@@ -95,7 +95,7 @@ pub fn quote(s: &str) -> String {
                 out.push_str(&format!("\\x{:02X}", c as u32));
             }
             c if crate::value::is_lone(c) => {
-                out.push_str(&format!("\\u{:04X}", crate::value::lone_unit(c)));
+                out.push_str(&format!("\\u{:04x}", crate::value::lone_unit(c)));
             }
             c => out.push(c),
         }
@@ -899,45 +899,15 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
                 inner,
             )
         }
-        ObjKind::Ordinary if o.flags.get() & crate::object::ARGUMENTS != 0 => {
-            let len = match o.get_own("length") {
-                Some(Value::Number(n)) if n >= 0.0 => n as usize,
-                _ => 0,
-            };
-            if len == 0 {
-                return "[Arguments] []".to_string();
-            }
-            if rt > MAX_DEPTH {
-                return "[Arguments]".to_string();
-            }
-            let inner = enter(ctx, ptr, rt);
-            let output: Vec<String> = (0..len.min(MAX_ITEMS))
-                .map(|i| {
-                    let v = o.get_own(&i.to_string()).unwrap_or_default();
-                    child(ctx, &v, inner)
-                })
-                .collect();
-            let mut base = "[Arguments]".to_string();
-            leave(ctx, ptr, &mut base);
-            reduce(
-                ctx,
-                output,
-                Shape {
-                    base,
-                    open: "[".to_string(),
-                    close: "]",
-                    array: Some((len > MAX_ITEMS, false)),
-                },
-                inner,
-            )
-        }
         ObjKind::Ordinary => {
-            let cname = class_name(o);
+            let arguments = o.flags.get() & crate::object::ARGUMENTS != 0;
+            let cname = if arguments { None } else { class_name(o) };
             let tag = match o.get_chain(crate::object::TO_STRING_TAG_KEY) {
                 Some(Value::Str(t)) if !t.is_empty() && cname.as_deref() != Some(&*t) => Some(t),
                 _ => None,
             };
             let prefix = match (&cname, o.proto.borrow().is_none(), &tag) {
+                _ if arguments => "[Arguments] ".to_string(),
                 (Some(n), _, Some(t)) => format!("{n} [{t}] "),
                 (Some(n), _, None) => format!("{n} "),
                 (None, true, Some(t)) if &**t == "Module" => {

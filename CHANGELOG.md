@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-22
+
+### Added
+
+- `BigInt` with literals, arithmetic, comparisons, `BigInt.asIntN`, `BigInt.asUintN` and
+  `toString(radix)`, plus `BigInt64Array`, `BigUint64Array` and `getBigInt64`/`setBigInt64` on
+  `DataView`.
+- Primitive wrapper objects: `new String`, `new Number`, `new Boolean` and `Object(primitive)`,
+  with `[String: 'a']` style output in `console.log`.
+- The temporal dead zone: `let`, `const`, `class` and parameters throw a `ReferenceError` when
+  used before initialization, and parameters bind left to right.
+- Resizable `ArrayBuffer` with `resize` and `maxByteLength`, length-tracking typed arrays,
+  `transfer`, `transferToFixedLength` and detached buffers.
+- `%TypedArray%` as the shared parent of all typed array constructors, with `Symbol.species`
+  support in `map`, `filter`, `slice` and `subarray`.
+- Generic `Array.prototype` methods that work on any array-like object, `Symbol.species` for
+  arrays, and subclassing of `Array`, `Error`, `Map`, `Promise`, `RegExp` and the other builtins.
+- `RegExp.prototype[Symbol.match]`, `[Symbol.matchAll]`, `[Symbol.replace]`, `[Symbol.search]`
+  and `[Symbol.split]`, and string methods that delegate to them, so custom matchers and
+  `RegExp` subclasses work.
+- `super[expr]`, assignment through `super.x` and `super[expr]`, and `export * as ns from`.
+- `yield*` that forwards `next`, `throw` and `return` to the inner iterator and evaluates to its
+  return value, in both sync and async generators.
+- `GeneratorFunction`, `AsyncFunction` and `AsyncGeneratorFunction` constructors, and real
+  `arguments` objects.
+- Unicode escapes in identifiers, iterator helpers (`map`, `filter`, `take`, `drop`, `flatMap`,
+  `reduce`, `toArray`, `Iterator.from`), `Set` methods (`union`, `intersection` and the rest),
+  `Object.groupBy`, `Map.groupBy`, `Array.fromAsync`, `Promise.try`, `FinalizationRegistry`,
+  `Error.isError`, `RegExp.escape`, `Math.f16round`, `String.prototype.isWellFormed` and
+  `toWellFormed`, and `Intl` for numbers, plural rules, lists, relative times, collation and
+  segmentation.
+
+### Changed
+
+- Strings follow UTF-16 semantics: lone surrogates are real values, pairs join when
+  concatenated, and output to terminals and files uses U+FFFD for unpaired halves.
+- `Promise.all`, `allSettled`, `any`, `race`, `resolve`, `reject`, `then` and `finally` follow
+  the specification, including thenable jobs, so callbacks run in the same order as in Node.js.
+- Generator parameters are evaluated when the generator is called, not on the first `next()`.
+- Private names resolve to the nearest class that declares them, and undeclared ones are a
+  `SyntaxError`.
+- Early errors: duplicate lexical declarations, legacy octal literals, misplaced numeric
+  separators, duplicate or undeclared exports, `new import()`, assignment to `eval` or
+  `arguments`, and invalid class members such as `#constructor` or a static `prototype`.
+
+### Fixed
+
+- Array destructuring and spread honour a patched `Array.prototype[Symbol.iterator]`.
+- Object patterns throw a `TypeError` on `null` and `undefined`, including empty patterns.
+- Property stores are faster after startup, because builtins no longer disable the fast path.
+
 ## [0.7.0] - 2026-10-21
 
 ### Added

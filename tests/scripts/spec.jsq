@@ -1,0 +1,89 @@
+const s = new String("abc")
+console.log(typeof s, s.length, s[1], Object.keys(s), new Number(5) + 1, Object(1n))
+
+try {
+  console.log(early)
+} catch (e) {
+  console.log(e.name)
+}
+let early = 1
+
+function params(a = 1, { b } = { b: a + 1 }, ...[c = b * 2]) {
+  return [a, b, c]
+}
+console.log(params(), params(5, { b: 6 }, 7))
+
+function args() {
+  return arguments
+}
+console.log(args(1, 2), Object.prototype.toString.call(args()))
+
+const like = { 0: "x", 1: "y", length: 2 }
+console.log(Array.prototype.map.call(like, (v) => v.toUpperCase()), Array.prototype.join.call(like, "+"))
+
+class Stack extends Array {
+  top() {
+    return this[this.length - 1]
+  }
+}
+const st = Stack.from([1, 2, 3]).map((x) => x * 10)
+console.log(st instanceof Stack, st.top())
+
+const big = new BigInt64Array([1n, -2n])
+const view = new DataView(big.buffer)
+console.log(big, view.getBigInt64(8, true))
+
+const buf = new ArrayBuffer(8, { maxByteLength: 16 })
+const tracked = new Uint8Array(buf)
+buf.resize(12)
+console.log(tracked.length, buf.resizable, buf.transfer().byteLength, buf.detached, tracked.length)
+
+const hi = "\uD83D"
+console.log((hi + "\uDE00") === "😀", hi.length, JSON.stringify(hi), "😀".split(""))
+
+const custom = {
+  [Symbol.replace](str, rep) {
+    return `${str}->${rep}`
+  },
+}
+console.log("abc".replace(custom, "x"), "a1b22".replace(/\d+/g, (m) => `[${m}]`), [..."a1b2".matchAll(/\d/g)].map((m) => m.index))
+
+class Base {
+  get value() {
+    return 1
+  }
+}
+class Derived extends Base {
+  read(key) {
+    return super[key] + 1
+  }
+}
+console.log(new Derived().read("value"))
+
+class Counter {
+  #count = 0
+  static has(o) {
+    return #count in o
+  }
+  inc() {
+    return ++this.#count
+  }
+}
+console.log(new Counter().inc(), Counter.has(new Counter()), Counter.has({}))
+
+function* inner() {
+  const got = yield 1
+  return got * 2
+}
+function* outer() {
+  const r = yield* inner()
+  yield r
+}
+const it = outer()
+console.log(it.next(), it.next(21), it.next())
+
+const order = []
+Promise.resolve().then(() => order.push(1))
+new Promise((r) => r(Promise.resolve())).then(() => order.push("wrapped"))
+Promise.resolve().then(() => order.push(2)).then(() => order.push(3)).then(() => order.push(4)).then(() => console.log(order))
+Promise.allSettled([Promise.reject(new Error("no")), 1]).then((r) => console.log(r.map((x) => x.status)))

@@ -1217,17 +1217,17 @@ const ArrayGeneric = {
     const mid = Math.floor(len / 2)
     for (let lower = 0; lower < mid; lower++) {
       const upper = len - lower - 1
-      const le = hasIdx(O, lower)
-      const ue = hasIdx(O, upper)
-      const lv = le ? O[lower] : undefined
-      const uv = ue ? O[upper] : undefined
-      if (le && ue) {
+      const lowerExists = hasIdx(O, lower)
+      const upperExists = hasIdx(O, upper)
+      const lv = lowerExists ? O[lower] : undefined
+      const uv = upperExists ? O[upper] : undefined
+      if (lowerExists && upperExists) {
         put(O, lower, uv)
         put(O, upper, lv)
-      } else if (ue) {
+      } else if (upperExists) {
         put(O, lower, uv)
         del(O, upper)
-      } else if (le) {
+      } else if (lowerExists) {
         del(O, lower)
         put(O, upper, lv)
       }

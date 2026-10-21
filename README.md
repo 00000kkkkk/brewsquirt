@@ -277,7 +277,10 @@ typos
 - [x] Test runner
 - [x] `ArrayBuffer`, typed arrays and binary bodies
 - [x] Node.js core modules
-- [ ] `BigInt`
+- [x] `BigInt`, `Proxy`, `Reflect` and `Intl`
+- [x] 89% of test262
+- [ ] 95% of test262
+- [ ] `SharedArrayBuffer` and `Atomics`
 - [ ] WebSockets
 - [ ] Rope strings for fast `+=` in loops
 - [ ] Shapes and inline caches for property access

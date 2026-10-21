@@ -483,14 +483,14 @@ for (const [name, fn] of Object.entries({
     const rec = this[SYNC]
     const cap = newCapability(P)
     const reject = cap.reject
-    let thr
+    let throwMethod
     try {
-      thr = rec.it.throw
+      throwMethod = rec.it.throw
     } catch (e) {
       reject(e)
       return cap.promise
     }
-    if (thr === undefined || thr === null) {
+    if (throwMethod === undefined || throwMethod === null) {
       try {
         const ret = rec.it.return
         if (ret !== undefined && ret !== null) {
@@ -506,7 +506,7 @@ for (const [name, fn] of Object.entries({
     }
     let result
     try {
-      result = args.length > 0 ? thr.call(rec.it, args[0]) : thr.call(rec.it)
+      result = args.length > 0 ? throwMethod.call(rec.it, args[0]) : throwMethod.call(rec.it)
     } catch (e) {
       reject(e)
       return cap.promise

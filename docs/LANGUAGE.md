@@ -1,8 +1,13 @@
 # JavaSquirt Language Reference
 
-This document describes JavaSquirt 0.7.0. JavaSquirt follows JavaScript semantics: for every
+This document describes JavaSquirt 0.8.0. JavaSquirt follows JavaScript semantics: for every
 supported feature, a program should print the same output under `jsq` as under Node.js. Features
 that are not implemented yet are listed in [Not yet supported](#not-yet-supported).
+
+JavaSquirt is checked against [test262](https://github.com/tc39/test262), the official
+ECMAScript conformance suite. JavaSquirt 0.8.0 passes 89% of the strict mode tests it runs
+(about 36,500 of 41,000). Most remaining failures are edge cases; the larger gaps are listed in
+[Not yet supported](#not-yet-supported).
 
 ## Contents
 
@@ -137,7 +142,9 @@ done: yes
 | `null`      | `"object"`    | Intentional absence of a value                               |
 | boolean     | `"boolean"`   | `true` and `false`                                           |
 | number      | `"number"`    | IEEE 754 double, including `NaN`, `Infinity` and `-0`        |
-| string      | `"string"`    | Immutable sequence of characters                             |
+| string      | `"string"`    | Immutable sequence of UTF-16 code units                      |
+| bigint      | `"bigint"`    | Arbitrary precision integer, written `123n`                  |
+| symbol      | `"symbol"`    | Unique property key, from `Symbol()` or `Symbol.for()`       |
 | array       | `"object"`    | Ordered, growable list with a `length` property              |
 | object      | `"object"`    | String-keyed properties with a prototype                     |
 | function    | `"function"`  | Functions, arrow functions, closures and methods             |
@@ -158,6 +165,12 @@ Semantics notes:
   throws a `TypeError`.
 - Objects inherit through prototype chains: property lookup walks the chain until it finds the
   key or reaches `null`.
+- `new String("a")`, `new Number(1)`, `new Boolean(false)` and `Object(primitive)` create wrapper
+  objects. They are objects (`typeof` is `"object"`, always truthy) that unwrap through
+  `valueOf`. Methods called on primitives never see a wrapper: `this` stays the primitive.
+- Strings are UTF-16: `length`, indexes, `charCodeAt` and `slice` count code units, so `"😀"`
+  has length 2. Lone surrogates such as `"\uD83D"` are valid string values, join back into a
+  pair when concatenated, and print as U+FFFD when written to a terminal or file.
 
 ## Variables and scope
 
@@ -201,6 +214,33 @@ function square(x) {
 ```
 
 Reading an undeclared variable throws a `ReferenceError`.
+
+`let`, `const` and `class` bindings exist from the start of their block but cannot be used before
+their declaration runs. Touching one early, even with `typeof`, throws a `ReferenceError`. The
+same holds for parameters: a default value can only refer to parameters on its left.
+
+```js
+{
+  try {
+    console.log(value)
+  } catch (e) {
+    console.log(e.message)
+  }
+  let value = 1
+}
+
+function range(start, end = start + 3) {
+  return [start, end]
+}
+console.log(range(2))
+```
+
+```text
+Cannot access 'value' before initialization
+[ 2, 5 ]
+```
+
+Declaring the same name twice in one block (`let x; var x`) is a `SyntaxError`.
 
 ## Operators
 
@@ -1414,9 +1454,27 @@ true
 
 `ArrayBuffer` holds raw bytes. Typed arrays and `DataView` read and write them: `Int8Array`,
 `Uint8Array`, `Uint8ClampedArray`, `Int16Array`, `Uint16Array`, `Int32Array`, `Uint32Array`,
-`Float32Array` and `Float64Array`. Typed arrays have the array methods that do not change their
-length (`map`, `filter`, `reduce`, `sort`, `slice`, `subarray`, `set`, `fill`, `indexOf`,
-`includes`, `join`, `at`, `with`, `toSorted` and the rest), and they can be subclassed.
+`Float32Array`, `Float64Array`, `BigInt64Array` and `BigUint64Array`. Typed arrays have the array
+methods that do not change their length (`map`, `filter`, `reduce`, `sort`, `slice`, `subarray`,
+`set`, `fill`, `indexOf`, `includes`, `join`, `at`, `with`, `toSorted` and the rest), and they can
+be subclassed; `map`, `filter`, `slice` and `subarray` respect `Symbol.species`.
+
+`new ArrayBuffer(n, { maxByteLength })` creates a resizable buffer. Typed arrays created on it
+without a length track its size as it grows and shrinks with `resize()`. `transfer()` and
+`transferToFixedLength()` move the bytes into a new buffer and detach the old one; views over a
+detached buffer have length 0 and their methods throw a `TypeError`.
+
+```js
+const growable = new ArrayBuffer(4, { maxByteLength: 16 })
+const tracking = new Uint8Array(growable)
+growable.resize(8)
+const longs = new BigInt64Array([1n, -2n])
+console.log(tracking.length, longs, new DataView(longs.buffer).getBigInt64(8, true))
+```
+
+```text
+8 BigInt64Array(2) [ 1n, -2n ] -2n
+```
 
 ```js
 const buf = new ArrayBuffer(8)
@@ -1916,13 +1974,16 @@ Dependency specs:
 
 These are on the roadmap and currently produce a `SyntaxError` or are absent:
 
-- `FinalizationRegistry`
-- `BigInt`, `BigInt64Array` and `BigUint64Array`
-- Resizable and shared `ArrayBuffer`, `Blob` and `FormData`
+- `SharedArrayBuffer`, `Atomics`, `Float16Array`, `Blob` and `FormData`
 - Streaming bodies, WebSockets and HTTPS servers
 - `node:net`, `node:worker_threads` and `node:crypto`
-- `Intl` and locale-aware formatting beyond `en-US`
+- `Intl` covers numbers, plural rules, lists, relative times, collation and segmentation in a
+  handful of locales; dates are formatted in English
+- Regular expressions: the `v` flag's set operations, duplicate named groups and some early
+  errors for invalid patterns
 - Direct `eval` sees only global variables, not the locals of the calling function
-- Sloppy mode: every program runs with strict mode semantics
+- Sloppy mode: every program runs with strict mode semantics. The one exception is functions
+  created with the `Function` constructor, which receive `globalThis` as `this`
+- `Temporal`, `ShadowRealm`, decorators and `using` declarations
 - Tracing garbage collection
 - JIT compilation
