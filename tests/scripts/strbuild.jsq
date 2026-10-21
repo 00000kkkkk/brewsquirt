@@ -1,0 +1,71 @@
+let s = ""
+for (let i = 0; i < 1000; i++) s += "abcdefghij"
+console.log(s.length, s.slice(0, 12), s[9995])
+
+let t = ""
+for (let i = 0; i < 100; i++) {
+  t += "x".repeat(10)
+  if (i === 50) console.log("mid", t.length)
+}
+console.log(t.length)
+
+function build(n) {
+  let out = ""
+  for (let i = 0; i < n; i++) out += `${i},`
+  return out
+}
+console.log(build(500).length, build(10).length, build(300).slice(-5))
+
+let c = ""
+const read = () => c.length
+for (let i = 0; i < 200; i++) c += "yy"
+console.log(read())
+
+function* gen() {
+  let acc = ""
+  for (let i = 0; i < 300; i++) {
+    acc += "z"
+    if (i % 100 === 99) yield acc.length
+  }
+}
+console.log([...gen()])
+
+async function slow() {
+  let a = ""
+  for (let i = 0; i < 300; i++) {
+    a += "q"
+    if (i === 150) await null
+  }
+  return a.length
+}
+slow().then((n) => console.log("async", n))
+
+let n = 1
+for (let i = 0; i < 5; i++) n += i
+console.log(n)
+
+let obj = "x".repeat(300)
+obj += { toString() { return "O" } }
+console.log(obj.length, obj.at(-1))
+
+let p = "x".repeat(300)
+const keep = p
+p += "y"
+console.log(keep.length, p.length)
+
+function params(str) {
+  for (let i = 0; i < 300; i++) str += "!"
+  return str.length
+}
+console.log(params("a"), params(""))
+
+let thrown = "x".repeat(300)
+try {
+  thrown += { toString() { throw new Error("nope") } }
+} catch (e) {
+  console.log(e.message, thrown.length)
+}
+
+const parts = { log: "" }
+for (let i = 0; i < 400; i++) parts.log += "-"
+console.log(parts.log.length)

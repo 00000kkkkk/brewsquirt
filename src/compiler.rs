@@ -1801,6 +1801,15 @@ impl Compiler {
             ExprKind::Member {
                 obj,
                 name: m,
+                optional: false,
+            } if self.local_slot(obj).is_some() => {
+                let slot = self.local_slot(obj).unwrap_or(0);
+                let k = self.str_const(m);
+                self.emit(Op::GetLocalMethod(slot, k));
+            }
+            ExprKind::Member {
+                obj,
+                name: m,
                 optional: mopt,
             } => {
                 self.expr(obj)?;
@@ -1888,6 +1897,20 @@ impl Compiler {
         Ok(self.emit(Op::JumpIfFalse(0)))
     }
 
+    fn local_slot(&mut self, e: &Expr) -> Option<u32> {
+        match &e.kind {
+            ExprKind::Ident(n) => match self.resolve(n) {
+                Var::Local(s, _) => Some(s),
+                _ => None,
+            },
+            ExprKind::This => match self.resolve("this") {
+                Var::Local(s, _) => Some(s),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn store_discard(&mut self, name: &Rc<str>) {
         match self.resolve(name) {
             Var::Local(s, false) => {
@@ -1944,6 +1967,15 @@ impl Compiler {
                     self.expr_named(value, Some(n))?;
                     self.store_discard(n);
                 }
+                (ExprKind::Ident(n), Some(AssignOp::Bin(BinOp::Add)))
+                    if matches!(self.resolve(n), Var::Local(_, false)) =>
+                {
+                    let Var::Local(slot, _) = self.resolve(n) else {
+                        unreachable!()
+                    };
+                    self.expr(value)?;
+                    self.emit(Op::AppendLocal(slot));
+                }
                 (ExprKind::Ident(n), Some(AssignOp::Bin(b))) => {
                     self.load_var(n);
                     self.expr(value)?;
@@ -1952,9 +1984,14 @@ impl Compiler {
                 }
                 (ExprKind::Member { obj, name, .. }, None) => {
                     let k = self.str_const(name);
-                    self.expr(obj)?;
-                    self.expr(value)?;
-                    self.emit(Op::StoreProp(k));
+                    if let Some(slot) = self.local_slot(obj) {
+                        self.expr(value)?;
+                        self.emit(Op::StoreLocalProp(slot, k));
+                    } else {
+                        self.expr(obj)?;
+                        self.expr(value)?;
+                        self.emit(Op::StoreProp(k));
+                    }
                 }
                 _ => {
                     self.expr(e)?;
@@ -2251,6 +2288,15 @@ impl Compiler {
                 self.patch(j);
                 self.expr_named(a, name)?;
                 self.patch(k);
+            }
+            ExprKind::Member {
+                obj,
+                name: m,
+                optional: false,
+            } if self.local_slot(obj).is_some() => {
+                let slot = self.local_slot(obj).unwrap_or(0);
+                let k = self.str_const(m);
+                self.emit(Op::GetLocalProp(slot, k));
             }
             ExprKind::Member {
                 obj,

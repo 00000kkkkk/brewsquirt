@@ -124,6 +124,10 @@ pub enum Op {
     StoreUpval(u32),
     StoreProp(u32),
     GetAsyncIter,
+    AppendLocal(u32),
+    GetLocalProp(u32, u32),
+    StoreLocalProp(u32, u32),
+    GetLocalMethod(u32, u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -262,6 +266,9 @@ impl FunctionProto {
                 | Op::InitAccessor(c, _)
                 | Op::DefineAccessor(c, _, _)
                 | Op::MakeClass(c, _) => format!("  {}", self.const_text(*c)),
+                Op::GetLocalProp(_, c) | Op::StoreLocalProp(_, c) | Op::GetLocalMethod(_, c) => {
+                    format!("  {}", self.const_text(*c))
+                }
                 Op::NewRegex(src, flags) => {
                     format!("  /{}/{}", self.const_text(*src), self.const_text(*flags))
                 }

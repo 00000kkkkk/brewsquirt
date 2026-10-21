@@ -169,6 +169,7 @@ pub struct Vm {
     pub(crate) open_upvalues: Vec<Rc<UpCell>>,
     pub globals: Globals,
     arg_buf: Vec<Value>,
+    builders: Vec<(usize, String)>,
     pub realm: Realm,
     modules: FxHashMap<PathBuf, Value>,
     loading: Vec<PathBuf>,
@@ -219,6 +220,7 @@ impl Vm {
             open_upvalues: Vec::new(),
             globals: Globals::default(),
             arg_buf: Vec::new(),
+            builders: Vec::new(),
             realm: Realm::new(),
             modules: FxHashMap::default(),
             loading: Vec::new(),
@@ -497,6 +499,108 @@ impl Vm {
         u
     }
 
+    #[inline(always)]
+    fn flush_builder(&mut self, abs: usize) {
+        if !self.builders.is_empty() {
+            self.flush_builder_slow(abs);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn flush_builder_slow(&mut self, abs: usize) {
+        if let Some(i) = self.builders.iter().position(|(a, _)| *a == abs) {
+            let (_, buf) = self.builders.swap_remove(i);
+            self.stack[abs] = Value::Str(buf.into());
+        }
+    }
+
+    #[inline(always)]
+    fn drop_builder(&mut self, abs: usize) {
+        if !self.builders.is_empty() {
+            self.drop_builder_slow(abs);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn drop_builder_slow(&mut self, abs: usize) {
+        self.builders.retain(|(a, _)| *a != abs);
+    }
+
+    #[inline(always)]
+    pub(crate) fn prune_builders(&mut self, len: usize) {
+        if !self.builders.is_empty() {
+            self.prune_builders_slow(len);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn prune_builders_slow(&mut self, len: usize) {
+        self.builders.retain(|(a, _)| *a < len);
+    }
+
+    pub(crate) fn flush_builders_from(&mut self, from: usize) {
+        let mut i = 0;
+        while i < self.builders.len() {
+            if self.builders[i].0 >= from {
+                let (abs, buf) = self.builders.swap_remove(i);
+                self.stack[abs] = Value::Str(buf.into());
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    fn append_local(&mut self, abs: usize, rhs: Value) -> Result<(), Value> {
+        if let Some(i) = self.builders.iter().position(|(a, _)| *a == abs) {
+            let piece = match &rhs {
+                Value::Str(s) => s.clone(),
+                other => {
+                    let p = self.default_primitive(other)?;
+                    self.to_string(&p)?
+                }
+            };
+            self.builders[i].1.push_str(&piece);
+            return Ok(());
+        }
+        let current = self.stack[abs].clone();
+        if let Value::Str(cur) = &current {
+            let piece = match &rhs {
+                Value::Str(s) => s.clone(),
+                other => {
+                    let p = self.default_primitive(other)?;
+                    self.to_string(&p)?
+                }
+            };
+            let total = cur.len() + piece.len();
+            let captured = self
+                .open_upvalues
+                .iter()
+                .any(|u| matches!(&*u.borrow(), Upvalue::Open(i) if *i == abs));
+            if total >= 256 && !captured {
+                let mut buf = String::with_capacity(total * 2);
+                buf.push_str(cur);
+                buf.push_str(&piece);
+                self.stack[abs] = Value::Undefined;
+                self.builders.push((abs, buf));
+            } else {
+                let mut s = String::with_capacity(total);
+                s.push_str(cur);
+                s.push_str(&piece);
+                self.stack[abs] = Value::Str(s.into());
+            }
+            return Ok(());
+        }
+        let r = match (&current, &rhs) {
+            (Value::Number(x), Value::Number(y)) => Value::Number(x + y),
+            _ => self.add_slow(&current, &rhs)?,
+        };
+        self.stack[abs] = r;
+        Ok(())
+    }
+
     fn close_upvalues(&mut self, from: usize) {
         while let Some(u) = self.open_upvalues.last() {
             let idx = match &*u.borrow() {
@@ -558,6 +662,7 @@ impl Vm {
                 let h = self.handlers.pop().expect("handler");
                 self.frames.truncate(h.frame + 1);
                 self.close_upvalues(h.stack_len);
+                self.prune_builders(h.stack_len);
                 self.stack.truncate(h.stack_len);
                 self.stack.push(err);
                 self.frames[h.frame].ip = h.catch_ip;
@@ -566,6 +671,7 @@ impl Vm {
         }
         let base = self.frames[stop].base;
         self.close_upvalues(base);
+        self.prune_builders(base - 1);
         self.stack.truncate(base - 1);
         self.frames.truncate(stop);
         Err(err)
@@ -1509,12 +1615,97 @@ impl Vm {
                     self.stack.insert(n - 3, v);
                 }
                 Op::GetLocal(s) => {
+                    self.flush_builder(base + s as usize);
                     let v = self.stack[base + s as usize].clone();
                     self.stack.push(v);
                 }
                 Op::SetLocal(s) => {
+                    self.drop_builder(base + s as usize);
                     let v = peek!();
                     self.stack[base + s as usize] = v;
+                }
+                Op::AppendLocal(s) => {
+                    let rhs = pop!();
+                    tri!(self.append_local(base + s as usize, rhs));
+                }
+                Op::GetLocalProp(s, k) => {
+                    let abs = base + s as usize;
+                    if !self.builders.is_empty() {
+                        self.flush_builder(abs);
+                    }
+                    let fast = match &self.stack[abs] {
+                        Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => {
+                            let Value::Str(key) = &proto.consts[k as usize] else {
+                                unreachable!()
+                            };
+                            let v = o.get_chain(key).unwrap_or_default();
+                            if matches!(&v, Value::Object(a) if a.is_accessor()) {
+                                None
+                            } else {
+                                Some(v)
+                            }
+                        }
+                        _ => None,
+                    };
+                    let v = match fast {
+                        Some(v) => v,
+                        None => {
+                            let obj = self.stack[abs].clone();
+                            let n = name!(k);
+                            tri!(self.get_prop(&obj, &n))
+                        }
+                    };
+                    self.stack.push(v);
+                }
+                Op::GetLocalMethod(s, k) => {
+                    let abs = base + s as usize;
+                    self.flush_builder(abs);
+                    let fast = match &self.stack[abs] {
+                        Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => {
+                            let Value::Str(key) = &proto.consts[k as usize] else {
+                                unreachable!()
+                            };
+                            let v = o.get_chain(key).unwrap_or_default();
+                            if matches!(&v, Value::Object(a) if a.is_accessor()) {
+                                None
+                            } else {
+                                Some(v)
+                            }
+                        }
+                        _ => None,
+                    };
+                    let obj = self.stack[abs].clone();
+                    let f = match fast {
+                        Some(v) => v,
+                        None => {
+                            let n = name!(k);
+                            tri!(self.get_prop(&obj, &n))
+                        }
+                    };
+                    self.stack.push(f);
+                    self.stack.push(obj);
+                }
+                Op::StoreLocalProp(s, k) => {
+                    let val = pop!();
+                    let abs = base + s as usize;
+                    let done = match &self.stack[abs] {
+                        Value::Object(o)
+                            if matches!(o.kind, ObjKind::Ordinary)
+                                && !o.frozen.get()
+                                && !self.accessors_used =>
+                        {
+                            o.props.borrow_mut().insert(name!(k), val.clone());
+                            true
+                        }
+                        _ => false,
+                    };
+                    if !done {
+                        if !self.builders.is_empty() {
+                            self.flush_builder(abs);
+                        }
+                        let obj = self.stack[abs].clone();
+                        tri!(self.set_prop(&obj, name!(k), val));
+                    }
                 }
                 Op::GetUpval(i) => {
                     let v = match &*cl.upvalues[i as usize].borrow() {
@@ -2008,6 +2199,7 @@ impl Vm {
                     } else {
                         result
                     };
+                    self.prune_builders(frame.base - 1);
                     self.stack.truncate(frame.base - 1);
                     if self.frames.len() == stop {
                         return Ok(result);
@@ -2024,6 +2216,7 @@ impl Vm {
                     let mut ups = Vec::with_capacity(p.upvalues.len());
                     for u in &p.upvalues {
                         if u.is_local {
+                            self.flush_builder(base + u.index as usize);
                             ups.push(self.capture_upvalue(base + u.index as usize));
                         } else {
                             ups.push(cl.upvalues[u.index as usize].clone());
@@ -2049,6 +2242,7 @@ impl Vm {
                 Op::PopTo(n) => {
                     let to = base + n as usize;
                     self.close_upvalues(to);
+                    self.prune_builders(to);
                     self.stack.truncate(to);
                 }
                 Op::CloseUpvalues(n) => {
@@ -2058,6 +2252,7 @@ impl Vm {
                     let top = pop!();
                     let to = base + n as usize;
                     self.close_upvalues(to);
+                    self.prune_builders(to);
                     self.stack.truncate(to);
                     self.stack.push(top);
                 }
@@ -2282,6 +2477,7 @@ impl Vm {
                 }
                 Op::IncLocal(s) | Op::DecLocal(s) => {
                     let slot = base + s as usize;
+                    self.flush_builder(slot);
                     let delta = if matches!(op, Op::IncLocal(_)) {
                         1.0
                     } else {
@@ -2297,6 +2493,7 @@ impl Vm {
                 }
                 Op::StoreLocal(s) => {
                     let v = pop!();
+                    self.drop_builder(base + s as usize);
                     self.stack[base + s as usize] = v;
                 }
                 Op::StoreUpval(i) => {

@@ -109,6 +109,7 @@ impl Vm {
             return false;
         };
         let seg = self.frames[fi].base - 1;
+        self.flush_builders_from(seg);
         let mut handlers = Vec::new();
         while self.handlers.last().is_some_and(|h| h.frame >= fi) {
             let h = self.handlers.pop().expect("handler");
