@@ -3022,7 +3022,7 @@ impl Compiler {
                     self.return_top()?;
                     let exit = self.here();
                     self.emit(Op::DelegateEnd);
-                    self.st().code[done] = Op::DelegateDone(exit as u32, ret as u32);
+                    self.st().code[done] = Op::DelegateDone(exit, ret);
                 } else if async_gen {
                     self.emit(Op::Await);
                     self.emit_yield()?;
