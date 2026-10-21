@@ -2,6 +2,8 @@ mod array;
 pub mod binary;
 mod collections;
 mod date;
+mod extras;
+mod intrinsics;
 mod json;
 pub mod node;
 pub mod reflect;
@@ -109,6 +111,7 @@ pub fn install(vm: &mut Vm) {
     web::install(vm);
     binary::install(vm);
     reflect::install(vm);
+    intrinsics::install(vm);
     let global = Obj::new(ObjKind::Global, Some(vm.realm.object_proto.clone()));
     vm.define_global("globalThis", Value::Object(global));
     for name in ["Math", "JSON", "Atomics"] {

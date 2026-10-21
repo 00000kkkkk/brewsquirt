@@ -201,6 +201,7 @@ fn object_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
         Value::Number(_) => "Number",
         Value::Str(_) => "String",
         Value::Symbol(_) => "Symbol",
+        Value::BigInt(_) => "BigInt",
         Value::Object(o) => match &o.kind {
             ObjKind::Array(_) => "Array",
             ObjKind::Function(_) | ObjKind::Native(_) | ObjKind::Bound(_) => "Function",
@@ -220,9 +221,12 @@ fn object_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
         },
     };
     let tag = match &this {
-        Value::Object(_) | Value::Symbol(_) | Value::Str(_) | Value::Number(_) | Value::Bool(_) => {
-            vm.get_prop(&this, crate::object::TO_STRING_TAG_KEY)?
-        }
+        Value::Object(_)
+        | Value::Symbol(_)
+        | Value::Str(_)
+        | Value::Number(_)
+        | Value::Bool(_)
+        | Value::BigInt(_) => vm.get_prop(&this, crate::object::TO_STRING_TAG_KEY)?,
         _ => Value::Undefined,
     };
     let tag = match &tag {

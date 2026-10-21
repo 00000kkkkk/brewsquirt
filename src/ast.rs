@@ -9,6 +9,7 @@ pub struct Expr {
 #[derive(Clone, Debug)]
 pub enum ExprKind {
     NewTarget,
+    BigInt(Rc<str>),
     ImportMeta,
     DynImport(Box<Expr>),
     Number(f64),

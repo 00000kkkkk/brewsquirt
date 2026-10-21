@@ -147,6 +147,7 @@ pub enum Tok {
     Num(f64),
     Str(Rc<str>),
     Template(Vec<TemplatePart>),
+    BigInt(Rc<str>),
     Regex(Rc<str>, Rc<str>),
     Ident(Rc<str>),
     Punct(P),
@@ -167,6 +168,7 @@ impl Token {
     pub fn describe(&self) -> String {
         match &self.tok {
             Tok::Num(n) => crate::number::number_to_string(*n),
+            Tok::BigInt(s) => format!("{s}n"),
             Tok::Str(s) => format!("string \"{s}\""),
             Tok::Template(_) => "template literal".to_string(),
             Tok::Regex(p, f) => format!("/{p}/{f}"),

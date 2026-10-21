@@ -33,9 +33,11 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, SyntaxError> {
 fn regex_allowed(prev: Option<&Tok>) -> bool {
     match prev {
         None => true,
-        Some(Tok::Num(_)) | Some(Tok::Str(_)) | Some(Tok::Template(_)) | Some(Tok::Regex(..)) => {
-            false
-        }
+        Some(Tok::Num(_))
+        | Some(Tok::Str(_))
+        | Some(Tok::Template(_))
+        | Some(Tok::Regex(..))
+        | Some(Tok::BigInt(_)) => false,
         Some(Tok::Ident(name)) => matches!(
             &**name,
             "return"
@@ -255,8 +257,9 @@ impl Lexer {
                 _ => 0,
             };
             if radix != 0 {
-                self.bump();
-                self.bump();
+                let mut text = String::new();
+                text.push(self.bump().unwrap_or('0'));
+                text.push(self.bump().unwrap_or('x'));
                 let mut value = 0f64;
                 let mut any = false;
                 while let Some(c) = self.peek() {
@@ -267,6 +270,7 @@ impl Lexer {
                     match c.to_digit(radix) {
                         Some(d) => {
                             value = value * radix as f64 + d as f64;
+                            text.push(c);
                             any = true;
                             self.bump();
                         }
@@ -276,12 +280,22 @@ impl Lexer {
                 if !any {
                     return Err(self.err("Invalid or unexpected token"));
                 }
+                if self.peek() == Some('n') {
+                    self.bump();
+                    self.check_number_end()?;
+                    return Ok(Tok::BigInt(text.into()));
+                }
                 self.check_number_end()?;
                 return Ok(Tok::Num(value));
             }
         }
         let mut s = String::new();
         self.digits(&mut s);
+        if self.peek() == Some('n') && !s.is_empty() {
+            self.bump();
+            self.check_number_end()?;
+            return Ok(Tok::BigInt(s.into()));
+        }
         if self.peek() == Some('.') {
             s.push('.');
             self.bump();

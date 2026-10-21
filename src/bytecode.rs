@@ -142,6 +142,7 @@ pub enum Op {
     DynImport,
     TemplateCache(u32, u32),
     TemplateStore(u32),
+    ToNumeric,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

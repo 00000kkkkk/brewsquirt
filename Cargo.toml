@@ -27,9 +27,13 @@ fancy-regex = "0.19"
 getrandom = "0.2"
 indexmap = { version = "2.14", features = ["serde"] }
 mimalloc = { version = "0.1", default-features = false }
+num-bigint = "0.4"
+num-integer = "0.1"
+num-traits = "0.2"
 rustc-hash = "2.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
+unicode-normalization = "0.1"
 ureq = "3.4"
 
 [profile.release]

@@ -113,6 +113,7 @@ pub fn run_prelude(vm: &mut Vm) {
     if let Err(e) = vm.run_proto(proto) {
         panic!("prelude failed: {}", inspect_plain(&e));
     }
+    super::extras::run(vm);
 }
 
 fn this_promise(vm: &mut Vm, this: &Value) -> Result<Rc<Obj>, Value> {

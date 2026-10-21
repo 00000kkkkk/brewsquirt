@@ -1910,6 +1910,11 @@ impl Parser {
     fn primary(&mut self) -> R<Expr> {
         let line = self.line();
         let kind = match &self.peek().tok {
+            Tok::BigInt(b) => {
+                let b = b.clone();
+                self.advance();
+                ExprKind::BigInt(b)
+            }
             Tok::Num(n) => {
                 let n = *n;
                 self.advance();

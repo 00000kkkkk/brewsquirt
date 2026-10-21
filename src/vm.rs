@@ -1,3 +1,4 @@
+use crate::bigint::BigOp;
 use crate::builtins;
 use crate::bytecode::{Cmp, FunctionProto, ModuleInfo, NO_NAME, Op, ProtoKind};
 use crate::compiler::{Mode, compile_module};
@@ -81,6 +82,9 @@ pub struct Realm {
     pub typed_proto: Rc<Obj>,
     pub typed_protos: Vec<Rc<Obj>>,
     pub dataview_proto: Rc<Obj>,
+    pub bigint_proto: Rc<Obj>,
+    pub iterator_base: Rc<Obj>,
+    pub async_iterator_base: Rc<Obj>,
 }
 
 impl Realm {
@@ -92,6 +96,8 @@ impl Realm {
         for _ in 1..ErrorKind::ALL.len() {
             error_protos.push(Obj::new(ObjKind::Ordinary, Some(error_proto.clone())));
         }
+        let iterator_base = mk();
+        let async_iterator_base = mk();
         let typed_proto = mk();
         let typed_protos = crate::object::TypedKind::ALL
             .iter()
@@ -102,6 +108,12 @@ impl Realm {
             typed_proto,
             typed_protos,
             dataview_proto: mk(),
+            bigint_proto: mk(),
+            iter_proto: Obj::new(ObjKind::Ordinary, Some(iterator_base.clone())),
+            generator_proto: Obj::new(ObjKind::Ordinary, Some(iterator_base.clone())),
+            async_generator_proto: Obj::new(ObjKind::Ordinary, Some(async_iterator_base.clone())),
+            iterator_base,
+            async_iterator_base,
             function_proto: mk(),
             array_proto: mk(),
             string_proto: mk(),
@@ -109,9 +121,6 @@ impl Realm {
             boolean_proto: mk(),
             map_proto: mk(),
             set_proto: mk(),
-            iter_proto: mk(),
-            generator_proto: mk(),
-            async_generator_proto: mk(),
             promise_proto: mk(),
             symbol_proto: mk(),
             regexp_proto: mk(),
@@ -246,6 +255,7 @@ pub struct Vm {
     pub async_from_sync_next: Value,
     pub iter_value_fn: Value,
     pub default_has_instance: Value,
+    pub proto_accessor: Value,
     pub(crate) io: crate::io::Io,
     pub(crate) io_fetches: FxHashMap<u64, Rc<Obj>>,
     pub(crate) io_servers: FxHashMap<u64, (Value, crate::io::ServerHandle)>,
@@ -313,6 +323,7 @@ impl Vm {
             async_from_sync_next: Value::Undefined,
             iter_value_fn: Value::Undefined,
             default_has_instance: Value::Undefined,
+            proto_accessor: Value::Undefined,
             io: crate::io::Io::default(),
             io_fetches: FxHashMap::default(),
             io_servers: FxHashMap::default(),
@@ -769,6 +780,11 @@ impl Vm {
             return Ok(());
         }
         let current = self.stack[abs].clone();
+        if matches!(current, Value::BigInt(_)) || matches!(rhs, Value::BigInt(_)) {
+            let r = self.add_slow(&current, &rhs)?;
+            self.stack[abs] = r;
+            return Ok(());
+        }
         if let Value::Str(cur) = &current {
             let piece = match &rhs {
                 Value::Str(s) => s.clone(),
@@ -1340,6 +1356,7 @@ impl Vm {
                 Ok(self.realm.string_proto.get_chain(key).unwrap_or_default())
             }
             Value::Number(_) => Ok(self.realm.number_proto.get_chain(key).unwrap_or_default()),
+            Value::BigInt(_) => Ok(self.realm.bigint_proto.get_chain(key).unwrap_or_default()),
             Value::Bool(_) => Ok(self.realm.boolean_proto.get_chain(key).unwrap_or_default()),
             Value::Undefined | Value::Null => Err(self.type_error(format!(
                 "Cannot read properties of {} (reading '{}')",
@@ -1440,6 +1457,21 @@ impl Vm {
                     && !o.has_own(&key)
                 {
                     return Err(self.read_only_error(o, &key));
+                }
+                if &*key == "__proto__" && !o.has_own("__proto__") {
+                    if let Some(found) = o.get_chain("__proto__") {
+                        if found.strict_eq(&self.proto_accessor) {
+                            let proto = match val {
+                                Value::Object(p) => Some(p),
+                                Value::Null => None,
+                                _ => return Ok(()),
+                            };
+                            if !self.op_set_prototype_of(o, proto)? {
+                                return Err(self.type_error("Cyclic __proto__ value"));
+                            }
+                            return Ok(());
+                        }
+                    }
                 }
                 let mut props = o.props.borrow_mut();
                 if props.contains_key(&key) {
@@ -1596,6 +1628,9 @@ impl Vm {
         if matches!(p, Value::Symbol(_)) {
             return Err(self.type_error("Cannot convert a Symbol value to a number"));
         }
+        if matches!(p, Value::BigInt(_)) {
+            return Err(self.type_error("Cannot convert a BigInt value to a number"));
+        }
         Ok(p.to_primitive_number().unwrap_or(f64::NAN))
     }
 
@@ -1612,6 +1647,16 @@ impl Vm {
             (Value::Undefined | Value::Null, Value::Undefined | Value::Null) => true,
             (Value::Undefined | Value::Null, _) | (_, Value::Undefined | Value::Null) => false,
             (Value::Symbol(_), _) | (_, Value::Symbol(_)) => a.strict_eq(b),
+            (Value::BigInt(x), Value::BigInt(y)) => x == y,
+            (Value::BigInt(x), Value::Number(n)) | (Value::Number(n), Value::BigInt(x)) => {
+                crate::bigint::compare_f64(x, *n) == Some(std::cmp::Ordering::Equal)
+            }
+            (Value::BigInt(x), Value::Str(s)) | (Value::Str(s), Value::BigInt(x)) => {
+                crate::bigint::from_string(s).is_some_and(|y| **x == y)
+            }
+            (Value::BigInt(x), Value::Bool(bv)) | (Value::Bool(bv), Value::BigInt(x)) => {
+                **x == num_bigint::BigInt::from(*bv as i32)
+            }
             (Value::Number(_), Value::Number(_))
             | (Value::Str(_), Value::Str(_))
             | (Value::Bool(_), Value::Bool(_))
@@ -1648,6 +1693,10 @@ impl Vm {
             s.push_str(&sb);
             return Ok(Value::Str(s.into()));
         }
+        if matches!(pa, Value::BigInt(_)) || matches!(pb, Value::BigInt(_)) {
+            let (x, y) = self.numeric_pair(&pa, &pb)?;
+            return self.bigint_op(crate::bigint::BigOp::Add, &x, &y);
+        }
         let x = self.to_number(&pa)?;
         let y = self.to_number(&pb)?;
         Ok(Value::Number(x + y))
@@ -1659,13 +1708,67 @@ impl Vm {
         if let (Value::Str(x), Value::Str(y)) = (&pa, &pb) {
             return Ok(Some(compare_strings(x, y)));
         }
+        match (&pa, &pb) {
+            (Value::BigInt(x), Value::BigInt(y)) => return Ok(Some(x.cmp(y))),
+            (Value::BigInt(x), Value::Str(s)) => {
+                return Ok(crate::bigint::from_string(s).map(|y| (**x).cmp(&y)));
+            }
+            (Value::Str(s), Value::BigInt(y)) => {
+                return Ok(crate::bigint::from_string(s).map(|x| x.cmp(y)));
+            }
+            (Value::BigInt(x), other) => {
+                let n = self.to_number(other)?;
+                return Ok(crate::bigint::compare_f64(x, n));
+            }
+            (other, Value::BigInt(y)) => {
+                let n = self.to_number(other)?;
+                return Ok(crate::bigint::compare_f64(y, n).map(|o| o.reverse()));
+            }
+            _ => {}
+        }
         let x = self.to_number(&pa)?;
         let y = self.to_number(&pb)?;
         Ok(x.partial_cmp(&y))
     }
 
-    fn num_pair(&mut self, a: &Value, b: &Value) -> Result<(f64, f64), Value> {
-        Ok((self.to_number(a)?, self.to_number(b)?))
+    pub fn to_numeric(&mut self, v: &Value) -> Result<Value, Value> {
+        if let Value::BigInt(_) = v {
+            return Ok(v.clone());
+        }
+        let p = self.to_primitive(v, true)?;
+        if let Value::BigInt(_) = p {
+            return Ok(p);
+        }
+        Ok(Value::Number(self.to_number(&p)?))
+    }
+
+    fn numeric_pair(&mut self, a: &Value, b: &Value) -> Result<(Value, Value), Value> {
+        let x = self.to_numeric(a)?;
+        let y = self.to_numeric(b)?;
+        match (&x, &y) {
+            (Value::BigInt(_), Value::Number(_)) | (Value::Number(_), Value::BigInt(_)) => {
+                Err(self.type_error("Cannot mix BigInt and other types, use explicit conversions"))
+            }
+            _ => Ok((x, y)),
+        }
+    }
+
+    pub fn bigint_op(
+        &mut self,
+        op: crate::bigint::BigOp,
+        a: &Value,
+        b: &Value,
+    ) -> Result<Value, Value> {
+        let (Value::BigInt(x), Value::BigInt(y)) = (a, b) else {
+            return Err(
+                self.type_error("Cannot mix BigInt and other types, use explicit conversions")
+            );
+        };
+        match crate::bigint::binop(op, x, y) {
+            Ok(r) => Ok(Value::BigInt(Rc::new(r))),
+            Err(crate::bigint::BigError::Range(m)) => Err(self.range_error(m)),
+            Err(crate::bigint::BigError::Type(m)) => Err(self.type_error(m)),
+        }
     }
 
     pub fn instance_of(&mut self, v: &Value, ctor: &Value) -> Result<bool, Value> {
@@ -2183,7 +2286,7 @@ impl Vm {
             };
         }
         macro_rules! num_op {
-            ($f:expr) => {{
+            ($f:expr, $big:expr) => {{
                 let b = pop!();
                 if let (Some(Value::Number(x)), Value::Number(y)) = (self.stack.last(), &b) {
                     let r = $f(*x, *y);
@@ -2193,19 +2296,29 @@ impl Vm {
                     continue;
                 }
                 let a = pop!();
-                let (x, y) = tri!(self.num_pair(&a, &b));
-                self.stack.push(Value::Number($f(x, y)));
+                let (a, b) = tri!(self.numeric_pair(&a, &b));
+                if let (Value::Number(x), Value::Number(y)) = (&a, &b) {
+                    self.stack.push(Value::Number($f(*x, *y)));
+                } else {
+                    let r = tri!(self.bigint_op($big, &a, &b));
+                    self.stack.push(r);
+                }
             }};
         }
         macro_rules! int_op {
-            ($f:expr) => {{
+            ($f:expr, $big:expr) => {{
                 let b = pop!();
                 let a = pop!();
-                let (x, y) = match (&a, &b) {
-                    (Value::Number(x), Value::Number(y)) => (*x, *y),
-                    _ => tri!(self.num_pair(&a, &b)),
+                let (a, b) = match (&a, &b) {
+                    (Value::Number(_), Value::Number(_)) => (a, b),
+                    _ => tri!(self.numeric_pair(&a, &b)),
                 };
-                self.stack.push(Value::Number($f(x, y)));
+                if let (Value::Number(x), Value::Number(y)) = (&a, &b) {
+                    self.stack.push(Value::Number($f(*x, *y)));
+                } else {
+                    let r = tri!(self.bigint_op($big, &a, &b));
+                    self.stack.push(r);
+                }
             }};
         }
         macro_rules! cmp_op {
@@ -2616,24 +2729,45 @@ impl Vm {
                     };
                     self.stack.push(r);
                 }
-                Op::Sub => num_op!(|x: f64, y: f64| x - y),
-                Op::Mul => num_op!(|x: f64, y: f64| x * y),
-                Op::Div => num_op!(|x: f64, y: f64| x / y),
-                Op::Mod => num_op!(|x: f64, y: f64| x % y),
-                Op::Pow => num_op!(js_pow),
-                Op::BitAnd => int_op!(|x, y| (to_int32(x) & to_int32(y)) as f64),
-                Op::BitOr => int_op!(|x, y| (to_int32(x) | to_int32(y)) as f64),
-                Op::BitXor => int_op!(|x, y| (to_int32(x) ^ to_int32(y)) as f64),
-                Op::Shl => int_op!(|x, y| to_int32(x).wrapping_shl(to_uint32(y) & 31) as f64),
-                Op::Shr => int_op!(|x, y| (to_int32(x) >> (to_uint32(y) & 31)) as f64),
-                Op::UShr => int_op!(|x, y| (to_uint32(x) >> (to_uint32(y) & 31)) as f64),
+                Op::Sub => num_op!(|x: f64, y: f64| x - y, BigOp::Sub),
+                Op::Mul => num_op!(|x: f64, y: f64| x * y, BigOp::Mul),
+                Op::Div => num_op!(|x: f64, y: f64| x / y, BigOp::Div),
+                Op::Mod => num_op!(|x: f64, y: f64| x % y, BigOp::Mod),
+                Op::Pow => num_op!(js_pow, BigOp::Pow),
+                Op::BitAnd => int_op!(|x, y| (to_int32(x) & to_int32(y)) as f64, BigOp::BitAnd),
+                Op::BitOr => int_op!(|x, y| (to_int32(x) | to_int32(y)) as f64, BigOp::BitOr),
+                Op::BitXor => int_op!(|x, y| (to_int32(x) ^ to_int32(y)) as f64, BigOp::BitXor),
+                Op::Shl => int_op!(
+                    |x, y| to_int32(x).wrapping_shl(to_uint32(y) & 31) as f64,
+                    BigOp::Shl
+                ),
+                Op::Shr => int_op!(
+                    |x, y| (to_int32(x) >> (to_uint32(y) & 31)) as f64,
+                    BigOp::Shr
+                ),
+                Op::UShr => int_op!(
+                    |x, y| (to_uint32(x) >> (to_uint32(y) & 31)) as f64,
+                    BigOp::UShr
+                ),
                 Op::Neg => {
                     let a = pop!();
-                    let n = match a {
-                        Value::Number(n) => n,
-                        _ => tri!(self.to_number(&a)),
+                    let v = match a {
+                        Value::Number(n) => Value::Number(-n),
+                        _ => match tri!(self.to_numeric(&a)) {
+                            Value::BigInt(b) => Value::BigInt(Rc::new(-(*b).clone())),
+                            Value::Number(n) => Value::Number(-n),
+                            _ => Value::Number(f64::NAN),
+                        },
                     };
-                    self.stack.push(Value::Number(-n));
+                    self.stack.push(v);
+                }
+                Op::ToNumeric => {
+                    let a = pop!();
+                    let v = match a {
+                        Value::Number(_) => a,
+                        _ => tri!(self.to_numeric(&a)),
+                    };
+                    self.stack.push(v);
                 }
                 Op::ToNumber => {
                     let a = pop!();
@@ -2645,12 +2779,21 @@ impl Vm {
                 }
                 Op::Inc | Op::Dec => {
                     let a = pop!();
-                    let n = match a {
+                    let v = match a {
                         Value::Number(n) => n,
-                        _ => tri!(self.to_number(&a)),
+                        _ => match tri!(self.to_numeric(&a)) {
+                            Value::BigInt(b) => {
+                                let one = num_bigint::BigInt::from(1);
+                                let r = if op == Op::Inc { &*b + one } else { &*b - one };
+                                self.stack.push(Value::BigInt(Rc::new(r)));
+                                continue;
+                            }
+                            Value::Number(n) => n,
+                            _ => f64::NAN,
+                        },
                     };
                     self.stack
-                        .push(Value::Number(if op == Op::Inc { n + 1.0 } else { n - 1.0 }));
+                        .push(Value::Number(if op == Op::Inc { v + 1.0 } else { v - 1.0 }));
                 }
                 Op::Not => {
                     let a = pop!();
@@ -2660,7 +2803,15 @@ impl Vm {
                     let a = pop!();
                     let n = match a {
                         Value::Number(n) => n,
-                        _ => tri!(self.to_number(&a)),
+                        _ => match tri!(self.to_numeric(&a)) {
+                            Value::BigInt(b) => {
+                                let r = -(*b).clone() - num_bigint::BigInt::from(1);
+                                self.stack.push(Value::BigInt(Rc::new(r)));
+                                continue;
+                            }
+                            Value::Number(n) => n,
+                            _ => f64::NAN,
+                        },
                     };
                     self.stack.push(Value::Number(!to_int32(n) as f64));
                 }
@@ -3285,8 +3436,16 @@ impl Vm {
                         *n += delta;
                     } else {
                         let v = self.stack[slot].clone();
-                        let n = tri!(self.to_number(&v));
-                        self.stack[slot] = Value::Number(n + delta);
+                        match tri!(self.to_numeric(&v)) {
+                            Value::BigInt(b) => {
+                                let r = &*b + num_bigint::BigInt::from(delta as i64);
+                                self.stack[slot] = Value::BigInt(Rc::new(r));
+                            }
+                            other => {
+                                let n = other.to_primitive_number().unwrap_or(f64::NAN);
+                                self.stack[slot] = Value::Number(n + delta);
+                            }
+                        }
                     }
                 }
                 Op::StoreLocal(s) => {

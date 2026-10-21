@@ -36,6 +36,20 @@ pub fn install(vm: &mut Vm) {
     }
     vm.define_global("Number", Value::Object(number));
 
+    let bp = vm.realm.bigint_proto.clone();
+    method(vm, &bp, "toString", 0, bigint_to_string);
+    method(vm, &bp, "toLocaleString", 0, bigint_to_locale_string);
+    method(vm, &bp, "valueOf", 0, bigint_value_of);
+    bp.set_with_attrs(
+        crate::object::TO_STRING_TAG_KEY,
+        "BigInt".into(),
+        crate::object::NON_ENUM | crate::object::READ_ONLY,
+    );
+    let bigint = make_ctor(vm, "BigInt", 1, bigint_ctor, None, &bp);
+    method(vm, &bigint, "asIntN", 2, bigint_as_int_n);
+    method(vm, &bigint, "asUintN", 2, bigint_as_uint_n);
+    vm.define_global("BigInt", Value::Object(bigint));
+
     let pf = native_fn(vm, "parseFloat", 1, parse_float_fn);
     vm.define_global("parseFloat", pf);
     let pi = native_fn(vm, "parseInt", 2, parse_int_fn);
@@ -111,7 +125,121 @@ fn number_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     if args.is_empty() {
         return Ok(Value::Number(0.0));
     }
-    Ok(Value::Number(vm.to_number(&args[0])?))
+    match vm.to_numeric(&args[0])? {
+        Value::BigInt(b) => Ok(Value::Number(crate::bigint::to_f64(&b))),
+        other => Ok(other),
+    }
+}
+
+fn to_bigint(vm: &mut Vm, v: &Value) -> Result<std::rc::Rc<num_bigint::BigInt>, Value> {
+    let p = vm.to_primitive(v, true)?;
+    match &p {
+        Value::BigInt(b) => Ok(b.clone()),
+        Value::Bool(b) => Ok(std::rc::Rc::new(num_bigint::BigInt::from(*b as i32))),
+        Value::Str(s) => match crate::bigint::from_string(s) {
+            Some(b) => Ok(std::rc::Rc::new(b)),
+            None => Err(vm.make_error(
+                crate::vm::ErrorKind::SyntaxError,
+                format!("Cannot convert {s} to a BigInt"),
+            )),
+        },
+        Value::Number(n) => Err(vm.type_error(format!(
+            "Cannot convert {} to a BigInt",
+            crate::number::number_to_string(*n)
+        ))),
+        other => Err(vm.type_error(format!(
+            "Cannot convert {} to a BigInt",
+            crate::inspect::inspect_plain(other)
+        ))),
+    }
+}
+
+fn bigint_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    if this.is_object() {
+        return Err(vm.type_error("BigInt is not a constructor"));
+    }
+    let v = arg(args, 0);
+    let p = vm.to_primitive(&v, true)?;
+    if let Value::Number(n) = p {
+        return match crate::bigint::from_f64(n) {
+            Some(b) => Ok(Value::BigInt(std::rc::Rc::new(b))),
+            None => Err(vm.range_error(format!(
+                "The number {} cannot be converted to a BigInt because it is not an integer",
+                crate::number::number_to_string(n)
+            ))),
+        };
+    }
+    Ok(Value::BigInt(to_bigint(vm, &p)?))
+}
+
+fn bits_arg(vm: &mut Vm, v: &Value) -> Result<u64, Value> {
+    let n = to_integer(vm, v)?;
+    if !(0.0..=9007199254740991.0).contains(&n) {
+        return Err(vm.range_error("Invalid value: not (convertible to) a safe integer"));
+    }
+    Ok(n as u64)
+}
+
+fn bigint_as_int_n(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let bits = bits_arg(vm, &arg(args, 0))?;
+    let b = to_bigint(vm, &arg(args, 1))?;
+    Ok(Value::BigInt(std::rc::Rc::new(crate::bigint::as_int_n(
+        bits, &b,
+    ))))
+}
+
+fn bigint_as_uint_n(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let bits = bits_arg(vm, &arg(args, 0))?;
+    let b = to_bigint(vm, &arg(args, 1))?;
+    Ok(Value::BigInt(std::rc::Rc::new(crate::bigint::as_uint_n(
+        bits, &b,
+    ))))
+}
+
+fn this_bigint(
+    vm: &mut Vm,
+    this: &Value,
+    name: &str,
+) -> Result<std::rc::Rc<num_bigint::BigInt>, Value> {
+    match this {
+        Value::BigInt(b) => Ok(b.clone()),
+        _ => Err(vm.type_error(format!(
+            "BigInt.prototype.{name} requires that 'this' be a BigInt"
+        ))),
+    }
+}
+
+fn bigint_to_string(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let b = this_bigint(vm, &this, "toString")?;
+    let radix = match arg(args, 0) {
+        Value::Undefined => 10.0,
+        v => to_integer(vm, &v)?,
+    };
+    if !(2.0..=36.0).contains(&radix) {
+        return Err(vm.range_error("toString() radix must be between 2 and 36"));
+    }
+    Ok(crate::bigint::to_string_radix(&b, radix as u32).into())
+}
+
+fn bigint_to_locale_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    let b = this_bigint(vm, &this, "toLocaleString")?;
+    let text = b.to_string();
+    let (sign, digits) = match text.strip_prefix('-') {
+        Some(d) => ("-", d.to_string()),
+        None => ("", text.clone()),
+    };
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    Ok(format!("{sign}{out}").into())
+}
+
+fn bigint_value_of(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    Ok(Value::BigInt(this_bigint(vm, &this, "valueOf")?))
 }
 
 fn value_of(vm: &mut Vm, this: Value, _args: &[Value]) -> R {

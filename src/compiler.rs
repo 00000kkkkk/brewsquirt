@@ -2367,6 +2367,13 @@ impl Compiler {
                 let k = self.constant(Value::Number(*n));
                 self.emit(Op::Const(k));
             }
+            ExprKind::BigInt(text) => {
+                let Some(b) = crate::bigint::parse_literal(text) else {
+                    return Err(self.err("Invalid BigInt literal"));
+                };
+                let k = self.constant(Value::BigInt(Rc::new(b)));
+                self.emit(Op::Const(k));
+            }
             ExprKind::Str(s) => {
                 let k = self.str_const(s);
                 self.emit(Op::Const(k));
@@ -2645,7 +2652,7 @@ impl Compiler {
                             self.emit(step);
                             self.store_var(n, false);
                         } else {
-                            self.emit(Op::ToNumber);
+                            self.emit(Op::ToNumeric);
                             self.emit(Op::Dup);
                             self.emit(step);
                             self.store_var(n, false);
@@ -2661,7 +2668,7 @@ impl Compiler {
                             self.emit(step);
                             self.emit(Op::SetProp(k));
                         } else {
-                            self.emit(Op::ToNumber);
+                            self.emit(Op::ToNumeric);
                             self.emit(Op::Dup);
                             self.emit(Op::Rot3);
                             self.emit(step);
@@ -2678,7 +2685,7 @@ impl Compiler {
                             self.emit(step);
                             self.emit(Op::SetIndex);
                         } else {
-                            self.emit(Op::ToNumber);
+                            self.emit(Op::ToNumeric);
                             self.emit(Op::Dup);
                             self.emit(Op::Rot4);
                             self.emit(step);

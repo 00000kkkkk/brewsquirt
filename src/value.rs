@@ -14,6 +14,7 @@ pub enum Value {
     Str(Rc<str>),
     Object(Rc<Obj>),
     Symbol(Rc<Symbol>),
+    BigInt(Rc<num_bigint::BigInt>),
 }
 
 impl fmt::Debug for Value {
@@ -66,6 +67,7 @@ impl Value {
             Value::Number(n) => *n != 0.0 && !n.is_nan(),
             Value::Str(s) => !s.is_empty(),
             Value::Object(_) | Value::Symbol(_) => true,
+            Value::BigInt(b) => !crate::bigint::is_zero(b),
         }
     }
 
@@ -110,6 +112,7 @@ impl Value {
             Value::Number(_) => "number",
             Value::Str(_) => "string",
             Value::Symbol(_) => "symbol",
+            Value::BigInt(_) => "bigint",
             Value::Object(o) => {
                 if o.is_callable() {
                     "function"
@@ -127,6 +130,7 @@ impl Value {
             (Value::Number(a), Value::Number(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
+            (Value::BigInt(a), Value::BigInt(b)) => a == b,
             (Value::Symbol(a), Value::Symbol(b)) => a.key == b.key,
             _ => false,
         }
@@ -146,6 +150,7 @@ impl Value {
             Value::Bool(b) => if *b { "true" } else { "false" }.into(),
             Value::Number(n) => number_to_string(*n).into(),
             Value::Str(s) => s.clone(),
+            Value::BigInt(b) => b.to_string().into(),
             Value::Object(_) | Value::Symbol(_) => return None,
         })
     }
@@ -163,13 +168,21 @@ impl Value {
             }
             Value::Number(n) => *n,
             Value::Str(s) => crate::number::string_to_number(s),
-            Value::Object(_) | Value::Symbol(_) => return None,
+            Value::Object(_) | Value::Symbol(_) | Value::BigInt(_) => return None,
         })
     }
 
     pub fn is_array(&self) -> bool {
         matches!(self, Value::Object(o) if matches!(o.kind, ObjKind::Array(_)))
     }
+}
+
+pub fn is_well_formed(_s: &str) -> bool {
+    true
+}
+
+pub fn to_well_formed(s: &str) -> String {
+    s.to_string()
 }
 
 pub fn len16(s: &str) -> usize {

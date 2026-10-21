@@ -244,6 +244,7 @@ fn format_value(ctx: &mut Ctx, v: &Value, rt: usize, top: bool) -> String {
         }
         Value::Object(o) => format_object(ctx, o, rt, top),
         Value::Symbol(sym) => crate::builtins::symbol_text(sym),
+        Value::BigInt(b) => format!("{b}n"),
     }
 }
 

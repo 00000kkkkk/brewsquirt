@@ -152,6 +152,9 @@ impl PropMap {
     }
 
     pub fn insert_fast(&mut self, key: Rc<str>, v: Value, adding_ok: bool) -> bool {
+        if key.len() == 9 && &*key == "__proto__" {
+            return false;
+        }
         if let Some(i) = self.find(&key) {
             if self.extra.is_some() && self.attrs(&key) & READ_ONLY != 0 {
                 return false;
@@ -739,6 +742,7 @@ pub enum MapKey {
     Str(Rc<str>),
     Obj(Rc<Obj>),
     Sym(Rc<Symbol>),
+    Big(Rc<num_bigint::BigInt>),
 }
 
 impl MapKey {
@@ -758,6 +762,7 @@ impl MapKey {
                 MapKey::Num(n.to_bits())
             }
             Value::Str(s) => MapKey::Str(s.clone()),
+            Value::BigInt(b) => MapKey::Big(b.clone()),
             Value::Object(o) => MapKey::Obj(o.clone()),
             Value::Symbol(s) => MapKey::Sym(s.clone()),
         }
@@ -772,6 +777,7 @@ impl MapKey {
             MapKey::Str(s) => Value::Str(s.clone()),
             MapKey::Obj(o) => Value::Object(o.clone()),
             MapKey::Sym(s) => Value::Symbol(s.clone()),
+            MapKey::Big(b) => Value::BigInt(b.clone()),
         }
     }
 }
@@ -785,6 +791,7 @@ impl PartialEq for MapKey {
             (MapKey::Str(a), MapKey::Str(b)) => a == b,
             (MapKey::Obj(a), MapKey::Obj(b)) => Rc::ptr_eq(a, b),
             (MapKey::Sym(a), MapKey::Sym(b)) => a.key == b.key,
+            (MapKey::Big(a), MapKey::Big(b)) => a == b,
             _ => false,
         }
     }
@@ -816,6 +823,10 @@ impl Hash for MapKey {
             MapKey::Sym(s) => {
                 6u8.hash(state);
                 s.key.hash(state)
+            }
+            MapKey::Big(b) => {
+                7u8.hash(state);
+                b.hash(state)
             }
         }
     }

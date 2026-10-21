@@ -57,6 +57,8 @@ pub fn install(vm: &mut Vm) {
         ("replace", REPLACE_KEY),
         ("search", SEARCH_KEY),
         ("split", SPLIT_KEY),
+        ("dispose", "\u{0}@@dispose:Symbol.dispose"),
+        ("asyncDispose", "\u{0}@@asyncDispose:Symbol.asyncDispose"),
     ] {
         symbol.set_with_attrs(
             name,
@@ -93,6 +95,12 @@ pub fn install(vm: &mut Vm) {
     }
     vm.define_global("Symbol", Value::Object(symbol));
 
+    let ib = vm.realm.iterator_base.clone();
+    method(vm, &ib, ITER_KEY, 0, iter_self);
+    ib.props.borrow_mut().set_enumerable(ITER_KEY, false);
+    let aib = vm.realm.async_iterator_base.clone();
+    method(vm, &aib, ASYNC_ITER_KEY, 0, iter_self);
+    aib.props.borrow_mut().set_enumerable(ASYNC_ITER_KEY, false);
     let iterable: [(&Rc<Obj>, crate::object::NativeFn); 6] = [
         (&vm.realm.array_proto.clone(), array_values),
         (&vm.realm.string_proto.clone(), string_iter),

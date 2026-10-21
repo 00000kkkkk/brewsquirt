@@ -158,6 +158,25 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                         }
                         _ => out.push_str("\\\\c"),
                     },
+                    'p' | 'P' if chars.get(i + 1) == Some(&'{') => {
+                        let end = chars[i + 1..]
+                            .iter()
+                            .position(|&ch| ch == '}')
+                            .ok_or("Invalid property name")?;
+                        let body: String = chars[i + 2..i + 1 + end].iter().collect();
+                        let body = match body.split_once('=') {
+                            Some(("Script_Extensions" | "scx", v)) => format!("scx={v}"),
+                            Some(("Script" | "sc", v)) => format!("sc={v}"),
+                            Some(("General_Category" | "gc", v)) => format!("gc={v}"),
+                            _ => body,
+                        };
+                        out.push('\\');
+                        out.push(e);
+                        out.push('{');
+                        out.push_str(&body);
+                        out.push('}');
+                        i += 1 + end;
+                    }
                     'p' | 'P' => {
                         out.push('\\');
                         out.push(e);

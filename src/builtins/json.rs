@@ -35,6 +35,8 @@ pub fn quote_json(s: &str, out: &mut String) {
 struct Ser<'a> {
     indent: &'a str,
     stack: Vec<*const Obj>,
+    replacer: Option<Value>,
+    allow: Option<Vec<Rc<str>>>,
 }
 
 impl Ser<'_> {
@@ -47,6 +49,29 @@ impl Ser<'_> {
         }
     }
 
+    fn property(
+        &mut self,
+        vm: &mut Vm,
+        holder: &Value,
+        key: &str,
+        value: Value,
+        depth: usize,
+        out: &mut String,
+    ) -> Result<bool, Value> {
+        let mut v = value;
+        if matches!(v, Value::Object(_) | Value::BigInt(_)) {
+            let f = vm.get_prop(&v, "toJSON")?;
+            if f.is_callable() {
+                v = vm.call_value(&f, v.clone(), &[key.into()])?;
+            }
+        }
+        if let Some(r) = &self.replacer {
+            let r = r.clone();
+            v = vm.call_value(&r, holder.clone(), &[key.into(), v])?;
+        }
+        self.write(vm, &v, depth, out)
+    }
+
     fn write(
         &mut self,
         vm: &mut Vm,
@@ -54,15 +79,8 @@ impl Ser<'_> {
         depth: usize,
         out: &mut String,
     ) -> Result<bool, Value> {
-        let mut v = v.clone();
-        if let Value::Object(o) = &v {
-            if let Some(f) = o.get_chain("toJSON") {
-                if f.is_callable() {
-                    v = vm.call_value(&f, v.clone(), &[])?;
-                }
-            }
-        }
-        match &v {
+        match v {
+            Value::BigInt(_) => Err(vm.type_error("Do not know how to serialize a BigInt")),
             Value::Undefined | Value::Symbol(_) => Ok(false),
             Value::Null => {
                 out.push_str("null");
@@ -100,6 +118,18 @@ impl Ser<'_> {
         }
     }
 
+    fn is_array(o: &Obj) -> bool {
+        match &o.kind {
+            ObjKind::Array(_) => true,
+            ObjKind::Proxy(p) => p
+                .target
+                .borrow()
+                .as_ref()
+                .is_some_and(|t| Self::is_array(t)),
+            _ => false,
+        }
+    }
+
     fn write_object(
         &mut self,
         vm: &mut Vm,
@@ -107,19 +137,26 @@ impl Ser<'_> {
         depth: usize,
         out: &mut String,
     ) -> Result<(), Value> {
-        if let ObjKind::Array(a) = &o.kind {
-            let items = a.borrow().clone();
-            if items.is_empty() {
+        let holder = Value::Object(o.clone());
+        if Self::is_array(o) {
+            let len = vm.get_prop(&holder, "length")?;
+            let len = vm.to_number(&len)? as usize;
+            if len == 0 {
                 out.push_str("[]");
                 return Ok(());
             }
             out.push('[');
-            for (i, item) in items.iter().enumerate() {
+            for i in 0..len {
                 if i > 0 {
                     out.push(',');
                 }
                 self.newline(out, depth + 1);
-                if !self.write(vm, item, depth + 1, out)? {
+                let key = i.to_string();
+                let item = match &o.kind {
+                    ObjKind::Array(a) => a.borrow().get(i).cloned().unwrap_or_default(),
+                    _ => vm.get_prop(&holder, &key)?,
+                };
+                if !self.property(vm, &holder, &key, item, depth + 1, out)? {
                     out.push_str("null");
                 }
             }
@@ -127,24 +164,19 @@ impl Ser<'_> {
             out.push(']');
             return Ok(());
         }
-        let entries: Vec<(Rc<str>, Value)> = match &o.kind {
-            ObjKind::Map(_) | ObjKind::Set(_) | ObjKind::Iter(_) => Vec::new(),
-            ObjKind::Typed(_) => vm.own_entries(&Value::Object(o.clone())),
-            _ => o
-                .props
-                .borrow()
-                .enumerable()
-                .filter(|(k, _)| !crate::object::is_symbol_key(k))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
+        let keys: Vec<Rc<str>> = match &self.allow {
+            Some(list) => list.clone(),
+            None => match &o.kind {
+                ObjKind::Map(_) | ObjKind::Set(_) | ObjKind::Iter(_) => Vec::new(),
+                _ => vm.op_own_enumerable_keys(o)?,
+            },
         };
         out.push('{');
         let mut first = true;
-        let receiver = Value::Object(o.clone());
-        for (k, v) in entries {
-            let v = vm.resolve_accessor(v, &receiver)?;
+        for k in keys {
+            let v = vm.get_prop(&holder, &k)?;
             let mut piece = String::new();
-            if !self.write(vm, &v, depth + 1, &mut piece)? {
+            if !self.property(vm, &holder, &k, v, depth + 1, &mut piece)? {
                 continue;
             }
             if !first {
@@ -171,9 +203,12 @@ pub fn json_stringify(vm: &mut Vm, v: &Value, indent: &str) -> Result<Option<Str
     let mut ser = Ser {
         indent,
         stack: Vec::new(),
+        replacer: None,
+        allow: None,
     };
+    let holder = Value::Object(vm.new_object());
     let mut out = String::new();
-    if ser.write(vm, v, 0, &mut out)? {
+    if ser.property(vm, &holder, "", v.clone(), 0, &mut out)? {
         Ok(Some(out))
     } else {
         Ok(None)
@@ -181,38 +216,51 @@ pub fn json_stringify(vm: &mut Vm, v: &Value, indent: &str) -> Result<Option<Str
 }
 
 fn stringify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    let indent = match arg(args, 2) {
+    let space = arg(args, 2);
+    let indent = match &space {
         Value::Number(_) => {
-            let n = to_integer(vm, &arg(args, 2))?.clamp(0.0, 10.0) as usize;
+            let n = to_integer(vm, &space)?.clamp(0.0, 10.0) as usize;
             " ".repeat(n)
         }
         Value::Str(s) => s.chars().take(10).collect(),
         _ => String::new(),
     };
-    let mut v = arg(args, 0);
     let replacer = arg(args, 1);
+    let mut ser = Ser {
+        indent: &indent,
+        stack: Vec::new(),
+        replacer: None,
+        allow: None,
+    };
     if replacer.is_callable() {
-        let holder = vm.new_object();
-        holder.set_own("", v.clone());
-        v = apply_replacer(vm, &replacer, &Value::Object(holder), "", v)?;
-    }
-    match json_stringify(vm, &v, &indent)? {
-        Some(s) => Ok(s.into()),
-        None => Ok(Value::Undefined),
-    }
-}
-
-fn apply_replacer(vm: &mut Vm, f: &Value, holder: &Value, key: &str, v: Value) -> R {
-    let v = vm.call_value(f, holder.clone(), &[key.into(), v])?;
-    if let Value::Object(o) = &v {
-        if !o.is_callable() {
-            for (k, child) in vm.own_entries(&v) {
-                let nv = apply_replacer(vm, f, &v, &k, child)?;
-                vm.set_prop(&v, k, nv)?;
+        ser.replacer = Some(replacer.clone());
+    } else if let Value::Object(r) = &replacer {
+        if Ser::is_array(r) {
+            let mut list: Vec<Rc<str>> = Vec::new();
+            for item in vm.iterate(&replacer)? {
+                let key = match &item {
+                    Value::Str(s) => Some(s.clone()),
+                    Value::Number(n) => Some(number_to_string(*n).into()),
+                    _ => None,
+                };
+                if let Some(k) = key {
+                    if !list.contains(&k) {
+                        list.push(k);
+                    }
+                }
             }
+            ser.allow = Some(list);
         }
     }
-    Ok(v)
+    let holder = vm.new_object();
+    let v = arg(args, 0);
+    holder.set_own("", v.clone());
+    let mut out = String::new();
+    if ser.property(vm, &Value::Object(holder), "", v, 0, &mut out)? {
+        Ok(out.into())
+    } else {
+        Ok(Value::Undefined)
+    }
 }
 
 pub fn json_parse(vm: &mut Vm, text: &str) -> R {
