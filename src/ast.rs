@@ -60,6 +60,7 @@ pub enum ExprKind {
     },
     SuperCall(Vec<Arg>),
     SuperMember(Rc<str>),
+    SuperIndex(Box<Expr>),
     OptChain(Box<Expr>),
     Seq(Vec<Expr>),
     Await(Box<Expr>),

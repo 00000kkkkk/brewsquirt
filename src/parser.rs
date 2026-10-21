@@ -209,7 +209,7 @@ impl Parser {
         };
         self.advance();
         for (id, names) in self.class_ids.iter().rev() {
-            if names.iter().any(|n| *n == name) {
+            if names.contains(&name) {
                 return Ok(format!("\u{0}#{name}@{id}").into());
             }
         }
@@ -274,6 +274,9 @@ impl Parser {
         match self.word() {
             Some(s) if is_reserved(&s) && self.peek().escaped => {
                 Err(self.error("Keyword must not contain escaped characters"))
+            }
+            Some(s) if matches!(&*s, "eval" | "arguments") => {
+                Err(self.error("Unexpected eval or arguments in strict mode"))
             }
             Some(s) if is_reserved(&s) => {
                 Err(self.error(format!("Unexpected reserved word '{s}'")))
@@ -749,6 +752,9 @@ impl Parser {
                                 self.error(format!("Unexpected reserved word '{imported}'"))
                             );
                         }
+                        if matches!(&*imported, "eval" | "arguments") {
+                            return Err(self.error("Unexpected eval or arguments in strict mode"));
+                        }
                         imported.clone()
                     };
                     named.push((imported, local));
@@ -812,8 +818,15 @@ impl Parser {
             return Ok(StmtKind::Export(ExportDecl::Default(e)));
         }
         if self.eat(P::Star) {
-            if self.is_kw("as") {
-                return Err(self.error("export * as is not supported yet"));
+            if self.eat_kw("as") {
+                let exported = self.module_name()?;
+                self.expect_kw("from")?;
+                let source = self.string_lit()?;
+                self.semicolon()?;
+                return Ok(StmtKind::Export(ExportDecl::From {
+                    source,
+                    names: Some(vec![("*".into(), exported)]),
+                }));
             }
             self.expect_kw("from")?;
             let source = self.string_lit()?;
@@ -1410,7 +1423,15 @@ impl Parser {
         let line = self.line();
         let lhs = self.conditional()?;
         if let Some(op) = self.assign_op() {
+            if let ExprKind::Ident(n) = &lhs.kind {
+                if matches!(&**n, "eval" | "arguments") {
+                    return Err(self.error("Unexpected eval or arguments in strict mode"));
+                }
+            }
             let target = match (&lhs.kind, op) {
+                (ExprKind::SuperMember(_), _) | (ExprKind::SuperIndex(_), _) => {
+                    AssignTarget::Simple(Box::new(lhs))
+                }
                 (ExprKind::Ident(_), _)
                 | (
                     ExprKind::Member {
@@ -1625,7 +1646,12 @@ impl Parser {
     }
 
     fn check_update_target(&self, e: &Expr) -> R<()> {
-        match e.kind {
+        match &e.kind {
+            ExprKind::Ident(n) if matches!(&**n, "eval" | "arguments") => Err(SyntaxError::new(
+                "Unexpected eval or arguments in strict mode",
+                e.line,
+                1,
+            )),
             ExprKind::Ident(_)
             | ExprKind::Member {
                 optional: false, ..
@@ -1853,6 +1879,9 @@ impl Parser {
     fn new_expr(&mut self) -> R<Expr> {
         let line = self.line();
         self.advance();
+        if self.is_kw("import") {
+            return Err(self.error("Cannot use new with import"));
+        }
         if self.is(P::Dot) {
             self.advance();
             match self.ident_name()? {
@@ -2087,6 +2116,14 @@ impl Parser {
                             ExprKind::SuperCall(self.arguments()?)
                         } else if self.eat(P::Dot) {
                             ExprKind::SuperMember(self.ident_name()?)
+                        } else if self.eat(P::LBracket) {
+                            let saved = self.no_in;
+                            self.no_in = false;
+                            let key = self.expression();
+                            self.no_in = saved;
+                            let key = key?;
+                            self.expect(P::RBracket)?;
+                            ExprKind::SuperIndex(Box::new(key))
                         } else {
                             return Err(self.error("'super' keyword unexpected here"));
                         }

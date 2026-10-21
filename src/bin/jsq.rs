@@ -29,6 +29,8 @@ struct Cli {
     disasm: bool,
     #[arg(long, requires = "file", hide = true)]
     script: bool,
+    #[arg(long, requires = "file", hide = true)]
+    prelude: Option<PathBuf>,
     file: Option<PathBuf>,
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
@@ -110,6 +112,19 @@ fn run(cli: Cli) -> ExitCode {
                     ExitCode::FAILURE
                 }
             };
+        }
+        if let Some(pre) = &cli.prelude {
+            let src = match std::fs::read_to_string(pre) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("jsq: cannot read {}: {e}", pre.display());
+                    return ExitCode::FAILURE;
+                }
+            };
+            let name = pre.display().to_string();
+            if let Err(e) = vm.run_script(&src, &name) {
+                return finish(&mut vm, Err(e));
+            }
         }
         if cli.script {
             let src = match std::fs::read_to_string(file) {

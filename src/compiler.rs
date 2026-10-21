@@ -261,8 +261,25 @@ pub fn compile_module(stmts: &[Stmt], module: Rc<ModuleInfo>, mode: Mode) -> R<R
         let st = c.states.pop().expect("module state");
         return Ok(Rc::new(c.finish(st)));
     }
-    c.load_var(&"%ns".into());
     let exports = std::mem::take(&mut c.exports);
+    let mut exported: Vec<&Rc<str>> = Vec::new();
+    for entry in &exports {
+        let name = match entry {
+            ExportEntry::Local(local, x) => {
+                if c.resolve_local(0, local).is_none() && c.alias(local).is_none() {
+                    return Err(c.err(format!("Export '{local}' is not defined in module")));
+                }
+                x
+            }
+            ExportEntry::Named(_, _, x) => x,
+            ExportEntry::All(_) => continue,
+        };
+        if exported.contains(&name) {
+            return Err(c.err(format!("Duplicate export of '{name}'")));
+        }
+        exported.push(name);
+    }
+    c.load_var(&"%ns".into());
     for entry in &exports {
         match entry {
             ExportEntry::Local(local, exported) => {
@@ -276,8 +293,10 @@ pub fn compile_module(stmts: &[Stmt], module: Rc<ModuleInfo>, mode: Mode) -> R<R
             }
             ExportEntry::Named(hidden, imported, exported) => {
                 c.load_var(hidden);
-                let i = c.str_const(imported);
-                c.emit(Op::GetProp(i));
+                if &**imported != "*" {
+                    let i = c.str_const(imported);
+                    c.emit(Op::GetProp(i));
+                }
                 let k = c.str_const(exported);
                 c.emit(Op::InitProp(k));
             }
@@ -820,7 +839,7 @@ impl Compiler {
         }
         for (n, _) in &names {
             let is_fn = funcs.iter().any(|f| f.name.as_ref() == Some(n));
-            if var_scope && is_fn {
+            if var_scope && is_fn && !(top && self.mode == Mode::Module) {
                 continue;
             }
             if var_names.contains(n) {
@@ -2331,6 +2350,12 @@ impl Compiler {
                 let k = self.str_const(m);
                 self.emit(Op::SuperGetMethod(k, is_static));
             }
+            ExprKind::SuperIndex(key) => {
+                let is_static = self.super_info(false)?;
+                self.load_var(&"this".into());
+                self.expr(key)?;
+                self.emit(Op::SuperGetIndexMethod(is_static));
+            }
             _ => {
                 self.expr(callee)?;
                 self.emit(Op::Undefined);
@@ -2943,6 +2968,12 @@ impl Compiler {
                 let k = self.str_const(m);
                 self.emit(Op::SuperGet(k, is_static));
             }
+            ExprKind::SuperIndex(key) => {
+                let is_static = self.super_info(false)?;
+                self.load_var(&"this".into());
+                self.expr(key)?;
+                self.emit(Op::SuperGetIndex(is_static));
+            }
             ExprKind::OptChain(inner) => {
                 let saved = std::mem::take(&mut self.chain);
                 let r = self.expr(inner);
@@ -3095,6 +3126,68 @@ impl Compiler {
                             let j = self.emit(logical_jump(l));
                             self.expr(value)?;
                             self.emit(Op::SetIndex);
+                            let end = self.emit(Op::Jump(0));
+                            self.patch(j);
+                            self.emit(Op::Rot3);
+                            self.emit(Op::Pop);
+                            self.emit(Op::Pop);
+                            self.patch(end);
+                        }
+                    }
+                }
+                ExprKind::SuperMember(m) => {
+                    let is_static = self.super_info(false)?;
+                    let k = self.str_const(m);
+                    self.load_var(&"this".into());
+                    match op {
+                        None => {
+                            self.expr(value)?;
+                            self.emit(Op::SuperSet(k, is_static));
+                        }
+                        Some(AssignOp::Bin(b)) => {
+                            self.emit(Op::Dup);
+                            self.emit(Op::SuperGet(k, is_static));
+                            self.expr(value)?;
+                            self.emit(bin_op(b));
+                            self.emit(Op::SuperSet(k, is_static));
+                        }
+                        Some(AssignOp::Logical(l)) => {
+                            self.emit(Op::Dup);
+                            self.emit(Op::SuperGet(k, is_static));
+                            let j = self.emit(logical_jump(l));
+                            self.expr(value)?;
+                            self.emit(Op::SuperSet(k, is_static));
+                            let end = self.emit(Op::Jump(0));
+                            self.patch(j);
+                            self.emit(Op::Swap);
+                            self.emit(Op::Pop);
+                            self.patch(end);
+                        }
+                    }
+                }
+                ExprKind::SuperIndex(key) => {
+                    let is_static = self.super_info(false)?;
+                    self.load_var(&"this".into());
+                    self.expr(key)?;
+                    self.emit(Op::ToPropertyKey);
+                    match op {
+                        None => {
+                            self.expr(value)?;
+                            self.emit(Op::SuperSetIndex(is_static));
+                        }
+                        Some(AssignOp::Bin(b)) => {
+                            self.emit(Op::Dup2);
+                            self.emit(Op::SuperGetIndex(is_static));
+                            self.expr(value)?;
+                            self.emit(bin_op(b));
+                            self.emit(Op::SuperSetIndex(is_static));
+                        }
+                        Some(AssignOp::Logical(l)) => {
+                            self.emit(Op::Dup2);
+                            self.emit(Op::SuperGetIndex(is_static));
+                            let j = self.emit(logical_jump(l));
+                            self.expr(value)?;
+                            self.emit(Op::SuperSetIndex(is_static));
                             let end = self.emit(Op::Jump(0));
                             self.patch(j);
                             self.emit(Op::Rot3);

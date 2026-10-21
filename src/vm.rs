@@ -125,9 +125,18 @@ impl Realm {
             async_iterator_base,
             function_proto: mk(),
             array_proto: mk(),
-            string_proto: mk(),
-            number_proto: mk(),
-            boolean_proto: mk(),
+            string_proto: Obj::new(
+                ObjKind::Primitive(Value::Str("".into())),
+                Some(object_proto.clone()),
+            ),
+            number_proto: Obj::new(
+                ObjKind::Primitive(Value::Number(0.0)),
+                Some(object_proto.clone()),
+            ),
+            boolean_proto: Obj::new(
+                ObjKind::Primitive(Value::Bool(false)),
+                Some(object_proto.clone()),
+            ),
             map_proto: mk(),
             set_proto: mk(),
             promise_proto: mk(),
@@ -2616,6 +2625,42 @@ impl Vm {
         self.resolve_accessor(raw, this)
     }
 
+    fn super_store(
+        &mut self,
+        cl: &Closure,
+        key: Rc<str>,
+        is_static: bool,
+        this: &Value,
+        val: Value,
+    ) -> Result<(), Value> {
+        let home = self.super_home(cl)?;
+        let start = if is_static {
+            home.proto.borrow().clone()
+        } else if home.is_callable() {
+            self.function_prototype(&home)
+                .and_then(|p| p.proto.borrow().clone())
+        } else {
+            home.proto.borrow().clone()
+        };
+        let ok = match start {
+            Some(s) => self.op_set(&s, key.clone(), val, this)?,
+            None => match this {
+                Value::Object(o) => {
+                    let o = o.clone();
+                    self.op_set(&o, key.clone(), val, this)?
+                }
+                _ => false,
+            },
+        };
+        if !ok {
+            return Err(self.type_error(format!(
+                "Cannot assign to read only property '{}' of object",
+                crate::props::key_text(&key)
+            )));
+        }
+        Ok(())
+    }
+
     pub fn run(&mut self, stop: usize) -> Result<Value, Value> {
         let mut fi = self.frames.len() - 1;
         let mut cl = self.frames[fi].closure.clone();
@@ -3097,6 +3142,41 @@ impl Vm {
                     let v = tri!(self.super_lookup(&cl, &n, is_static, &this));
                     self.stack.push(v);
                     self.stack.push(this);
+                }
+                Op::ToPropertyKey => {
+                    let v = pop!();
+                    let k = tri!(self.to_property_key(&v));
+                    self.stack.push(Value::Str(k));
+                }
+                Op::SuperGetIndex(is_static) => {
+                    let key = pop!();
+                    let this = pop!();
+                    let n = tri!(self.to_property_key(&key));
+                    let v = tri!(self.super_lookup(&cl, &n, is_static, &this));
+                    self.stack.push(v);
+                }
+                Op::SuperGetIndexMethod(is_static) => {
+                    let key = pop!();
+                    let this = pop!();
+                    let n = tri!(self.to_property_key(&key));
+                    let v = tri!(self.super_lookup(&cl, &n, is_static, &this));
+                    self.stack.push(v);
+                    self.stack.push(this);
+                }
+                Op::SuperSet(k, is_static) => {
+                    let val = pop!();
+                    let this = pop!();
+                    let n = name!(k);
+                    tri!(self.super_store(&cl, n, is_static, &this, val.clone()));
+                    self.stack.push(val);
+                }
+                Op::SuperSetIndex(is_static) => {
+                    let val = pop!();
+                    let key = pop!();
+                    let this = pop!();
+                    let n = tri!(self.to_property_key(&key));
+                    tri!(self.super_store(&cl, n, is_static, &this, val.clone()));
+                    self.stack.push(val);
                 }
                 Op::SuperCall(argc) => {
                     let argc = if argc == u32::MAX {
