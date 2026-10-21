@@ -15,6 +15,21 @@ pub fn well_known(description: &str, key: &str) -> Value {
     }))
 }
 
+fn function_has_instance(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let Value::Object(c) = &this else {
+        return Ok(Value::Bool(false));
+    };
+    Ok(Value::Bool(vm.ordinary_has_instance(&arg(args, 0), c)?))
+}
+
+pub fn symbol_from_key(key: &str) -> Value {
+    let desc = crate::object::symbol_key_description(key);
+    Value::Symbol(Rc::new(Symbol {
+        description: Some(desc.into()),
+        key: key.into(),
+    }))
+}
+
 pub fn install(vm: &mut Vm) {
     let sp = vm.realm.symbol_proto.clone();
     method(vm, &sp, "toString", 0, symbol_to_string);
@@ -26,6 +41,56 @@ pub fn install(vm: &mut Vm) {
     vm.symbol_async_iterator = well_known("Symbol.asyncIterator", ASYNC_ITER_KEY);
     symbol.set_own("iterator", vm.symbol_iterator.clone());
     symbol.set_own("asyncIterator", vm.symbol_async_iterator.clone());
+    use crate::object::{
+        HAS_INSTANCE_KEY, IS_CONCAT_SPREADABLE_KEY, MATCH_ALL_KEY, MATCH_KEY, REPLACE_KEY,
+        SEARCH_KEY, SPECIES_KEY, SPLIT_KEY, TO_PRIMITIVE_KEY, TO_STRING_TAG_KEY, UNSCOPABLES_KEY,
+    };
+    for (name, key) in [
+        ("toStringTag", TO_STRING_TAG_KEY),
+        ("toPrimitive", TO_PRIMITIVE_KEY),
+        ("hasInstance", HAS_INSTANCE_KEY),
+        ("species", SPECIES_KEY),
+        ("isConcatSpreadable", IS_CONCAT_SPREADABLE_KEY),
+        ("unscopables", UNSCOPABLES_KEY),
+        ("match", MATCH_KEY),
+        ("matchAll", MATCH_ALL_KEY),
+        ("replace", REPLACE_KEY),
+        ("search", SEARCH_KEY),
+        ("split", SPLIT_KEY),
+    ] {
+        symbol.set_with_attrs(
+            name,
+            well_known(&format!("Symbol.{name}"), key),
+            crate::object::NON_ENUM | crate::object::READ_ONLY | crate::object::NON_CONFIG,
+        );
+    }
+    let has_instance = super::native_fn(vm, "[Symbol.hasInstance]", 1, function_has_instance);
+    vm.default_has_instance = has_instance.clone();
+    vm.realm.function_proto.set_with_attrs(
+        HAS_INSTANCE_KEY,
+        has_instance,
+        crate::object::NON_ENUM | crate::object::READ_ONLY | crate::object::NON_CONFIG,
+    );
+    let tags: Vec<(Rc<Obj>, &str)> = vec![
+        (vm.realm.map_proto.clone(), "Map"),
+        (vm.realm.set_proto.clone(), "Set"),
+        (vm.realm.promise_proto.clone(), "Promise"),
+        (vm.realm.symbol_proto.clone(), "Symbol"),
+        (vm.realm.weakmap_proto.clone(), "WeakMap"),
+        (vm.realm.weakset_proto.clone(), "WeakSet"),
+        (vm.realm.weakref_proto.clone(), "WeakRef"),
+        (vm.realm.array_buffer_proto.clone(), "ArrayBuffer"),
+        (vm.realm.dataview_proto.clone(), "DataView"),
+        (vm.realm.generator_proto.clone(), "Generator"),
+        (vm.realm.async_generator_proto.clone(), "AsyncGenerator"),
+    ];
+    for (p, tag) in tags {
+        p.set_with_attrs(
+            TO_STRING_TAG_KEY,
+            tag.into(),
+            crate::object::NON_ENUM | crate::object::READ_ONLY,
+        );
+    }
     vm.define_global("Symbol", Value::Object(symbol));
 
     let iterable: [(&Rc<Obj>, crate::object::NativeFn); 6] = [
@@ -38,6 +103,15 @@ pub fn install(vm: &mut Vm) {
     ];
     for (proto, f) in iterable {
         method(vm, proto, ITER_KEY, 0, f);
+    }
+    for (proto, name) in [
+        (vm.realm.array_proto.clone(), "values"),
+        (vm.realm.map_proto.clone(), "entries"),
+        (vm.realm.set_proto.clone(), "values"),
+    ] {
+        if let Some(f) = proto.get_own(name) {
+            proto.set_own(ITER_KEY, f);
+        }
     }
 
     let gp = vm.realm.generator_proto.clone();

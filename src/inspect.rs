@@ -501,11 +501,54 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             )
         }
         ObjKind::Error => {
-            if top {
-                error_full(o)
-            } else {
-                format!("[{}]", error_header(o))
+            let _ = top;
+            let mut base = match o.get_own("stack") {
+                Some(Value::Str(st)) if st.starts_with(&*error_header(o)) => st.to_string(),
+                _ => error_full(o),
+            };
+            if !base.contains("\n    at ") {
+                base = format!("[{base}]");
             }
+            if ctx.indent > 0 {
+                let pad = " ".repeat(ctx.indent);
+                base = base.replace('\n', &format!("\n{pad}"));
+            }
+            let props = own_props(o, false);
+            let cause = o
+                .get_own("cause")
+                .filter(|_| !o.props.borrow().is_enumerable("cause"));
+            let errors = o
+                .get_own("errors")
+                .filter(|_| !o.props.borrow().is_enumerable("errors"));
+            if props.is_empty() && cause.is_none() && errors.is_none() {
+                return base;
+            }
+            if rt > MAX_DEPTH {
+                return format!("[{}]", error_header(o));
+            }
+            let inner = enter(ctx, ptr, rt);
+            let mut output: Vec<String> = props
+                .iter()
+                .map(|(k, v)| format_prop(ctx, k, v, inner))
+                .collect();
+            if let Some(c) = cause {
+                output.push(format!("[cause]: {}", child(ctx, &c, inner)));
+            }
+            if let Some(e) = errors {
+                output.push(format!("[errors]: {}", child(ctx, &e, inner)));
+            }
+            leave(ctx, ptr, &mut base);
+            reduce(
+                ctx,
+                output,
+                Shape {
+                    base,
+                    open: "{".to_string(),
+                    close: "}",
+                    array: None,
+                },
+                inner,
+            )
         }
         ObjKind::Array(a) => {
             let items: Vec<Value> = a.borrow().iter().take(MAX_ITEMS).cloned().collect();
@@ -682,6 +725,14 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
                 inner,
             )
         }
+        ObjKind::Proxy(p) => {
+            let t = p.target.borrow().clone();
+            match t {
+                Some(t) => format_object(ctx, &t, rt, top),
+                None => "<Revoked Proxy>".to_string(),
+            }
+        }
+        ObjKind::Global => "Object [global] {}".to_string(),
         ObjKind::Typed(t) if class_name(o).as_deref() == Some("Buffer") => {
             let bytes = t.bytes();
             let mut s = String::from("<Buffer");
@@ -811,9 +862,16 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
         }
         ObjKind::Ordinary => {
             let cname = class_name(o);
-            let prefix = match (&cname, o.proto.borrow().is_none()) {
-                (Some(n), _) => format!("{n} "),
-                (None, true) => "[Object: null prototype] ".to_string(),
+            let tag = match o.get_chain(crate::object::TO_STRING_TAG_KEY) {
+                Some(Value::Str(t)) if !t.is_empty() && cname.as_deref() != Some(&*t) => Some(t),
+                _ => None,
+            };
+            let prefix = match (&cname, o.proto.borrow().is_none(), &tag) {
+                (Some(n), _, Some(t)) => format!("{n} [{t}] "),
+                (Some(n), _, None) => format!("{n} "),
+                (None, true, Some(t)) => format!("[Object: null prototype] [{t}] "),
+                (None, true, None) => "[Object: null prototype] ".to_string(),
+                (None, false, Some(t)) => format!("Object [{t}] "),
                 _ => String::new(),
             };
             let props = own_props(o, false);

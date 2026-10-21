@@ -23,6 +23,24 @@ pub fn install(vm: &mut Vm) {
     method(vm, &object, "fromEntries", 1, from_entries);
     method(vm, &object, "freeze", 1, freeze);
     method(vm, &object, "isFrozen", 1, is_frozen);
+    method(vm, &object, "seal", 1, seal);
+    method(vm, &object, "isSealed", 1, is_sealed);
+    method(vm, &object, "preventExtensions", 1, prevent_extensions);
+    method(vm, &object, "isExtensible", 1, is_extensible);
+    method(
+        vm,
+        &object,
+        "getOwnPropertySymbols",
+        1,
+        get_own_property_symbols,
+    );
+    method(
+        vm,
+        &object,
+        "getOwnPropertyDescriptors",
+        1,
+        get_own_property_descriptors,
+    );
     method(vm, &object, "create", 2, create);
     method(vm, &object, "getPrototypeOf", 1, get_prototype_of);
     method(vm, &object, "setPrototypeOf", 2, set_prototype_of);
@@ -77,9 +95,26 @@ pub fn install(vm: &mut Vm) {
             *c.proto.borrow_mut() = Some(Rc::clone(base));
         } else {
             base_ctor = Some(c.clone());
+            method(vm, &c, "captureStackTrace", 1, capture_stack_trace);
+            c.set_own("stackTraceLimit", Value::Number(10.0));
         }
         vm.define_global(kind.name(), Value::Object(c));
     }
+    let agg_proto = Obj::new(ObjKind::Ordinary, Some(vm.realm.error_protos[0].clone()));
+    agg_proto.set_hidden("name", "AggregateError".into());
+    agg_proto.set_hidden("message", "".into());
+    let agg = make_ctor(
+        vm,
+        "AggregateError",
+        2,
+        aggregate_error_ctor,
+        None,
+        &agg_proto,
+    );
+    if let Some(base) = &base_ctor {
+        *agg.proto.borrow_mut() = Some(Rc::clone(base));
+    }
+    vm.define_global("AggregateError", Value::Object(agg));
 
     let bp = vm.realm.boolean_proto.clone();
     method(vm, &bp, "toString", 0, bool_to_string);
@@ -117,6 +152,17 @@ fn own_property_names(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     if v.is_nullish() {
         return Err(vm.type_error("Cannot convert undefined or null to object"));
     }
+    if let Value::Object(o) = &v {
+        if crate::builtins::reflect::is_proxy(o) || matches!(o.kind, ObjKind::Global) {
+            let keys = vm.op_own_keys(o)?;
+            let list = keys
+                .into_iter()
+                .filter(|k| !crate::object::is_symbol_key(k))
+                .map(Value::Str)
+                .collect();
+            return Ok(vm.new_array(list));
+        }
+    }
     let k = vm.own_property_names(&v);
     Ok(vm.new_array(k))
 }
@@ -128,13 +174,7 @@ fn has_own_property(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 
 fn has_own_key(vm: &mut Vm, target: &Value, k: &str) -> R {
     Ok(Value::Bool(match target {
-        Value::Object(o) => match &o.kind {
-            ObjKind::Array(a) => match crate::object::array_index(k) {
-                Some(i) => i < a.borrow().len(),
-                None => k == "length" || o.has_own(k),
-            },
-            _ => o.has_own(k),
-        },
+        Value::Object(o) => vm.own_property(o, k).is_some(),
         Value::Str(s) => {
             crate::object::array_index(k).is_some_and(|i| i < crate::value::len16(s))
                 || k == "length"
@@ -151,33 +191,41 @@ fn has_own(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     has_own_key(vm, &arg(args, 0), &k)
 }
 
-fn object_to_string(_vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let tag = match &this {
-        Value::Undefined => "Undefined",
-        Value::Null => "Null",
+fn object_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    let builtin = match &this {
+        Value::Undefined => return Ok("[object Undefined]".into()),
+        Value::Null => return Ok("[object Null]".into()),
         Value::Bool(_) => "Boolean",
         Value::Number(_) => "Number",
         Value::Str(_) => "String",
+        Value::Symbol(_) => "Symbol",
         Value::Object(o) => match &o.kind {
             ObjKind::Array(_) => "Array",
             ObjKind::Function(_) | ObjKind::Native(_) | ObjKind::Bound(_) => "Function",
             ObjKind::Error => "Error",
-            ObjKind::Map(_) => "Map",
-            ObjKind::Set(_) => "Set",
-            ObjKind::Iter(_) => "Iterator",
-            ObjKind::Promise(_) => "Promise",
             ObjKind::RegExp(_) => "RegExp",
             ObjKind::Date(_) => "Date",
-            ObjKind::WeakMap(_) => "WeakMap",
-            ObjKind::WeakSet(_) => "WeakSet",
-            ObjKind::WeakRef(_) => "WeakRef",
-            ObjKind::Coroutine(_) => "Generator",
-            ObjKind::ArrayBuffer(_) => "ArrayBuffer",
             ObjKind::Typed(t) => t.kind.name(),
-            ObjKind::DataView(_) => "DataView",
-            ObjKind::Accessor(_) | ObjKind::Ordinary => "Object",
+            ObjKind::Proxy(p) => {
+                let t = p.target.borrow().clone();
+                match t {
+                    Some(t) if matches!(t.kind, ObjKind::Array(_)) => "Array",
+                    _ if p.callable => "Function",
+                    _ => "Object",
+                }
+            }
+            _ => "Object",
         },
-        Value::Symbol(_) => "Symbol",
+    };
+    let tag = match &this {
+        Value::Object(_) | Value::Symbol(_) | Value::Str(_) | Value::Number(_) | Value::Bool(_) => {
+            vm.get_prop(&this, crate::object::TO_STRING_TAG_KEY)?
+        }
+        _ => Value::Undefined,
+    };
+    let tag = match &tag {
+        Value::Str(s) => s.to_string(),
+        _ => builtin.to_string(),
     };
     Ok(format!("[object {tag}]").into())
 }
@@ -212,8 +260,35 @@ fn keys(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     if v.is_nullish() {
         return Err(vm.type_error("Cannot convert undefined or null to object"));
     }
+    if let Value::Object(o) = &v {
+        if crate::builtins::reflect::is_proxy(o) {
+            let keys = vm.op_own_enumerable_keys(o)?;
+            let list = keys.into_iter().map(Value::Str).collect();
+            return Ok(vm.new_array(list));
+        }
+    }
     let k = vm.own_keys(&v);
     Ok(vm.new_array(k))
+}
+
+fn proxy_entries(vm: &mut Vm, o: &Rc<Obj>) -> Result<Vec<(Rc<str>, Value)>, Value> {
+    let keys = vm.op_own_enumerable_keys(o)?;
+    let receiver = Value::Object(o.clone());
+    let mut out = Vec::with_capacity(keys.len());
+    for k in keys {
+        let v = vm.op_get(o, &k, &receiver)?;
+        out.push((k, v));
+    }
+    Ok(out)
+}
+
+fn entries_of(vm: &mut Vm, v: &Value, symbols: bool) -> Result<Vec<(Rc<str>, Value)>, Value> {
+    if let Value::Object(o) = v {
+        if crate::builtins::reflect::is_proxy(o) {
+            return proxy_entries(vm, o);
+        }
+    }
+    vm.own_entries_resolved(v, symbols)
 }
 
 fn values(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
@@ -221,8 +296,7 @@ fn values(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     if v.is_nullish() {
         return Err(vm.type_error("Cannot convert undefined or null to object"));
     }
-    let vals = vm
-        .own_entries_resolved(&v, false)?
+    let vals = entries_of(vm, &v, false)?
         .into_iter()
         .map(|(_, v)| v)
         .collect();
@@ -234,8 +308,7 @@ fn entries(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     if v.is_nullish() {
         return Err(vm.type_error("Cannot convert undefined or null to object"));
     }
-    let pairs: Vec<Value> = vm
-        .own_entries_resolved(&v, false)?
+    let pairs: Vec<Value> = entries_of(vm, &v, false)?
         .into_iter()
         .map(|(k, v)| vm.new_array(vec![Value::Str(k), v]))
         .collect();
@@ -246,7 +319,7 @@ fn assign(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let target = arg(args, 0);
     to_object(vm, &target)?;
     for src in args.iter().skip(1) {
-        for (k, v) in vm.own_entries_resolved(src, true)? {
+        for (k, v) in entries_of(vm, src, true)? {
             vm.set_prop(&target, k, v)?;
         }
     }
@@ -265,17 +338,78 @@ fn from_entries(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(Value::Object(o))
 }
 
-fn freeze(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+fn freeze(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let v = arg(args, 0);
     if let Value::Object(o) = &v {
-        o.frozen.set(true);
+        if crate::builtins::reflect::is_proxy(o) {
+            integrity_via_ops(vm, o, true)?;
+        } else {
+            vm.freeze(o)?;
+        }
     }
     Ok(v)
 }
 
-fn is_frozen(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+fn integrity_via_ops(vm: &mut Vm, o: &Rc<Obj>, frozen: bool) -> Result<(), Value> {
+    if !vm.op_prevent_extensions(o)? {
+        return Err(vm.type_error("Cannot prevent extensions"));
+    }
+    for k in vm.op_own_keys(o)? {
+        let mut d = crate::props::PropDesc {
+            configurable: Some(false),
+            ..Default::default()
+        };
+        if frozen {
+            if let Some(cur) = vm.op_get_own_property(o, &k)? {
+                if !cur.is_accessor() {
+                    d.writable = Some(false);
+                }
+            }
+        }
+        vm.op_define_own_property(o, k, d, true)?;
+    }
+    Ok(())
+}
+
+fn seal(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let v = arg(args, 0);
+    if let Value::Object(o) = &v {
+        if crate::builtins::reflect::is_proxy(o) {
+            integrity_via_ops(vm, o, false)?;
+        } else {
+            vm.seal(o);
+        }
+    }
+    Ok(v)
+}
+
+fn prevent_extensions(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let v = arg(args, 0);
+    if let Value::Object(o) = &v {
+        if !vm.op_prevent_extensions(o)? {
+            return Err(vm.type_error("Cannot prevent extensions"));
+        }
+    }
+    Ok(v)
+}
+
+fn is_sealed(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(Value::Bool(match arg(args, 0) {
-        Value::Object(o) => o.frozen.get(),
+        Value::Object(o) => vm.test_integrity(&o, false),
+        _ => true,
+    }))
+}
+
+fn is_extensible(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    Ok(Value::Bool(match arg(args, 0) {
+        Value::Object(o) => vm.op_is_extensible(&o)?,
+        _ => false,
+    }))
+}
+
+fn is_frozen(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    Ok(Value::Bool(match arg(args, 0) {
+        Value::Object(o) => vm.test_integrity(&o, true),
         _ => true,
     }))
 }
@@ -291,21 +425,33 @@ fn create(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             )));
         }
     };
-    let o = Value::Object(Obj::new(ObjKind::Ordinary, proto));
-    if let Value::Object(_) = arg(args, 1) {
-        for (k, d) in vm.own_entries(&arg(args, 1)) {
-            define_one(vm, &o, k, &d)?;
-        }
+    let o = Obj::new(ObjKind::Ordinary, proto);
+    let props = arg(args, 1);
+    if !props.is_undefined() {
+        define_all(vm, &o, &props)?;
     }
-    Ok(o)
+    Ok(Value::Object(o))
+}
+
+fn define_all(vm: &mut Vm, o: &Rc<Obj>, props: &Value) -> Result<(), Value> {
+    if props.is_nullish() {
+        return Err(vm.type_error("Cannot convert undefined or null to object"));
+    }
+    let entries = vm.own_entries_resolved(props, true)?;
+    let mut descs = Vec::with_capacity(entries.len());
+    for (k, d) in entries {
+        descs.push((k, vm.to_prop_desc(&d)?));
+    }
+    for (k, d) in descs {
+        vm.op_define_own_property(o, k, d, true)?;
+    }
+    Ok(())
 }
 
 fn get_prototype_of(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(match arg(args, 0) {
-        Value::Object(o) => o
-            .proto
-            .borrow()
-            .clone()
+        Value::Object(o) => vm
+            .op_get_prototype_of(&o)?
             .map(Value::Object)
             .unwrap_or(Value::Null),
         Value::Str(_) => Value::Object(vm.realm.string_proto.clone()),
@@ -318,11 +464,22 @@ fn get_prototype_of(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 
 fn set_prototype_of(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let target = arg(args, 0);
+    if target.is_nullish() {
+        return Err(vm.type_error("Object.setPrototypeOf called on null or undefined"));
+    }
+    let proto = match arg(args, 1) {
+        Value::Object(p) => Some(p),
+        Value::Null => None,
+        other => {
+            return Err(vm.type_error(format!(
+                "Object prototype may only be an Object or null: {}",
+                crate::inspect::inspect_plain(&other)
+            )));
+        }
+    };
     if let Value::Object(o) = &target {
-        match arg(args, 1) {
-            Value::Object(p) => *o.proto.borrow_mut() = Some(p),
-            Value::Null => *o.proto.borrow_mut() = None,
-            _ => return Err(vm.type_error("Object prototype may only be an Object or null")),
+        if !vm.op_set_prototype_of(o, proto)? {
+            return Err(vm.type_error("Cyclic __proto__ value"));
         }
     }
     Ok(target)
@@ -332,47 +489,9 @@ fn define_one(vm: &mut Vm, target: &Value, k: Rc<str>, desc: &Value) -> Result<(
     let Value::Object(o) = target else {
         return Ok(());
     };
-    if !desc.is_object() {
-        return Err(vm.type_error(format!(
-            "Property description must be an object: {}",
-            crate::inspect::inspect_plain(desc)
-        )));
-    }
-    let existed = o.has_own(&k);
-    let enumerable = vm.get_prop(desc, "enumerable")?;
-    let getter = vm.get_prop(desc, "get")?;
-    let setter = vm.get_prop(desc, "set")?;
-    if getter.is_callable() || setter.is_callable() {
-        if getter.is_callable() {
-            vm.define_accessor(o, k.clone(), getter, false);
-        }
-        if setter.is_callable() {
-            vm.define_accessor(o, k.clone(), setter, true);
-        }
-    } else if has_key(vm, desc, "value")? || !existed {
-        let v = vm.get_prop(desc, "value")?;
-        if let ObjKind::Array(a) = &o.kind {
-            if let Some(i) = crate::object::array_index(&k) {
-                let mut items = a.borrow_mut();
-                if i >= items.len() {
-                    items.resize(i + 1, Value::Undefined);
-                }
-                items[i] = v;
-                return Ok(());
-            }
-        }
-        o.props.borrow_mut().insert(k.clone(), v);
-    }
-    if !enumerable.is_undefined() {
-        o.props.borrow_mut().set_enumerable(&k, enumerable.truthy());
-    } else if !existed {
-        o.props.borrow_mut().set_enumerable(&k, false);
-    }
+    let d = vm.to_prop_desc(desc)?;
+    vm.op_define_own_property(o, k, d, true)?;
     Ok(())
-}
-
-fn has_key(vm: &mut Vm, obj: &Value, key: &str) -> Result<bool, Value> {
-    vm.has_property(obj, &Value::Str(key.into()))
 }
 
 fn define_property(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
@@ -387,51 +506,84 @@ fn define_property(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 
 fn define_properties(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let target = arg(args, 0);
-    if !target.is_object() {
+    let Value::Object(o) = &target else {
         return Err(vm.type_error("Object.defineProperties called on non-object"));
-    }
-    for (k, d) in vm.own_entries(&arg(args, 1)) {
-        define_one(vm, &target, k, &d)?;
-    }
+    };
+    define_all(vm, o, &arg(args, 1))?;
     Ok(target)
 }
 
 fn get_own_property_descriptor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let target = arg(args, 0);
+    if target.is_nullish() {
+        return Err(vm.type_error("Cannot convert undefined or null to object"));
+    }
     let k = vm.to_property_key(&arg(args, 1))?;
-    let Value::Object(o) = &target else {
-        return Ok(Value::Undefined);
-    };
-    let raw = match &o.kind {
-        ObjKind::Array(a) => match crate::object::array_index(&k) {
-            Some(i) => a.borrow().get(i).cloned(),
-            None if &*k == "length" => Some(Value::Number(a.borrow().len() as f64)),
-            None => o.get_own(&k),
-        },
-        _ => o.get_own(&k),
-    };
-    let Some(raw) = raw else {
-        return Ok(Value::Undefined);
-    };
-    let d = vm.new_object();
-    match &raw {
-        Value::Object(a) if a.is_accessor() => {
-            if let ObjKind::Accessor(acc) = &a.kind {
-                d.set_own("get", acc.get.borrow().clone());
-                d.set_own("set", acc.set.borrow().clone());
+    let o = match &target {
+        Value::Object(o) => o.clone(),
+        Value::Str(s) => {
+            if &*k == "length" {
+                let d = crate::props::PropDesc::data(
+                    Value::Number(crate::value::len16(s) as f64),
+                    crate::object::NON_ENUM | crate::object::READ_ONLY | crate::object::NON_CONFIG,
+                );
+                return Ok(vm.from_prop_desc(&d));
             }
+            if let Some(i) = crate::object::array_index(&k) {
+                if let Some(c) = crate::value::char_at16(s, i) {
+                    let d = crate::props::PropDesc::data(
+                        Value::from(c),
+                        crate::object::READ_ONLY | crate::object::NON_CONFIG,
+                    );
+                    return Ok(vm.from_prop_desc(&d));
+                }
+            }
+            return Ok(Value::Undefined);
         }
-        _ => {
-            d.set_own("value", raw.clone());
-            d.set_own("writable", Value::Bool(!o.frozen.get()));
+        _ => return Ok(Value::Undefined),
+    };
+    match vm.op_get_own_property(&o, &k)? {
+        Some(d) => Ok(vm.from_prop_desc(&d)),
+        None => Ok(Value::Undefined),
+    }
+}
+
+fn get_own_property_descriptors(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let target = arg(args, 0);
+    let Value::Object(o) = &target else {
+        return Err(vm.type_error("Cannot convert undefined or null to object"));
+    };
+    let out = vm.new_object();
+    let mut keys = vm.own_property_names(&target);
+    keys.extend(own_symbols(o));
+    for k in keys {
+        let k = vm.to_property_key(&k)?;
+        if let Some(d) = vm.own_descriptor(o, &k) {
+            let v = vm.from_prop_desc(&d);
+            out.set_own(k, v);
         }
     }
-    d.set_own(
-        "enumerable",
-        Value::Bool(o.props.borrow().is_enumerable(&k)),
-    );
-    d.set_own("configurable", Value::Bool(!o.frozen.get()));
-    Ok(Value::Object(d))
+    Ok(Value::Object(out))
+}
+
+fn own_symbols(o: &Obj) -> Vec<Value> {
+    o.props
+        .borrow()
+        .keys()
+        .filter(|k| crate::object::is_symbol_key(k) && !crate::object::is_private_key(k))
+        .map(|k| crate::builtins::symbol_from_key(k))
+        .collect()
+}
+
+fn get_own_property_symbols(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let list = match arg(args, 0) {
+        Value::Object(o) => own_symbols(&o),
+        Value::Undefined | Value::Null => {
+            return Err(vm.type_error("Cannot convert undefined or null to object"));
+        }
+        _ => Vec::new(),
+    };
+    Ok(vm.new_array(list))
 }
 
 fn object_is(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {
@@ -512,18 +664,77 @@ fn error_ctor<const K: usize>(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         }
     };
     if let Some(m) = msg {
-        target.set_own("message", Value::Str(m));
+        target.set_hidden("message", Value::Str(m));
     }
     let options = arg(args, 1);
-    if options.is_object() {
-        let cause = vm.get_prop(&options, "cause")?;
-        if !cause.is_undefined() {
-            target.set_own("cause", cause);
-        }
-    }
+    install_cause(vm, &target, &options)?;
     let stack = format!("{}{}", error_header(&target), vm.stack_trace());
-    target.set_own("stack", stack.into());
+    target.set_hidden("stack", stack.into());
     Ok(Value::Object(target))
+}
+
+fn install_cause(vm: &mut Vm, target: &Rc<Obj>, options: &Value) -> Result<(), Value> {
+    if options.is_object() && vm.has_property(options, &Value::Str("cause".into()))? {
+        let cause = vm.get_prop(options, "cause")?;
+        target.set_hidden("cause", cause);
+    }
+    Ok(())
+}
+
+fn aggregate_error_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let proto = match &this {
+        Value::Object(o) => o.proto.borrow().clone(),
+        _ => vm
+            .globals
+            .get("AggregateError")
+            .cloned()
+            .and_then(|c| c.as_object().and_then(|c| c.get_own("prototype")))
+            .and_then(|p| p.as_object().cloned()),
+    };
+    let target = Obj::new(ObjKind::Error, proto);
+    let msg = arg(args, 1);
+    if !msg.is_undefined() {
+        let m = vm.to_string(&msg)?;
+        target.set_hidden("message", Value::Str(m));
+    }
+    install_cause(vm, &target, &arg(args, 2))?;
+    let errors = vm.iterate(&arg(args, 0))?;
+    let list = vm.new_array(errors);
+    target.set_hidden("errors", list);
+    let stack = format!("{}{}", error_header(&target), vm.stack_trace());
+    target.set_hidden("stack", stack.into());
+    Ok(Value::Object(target))
+}
+
+fn capture_stack_trace(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let Value::Object(o) = arg(args, 0) else {
+        return Err(vm.type_error("Invalid argument"));
+    };
+    let header = match o.kind {
+        ObjKind::Error => error_header(&o),
+        _ => {
+            let name = vm.get_prop(&Value::Object(o.clone()), "name")?;
+            let msg = vm.get_prop(&Value::Object(o.clone()), "message")?;
+            let name = if name.is_undefined() {
+                "Error".into()
+            } else {
+                vm.to_string(&name)?
+            };
+            let msg = if msg.is_undefined() {
+                "".into()
+            } else {
+                vm.to_string(&msg)?
+            };
+            if msg.is_empty() {
+                name.to_string()
+            } else {
+                format!("{name}: {msg}")
+            }
+        }
+    };
+    let stack = format!("{header}{}", vm.stack_trace());
+    o.set_hidden("stack", stack.into());
+    Ok(Value::Undefined)
 }
 
 fn error_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {

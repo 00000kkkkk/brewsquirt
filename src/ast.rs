@@ -8,6 +8,7 @@ pub struct Expr {
 
 #[derive(Clone, Debug)]
 pub enum ExprKind {
+    NewTarget,
     Number(f64),
     Str(Rc<str>),
     Regex(Rc<str>, Rc<str>),
@@ -265,6 +266,7 @@ pub enum ClassMember {
         is_static: bool,
         setter: bool,
     },
+    StaticBlock(Rc<FuncDef>),
 }
 
 #[derive(Clone, Debug)]
@@ -277,6 +279,7 @@ pub struct Stmt {
 pub enum DeclKind {
     Let,
     Const,
+    Var,
 }
 
 #[derive(Clone, Debug)]

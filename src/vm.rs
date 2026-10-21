@@ -129,9 +129,30 @@ impl Realm {
 pub struct Globals {
     index: FxHashMap<Rc<str>, u32>,
     values: Vec<Value>,
+    pub(crate) attrs: FxHashMap<Rc<str>, u8>,
+    pub(crate) readonly: bool,
 }
 
 impl Globals {
+    pub fn names(&self) -> Vec<Rc<str>> {
+        let mut v: Vec<(u32, Rc<str>)> = self.index.iter().map(|(k, &i)| (i, k.clone())).collect();
+        v.sort_unstable_by_key(|(i, _)| *i);
+        v.into_iter().map(|(_, k)| k).collect()
+    }
+
+    pub fn attrs_of(&self, name: &str) -> u8 {
+        self.attrs.get(name).copied().unwrap_or(0)
+    }
+
+    pub fn remove(&mut self, name: &str) -> bool {
+        if let Some(i) = self.index.remove(name) {
+            self.values[i as usize] = Value::Undefined;
+            self.attrs.remove(name);
+            return true;
+        }
+        false
+    }
+
     pub fn get(&self, name: &str) -> Option<&Value> {
         self.index.get(name).map(|&i| &self.values[i as usize])
     }
@@ -173,6 +194,7 @@ pub(crate) struct Frame {
     pub(crate) base: usize,
     pub(crate) construct: bool,
     pub(crate) co: Option<Rc<Obj>>,
+    pub(crate) new_target: Option<Value>,
 }
 
 pub(crate) struct Handler {
@@ -208,6 +230,9 @@ pub struct Vm {
     pub(crate) pending_rejections: Vec<Rc<Obj>>,
     pub(crate) co_signal: Option<Signal>,
     pub accessors_used: bool,
+    pub(crate) readonly_used: bool,
+    pub(crate) global_accessors: bool,
+    pub(crate) next_new_target: Option<Value>,
     pub rejection: bool,
     pub symbol_seq: u64,
     pub symbol_registry: FxHashMap<Rc<str>, Value>,
@@ -217,6 +242,7 @@ pub struct Vm {
     pub promise_reject_fn: Value,
     pub async_from_sync_next: Value,
     pub iter_value_fn: Value,
+    pub default_has_instance: Value,
     pub(crate) io: crate::io::Io,
     pub(crate) io_fetches: FxHashMap<u64, Rc<Obj>>,
     pub(crate) io_servers: FxHashMap<u64, (Value, crate::io::ServerHandle)>,
@@ -268,6 +294,9 @@ impl Vm {
             pending_rejections: Vec::new(),
             co_signal: None,
             accessors_used: false,
+            readonly_used: false,
+            global_accessors: false,
+            next_new_target: None,
             rejection: false,
             symbol_seq: 0,
             symbol_registry: FxHashMap::default(),
@@ -277,6 +306,7 @@ impl Vm {
             promise_reject_fn: Value::Undefined,
             async_from_sync_next: Value::Undefined,
             iter_value_fn: Value::Undefined,
+            default_has_instance: Value::Undefined,
             io: crate::io::Io::default(),
             io_fetches: FxHashMap::default(),
             io_servers: FxHashMap::default(),
@@ -545,8 +575,8 @@ impl Vm {
         let o = Obj::new(ObjKind::Error, Some(proto));
         let msg: String = msg.into();
         let stack = format!("{}: {}{}", kind.name(), msg, self.stack_trace());
-        o.set_own("message", msg.into());
-        o.set_own("stack", stack.into());
+        o.set_hidden("message", msg.into());
+        o.set_hidden("stack", stack.into());
         Value::Object(o)
     }
 
@@ -756,6 +786,11 @@ impl Vm {
             base: ci + 1,
             construct,
             co: None,
+            new_target: if construct {
+                self.next_new_target.take()
+            } else {
+                None
+            },
         });
         Ok(())
     }
@@ -785,6 +820,11 @@ impl Vm {
         let Value::Object(o) = f else {
             return Err(self.type_error(format!("{} is not a function", inspect_plain(f))));
         };
+        if let ObjKind::Proxy(p) = &o.kind {
+            if p.callable {
+                return self.proxy_call(o, this, args);
+            }
+        }
         match &o.kind {
             ObjKind::Function(c) => {
                 if c.proto.is_class() {
@@ -863,10 +903,127 @@ impl Vm {
         self.type_error(format!("{desc} is not a constructor"))
     }
 
+    pub fn is_constructor(&self, f: &Value) -> bool {
+        let Value::Object(o) = f else {
+            return false;
+        };
+        match &o.kind {
+            ObjKind::Function(c) => c.proto.is_constructor(),
+            ObjKind::Native(n) => n.ctor.is_some() || o.get_own("prototype").is_some(),
+            ObjKind::Bound(b) => self.is_constructor(&b.target),
+            ObjKind::Proxy(p) => p.constructible,
+            _ => false,
+        }
+    }
+
+    pub fn construct_with_target(
+        &mut self,
+        callee: &Value,
+        args: &[Value],
+        new_target: &Value,
+    ) -> Result<Value, Value> {
+        if let Value::Object(o) = callee {
+            if let ObjKind::Proxy(_) = &o.kind {
+                return self.proxy_construct(o, args, new_target);
+            }
+        }
+        let r = self.construct(callee, args)?;
+        if !new_target.strict_eq(callee) {
+            if let (Value::Object(obj), Value::Object(nt)) = (&r, new_target) {
+                if let Value::Object(p) = self.get_prop(&Value::Object(nt.clone()), "prototype")? {
+                    *obj.proto.borrow_mut() = Some(p);
+                }
+            }
+        }
+        Ok(r)
+    }
+
+    pub fn set_global_prop(&mut self, key: Rc<str>, val: Value) -> Result<(), Value> {
+        if let Some(raw) = self.globals.get(&key).cloned() {
+            if let Some((_, setter)) = crate::props::accessor_parts(&raw) {
+                if setter.is_callable() {
+                    self.call_value(&setter, Value::Undefined, &[val])?;
+                    return Ok(());
+                }
+                return Err(self.type_error(format!(
+                    "Cannot set property {key} of #<Object> which has only a getter"
+                )));
+            }
+            if self.globals.attrs_of(&key) & crate::object::READ_ONLY != 0 {
+                return Err(self.type_error(format!(
+                    "Cannot assign to read only property '{key}' of object '#<Object>'"
+                )));
+            }
+        }
+        self.globals.insert(key, val);
+        Ok(())
+    }
+
+    pub fn global_descriptor(&self, key: &str) -> Option<crate::props::PropDesc> {
+        let raw = self.globals.get(key)?.clone();
+        let attrs = self.globals.attrs_of(key);
+        Some(match crate::props::accessor_parts(&raw) {
+            Some((g, s)) => crate::props::PropDesc {
+                get: Some(g),
+                set: Some(s),
+                enumerable: Some(attrs & crate::object::NON_ENUM == 0),
+                configurable: Some(attrs & crate::object::NON_CONFIG == 0),
+                ..Default::default()
+            },
+            None => crate::props::PropDesc::data(raw, attrs),
+        })
+    }
+
+    pub fn define_global_prop(
+        &mut self,
+        key: Rc<str>,
+        d: crate::props::PropDesc,
+        throw: bool,
+    ) -> Result<bool, Value> {
+        use crate::object::{NON_CONFIG, NON_ENUM, READ_ONLY};
+        let scratch = self.new_object();
+        if let Some(cur) = self.global_descriptor(&key) {
+            let attrs = self.globals.attrs_of(&key);
+            let raw = self.globals.get(&key).cloned().unwrap_or_default();
+            scratch.set_with_attrs(key.clone(), raw, attrs);
+            let _ = cur;
+        }
+        let ok = self.define_own(&scratch, key.clone(), d, throw)?;
+        if !ok {
+            return Ok(false);
+        }
+        let raw = scratch.get_own(&key).unwrap_or_default();
+        let attrs = scratch.props.borrow().attrs(&key) & (NON_ENUM | READ_ONLY | NON_CONFIG);
+        if crate::props::accessor_parts(&raw).is_some() {
+            self.global_accessors = true;
+        }
+        if attrs & READ_ONLY != 0 {
+            self.globals.readonly = true;
+        }
+        self.globals.insert(key.clone(), raw);
+        if attrs == 0 {
+            self.globals.attrs.remove(&key);
+        } else {
+            self.globals.attrs.insert(key, attrs);
+        }
+        Ok(true)
+    }
+
+    pub fn delete_global(&mut self, key: &str) -> bool {
+        if self.globals.attrs_of(key) & crate::object::NON_CONFIG != 0 {
+            return false;
+        }
+        self.globals.remove(key);
+        true
+    }
+
     pub fn construct(&mut self, callee: &Value, args: &[Value]) -> Result<Value, Value> {
         let Value::Object(o) = callee else {
             return Err(self.not_constructor(callee, NO_NAME, None));
         };
+        if let ObjKind::Proxy(_) = &o.kind {
+            return self.proxy_construct(o, args, callee);
+        }
         match &o.kind {
             ObjKind::Function(c) => {
                 if !c.proto.is_constructor() {
@@ -941,7 +1098,11 @@ impl Vm {
                         "prototype" if c.proto.is_constructor() => {
                             let p = self.new_object();
                             p.set_hidden("constructor", Value::Object(o.clone()));
-                            o.set_hidden("prototype", Value::Object(p.clone()));
+                            o.set_with_attrs(
+                                "prototype",
+                                Value::Object(p.clone()),
+                                crate::object::NON_ENUM | crate::object::NON_CONFIG,
+                            );
                             return Value::Object(p);
                         }
                         "name" => return Value::Str(c.proto.name.clone()),
@@ -967,6 +1128,17 @@ impl Vm {
             }
             ObjKind::Map(m) if key == "size" => {
                 return Value::Number(m.borrow().len() as f64);
+            }
+            ObjKind::Global => {
+                if let Some(v) = self.globals.get(key) {
+                    return v.clone();
+                }
+            }
+            ObjKind::Proxy(p) => {
+                if let Some(t) = p.target.borrow().clone() {
+                    return self.get_obj(&t, key);
+                }
+                return Value::Undefined;
             }
             ObjKind::Typed(t) => {
                 if let Some(i) = array_index(key) {
@@ -1066,6 +1238,13 @@ impl Vm {
     pub fn get_prop(&mut self, v: &Value, key: &str) -> Result<Value, Value> {
         match v {
             Value::Object(o) => {
+                match &o.kind {
+                    ObjKind::Proxy(_) => return self.op_get(o, key, v),
+                    ObjKind::Global if self.globals.get(key).is_none() => {
+                        self.load_lazy_global(key)?;
+                    }
+                    _ => {}
+                }
                 let raw = self.get_obj(o, key);
                 self.resolve_accessor(raw, v)
             }
@@ -1097,10 +1276,18 @@ impl Vm {
     pub fn set_prop(&mut self, target: &Value, key: Rc<str>, val: Value) -> Result<(), Value> {
         match target {
             Value::Object(o) => {
-                if o.frozen.get() {
-                    return Err(self.type_error(format!(
-                        "Cannot assign to read only property '{key}' of object"
-                    )));
+                match &o.kind {
+                    ObjKind::Proxy(_) => {
+                        if !self.op_set(o, key.clone(), val, target)? {
+                            return Err(self.type_error(format!(
+                                "'set' on proxy: trap returned falsish for property '{}'",
+                                crate::props::key_text(&key)
+                            )));
+                        }
+                        return Ok(());
+                    }
+                    ObjKind::Global => return self.set_global_prop(key, val),
+                    _ => {}
                 }
                 if self.accessors_used {
                     if let Some(setter) = self.accessor_setter(o, &key) {
@@ -1133,6 +1320,16 @@ impl Vm {
                 }
                 if let ObjKind::Array(a) = &o.kind {
                     if let Some(i) = array_index(&key) {
+                        let flags = o.flags.get();
+                        if flags != 0 {
+                            let len = a.borrow().len();
+                            if flags & crate::object::ELEMENTS_FROZEN != 0 && i < len {
+                                return Err(self.read_only_error(o, &key));
+                            }
+                            if !o.is_extensible() && i >= len {
+                                return Err(self.not_extensible_error(&key));
+                            }
+                        }
                         return self.set_array_index(a, i, val);
                     }
                     if &*key == "length" {
@@ -1140,9 +1337,44 @@ impl Vm {
                         if n < 0.0 || n.fract() != 0.0 || n > 4294967295.0 {
                             return Err(self.range_error("Invalid array length"));
                         }
+                        let flags = o.flags.get();
+                        if flags & crate::object::ELEMENTS_FROZEN != 0 {
+                            return Err(self.read_only_error(o, &key));
+                        }
+                        let len = a.borrow().len();
+                        if flags & crate::object::ELEMENTS_SEALED != 0 && (n as usize) < len {
+                            return Err(self.type_error(format!(
+                                "Cannot delete property '{}' of [object Array]",
+                                len - 1
+                            )));
+                        }
                         a.borrow_mut().resize(n as usize, Value::Undefined);
                         return Ok(());
                     }
+                }
+                if matches!(
+                    o.kind,
+                    ObjKind::Function(_) | ObjKind::Native(_) | ObjKind::Bound(_)
+                ) && matches!(&*key, "name" | "length")
+                    && !o.has_own(&key)
+                {
+                    return Err(self.read_only_error(o, &key));
+                }
+                let mut props = o.props.borrow_mut();
+                if props.contains_key(&key) {
+                    if props.attrs(&key) & crate::object::READ_ONLY != 0 {
+                        drop(props);
+                        return Err(self.read_only_error(o, &key));
+                    }
+                    props.insert(key, val);
+                    return Ok(());
+                }
+                drop(props);
+                if self.readonly_used && self.inherited_read_only(o, &key) {
+                    return Err(self.read_only_error(o, &key));
+                }
+                if !o.is_extensible() {
+                    return Err(self.not_extensible_error(&key));
                 }
                 o.props.borrow_mut().insert(key, val);
                 Ok(())
@@ -1203,7 +1435,7 @@ impl Vm {
         if let (Value::Object(o), Value::Number(n)) = (obj, key) {
             if let ObjKind::Array(a) = &o.kind {
                 let i = *n as usize;
-                if i as f64 == *n && !o.frozen.get() {
+                if i as f64 == *n && o.flags.get() == 0 {
                     return self.set_array_index(a, i, val);
                 }
             }
@@ -1221,21 +1453,37 @@ impl Vm {
     }
 
     pub fn to_primitive(&mut self, v: &Value, prefer_number: bool) -> Result<Value, Value> {
-        let Value::Object(o) = v else {
+        self.to_primitive_hint(v, if prefer_number { "number" } else { "string" })
+    }
+
+    pub fn to_primitive_hint(&mut self, v: &Value, hint: &str) -> Result<Value, Value> {
+        let Value::Object(_) = v else {
             return Ok(v.clone());
         };
-        let order = if prefer_number {
-            ["valueOf", "toString"]
-        } else {
+        let exotic = self.get_prop(v, crate::object::TO_PRIMITIVE_KEY)?;
+        if !exotic.is_nullish() {
+            if !exotic.is_callable() {
+                return Err(
+                    self.type_error(format!("{} is not a function", inspect_plain(&exotic)))
+                );
+            }
+            let r = self.call_value(&exotic, v.clone(), &[Value::Str(hint.into())])?;
+            if r.is_object() {
+                return Err(self.type_error("Cannot convert object to primitive value"));
+            }
+            return Ok(r);
+        }
+        let order = if hint == "string" {
             ["toString", "valueOf"]
+        } else {
+            ["valueOf", "toString"]
         };
         for name in order {
-            if let Some(f) = o.get_chain(name) {
-                if f.is_callable() {
-                    let r = self.call_value(&f, v.clone(), &[])?;
-                    if !r.is_object() {
-                        return Ok(r);
-                    }
+            let f = self.get_prop(v, name)?;
+            if f.is_callable() {
+                let r = self.call_value(&f, v.clone(), &[])?;
+                if !r.is_object() {
+                    return Ok(r);
                 }
             }
         }
@@ -1299,7 +1547,7 @@ impl Vm {
 
     fn default_primitive(&mut self, v: &Value) -> Result<Value, Value> {
         let is_date = matches!(v, Value::Object(o) if matches!(o.kind, ObjKind::Date(_)));
-        self.to_primitive(v, !is_date)
+        self.to_primitive_hint(v, if is_date { "string" } else { "default" })
     }
 
     fn add_slow(&mut self, a: &Value, b: &Value) -> Result<Value, Value> {
@@ -1337,8 +1585,23 @@ impl Vm {
         let Value::Object(c) = ctor else {
             return Err(self.type_error("Right-hand side of 'instanceof' is not callable"));
         };
+        let h = self.get_prop(ctor, crate::object::HAS_INSTANCE_KEY)?;
+        if !h.is_nullish() && !h.strict_eq(&self.default_has_instance) {
+            if !h.is_callable() {
+                return Err(self.type_error(format!("{} is not a function", inspect_plain(&h))));
+            }
+            let r = self.call_value(&h, ctor.clone(), std::slice::from_ref(v))?;
+            return Ok(r.truthy());
+        }
         if !c.is_callable() {
             return Err(self.type_error("Right-hand side of 'instanceof' is not callable"));
+        }
+        self.ordinary_has_instance(v, c)
+    }
+
+    pub fn ordinary_has_instance(&mut self, v: &Value, c: &Rc<Obj>) -> Result<bool, Value> {
+        if !c.is_callable() {
+            return Ok(false);
         }
         if let ObjKind::Bound(b) = &c.kind {
             let t = b.target.clone();
@@ -1347,15 +1610,20 @@ impl Vm {
         let Value::Object(o) = v else {
             return Ok(false);
         };
-        let Some(proto) = self.function_prototype(c) else {
-            return Ok(false);
+        let proto = match self.get_prop(&Value::Object(c.clone()), "prototype")? {
+            Value::Object(p) => p,
+            _ => {
+                return Err(self.type_error(
+                    "Function has non-object prototype 'undefined' in instanceof check",
+                ));
+            }
         };
-        let mut cur = o.proto.borrow().clone();
+        let mut cur = self.op_get_prototype_of(o)?;
         while let Some(p) = cur {
             if Rc::ptr_eq(&p, &proto) {
                 return Ok(true);
             }
-            cur = p.proto.borrow().clone();
+            cur = self.op_get_prototype_of(&p)?;
         }
         Ok(false)
     }
@@ -1370,6 +1638,7 @@ impl Vm {
         };
         let k = self.to_property_key(key)?;
         match &o.kind {
+            ObjKind::Proxy(_) | ObjKind::Global => return self.op_has_property(o, &k),
             ObjKind::Array(a) => {
                 if &*k == "length" {
                     return Ok(true);
@@ -1596,6 +1865,23 @@ impl Vm {
                 }
                 keys.push(Value::Str("length".into()));
             }
+            if let ObjKind::Typed(t) = &o.kind {
+                for i in 0..t.length {
+                    keys.push(Value::Str(i.to_string().into()));
+                }
+            }
+            if o.is_callable() {
+                let mut virtual_keys = vec!["length", "name"];
+                if let ObjKind::Function(c) = &o.kind {
+                    if c.proto.is_constructor() {
+                        let _ = self.get_obj(o, "prototype");
+                    }
+                }
+                virtual_keys.retain(|k| !o.has_own(k));
+                for k in virtual_keys {
+                    keys.push(Value::Str(k.into()));
+                }
+            }
             for k in o.props.borrow().keys() {
                 if !is_symbol_key(k) {
                     keys.push(Value::Str(k.clone()));
@@ -1609,6 +1895,20 @@ impl Vm {
     pub fn own_keys(&self, v: &Value) -> Vec<Value> {
         let mut keys = Vec::new();
         match v {
+            Value::Object(o) if matches!(o.kind, ObjKind::Global) => {
+                for k in self.globals.names() {
+                    if self.globals.attrs_of(&k) & crate::object::NON_ENUM == 0 {
+                        keys.push(Value::Str(k));
+                    }
+                }
+            }
+            Value::Object(o) if matches!(o.kind, ObjKind::Proxy(_)) => {
+                if let ObjKind::Proxy(p) = &o.kind {
+                    if let Some(t) = p.target.borrow().clone() {
+                        return self.own_keys(&Value::Object(t));
+                    }
+                }
+            }
             Value::Object(o) => {
                 if let ObjKind::Array(a) = &o.kind {
                     for i in 0..a.borrow().len() {
@@ -1882,11 +2182,14 @@ impl Vm {
                     let done = match &self.stack[abs] {
                         Value::Object(o)
                             if matches!(o.kind, ObjKind::Ordinary)
-                                && !o.frozen.get()
+                                && o.flags.get() == 0
                                 && !self.accessors_used =>
                         {
-                            o.props.borrow_mut().insert(name!(k), val.clone());
-                            true
+                            o.props.borrow_mut().insert_fast(
+                                name!(k),
+                                val.clone(),
+                                !self.readonly_used,
+                            )
                         }
                         _ => false,
                     };
@@ -1915,7 +2218,7 @@ impl Vm {
                 }
                 Op::GetGlobal(k) => {
                     let cached = proto.global_cache[k as usize].get();
-                    if cached != u32::MAX {
+                    if cached != u32::MAX && !self.global_accessors {
                         let v = self.globals.at(cached).clone();
                         self.stack.push(v);
                         continue;
@@ -1928,7 +2231,14 @@ impl Vm {
                     match slot {
                         Some(slot) => {
                             proto.global_cache[k as usize].set(slot);
-                            let v = self.globals.at(slot).clone();
+                            let mut v = self.globals.at(slot).clone();
+                            if self.global_accessors {
+                                if let Value::Object(a) = &v {
+                                    if a.is_accessor() {
+                                        v = tri!(self.resolve_accessor(v, &Value::Undefined));
+                                    }
+                                }
+                            }
                             self.stack.push(v);
                         }
                         None => throw!(self.make_error_at(
@@ -1952,6 +2262,10 @@ impl Vm {
                     }
                     match self.globals.slot(&n) {
                         Some(slot) => {
+                            if self.global_accessors || self.globals.readonly {
+                                tri!(self.set_global_prop(n.clone(), v));
+                                continue;
+                            }
                             proto.global_cache[k as usize].set(slot);
                             *self.globals.at_mut(slot) = v;
                         }
@@ -2010,17 +2324,22 @@ impl Vm {
                 Op::SetProp(k) => {
                     let val = pop!();
                     let obj = pop!();
-                    match &obj {
+                    let done = match &obj {
                         Value::Object(o)
                             if matches!(o.kind, ObjKind::Ordinary)
-                                && !o.frozen.get()
+                                && o.flags.get() == 0
                                 && !self.accessors_used =>
                         {
-                            o.props.borrow_mut().insert(name!(k), val.clone());
+                            o.props.borrow_mut().insert_fast(
+                                name!(k),
+                                val.clone(),
+                                !self.readonly_used,
+                            )
                         }
-                        _ => {
-                            tri!(self.set_prop(&obj, name!(k), val.clone()));
-                        }
+                        _ => false,
+                    };
+                    if !done {
+                        tri!(self.set_prop(&obj, name!(k), val.clone()));
                     }
                     self.stack.push(val);
                 }
@@ -2092,6 +2411,10 @@ impl Vm {
                     let Some(sup) = sup else {
                         throw!(self.type_error("Super constructor is not a constructor"));
                     };
+                    self.next_new_target = Some(match &self.frames[fi].new_target {
+                        Some(t) => t.clone(),
+                        None => self.stack[base - 1].clone(),
+                    });
                     let ti = self.stack.len() - argc - 1;
                     match &sup.kind {
                         ObjKind::Function(c) => {
@@ -2102,6 +2425,7 @@ impl Vm {
                             reload!();
                         }
                         ObjKind::Native(n) => {
+                            self.next_new_target = None;
                             let f = n.func;
                             let args = self.stack.split_off(ti + 1);
                             let this = pop!();
@@ -2359,13 +2683,7 @@ impl Vm {
                     }
                     let args = self.stack.split_off(ci + 1);
                     let f = pop!();
-                    let constructible = match &f {
-                        Value::Object(o) => {
-                            matches!(o.kind, ObjKind::Native(_) | ObjKind::Bound(_))
-                        }
-                        _ => false,
-                    };
-                    if !constructible {
+                    if !self.is_constructor(&f) {
                         throw!(self.not_constructor(&f, name, Some(cl.proto.consts.as_slice())));
                     }
                     let r = tri!(self.construct(&f, &args));
@@ -2495,6 +2813,61 @@ impl Vm {
                     let v = pop!();
                     if let Some(Value::Object(o)) = self.stack.last() {
                         o.props.borrow_mut().insert(name!(k), v);
+                    }
+                }
+                Op::InitMethod(k) => {
+                    let v = pop!();
+                    if let Some(Value::Object(o)) = self.stack.last() {
+                        if let Value::Object(f) = &v {
+                            if let ObjKind::Function(c) = &f.kind {
+                                *c.home.borrow_mut() = Some(o.clone());
+                            }
+                        }
+                        o.props.borrow_mut().insert(name!(k), v);
+                    }
+                }
+                Op::InitMethodComputed => {
+                    let v = pop!();
+                    let key = pop!();
+                    let k = tri!(self.to_property_key(&key));
+                    if let Some(Value::Object(o)) = self.stack.last() {
+                        if let Value::Object(f) = &v {
+                            if let ObjKind::Function(c) = &f.kind {
+                                *c.home.borrow_mut() = Some(o.clone());
+                            }
+                        }
+                        o.props.borrow_mut().insert(k, v);
+                    }
+                }
+                Op::InitProto => {
+                    let v = pop!();
+                    if let Some(Value::Object(o)) = self.stack.last() {
+                        match v {
+                            Value::Object(p) => *o.proto.borrow_mut() = Some(p),
+                            Value::Null => *o.proto.borrow_mut() = None,
+                            _ => {}
+                        }
+                    }
+                }
+                Op::NewTarget => {
+                    let v = if self.frames[fi].construct {
+                        match &self.frames[fi].new_target {
+                            Some(t) => t.clone(),
+                            None => self.stack[base - 1].clone(),
+                        }
+                    } else {
+                        Value::Undefined
+                    };
+                    self.stack.push(v);
+                }
+                Op::SetHome => {
+                    let n = self.stack.len();
+                    if let (Value::Object(h), Value::Object(f)) =
+                        (&self.stack[n - 2], &self.stack[n - 1])
+                    {
+                        if let ObjKind::Function(c) = &f.kind {
+                            *c.home.borrow_mut() = Some(h.clone());
+                        }
                     }
                 }
                 Op::InitHidden(k) => {
@@ -2711,17 +3084,22 @@ impl Vm {
                 Op::StoreProp(k) => {
                     let val = pop!();
                     let obj = pop!();
-                    match &obj {
+                    let done = match &obj {
                         Value::Object(o)
                             if matches!(o.kind, ObjKind::Ordinary)
-                                && !o.frozen.get()
+                                && o.flags.get() == 0
                                 && !self.accessors_used =>
                         {
-                            o.props.borrow_mut().insert(name!(k), val);
+                            o.props.borrow_mut().insert_fast(
+                                name!(k),
+                                val.clone(),
+                                !self.readonly_used,
+                            )
                         }
-                        _ => {
-                            tri!(self.set_prop(&obj, name!(k), val));
-                        }
+                        _ => false,
+                    };
+                    if !done {
+                        tri!(self.set_prop(&obj, name!(k), val));
                     }
                 }
                 Op::GetAsyncIter => {
@@ -2739,6 +3117,11 @@ impl Vm {
                     let f = pop!();
                     if let Some(Value::Object(o)) = self.stack.last() {
                         let o = o.clone();
+                        if let Value::Object(fo) = &f {
+                            if let ObjKind::Function(c) = &fo.kind {
+                                *c.home.borrow_mut() = Some(o.clone());
+                            }
+                        }
                         self.define_accessor(&o, name!(k), f, setter);
                     }
                 }
@@ -2804,6 +3187,26 @@ impl Vm {
 
     pub fn own_entries_raw(&self, v: &Value, include_symbols: bool) -> Vec<(Rc<str>, Value)> {
         let mut out = Vec::new();
+        if let Value::Object(o) = v {
+            match &o.kind {
+                ObjKind::Global => {
+                    for k in self.globals.names() {
+                        if self.globals.attrs_of(&k) & crate::object::NON_ENUM == 0 {
+                            let x = self.globals.get(&k).cloned().unwrap_or_default();
+                            out.push((k, x));
+                        }
+                    }
+                    return out;
+                }
+                ObjKind::Proxy(p) => {
+                    if let Some(t) = p.target.borrow().clone() {
+                        return self.own_entries_raw(&Value::Object(t), include_symbols);
+                    }
+                    return out;
+                }
+                _ => {}
+            }
+        }
         match v {
             Value::Object(o) => {
                 if let ObjKind::Array(a) = &o.kind {
@@ -2835,21 +3238,26 @@ impl Vm {
     pub fn delete_prop(&mut self, obj: &Value, key: &str) -> Result<bool, Value> {
         match obj {
             Value::Object(o) => {
-                if o.frozen.get() {
-                    return Err(
-                        self.type_error(format!("Cannot delete property '{key}' of frozen object"))
-                    );
-                }
-                if let ObjKind::Array(a) = &o.kind {
-                    if let Some(i) = array_index(key) {
-                        if let Some(slot) = a.borrow_mut().get_mut(i) {
-                            *slot = Value::Undefined;
-                        }
+                if matches!(o.kind, ObjKind::Proxy(_) | ObjKind::Global) {
+                    if self.op_delete(o, key)? {
                         return Ok(true);
                     }
+                } else if self.try_delete(o, key) {
+                    return Ok(true);
                 }
-                o.props.borrow_mut().shift_remove(key);
-                Ok(true)
+                let target = match &o.kind {
+                    ObjKind::Array(_) => "[object Array]".to_string(),
+                    _ => format!(
+                        "#<{}>",
+                        crate::inspect::class_name(o)
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "Object".to_string())
+                    ),
+                };
+                Err(self.type_error(format!(
+                    "Cannot delete property '{}' of {target}",
+                    crate::props::key_text(key)
+                )))
             }
             Value::Undefined | Value::Null => Err(self.type_error(format!(
                 "Cannot convert undefined or null to object (deleting '{key}')"
@@ -2890,10 +3298,18 @@ impl Vm {
         };
         let prototype = Obj::new(ObjKind::Ordinary, proto_parent);
         prototype.set_hidden("constructor", ctor.clone());
-        ctor_obj.set_hidden("prototype", Value::Object(prototype));
         if !name.is_empty() {
-            ctor_obj.set_hidden("name", Value::Str(name));
+            ctor_obj.set_with_attrs(
+                "name",
+                Value::Str(name),
+                crate::object::NON_ENUM | crate::object::READ_ONLY,
+            );
         }
+        ctor_obj.set_with_attrs(
+            "prototype",
+            Value::Object(prototype),
+            crate::object::NON_ENUM | crate::object::READ_ONLY | crate::object::NON_CONFIG,
+        );
         *ctor_obj.proto.borrow_mut() = Some(ctor_parent);
         if let ObjKind::Function(c) = &ctor_obj.kind {
             *c.home.borrow_mut() = Some(ctor_obj.clone());

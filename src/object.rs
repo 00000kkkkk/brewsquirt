@@ -11,10 +11,18 @@ pub type NativeFn = fn(&mut Vm, Value, &[Value]) -> Result<Value, Value>;
 
 const INDEX_AT: usize = 12;
 
+pub const NON_ENUM: u8 = 1;
+pub const READ_ONLY: u8 = 2;
+pub const NON_CONFIG: u8 = 4;
+
+pub const NOT_EXTENSIBLE: u8 = 1;
+pub const ELEMENTS_FROZEN: u8 = 2;
+pub const ELEMENTS_SEALED: u8 = 4;
+
 #[derive(Default)]
 struct PropExtra {
     index: rustc_hash::FxHashMap<Rc<str>, u32>,
-    hidden: rustc_hash::FxHashSet<Rc<str>>,
+    attrs: rustc_hash::FxHashMap<Rc<str>, u8>,
 }
 
 #[derive(Default)]
@@ -48,39 +56,127 @@ impl PropMap {
             }
         } else if let Some(x) = &mut self.extra {
             x.index.clear();
-            if x.hidden.is_empty() {
+            if x.attrs.is_empty() {
                 self.extra = None;
             }
         }
     }
 
-    pub fn is_enumerable(&self, key: &str) -> bool {
-        self.extra.as_ref().is_none_or(|x| !x.hidden.contains(key))
+    pub fn attrs(&self, key: &str) -> u8 {
+        match &self.extra {
+            Some(x) if !x.attrs.is_empty() => x.attrs.get(key).copied().unwrap_or(0),
+            _ => 0,
+        }
     }
 
-    pub fn set_enumerable(&mut self, key: &str, enumerable: bool) {
-        if enumerable {
+    pub fn has_attrs(&self) -> bool {
+        self.extra.as_ref().is_some_and(|x| !x.attrs.is_empty())
+    }
+
+    pub fn set_attrs(&mut self, key: &str, bits: u8) {
+        if bits == 0 {
             if let Some(x) = &mut self.extra {
-                x.hidden.remove(key);
-                if x.hidden.is_empty() && x.index.is_empty() {
+                x.attrs.remove(key);
+                if x.attrs.is_empty() && x.index.is_empty() {
                     self.extra = None;
                 }
             }
-        } else if let Some(i) = self.find(key) {
+            return;
+        }
+        if let Some(i) = self.find(key) {
             let k = self.entries[i].0.clone();
-            self.extra.get_or_insert_with(Box::default).hidden.insert(k);
+            self.extra
+                .get_or_insert_with(Box::default)
+                .attrs
+                .insert(k, bits);
+        }
+    }
+
+    pub fn is_enumerable(&self, key: &str) -> bool {
+        self.attrs(key) & NON_ENUM == 0
+    }
+
+    pub fn set_enumerable(&mut self, key: &str, enumerable: bool) {
+        let a = self.attrs(key);
+        self.set_attrs(
+            key,
+            if enumerable {
+                a & !NON_ENUM
+            } else {
+                a | NON_ENUM
+            },
+        );
+    }
+
+    pub fn add_all(&mut self, bits: u8, data_only: bool) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let keys: Vec<(Rc<str>, bool)> = self
+            .entries
+            .iter()
+            .map(|(k, v)| (k.clone(), matches!(v, Value::Object(o) if o.is_accessor())))
+            .collect();
+        let x = self.extra.get_or_insert_with(Box::default);
+        for (k, accessor) in keys {
+            let b = if data_only && accessor {
+                bits & !READ_ONLY
+            } else {
+                bits
+            };
+            *x.attrs.entry(k).or_insert(0) |= b;
         }
     }
 
     pub fn hide_all(&mut self) {
-        if self.entries.is_empty() {
-            return;
+        self.add_all(NON_ENUM, false);
+    }
+
+    pub fn all_have(&self, bits: u8, data_only: bool) -> bool {
+        self.entries.iter().all(|(k, v)| {
+            let need = if data_only && matches!(v, Value::Object(o) if o.is_accessor()) {
+                bits & !READ_ONLY
+            } else {
+                bits
+            };
+            self.attrs(k) & need == need
+        })
+    }
+
+    pub fn insert_fast(&mut self, key: Rc<str>, v: Value, adding_ok: bool) -> bool {
+        if let Some(i) = self.find(&key) {
+            if self.attrs(&key) & READ_ONLY != 0 {
+                return false;
+            }
+            self.entries[i].1 = v;
+            return true;
         }
-        let keys: Vec<Rc<str>> = self.entries.iter().map(|(k, _)| k.clone()).collect();
-        self.extra
-            .get_or_insert_with(Box::default)
-            .hidden
-            .extend(keys);
+        if !adding_ok {
+            return false;
+        }
+        self.insert(key, v);
+        true
+    }
+
+    fn order(&self) -> Option<Vec<usize>> {
+        let has_index = self.entries.iter().any(|(k, _)| {
+            k.as_bytes().first().is_some_and(u8::is_ascii_digit) && array_index(k).is_some()
+        });
+        if !has_index {
+            return None;
+        }
+        let mut ints: Vec<(usize, usize)> = Vec::new();
+        let mut rest: Vec<usize> = Vec::new();
+        for (i, (k, _)) in self.entries.iter().enumerate() {
+            match array_index(k) {
+                Some(n) => ints.push((n, i)),
+                None => rest.push(i),
+            }
+        }
+        ints.sort_unstable();
+        let mut out: Vec<usize> = ints.into_iter().map(|(_, i)| i).collect();
+        out.extend(rest);
+        Some(out)
     }
 
     pub fn get(&self, key: &str) -> Option<&Value> {
@@ -119,8 +215,8 @@ impl PropMap {
         let i = self.find(key)?;
         let (_, v) = self.entries.remove(i);
         if let Some(x) = &mut self.extra {
-            x.hidden.remove(key);
-            if !x.index.is_empty() || x.hidden.is_empty() {
+            x.attrs.remove(key);
+            if !x.index.is_empty() || x.attrs.is_empty() {
                 self.reindex();
             }
         }
@@ -128,18 +224,20 @@ impl PropMap {
     }
 
     pub fn enumerable(&self) -> impl Iterator<Item = (&Rc<str>, &Value)> {
-        self.entries
-            .iter()
-            .filter(|(k, _)| self.is_enumerable(k))
-            .map(|(k, v)| (k, v))
+        self.iter().filter(|(k, _)| self.is_enumerable(k))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&Rc<str>, &Value)> {
-        self.entries.iter().map(|(k, v)| (k, v))
+        let order = self.order();
+        (0..self.entries.len()).map(move |i| {
+            let j = order.as_ref().map_or(i, |o| o[i]);
+            let (k, v) = &self.entries[j];
+            (k, v)
+        })
     }
 
     pub fn keys(&self) -> impl Iterator<Item = &Rc<str>> {
-        self.entries.iter().map(|(k, _)| k)
+        self.iter().map(|(k, _)| k)
     }
 
     pub fn values(&self) -> impl Iterator<Item = &Value> {
@@ -168,7 +266,7 @@ pub struct Obj {
     pub kind: ObjKind,
     pub props: RefCell<PropMap>,
     pub proto: RefCell<Option<Rc<Obj>>>,
-    pub frozen: Cell<bool>,
+    pub flags: Cell<u8>,
     pub(crate) gc_slot: Cell<u32>,
 }
 
@@ -193,6 +291,15 @@ pub enum ObjKind {
     ArrayBuffer(RefCell<Vec<u8>>),
     Typed(Box<View>),
     DataView(Box<View>),
+    Global,
+    Proxy(Box<ProxyData>),
+}
+
+pub struct ProxyData {
+    pub target: RefCell<Option<Rc<Obj>>>,
+    pub handler: RefCell<Option<Rc<Obj>>>,
+    pub callable: bool,
+    pub constructible: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -391,6 +498,17 @@ pub struct Symbol {
 pub const SYMBOL_PREFIX: char = '\u{0}';
 pub const ITER_KEY: &str = "\u{0}@@iterator:Symbol.iterator";
 pub const ASYNC_ITER_KEY: &str = "\u{0}@@asyncIterator:Symbol.asyncIterator";
+pub const TO_STRING_TAG_KEY: &str = "\u{0}@@toStringTag:Symbol.toStringTag";
+pub const TO_PRIMITIVE_KEY: &str = "\u{0}@@toPrimitive:Symbol.toPrimitive";
+pub const HAS_INSTANCE_KEY: &str = "\u{0}@@hasInstance:Symbol.hasInstance";
+pub const SPECIES_KEY: &str = "\u{0}@@species:Symbol.species";
+pub const IS_CONCAT_SPREADABLE_KEY: &str = "\u{0}@@isConcatSpreadable:Symbol.isConcatSpreadable";
+pub const UNSCOPABLES_KEY: &str = "\u{0}@@unscopables:Symbol.unscopables";
+pub const MATCH_KEY: &str = "\u{0}@@match:Symbol.match";
+pub const MATCH_ALL_KEY: &str = "\u{0}@@matchAll:Symbol.matchAll";
+pub const REPLACE_KEY: &str = "\u{0}@@replace:Symbol.replace";
+pub const SEARCH_KEY: &str = "\u{0}@@search:Symbol.search";
+pub const SPLIT_KEY: &str = "\u{0}@@split:Symbol.split";
 
 pub fn is_symbol_key(k: &str) -> bool {
     k.starts_with(SYMBOL_PREFIX)
@@ -586,7 +704,7 @@ impl PartialEq for MapKey {
             (MapKey::Num(a), MapKey::Num(b)) => a == b,
             (MapKey::Str(a), MapKey::Str(b)) => a == b,
             (MapKey::Obj(a), MapKey::Obj(b)) => Rc::ptr_eq(a, b),
-            (MapKey::Sym(a), MapKey::Sym(b)) => Rc::ptr_eq(a, b),
+            (MapKey::Sym(a), MapKey::Sym(b)) => a.key == b.key,
             _ => false,
         }
     }
@@ -617,7 +735,7 @@ impl Hash for MapKey {
             }
             MapKey::Sym(s) => {
                 6u8.hash(state);
-                (Rc::as_ptr(s) as usize).hash(state)
+                s.key.hash(state)
             }
         }
     }
@@ -629,7 +747,7 @@ impl Obj {
             kind,
             props: RefCell::new(PropMap::default()),
             proto: RefCell::new(proto),
-            frozen: Cell::new(false),
+            flags: Cell::new(0),
             gc_slot: Cell::new(u32::MAX),
         });
         crate::gc::register(&o);
@@ -637,10 +755,11 @@ impl Obj {
     }
 
     pub fn is_callable(&self) -> bool {
-        matches!(
-            self.kind,
-            ObjKind::Function(_) | ObjKind::Native(_) | ObjKind::Bound(_)
-        )
+        match &self.kind {
+            ObjKind::Function(_) | ObjKind::Native(_) | ObjKind::Bound(_) => true,
+            ObjKind::Proxy(p) => p.callable,
+            _ => false,
+        }
     }
 
     pub fn get_own(&self, key: &str) -> Option<Value> {
@@ -656,6 +775,17 @@ impl Obj {
         let mut props = self.props.borrow_mut();
         props.insert(key.clone(), v);
         props.set_enumerable(&key, false);
+    }
+
+    pub fn set_with_attrs(&self, key: impl Into<Rc<str>>, v: Value, bits: u8) {
+        let key = key.into();
+        let mut props = self.props.borrow_mut();
+        props.insert(key.clone(), v);
+        props.set_attrs(&key, bits);
+    }
+
+    pub fn is_extensible(&self) -> bool {
+        self.flags.get() & NOT_EXTENSIBLE == 0
     }
 
     pub fn has_own(&self, key: &str) -> bool {

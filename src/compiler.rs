@@ -78,6 +78,7 @@ struct FnState {
     is_async: bool,
     is_generator: bool,
     fields: Option<Rc<Vec<ClassMember>>>,
+    vars: Vec<Rc<str>>,
 }
 
 impl FnState {
@@ -104,6 +105,7 @@ impl FnState {
             is_async: false,
             is_generator: false,
             fields: None,
+            vars: Vec::new(),
         }
     }
 }
@@ -119,6 +121,87 @@ pub struct Compiler {
     self_bind: Option<Rc<str>>,
     repl_consts: Vec<Rc<str>>,
     pending_labels: Vec<Rc<str>>,
+}
+
+fn collect_var_names(s: &Stmt, out: &mut Vec<Rc<str>>) {
+    let push = |p: &Pattern, out: &mut Vec<Rc<str>>| {
+        let mut v = Vec::new();
+        p.bound_names(&mut v);
+        for n in v {
+            if !out.contains(&n) {
+                out.push(n);
+            }
+        }
+    };
+    match &s.kind {
+        StmtKind::Decl(DeclKind::Var, decls) => {
+            for (p, _) in decls {
+                push(p, out);
+            }
+        }
+        StmtKind::If(_, a, b) => {
+            collect_var_names(a, out);
+            if let Some(b) = b {
+                collect_var_names(b, out);
+            }
+        }
+        StmtKind::Block(list) => {
+            for x in list {
+                collect_var_names(x, out);
+            }
+        }
+        StmtKind::While(_, b) | StmtKind::DoWhile(b, _) | StmtKind::Labeled(_, b) => {
+            collect_var_names(b, out)
+        }
+        StmtKind::For { init, body, .. } => {
+            if let Some(i) = init {
+                collect_var_names(i, out);
+            }
+            collect_var_names(body, out);
+        }
+        StmtKind::ForOf {
+            decl,
+            pattern,
+            body,
+            ..
+        }
+        | StmtKind::ForIn {
+            decl,
+            pattern,
+            body,
+            ..
+        } => {
+            if *decl == Some(DeclKind::Var) {
+                push(pattern, out);
+            }
+            collect_var_names(body, out);
+        }
+        StmtKind::Try {
+            block,
+            handler,
+            finalizer,
+            ..
+        } => {
+            for x in block {
+                collect_var_names(x, out);
+            }
+            for x in handler.iter().flatten() {
+                collect_var_names(x, out);
+            }
+            for x in finalizer.iter().flatten() {
+                collect_var_names(x, out);
+            }
+        }
+        StmtKind::Switch(_, cases) => {
+            for c in cases {
+                for x in &c.body {
+                    collect_var_names(x, out);
+                }
+            }
+        }
+        StmtKind::Export(ExportDecl::Decl(d)) => collect_var_names(d, out),
+        _ => {}
+    }
 }
 
 pub fn compile_module(stmts: &[Stmt], module: Rc<ModuleInfo>, mode: Mode) -> R<Rc<FunctionProto>> {
@@ -138,6 +221,7 @@ pub fn compile_module(stmts: &[Stmt], module: Rc<ModuleInfo>, mode: Mode) -> R<R
         .push(FnState::new("<main>".into(), ProtoKind::Module, 1, false));
     c.begin_scope();
     c.add_local("this".into(), true);
+    c.declare_vars(stmts);
     let refs: Vec<&Stmt> = stmts.iter().collect();
     c.hoist_list(&refs, true)?;
     let last = stmts.len().wrapping_sub(1);
@@ -475,6 +559,7 @@ impl Compiler {
         imports: &mut Vec<&'a ImportDecl>,
     ) -> R<()> {
         match &s.kind {
+            StmtKind::Decl(DeclKind::Var, _) => {}
             StmtKind::Decl(kind, decls) => {
                 for (p, _) in decls {
                     let mut v = Vec::new();
@@ -553,6 +638,37 @@ impl Compiler {
         Ok(())
     }
 
+    fn declare_vars(&mut self, stmts: &[Stmt]) {
+        let mut names = Vec::new();
+        for s in stmts {
+            collect_var_names(s, &mut names);
+        }
+        let repl = self.is_repl_top();
+        for n in names {
+            if self.st_ref().vars.contains(&n) {
+                continue;
+            }
+            let exists = self
+                .st_ref()
+                .locals
+                .iter()
+                .any(|l| l.name == n && l.depth <= self.st_ref().depth);
+            self.st().vars.push(n.clone());
+            if exists {
+                continue;
+            }
+            if repl {
+                self.emit(Op::Undefined);
+                let k = self.str_const(&n);
+                self.emit(Op::DefineGlobal(k, false));
+                self.emit(Op::Pop);
+            } else {
+                self.emit(Op::Undefined);
+                self.add_local(n, false);
+            }
+        }
+    }
+
     fn hoist(&mut self, stmts: &[Stmt]) -> R<()> {
         let refs: Vec<&Stmt> = stmts.iter().collect();
         self.hoist_list(&refs, false)
@@ -574,8 +690,19 @@ impl Compiler {
             }
         }
         let depth = self.st_ref().depth;
-        for (i, (n, _)) in names.iter().enumerate() {
+        let mut fresh = Vec::new();
+        for (i, (n, c)) in names.iter().enumerate() {
+            let is_fn = funcs.iter().any(|f| f.name.as_ref() == Some(n));
             let dup_new = names[..i].iter().any(|(m, _)| m == n);
+            let var_clash = self.st_ref().vars.contains(n)
+                && self
+                    .st_ref()
+                    .locals
+                    .iter()
+                    .any(|l| l.depth == depth && &l.name == n);
+            if var_clash && is_fn {
+                continue;
+            }
             let dup_old = self
                 .st_ref()
                 .locals
@@ -584,7 +711,9 @@ impl Compiler {
             if dup_new || dup_old {
                 return Err(self.err(format!("Identifier '{n}' has already been declared")));
             }
+            fresh.push((n.clone(), *c));
         }
+        let names = fresh;
         let repl = self.is_repl_top();
         for (n, c) in &names {
             self.emit(Op::Undefined);
@@ -677,6 +806,18 @@ impl Compiler {
         match &s.kind {
             StmtKind::Expr(e) => {
                 self.expr_discard(e)?;
+            }
+            StmtKind::Decl(DeclKind::Var, decls) => {
+                for (pattern, init) in decls {
+                    if let Some(e) = init {
+                        let name = match pattern {
+                            Pattern::Ident(n) => Some(n.clone()),
+                            _ => None,
+                        };
+                        self.expr_named(e, name.as_ref())?;
+                        self.bind_pattern(pattern, BindMode::Assign)?;
+                    }
+                }
             }
             StmtKind::Decl(_, decls) => {
                 for (pattern, init) in decls {
@@ -984,6 +1125,7 @@ impl Compiler {
         let iter_slot = self.add_local(iter_name, true);
         let start = self.here();
         self.begin_scope();
+        let decl = decl.filter(|k| *k != DeclKind::Var);
         if let Some(kind) = decl {
             let mut names = Vec::new();
             pattern.bound_names(&mut names);
@@ -1526,6 +1668,7 @@ impl Compiler {
         }
         match &f.body {
             FuncBody::Block(stmts) => {
+                self.declare_vars(stmts);
                 self.hoist(stmts)?;
                 for s in stmts {
                     self.stmt(s)?;
@@ -1663,6 +1806,17 @@ impl Compiler {
         self.emit(Op::Closure(idx));
         let k = self.str_const(&name);
         self.emit(Op::MakeClass(k, has_super));
+        if let Some(n) = &c.name {
+            match self.resolve(n) {
+                Var::Local(s, _) => {
+                    self.emit(Op::SetLocal(s));
+                }
+                Var::Upval(i, _) => {
+                    self.emit(Op::SetUpval(i));
+                }
+                Var::Global => {}
+            }
+        }
         for m in &c.members {
             if let ClassMember::Method {
                 key,
@@ -1709,39 +1863,80 @@ impl Compiler {
             }
         }
         for m in &c.members {
-            if let ClassMember::Field {
-                key,
-                value,
-                is_static: true,
-            } = m
-            {
-                self.emit(Op::Dup);
-                match key {
+            match m {
+                ClassMember::Field {
+                    key,
+                    value,
+                    is_static: true,
+                } => match key {
                     PropKey::Named(n) => {
+                        self.emit(Op::Dup);
                         match value {
-                            Some(v) => self.expr_named(v, Some(n))?,
+                            Some(v) => {
+                                self.emit(Op::Dup);
+                                self.static_init_value(v, Some(n), c.line)?;
+                            }
                             None => {
                                 self.emit(Op::Undefined);
                             }
                         }
                         let k = self.str_const(n);
                         self.emit(Op::SetProp(k));
+                        self.emit(Op::Pop);
                     }
                     PropKey::Computed(e) => {
+                        self.emit(Op::Dup);
                         self.expr(e)?;
                         match value {
-                            Some(v) => self.expr(v)?,
+                            Some(v) => {
+                                self.emit(Op::Dup2);
+                                self.emit(Op::Pop);
+                                self.static_init_value(v, None, c.line)?;
+                            }
                             None => {
                                 self.emit(Op::Undefined);
                             }
                         }
                         self.emit(Op::SetIndex);
+                        self.emit(Op::Pop);
                     }
+                },
+                ClassMember::StaticBlock(f) => {
+                    let idx = self.function(f, Some("static".into()), None)?;
+                    self.emit(Op::Dup);
+                    self.emit(Op::Closure(idx));
+                    self.emit(Op::SetHome);
+                    self.emit(Op::Swap);
+                    self.emit(Op::Call(0, NO_NAME));
+                    self.emit(Op::Pop);
                 }
-                self.emit(Op::Pop);
+                _ => {}
             }
         }
         self.line = saved_line;
+        Ok(())
+    }
+
+    fn static_init_value(&mut self, v: &Expr, name: Option<&Rc<str>>, line: u32) -> R<()> {
+        let f = FuncDef {
+            name: Some("static".into()),
+            params: Vec::new(),
+            rest: None,
+            body: FuncBody::Block(vec![Stmt {
+                kind: StmtKind::Return(Some(v.clone())),
+                line,
+            }]),
+            kind: FuncKind::StaticMethod,
+            is_async: false,
+            is_generator: false,
+            uses_arguments: false,
+            line,
+        };
+        let idx = self.function(&f, name.cloned(), None)?;
+        self.emit(Op::Closure(idx));
+        self.emit(Op::SetHome);
+        self.emit(Op::Swap);
+        self.emit(Op::Call(0, NO_NAME));
         Ok(())
     }
 
@@ -2124,6 +2319,10 @@ impl Compiler {
                 self.emit(Op::NewObject);
                 for p in props {
                     match p {
+                        PropDef::KeyValue(PropKey::Named(k), v) if &**k == "__proto__" => {
+                            self.expr(v)?;
+                            self.emit(Op::InitProto);
+                        }
                         PropDef::KeyValue(PropKey::Named(k), v) => {
                             self.expr_named(v, Some(k))?;
                             let k = self.str_const(k);
@@ -2150,13 +2349,13 @@ impl Compiler {
                             let idx = self.function(f, Some(k.clone()), None)?;
                             self.emit(Op::Closure(idx));
                             let k = self.str_const(k);
-                            self.emit(Op::InitProp(k));
+                            self.emit(Op::InitMethod(k));
                         }
                         PropDef::Method(PropKey::Computed(ke), f) => {
                             self.expr(ke)?;
                             let idx = self.function(f, None, None)?;
                             self.emit(Op::Closure(idx));
-                            self.emit(Op::InitIndex);
+                            self.emit(Op::InitMethodComputed);
                         }
                         PropDef::Getter(key, f) | PropDef::Setter(key, f) => {
                             let setter = matches!(p, PropDef::Setter(..));
@@ -2185,7 +2384,41 @@ impl Compiler {
                 let idx = self.function(f, name.cloned(), None)?;
                 self.emit(Op::Closure(idx));
             }
-            ExprKind::Class(c) => self.class(c, name)?,
+            ExprKind::Class(c) => match &c.name {
+                Some(n) => {
+                    let wrapper = FuncDef {
+                        name: None,
+                        params: Vec::new(),
+                        rest: None,
+                        body: FuncBody::Block(vec![
+                            Stmt {
+                                kind: StmtKind::Class(c.clone()),
+                                line: c.line,
+                            },
+                            Stmt {
+                                kind: StmtKind::Return(Some(Expr {
+                                    kind: ExprKind::Ident(n.clone()),
+                                    line: c.line,
+                                })),
+                                line: c.line,
+                            },
+                        ]),
+                        kind: FuncKind::Arrow,
+                        is_async: false,
+                        is_generator: false,
+                        uses_arguments: false,
+                        line: c.line,
+                    };
+                    let idx = self.function(&wrapper, None, None)?;
+                    self.emit(Op::Closure(idx));
+                    self.emit(Op::Undefined);
+                    self.emit(Op::Call(0, NO_NAME));
+                }
+                None => self.class(c, name)?,
+            },
+            ExprKind::NewTarget => {
+                self.emit(Op::NewTarget);
+            }
             ExprKind::Unary(op, x) => match op {
                 UnaryOp::Typeof => {
                     if let ExprKind::Ident(n) = &x.kind {

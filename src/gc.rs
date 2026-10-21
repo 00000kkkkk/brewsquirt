@@ -145,6 +145,19 @@ fn obj_edges(o: &Obj, f: &mut dyn FnMut(Edge<'_>)) {
         | ObjKind::WeakRef(_)
         | ObjKind::ArrayBuffer(_) => {}
         ObjKind::Typed(t) | ObjKind::DataView(t) => f(Edge::Obj(&t.buffer)),
+        ObjKind::Global => {}
+        ObjKind::Proxy(p) => {
+            if let Ok(t) = p.target.try_borrow() {
+                if let Some(t) = &*t {
+                    f(Edge::Obj(t));
+                }
+            }
+            if let Ok(h) = p.handler.try_borrow() {
+                if let Some(h) = &*h {
+                    f(Edge::Obj(h));
+                }
+            }
+        }
         ObjKind::WeakMap(m) => {
             if let Ok(m) = m.try_borrow() {
                 for (_, v) in m.values() {
@@ -330,6 +343,18 @@ fn clear(n: &Node, grave: &mut Graveyard) {
                 ObjKind::WeakMap(m) => {
                     if let Ok(mut m) = m.try_borrow_mut() {
                         grave.maps.push(Box::new(std::mem::take(&mut *m)));
+                    }
+                }
+                ObjKind::Proxy(p) => {
+                    if let Ok(mut t) = p.target.try_borrow_mut() {
+                        if let Some(t) = t.take() {
+                            grave.objs.push(t);
+                        }
+                    }
+                    if let Ok(mut h) = p.handler.try_borrow_mut() {
+                        if let Some(h) = h.take() {
+                            grave.objs.push(h);
+                        }
                     }
                 }
                 ObjKind::Coroutine(co) => {

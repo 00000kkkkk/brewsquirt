@@ -198,6 +198,7 @@ impl Vm {
             base: seg + 1,
             construct: false,
             co: Some(co_obj.clone()),
+            new_target: None,
         });
         for (rel, catch_ip) in saved.handlers {
             self.handlers.push(Handler {

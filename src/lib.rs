@@ -12,6 +12,7 @@ pub mod number;
 pub mod object;
 pub mod parser;
 pub mod pm;
+pub mod props;
 pub mod regexp;
 pub mod runner;
 pub mod token;

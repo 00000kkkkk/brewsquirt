@@ -83,8 +83,17 @@ fn get(o: &Obj, i: usize) -> Value {
 }
 
 fn check_frozen(vm: &mut Vm, o: &Obj) -> Result<(), Value> {
-    if o.frozen.get() {
-        Err(vm.type_error("Cannot modify a frozen array"))
+    let flags = o.flags.get();
+    if flags & crate::object::ELEMENTS_FROZEN != 0 {
+        Err(vm.type_error("Cannot assign to read only property '0' of object '[object Array]'"))
+    } else if flags != 0 {
+        let len = match &o.kind {
+            ObjKind::Array(a) => a.borrow().len(),
+            _ => 0,
+        };
+        Err(vm.type_error(format!(
+            "Cannot add property {len}, object is not extensible"
+        )))
     } else {
         Ok(())
     }
@@ -102,8 +111,27 @@ fn array_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(vm.new_array(args.to_vec()))
 }
 
-fn is_array(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    Ok(Value::Bool(arg(args, 0).is_array()))
+fn is_array(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let mut v = arg(args, 0);
+    loop {
+        if let Value::Object(o) = &v {
+            if let ObjKind::Proxy(p) = &o.kind {
+                let t = p.target.borrow().clone();
+                match t {
+                    Some(t) => {
+                        v = Value::Object(t);
+                        continue;
+                    }
+                    None => {
+                        return Err(vm.type_error(
+                            "Cannot perform 'IsArray' on a proxy that has been revoked",
+                        ));
+                    }
+                }
+            }
+        }
+        return Ok(Value::Bool(v.is_array()));
+    }
 }
 
 fn from(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

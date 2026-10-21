@@ -474,6 +474,8 @@ impl Parser {
     fn var_decl(&mut self) -> R<StmtKind> {
         let kind = if self.is_kw("const") {
             DeclKind::Const
+        } else if self.is_kw("var") {
+            DeclKind::Var
         } else {
             DeclKind::Let
         };
@@ -522,6 +524,8 @@ impl Parser {
             ) {
             let kind = if self.is_kw("const") {
                 DeclKind::Const
+            } else if self.is_kw("var") {
+                DeclKind::Var
             } else {
                 DeclKind::Let
             };
@@ -1026,7 +1030,26 @@ impl Parser {
                 self.advance();
                 is_static = true;
                 if self.is(P::LBrace) {
-                    return Err(self.error("Static blocks are not supported yet"));
+                    let saved = (self.in_async, self.in_generator);
+                    self.in_async = false;
+                    self.in_generator = false;
+                    self.args_used.push(false);
+                    let body = self.function_body();
+                    self.args_used.pop();
+                    (self.in_async, self.in_generator) = saved;
+                    let body = body?;
+                    members.push(ClassMember::StaticBlock(Rc::new(FuncDef {
+                        name: Some("static".into()),
+                        params: Vec::new(),
+                        rest: None,
+                        body: FuncBody::Block(body),
+                        kind: FuncKind::StaticMethod,
+                        is_async: false,
+                        is_generator: false,
+                        uses_arguments: false,
+                        line: mline,
+                    })));
+                    continue;
                 }
             }
             let mut is_async = false;
@@ -1744,7 +1767,19 @@ impl Parser {
         let line = self.line();
         self.advance();
         if self.is(P::Dot) {
-            return Err(self.error("new.target is not supported yet"));
+            self.advance();
+            match self.ident_name()? {
+                n if &*n == "target" => {
+                    if self.fn_depth == 0 {
+                        return Err(self.error("new.target expression is not allowed here"));
+                    }
+                    return Ok(Expr {
+                        kind: ExprKind::NewTarget,
+                        line,
+                    });
+                }
+                _ => return Err(self.error("Unexpected identifier after 'new.'")),
+            }
         }
         let mut callee = if self.is_kw("new") {
             self.new_expr()?

@@ -127,7 +127,7 @@ impl Value {
             (Value::Number(a), Value::Number(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
-            (Value::Symbol(a), Value::Symbol(b)) => Rc::ptr_eq(a, b),
+            (Value::Symbol(a), Value::Symbol(b)) => a.key == b.key,
             _ => false,
         }
     }

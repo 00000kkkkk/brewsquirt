@@ -62,10 +62,7 @@ P.any = function (items) {
     const errors = new Array(list.length)
     let left = list.length
     const fail = () => {
-      const err = new Error("All promises were rejected")
-      err.name = "AggregateError"
-      err.errors = errors
-      reject(err)
+      reject(new AggregateError(errors, "All promises were rejected"))
     }
     if (left === 0) fail()
     list.forEach((item, i) => {

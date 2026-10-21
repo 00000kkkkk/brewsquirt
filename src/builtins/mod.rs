@@ -4,6 +4,8 @@ mod collections;
 mod date;
 mod json;
 pub mod node;
+pub mod reflect;
+pub use reflect::{array_like, key_value};
 mod number;
 mod object;
 mod promise;
@@ -25,7 +27,7 @@ pub use date::{date_to_string, iso_string};
 pub use json::{json_parse, json_stringify};
 pub use promise::run_prelude;
 pub use regexp::make_regexp;
-pub use symbol::{iter_result, symbol_text};
+pub use symbol::{iter_result, symbol_from_key, symbol_text};
 pub use system::exit_code;
 
 pub fn arg(args: &[Value], i: usize) -> Value {
@@ -106,9 +108,31 @@ pub fn install(vm: &mut Vm) {
     system::install(vm);
     web::install(vm);
     binary::install(vm);
+    reflect::install(vm);
+    let global = Obj::new(ObjKind::Global, Some(vm.realm.object_proto.clone()));
+    vm.define_global("globalThis", Value::Object(global));
+    for name in ["Math", "JSON", "Atomics"] {
+        if let Some(Value::Object(o)) = vm.globals.get(name).cloned() {
+            o.set_with_attrs(
+                crate::object::TO_STRING_TAG_KEY,
+                name.into(),
+                crate::object::NON_ENUM | crate::object::READ_ONLY,
+            );
+        }
+    }
 }
 
 pub fn hide_builtin_members(vm: &mut Vm) {
+    for name in vm.globals.names() {
+        let bits = match &*name {
+            "undefined" | "NaN" | "Infinity" => {
+                crate::object::NON_ENUM | crate::object::READ_ONLY | crate::object::NON_CONFIG
+            }
+            _ => crate::object::NON_ENUM,
+        };
+        vm.globals.attrs.insert(name, bits);
+    }
+    vm.globals.readonly = true;
     let mut seen = Vec::new();
     let mut hide = |o: &Rc<Obj>| {
         if !seen.iter().any(|s| Rc::ptr_eq(s, o)) {
