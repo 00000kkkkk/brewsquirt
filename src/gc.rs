@@ -207,7 +207,8 @@ fn obj_edges(o: &Obj, f: &mut dyn FnMut(Edge<'_>)) {
                     | IterState::MapEntries(o, _)
                     | IterState::MapKeys(o, _)
                     | IterState::MapValues(o, _)
-                    | IterState::SetValues(o, _) => f(Edge::Obj(o)),
+                    | IterState::SetValues(o, _)
+                    | IterState::Typed(o, _, _) => f(Edge::Obj(o)),
                     IterState::Str(..) => {}
                     IterState::List(items, _) => {
                         for v in items {

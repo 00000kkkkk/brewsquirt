@@ -266,6 +266,7 @@ pub struct Vm {
     pub default_has_instance: Value,
     pub proto_accessor: Value,
     pub(crate) array_species: Value,
+    pub(crate) binary_ctors: Vec<Value>,
     pub(crate) pristine: Option<Box<Pristine>>,
     pub(crate) array_ctor: Option<Rc<Obj>>,
     pub(crate) io: crate::io::Io,
@@ -337,6 +338,7 @@ impl Vm {
             default_has_instance: Value::Undefined,
             proto_accessor: Value::Undefined,
             array_species: Value::Undefined,
+            binary_ctors: Vec::new(),
             pristine: None,
             array_ctor: None,
             io: crate::io::Io::default(),
@@ -1094,6 +1096,35 @@ impl Vm {
                 return self.proxy_construct(o, args, new_target);
             }
         }
+        if !new_target.strict_eq(callee) {
+            if let Value::Object(o) = callee {
+                if let ObjKind::Native(n) = &o.kind {
+                    if let Some(k) = n.ctor {
+                        let f = n.func;
+                        let proto = match self.get_prop(new_target, "prototype")? {
+                            Value::Object(p) => p,
+                            _ => match o.get_own("prototype") {
+                                Some(Value::Object(p)) => p,
+                                _ => self.realm.object_proto.clone(),
+                            },
+                        };
+                        let this = Obj::new(k(), Some(proto.clone()));
+                        let r = f(self, Value::Object(this.clone()), args)?;
+                        if let Value::Object(ro) = &r {
+                            let reused = Rc::ptr_eq(ro, &this)
+                                || args
+                                    .iter()
+                                    .any(|a| matches!(a, Value::Object(x) if Rc::ptr_eq(x, ro)));
+                            if !reused {
+                                *ro.proto.borrow_mut() = Some(proto);
+                            }
+                            return Ok(r);
+                        }
+                        return Ok(Value::Object(this));
+                    }
+                }
+            }
+        }
         let r = self.construct(callee, args)?;
         if !new_target.strict_eq(callee) {
             if let (Value::Object(obj), Value::Object(nt)) = (&r, new_target) {
@@ -1317,22 +1348,31 @@ impl Vm {
             }
             ObjKind::Typed(t) => {
                 if let Some(i) = array_index(key) {
-                    return t.get(i).map(Value::Number).unwrap_or_default();
+                    return if i < t.len() {
+                        t.get(i).unwrap_or_default()
+                    } else {
+                        Value::Undefined
+                    };
                 }
-                match key {
-                    "length" => return Value::Number(t.length as f64),
-                    "byteLength" => return Value::Number(t.byte_len() as f64),
-                    "byteOffset" => return Value::Number(t.offset as f64),
-                    "buffer" => return Value::Object(t.buffer.clone()),
-                    _ => {}
+                if crate::builtins::typed::canonical_numeric(key).is_some() {
+                    return Value::Undefined;
+                }
+                if !o.props.borrow().contains_key(key) {
+                    match key {
+                        "length" => return Value::Number(t.len() as f64),
+                        "byteLength" => return Value::Number(t.byte_len() as f64),
+                        "byteOffset" => {
+                            return Value::Number(if t.out_of_bounds() {
+                                0.0
+                            } else {
+                                t.offset as f64
+                            });
+                        }
+                        "buffer" => return Value::Object(t.buffer.clone()),
+                        _ => {}
+                    }
                 }
             }
-            ObjKind::DataView(t) => match key {
-                "byteLength" => return Value::Number(t.length as f64),
-                "byteOffset" => return Value::Number(t.offset as f64),
-                "buffer" => return Value::Object(t.buffer.clone()),
-                _ => {}
-            },
             ObjKind::Primitive(Value::Str(s)) => {
                 if key == "length" {
                     return Value::Number(len16(s) as f64);
@@ -1342,9 +1382,6 @@ impl Vm {
                         return Value::from(c);
                     }
                 }
-            }
-            ObjKind::ArrayBuffer(b) if key == "byteLength" => {
-                return Value::Number(b.borrow().len() as f64);
             }
             ObjKind::Set(s) if key == "size" => {
                 return Value::Number(s.borrow().len() as f64);
@@ -1368,7 +1405,14 @@ impl Vm {
             }
             _ => {}
         }
-        o.get_chain(key).unwrap_or_default()
+        if let Some(v) = o.props.borrow().get(key) {
+            return v.clone();
+        }
+        let proto = o.proto.borrow().clone();
+        match proto {
+            Some(p) => self.get_obj(&p, key),
+            None => Value::Undefined,
+        }
     }
 
     pub fn resolve_accessor(&mut self, v: Value, receiver: &Value) -> Result<Value, Value> {
@@ -1387,6 +1431,11 @@ impl Vm {
     fn accessor_setter(&self, o: &Rc<Obj>, key: &str) -> Option<Value> {
         let mut cur = Some(o.clone());
         while let Some(c) = cur {
+            if matches!(c.kind, ObjKind::Typed(_))
+                && crate::builtins::typed::canonical_numeric(key).is_some()
+            {
+                return None;
+            }
             if let Some(v) = c.props.borrow().get(key) {
                 if let Value::Object(a) = v {
                     if let ObjKind::Accessor(acc) = &a.kind {
@@ -1437,7 +1486,8 @@ impl Vm {
                 if key == "description" {
                     return Ok(s.description.clone().map(Value::Str).unwrap_or_default());
                 }
-                Ok(self.realm.symbol_proto.get_chain(key).unwrap_or_default())
+                let raw = self.realm.symbol_proto.get_chain(key).unwrap_or_default();
+                self.resolve_accessor(raw, v)
             }
             Value::Str(s) => {
                 if key == "length" {
@@ -1446,11 +1496,21 @@ impl Vm {
                 if let Some(i) = array_index(key) {
                     return Ok(char_at16(s, i).map(Value::from).unwrap_or_default());
                 }
-                Ok(self.realm.string_proto.get_chain(key).unwrap_or_default())
+                let raw = self.realm.string_proto.get_chain(key).unwrap_or_default();
+                self.resolve_accessor(raw, v)
             }
-            Value::Number(_) => Ok(self.realm.number_proto.get_chain(key).unwrap_or_default()),
-            Value::BigInt(_) => Ok(self.realm.bigint_proto.get_chain(key).unwrap_or_default()),
-            Value::Bool(_) => Ok(self.realm.boolean_proto.get_chain(key).unwrap_or_default()),
+            Value::Number(_) => {
+                let raw = self.realm.number_proto.get_chain(key).unwrap_or_default();
+                self.resolve_accessor(raw, v)
+            }
+            Value::BigInt(_) => {
+                let raw = self.realm.bigint_proto.get_chain(key).unwrap_or_default();
+                self.resolve_accessor(raw, v)
+            }
+            Value::Bool(_) => {
+                let raw = self.realm.boolean_proto.get_chain(key).unwrap_or_default();
+                self.resolve_accessor(raw, v)
+            }
             Value::Undefined | Value::Null => Err(self.type_error(format!(
                 "Cannot read properties of {} (reading '{}')",
                 inspect_plain(v),
@@ -1501,12 +1561,21 @@ impl Vm {
                 }
                 if let ObjKind::Typed(t) = &o.kind {
                     if let Some(i) = array_index(&key) {
-                        let x = self.to_number(&val)?;
-                        t.set(i, x);
+                        let x = crate::builtins::typed::coerce(self, t.kind, &val)?;
+                        t.set(i, &x);
                         return Ok(());
                     }
-                    if matches!(&*key, "length" | "byteLength" | "byteOffset" | "buffer") {
+                    if crate::builtins::typed::canonical_numeric(&key).is_some() {
+                        crate::builtins::typed::coerce(self, t.kind, &val)?;
                         return Ok(());
+                    }
+                    if matches!(&*key, "length" | "byteLength" | "byteOffset" | "buffer")
+                        && !o.props.borrow().contains_key(&key)
+                    {
+                        return Err(self.type_error(format!(
+                            "Cannot set property {key} of {} which has only a getter",
+                            inspect_plain(target)
+                        )));
                     }
                 }
                 if let ObjKind::Array(a) = &o.kind {
@@ -1634,7 +1703,7 @@ impl Vm {
                             return Ok(a.borrow().get(i).cloned().unwrap_or_default());
                         }
                         if let ObjKind::Typed(t) = &o.kind {
-                            return Ok(t.get(i).map(Value::Number).unwrap_or_default());
+                            return Ok(t.get(i).unwrap_or_default());
                         }
                     }
                     Value::Str(s) => {
@@ -1659,8 +1728,8 @@ impl Vm {
             if let ObjKind::Typed(t) = &o.kind {
                 let i = *n as usize;
                 if i as f64 == *n {
-                    let x = self.to_number(&val)?;
-                    t.set(i, x);
+                    let x = crate::builtins::typed::coerce(self, t.kind, &val)?;
+                    t.set(i, &x);
                     return Ok(());
                 }
             }
@@ -1954,6 +2023,11 @@ impl Vm {
                     return Ok(true);
                 }
             }
+            ObjKind::Typed(t) => {
+                if let Some(n) = crate::builtins::typed::canonical_numeric(&k) {
+                    return Ok(crate::builtins::typed::valid_index(t, n).is_some());
+                }
+            }
             ObjKind::Function(_) | ObjKind::Native(_) => {
                 if matches!(&*k, "name" | "length" | "prototype") {
                     return Ok(true);
@@ -1961,7 +2035,14 @@ impl Vm {
             }
             _ => {}
         }
-        Ok(o.get_chain(&k).is_some())
+        if o.props.borrow().contains_key(&k) {
+            return Ok(true);
+        }
+        let proto = o.proto.borrow().clone();
+        match proto {
+            Some(p) => self.has_property(&Value::Object(p), &Value::Str(k)),
+            None => Ok(false),
+        }
     }
 
     fn capture_pristine(&mut self) {
@@ -2098,7 +2179,11 @@ impl Vm {
         if !method.is_callable() {
             return Err(self.type_error(format!("{} is not iterable", inspect_plain(v))));
         }
-        let it = self.call_value(&method, v.clone(), &[])?;
+        self.iterator_from_method(v, &method)
+    }
+
+    pub fn iterator_from_method(&mut self, v: &Value, method: &Value) -> Result<Value, Value> {
+        let it = self.call_value(method, v.clone(), &[])?;
         let Value::Object(o) = &it else {
             return Err(self.type_error("Result of the Symbol.iterator method is not an object"));
         };
@@ -2140,6 +2225,34 @@ impl Vm {
         let protocol = {
             let mut st = state.borrow_mut();
             match &mut *st {
+                IterState::Typed(ta, i, kind) => {
+                    let ObjKind::Typed(t) = &ta.kind else {
+                        return Ok(None);
+                    };
+                    if *i == usize::MAX {
+                        return Ok(None);
+                    }
+                    if t.out_of_bounds() {
+                        return Err(self.type_error(
+                            "Cannot perform %ArrayIteratorPrototype%.next on a detached ArrayBuffer",
+                        ));
+                    }
+                    if *i >= t.len() {
+                        *i = usize::MAX;
+                        return Ok(None);
+                    }
+                    let k = *i;
+                    *i += 1;
+                    let v = match kind {
+                        0 => Value::Number(k as f64),
+                        1 => t.get(k).unwrap_or_default(),
+                        _ => {
+                            let x = t.get(k).unwrap_or_default();
+                            self.new_array(vec![Value::Number(k as f64), x])
+                        }
+                    };
+                    return Ok(Some(v));
+                }
                 IterState::Array(arr, i) => {
                     let v = arr.array().and_then(|a| a.borrow().get(*i).cloned());
                     if v.is_some() {
@@ -2306,7 +2419,7 @@ impl Vm {
                 keys.push(Value::Str("length".into()));
             }
             if let ObjKind::Typed(t) = &o.kind {
-                for i in 0..t.length {
+                for i in 0..t.len() {
                     keys.push(Value::Str(i.to_string().into()));
                 }
             }
@@ -2379,7 +2492,7 @@ impl Vm {
                     }
                 }
                 if let ObjKind::Typed(t) = &o.kind {
-                    for i in 0..t.length {
+                    for i in 0..t.len() {
                         keys.push(Value::Str(i.to_string().into()));
                     }
                 }
@@ -3835,7 +3948,7 @@ impl Vm {
                 }
                 if let ObjKind::Typed(t) = &o.kind {
                     for (i, x) in t.values().into_iter().enumerate() {
-                        out.push((Rc::from(i.to_string()), Value::Number(x)));
+                        out.push((Rc::from(i.to_string()), x));
                     }
                 }
                 for (k, x) in o.props.borrow().enumerable() {

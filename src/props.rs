@@ -141,8 +141,9 @@ impl Vm {
                 }
             }
             ObjKind::Typed(t) => {
-                if let Some(i) = array_index(key) {
-                    return t.get(i).map(|n| (Value::Number(n), 0));
+                if let Some(n) = crate::builtins::typed::canonical_numeric(key) {
+                    let i = crate::builtins::typed::valid_index(t, n)?;
+                    return t.get(i).map(|v| (v, 0));
                 }
             }
             ObjKind::Global => {
@@ -341,8 +342,8 @@ impl Vm {
             }
             ObjKind::Typed(t) => {
                 if let Some(i) = array_index(key) {
-                    let n = self.to_number(&raw)?;
-                    t.set(i, n);
+                    let x = crate::builtins::typed::coerce(self, t.kind, &raw)?;
+                    t.set(i, &x);
                     return Ok(());
                 }
             }
@@ -379,6 +380,29 @@ impl Vm {
         d: PropDesc,
         throw: bool,
     ) -> Result<bool, Value> {
+        if let ObjKind::Typed(t) = &o.kind {
+            if let Some(n) = crate::builtins::typed::canonical_numeric(&key) {
+                let ok = crate::builtins::typed::valid_index(t, n).is_some()
+                    && d.configurable != Some(false)
+                    && d.enumerable != Some(false)
+                    && !d.is_accessor()
+                    && d.writable != Some(false);
+                if !ok {
+                    if throw {
+                        return Err(self
+                            .type_error(format!("Cannot redefine property: {}", key_text(&key))));
+                    }
+                    return Ok(false);
+                }
+                if let Some(v) = &d.value {
+                    let x = crate::builtins::typed::coerce(self, t.kind, v)?;
+                    if let Some(i) = crate::builtins::typed::valid_index(t, n) {
+                        t.set(i, &x);
+                    }
+                }
+                return Ok(true);
+            }
+        }
         let current = self.own_property(o, &key);
         let Some((raw, attrs)) = current else {
             if !o.is_extensible() {
@@ -535,8 +559,8 @@ impl Vm {
                 }
             }
             ObjKind::Typed(t) => {
-                if let Some(i) = array_index(key) {
-                    return i >= t.length;
+                if let Some(n) = crate::builtins::typed::canonical_numeric(key) {
+                    return crate::builtins::typed::valid_index(t, n).is_none();
                 }
             }
             _ => {}
@@ -568,7 +592,7 @@ impl Vm {
 
     pub fn freeze(&mut self, o: &Rc<Obj>) -> Result<(), Value> {
         if let ObjKind::Typed(t) = &o.kind {
-            if t.length > 0 {
+            if !t.is_empty() {
                 return Err(self.type_error("Cannot freeze array buffer views with elements"));
             }
         }
@@ -590,7 +614,7 @@ impl Vm {
         };
         let has_elements = match &o.kind {
             ObjKind::Array(a) => !a.borrow().is_empty(),
-            ObjKind::Typed(t) => t.length > 0,
+            ObjKind::Typed(t) => !t.is_empty(),
             _ => false,
         };
         if has_elements && o.flags.get() & need != need {

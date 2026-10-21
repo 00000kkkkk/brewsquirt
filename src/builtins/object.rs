@@ -11,7 +11,7 @@ pub fn install(vm: &mut Vm) {
     let op = vm.realm.object_proto.clone();
     method(vm, &op, "hasOwnProperty", 1, has_own_property);
     method(vm, &op, "toString", 0, object_to_string);
-    method(vm, &op, "toLocaleString", 0, object_to_string);
+    method(vm, &op, "toLocaleString", 0, object_to_locale_string);
     method(vm, &op, "valueOf", 0, value_of);
     method(vm, &op, "isPrototypeOf", 1, is_prototype_of);
     method(vm, &op, "propertyIsEnumerable", 1, property_is_enumerable);
@@ -192,6 +192,20 @@ fn has_own_key(vm: &mut Vm, target: &Value, k: &str) -> R {
 fn has_own(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let k = vm.to_property_key(&arg(args, 1))?;
     has_own_key(vm, &arg(args, 0), &k)
+}
+
+fn object_to_locale_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    if this.is_nullish() {
+        return Err(vm.type_error("Object.prototype.toLocaleString called on null or undefined"));
+    }
+    let f = vm.get_prop(&this, "toString")?;
+    if !f.is_callable() {
+        return Err(vm.type_error(format!(
+            "{} is not a function",
+            crate::inspect::inspect_plain(&f)
+        )));
+    }
+    vm.call_value(&f, this, &[])
 }
 
 fn object_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {

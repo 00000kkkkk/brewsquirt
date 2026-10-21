@@ -221,6 +221,11 @@ impl Vm {
             if is_proxy(&c) {
                 return self.op_has_property(&c, key);
             }
+            if let ObjKind::Typed(t) = &c.kind {
+                if let Some(n) = crate::builtins::typed::canonical_numeric(key) {
+                    return Ok(crate::builtins::typed::valid_index(t, n).is_some());
+                }
+            }
             if self.has_own_any(&c, key) {
                 return Ok(true);
             }
@@ -290,6 +295,22 @@ impl Vm {
         while let Some(c) = cur {
             if is_proxy(&c) && !Rc::ptr_eq(&c, o) {
                 return self.op_set(&c, key, val, receiver);
+            }
+            if let ObjKind::Typed(t) = &c.kind {
+                if let Some(n) = crate::builtins::typed::canonical_numeric(&key) {
+                    let same = matches!(receiver, Value::Object(r) if Rc::ptr_eq(r, &c));
+                    if same {
+                        let x = crate::builtins::typed::coerce(self, t.kind, &val)?;
+                        if let Some(i) = crate::builtins::typed::valid_index(t, n) {
+                            t.set(i, &x);
+                        }
+                        return Ok(true);
+                    }
+                    if crate::builtins::typed::valid_index(t, n).is_none() {
+                        return Ok(true);
+                    }
+                    break;
+                }
             }
             if let Some((raw, attrs)) = self.own_property(&c, &key) {
                 if let Some((_, setter)) = accessor_parts(&raw) {

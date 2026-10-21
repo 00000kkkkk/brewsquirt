@@ -161,7 +161,7 @@ fn number_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     Ok(super::box_for(&this, n.clone()).unwrap_or(n))
 }
 
-fn to_bigint(vm: &mut Vm, v: &Value) -> Result<std::rc::Rc<num_bigint::BigInt>, Value> {
+pub(crate) fn to_bigint(vm: &mut Vm, v: &Value) -> Result<std::rc::Rc<num_bigint::BigInt>, Value> {
     let p = vm.to_primitive(v, true)?;
     match &p {
         Value::BigInt(b) => Ok(b.clone()),

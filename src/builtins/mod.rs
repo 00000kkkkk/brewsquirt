@@ -8,6 +8,7 @@ mod intrinsics;
 mod json;
 pub mod node;
 pub mod reflect;
+pub mod typed;
 pub use reflect::{array_like, key_value};
 mod number;
 mod object;
@@ -97,8 +98,16 @@ pub fn make_ctor(
         })),
         Some(vm.realm.function_proto.clone()),
     );
-    c.set_own("prototype", Value::Object(prototype.clone()));
-    prototype.set_own("constructor", Value::Object(c.clone()));
+    c.set_with_attrs(
+        "prototype",
+        Value::Object(prototype.clone()),
+        crate::object::NON_ENUM | crate::object::READ_ONLY | crate::object::NON_CONFIG,
+    );
+    prototype.set_with_attrs(
+        "constructor",
+        Value::Object(c.clone()),
+        crate::object::NON_ENUM,
+    );
     c
 }
 
@@ -239,12 +248,21 @@ pub fn hide_builtin_members(vm: &mut Vm) {
         "Uint32Array",
         "Float32Array",
         "Float64Array",
+        "BigInt64Array",
+        "BigUint64Array",
+        "BigInt",
+        "Proxy",
     ] {
         if let Some(Value::Object(o)) = vm.globals.get(name) {
             hide(o);
             if let Some(Value::Object(p)) = o.get_own("prototype") {
                 hide(&p);
             }
+        }
+    }
+    if let Some(Value::Object(i8)) = vm.globals.get("Int8Array") {
+        if let Some(ta) = i8.proto.borrow().clone() {
+            hide(&ta);
         }
     }
 }

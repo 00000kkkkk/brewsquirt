@@ -45,22 +45,6 @@ pub fn install(vm: &mut Vm) {
         getter(vm, &rp, name, f);
     }
 
-    let view_getters: [crate::object::NativeFn; 4] = [
-        view_prop::<0>,
-        view_prop::<1>,
-        view_prop::<2>,
-        view_prop::<3>,
-    ];
-    let tp = vm.realm.typed_proto.clone();
-    for (name, f) in VIEW_PROPS.iter().zip(view_getters) {
-        getter(vm, &tp, name, f);
-    }
-    let dvp = vm.realm.dataview_proto.clone();
-    for (name, f) in VIEW_PROPS.iter().zip(view_getters).take(3) {
-        getter(vm, &dvp, name, f);
-    }
-    let abp = vm.realm.array_buffer_proto.clone();
-    getter(vm, &abp, "byteLength", view_prop::<1>);
     let syp = vm.realm.symbol_proto.clone();
     getter(vm, &syp, "description", symbol_description);
 
@@ -176,24 +160,6 @@ fn regexp_prop<const I: usize>(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     }
     Err(vm.type_error(format!(
         "RegExp.prototype.{name} getter called on non-RegExp object"
-    )))
-}
-
-const VIEW_PROPS: [&str; 4] = ["buffer", "byteLength", "byteOffset", "length"];
-
-fn view_prop<const I: usize>(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let name = VIEW_PROPS[I];
-    if let Value::Object(o) = &this {
-        if matches!(
-            o.kind,
-            ObjKind::Typed(_) | ObjKind::DataView(_) | ObjKind::ArrayBuffer(_)
-        ) {
-            return Ok(vm.get_obj(o, name));
-        }
-    }
-    Err(vm.type_error(format!(
-        "Method get {name} called on incompatible receiver {}",
-        crate::inspect::inspect_plain(&this)
     )))
 }
 

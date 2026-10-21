@@ -21,6 +21,7 @@ pub const ELEMENTS_SEALED: u8 = 4;
 pub const HAS_HOLES: u8 = 8;
 pub const NAME_DELETED: u8 = 16;
 pub const LENGTH_DELETED: u8 = 32;
+pub const DETACHED: u8 = 64;
 
 #[derive(Default)]
 struct PropExtra {
@@ -373,7 +374,7 @@ pub enum ObjKind {
     WeakMap(Box<RefCell<WeakEntries>>),
     WeakSet(Box<RefCell<WeakKeys>>),
     WeakRef(std::rc::Weak<Obj>),
-    ArrayBuffer(RefCell<Vec<u8>>),
+    ArrayBuffer(Box<BufferData>),
     Typed(Box<View>),
     DataView(Box<View>),
     Global,
@@ -413,6 +414,8 @@ pub enum TypedKind {
     Uint32,
     Float32,
     Float64,
+    BigInt64,
+    BigUint64,
 }
 
 fn modulo32(n: f64) -> u32 {
@@ -422,8 +425,18 @@ fn modulo32(n: f64) -> u32 {
     n.trunc().rem_euclid(4294967296.0) as u32
 }
 
+fn big_bits(v: &Value) -> u64 {
+    match v {
+        Value::BigInt(b) => {
+            let m = crate::bigint::as_uint_n(64, b);
+            num_traits::ToPrimitive::to_u64(&m).unwrap_or(0)
+        }
+        _ => 0,
+    }
+}
+
 impl TypedKind {
-    pub const ALL: [TypedKind; 9] = [
+    pub const ALL: [TypedKind; 11] = [
         TypedKind::Int8,
         TypedKind::Uint8,
         TypedKind::Uint8Clamped,
@@ -433,6 +446,8 @@ impl TypedKind {
         TypedKind::Uint32,
         TypedKind::Float32,
         TypedKind::Float64,
+        TypedKind::BigInt64,
+        TypedKind::BigUint64,
     ];
 
     pub fn size(self) -> usize {
@@ -440,7 +455,7 @@ impl TypedKind {
             TypedKind::Int8 | TypedKind::Uint8 | TypedKind::Uint8Clamped => 1,
             TypedKind::Int16 | TypedKind::Uint16 => 2,
             TypedKind::Int32 | TypedKind::Uint32 | TypedKind::Float32 => 4,
-            TypedKind::Float64 => 8,
+            TypedKind::Float64 | TypedKind::BigInt64 | TypedKind::BigUint64 => 8,
         }
     }
 
@@ -455,11 +470,17 @@ impl TypedKind {
             TypedKind::Uint32 => "Uint32Array",
             TypedKind::Float32 => "Float32Array",
             TypedKind::Float64 => "Float64Array",
+            TypedKind::BigInt64 => "BigInt64Array",
+            TypedKind::BigUint64 => "BigUint64Array",
         }
     }
 
     pub fn is_float(self) -> bool {
         matches!(self, TypedKind::Float32 | TypedKind::Float64)
+    }
+
+    pub fn is_big(self) -> bool {
+        matches!(self, TypedKind::BigInt64 | TypedKind::BigUint64)
     }
 
     pub fn read(self, b: &[u8], little: bool) -> f64 {
@@ -483,7 +504,46 @@ impl TypedKind {
             TypedKind::Uint32 => rd!(u32, 4),
             TypedKind::Float32 => rd!(f32, 4),
             TypedKind::Float64 => rd!(f64, 8),
+            TypedKind::BigInt64 => rd!(i64, 8),
+            TypedKind::BigUint64 => rd!(u64, 8),
         }
+    }
+
+    pub fn read_value(self, b: &[u8], little: bool) -> Value {
+        if !self.is_big() {
+            return Value::Number(self.read(b, little));
+        }
+        let mut a = [0u8; 8];
+        a.copy_from_slice(&b[..8]);
+        let bits = if little {
+            u64::from_le_bytes(a)
+        } else {
+            u64::from_be_bytes(a)
+        };
+        let n = if self == TypedKind::BigInt64 {
+            num_bigint::BigInt::from(bits as i64)
+        } else {
+            num_bigint::BigInt::from(bits)
+        };
+        Value::BigInt(Rc::new(n))
+    }
+
+    pub fn write_value(self, b: &mut [u8], v: &Value, little: bool) {
+        if self.is_big() {
+            let bits = big_bits(v);
+            let bytes = if little {
+                bits.to_le_bytes()
+            } else {
+                bits.to_be_bytes()
+            };
+            b[..8].copy_from_slice(&bytes);
+            return;
+        }
+        let n = match v {
+            Value::Number(n) => *n,
+            _ => f64::NAN,
+        };
+        self.write(b, n, little);
     }
 
     pub fn write(self, b: &mut [u8], n: f64, little: bool) {
@@ -520,7 +580,21 @@ impl TypedKind {
             TypedKind::Int32 | TypedKind::Uint32 => wr!(modulo32(n)),
             TypedKind::Float32 => wr!(n as f32),
             TypedKind::Float64 => wr!(n),
+            TypedKind::BigInt64 | TypedKind::BigUint64 => wr!(0u64),
         }
+    }
+}
+
+pub struct BufferData {
+    pub bytes: RefCell<Vec<u8>>,
+    pub max: Option<usize>,
+}
+
+impl std::ops::Deref for BufferData {
+    type Target = RefCell<Vec<u8>>;
+
+    fn deref(&self) -> &RefCell<Vec<u8>> {
+        &self.bytes
     }
 }
 
@@ -529,50 +603,107 @@ pub struct View {
     pub buffer: Rc<Obj>,
     pub offset: usize,
     pub length: usize,
+    pub tracking: bool,
 }
 
 impl View {
+    pub fn detached(&self) -> bool {
+        self.buffer.flags.get() & DETACHED != 0
+    }
+
+    fn len_with(&self, buf_len: usize) -> usize {
+        let size = self.kind.size();
+        if self.tracking {
+            if self.offset > buf_len {
+                0
+            } else {
+                (buf_len - self.offset) / size
+            }
+        } else if self.offset + self.length * size > buf_len {
+            0
+        } else {
+            self.length
+        }
+    }
+
+    pub fn out_of_bounds(&self) -> bool {
+        if self.detached() {
+            return true;
+        }
+        let buf_len = self.store().borrow().len();
+        if self.tracking {
+            self.offset > buf_len
+        } else {
+            self.offset + self.length * self.kind.size() > buf_len
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len_with(self.store().borrow().len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn byte_len(&self) -> usize {
-        self.length * self.kind.size()
+        self.len() * self.kind.size()
     }
 
     pub fn store(&self) -> &RefCell<Vec<u8>> {
         match &self.buffer.kind {
-            ObjKind::ArrayBuffer(b) => b,
+            ObjKind::ArrayBuffer(b) => &b.bytes,
             _ => unreachable!("view over a non-buffer"),
         }
     }
 
-    pub fn get(&self, i: usize) -> Option<f64> {
-        if i >= self.length {
+    pub fn get(&self, i: usize) -> Option<Value> {
+        let b = self.store().borrow();
+        if i >= self.len_with(b.len()) {
             return None;
         }
         let size = self.kind.size();
         let start = self.offset + i * size;
+        b.get(start..start + size)
+            .map(|x| self.kind.read_value(x, true))
+    }
+
+    pub fn get_f64(&self, i: usize) -> Option<f64> {
         let b = self.store().borrow();
+        if i >= self.len_with(b.len()) {
+            return None;
+        }
+        let size = self.kind.size();
+        let start = self.offset + i * size;
         b.get(start..start + size).map(|x| self.kind.read(x, true))
     }
 
-    pub fn set(&self, i: usize, n: f64) {
-        if i >= self.length {
+    pub fn set(&self, i: usize, v: &Value) {
+        let mut b = self.store().borrow_mut();
+        if i >= self.len_with(b.len()) {
             return;
         }
         let size = self.kind.size();
         let start = self.offset + i * size;
+        if let Some(x) = b.get_mut(start..start + size) {
+            self.kind.write_value(x, v, true);
+        }
+    }
+
+    pub fn set_f64(&self, i: usize, n: f64) {
         let mut b = self.store().borrow_mut();
+        if i >= self.len_with(b.len()) {
+            return;
+        }
+        let size = self.kind.size();
+        let start = self.offset + i * size;
         if let Some(x) = b.get_mut(start..start + size) {
             self.kind.write(x, n, true);
         }
     }
 
-    pub fn values(&self) -> Vec<f64> {
-        let size = self.kind.size();
-        let b = self.store().borrow();
-        let end = (self.offset + self.byte_len()).min(b.len());
-        b[self.offset.min(end)..end]
-            .chunks_exact(size)
-            .map(|c| self.kind.read(c, true))
-            .collect()
+    pub fn values(&self) -> Vec<Value> {
+        (0..self.len()).filter_map(|i| self.get(i)).collect()
     }
 
     pub fn bytes(&self) -> Vec<u8> {
@@ -748,6 +879,7 @@ pub enum IterState {
     SetValues(Rc<Obj>, usize),
     List(Vec<Value>, usize),
     Protocol(Value, Value),
+    Typed(Rc<Obj>, usize, u8),
 }
 
 #[derive(Clone)]

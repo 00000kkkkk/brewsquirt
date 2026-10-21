@@ -788,6 +788,7 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             let values = t.values();
             let total = values.len();
             let name = t.kind.name();
+            let big = t.kind.is_big();
             let props = own_props(o, false);
             if total == 0 && props.is_empty() {
                 return format!("{name}(0) []");
@@ -799,7 +800,11 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             let mut output: Vec<String> = values
                 .iter()
                 .take(MAX_ITEMS)
-                .map(|&n| format_number(n))
+                .map(|v| match v {
+                    Value::Number(n) if !big => format_number(*n),
+                    Value::BigInt(b) => format!("{b}n"),
+                    _ => "undefined".to_string(),
+                })
                 .collect();
             let has_more = total > MAX_ITEMS;
             if has_more {
