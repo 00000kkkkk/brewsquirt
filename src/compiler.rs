@@ -3007,40 +3007,25 @@ impl Compiler {
                     }
                 }
                 let async_gen = self.st_ref().is_async;
-                if *delegate && async_gen {
-                    self.emit(Op::GetAsyncIter);
+                if *delegate {
+                    self.emit(Op::DelegateInit(async_gen));
                     let start = self.here();
-                    self.emit(Op::Dup);
-                    self.emit_async_next();
-                    self.emit(Op::Dup);
-                    let done: Rc<str> = "done".into();
-                    let kd = self.str_const(&done);
-                    self.emit(Op::GetProp(kd));
-                    let exit = self.emit(Op::JumpIfTrue(0));
-                    let value: Rc<str> = "value".into();
-                    let kv = self.str_const(&value);
-                    self.emit(Op::GetProp(kv));
-                    self.emit_yield()?;
-                    self.emit(Op::Pop);
+                    self.emit(Op::DelegateCall);
+                    if async_gen {
+                        self.emit(Op::Await);
+                    }
+                    let done = self.emit(Op::DelegateDone(0, 0));
+                    self.emit(Op::YieldDelegate);
                     self.emit(Op::Jump(start));
-                    self.patch(exit);
-                    self.emit(Op::GetProp(kv));
-                    self.emit(Op::Swap);
-                    self.emit(Op::Pop);
+                    let ret = self.here();
+                    self.emit(Op::DelegateEnd);
+                    self.return_top()?;
+                    let exit = self.here();
+                    self.emit(Op::DelegateEnd);
+                    self.st().code[done] = Op::DelegateDone(exit as u32, ret as u32);
                 } else if async_gen {
                     self.emit(Op::Await);
                     self.emit_yield()?;
-                } else if *delegate {
-                    self.emit(Op::GetIter);
-                    let start = self.here();
-                    self.emit(Op::Dup);
-                    let exit = self.emit(Op::IterNext(0));
-                    self.emit_yield()?;
-                    self.emit(Op::Pop);
-                    self.emit(Op::Jump(start));
-                    self.patch(exit);
-                    self.emit(Op::Pop);
-                    self.emit(Op::Undefined);
                 } else {
                     self.emit_yield()?;
                 }

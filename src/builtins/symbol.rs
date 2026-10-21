@@ -320,6 +320,7 @@ fn gen_step(vm: &mut Vm, this: Value, value: Value, mode: ResumeMode) -> R {
     let g = this_generator(vm, &this)?;
     match vm.resume(&g, value, mode)? {
         Step::Yield(v) => Ok(iter_result(vm, v, false)),
+        Step::YieldRaw(v) => Ok(v),
         Step::Done(v) | Step::Await(v) => Ok(iter_result(vm, v, true)),
     }
 }

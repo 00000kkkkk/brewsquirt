@@ -24,11 +24,13 @@ pub(crate) struct Timer {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Signal {
     Yield,
+    YieldRaw,
     Await,
 }
 
 pub enum Step {
     Yield(Value),
+    YieldRaw(Value),
     Await(Value),
     Done(Value),
 }
@@ -192,6 +194,10 @@ impl Vm {
             *u.borrow_mut() = Upvalue::Open(idx);
             self.open_upvalues.push(u);
         }
+        let delegate = matches!(
+            saved.closure.proto.code.get(saved.ip.wrapping_sub(1)),
+            Some(crate::bytecode::Op::YieldDelegate)
+        );
         let fi = self.frames.len();
         self.frames.push(Frame {
             closure: saved.closure,
@@ -209,7 +215,15 @@ impl Vm {
             });
         }
         co.state.set(CoState::Running);
-        if saved.started {
+        if saved.started && delegate {
+            let n = self.stack.len();
+            self.stack[n - 2] = Value::Number(match mode {
+                ResumeMode::Next => 0.0,
+                ResumeMode::Throw => 1.0,
+                ResumeMode::Return => 2.0,
+            });
+            self.stack[n - 1] = value;
+        } else if saved.started {
             if mode == ResumeMode::Throw {
                 if let Err(e) = self.unwind(value, fi) {
                     co.state.set(CoState::Done);
@@ -227,6 +241,7 @@ impl Vm {
         match r {
             Ok(v) => match signal {
                 Some(Signal::Yield) => Ok(Step::Yield(v)),
+                Some(Signal::YieldRaw) => Ok(Step::YieldRaw(v)),
                 Some(Signal::Await) => Ok(Step::Await(v)),
                 None => {
                     co.state.set(CoState::Done);
@@ -259,7 +274,9 @@ impl Vm {
                 let p = self.to_promise(v);
                 self.add_reaction(&p, Reaction::Resume(co.clone()));
             }
-            Ok(Step::Done(v)) | Ok(Step::Yield(v)) => self.resolve_promise(&promise, v),
+            Ok(Step::Done(v)) | Ok(Step::Yield(v)) | Ok(Step::YieldRaw(v)) => {
+                self.resolve_promise(&promise, v)
+            }
             Err(e) => self.reject_promise(&promise, e),
         }
     }
@@ -305,7 +322,9 @@ impl Vm {
                 self.add_reaction(&p, Reaction::Resume(agen.clone()));
                 return;
             }
-            Ok(Step::Yield(v)) => self.async_gen_settle(agen, Ok((v, false))),
+            Ok(Step::Yield(v)) | Ok(Step::YieldRaw(v)) => {
+                self.async_gen_settle(agen, Ok((v, false)))
+            }
             Ok(Step::Done(v)) => self.async_gen_settle(agen, Ok((v, true))),
             Err(e) => self.async_gen_settle(agen, Err(e)),
         }

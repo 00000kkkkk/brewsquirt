@@ -64,7 +64,38 @@ pub fn install(vm: &mut Vm) {
     method(vm, &fp, "bind", 1, fn_bind);
     method(vm, &fp, "toString", 0, fn_to_string);
     let function = make_ctor(vm, "Function", 1, function_ctor, None, &fp);
-    vm.define_global("Function", Value::Object(function));
+    vm.define_global("Function", Value::Object(function.clone()));
+    let kinds: [(&str, NativeFnPtr, Rc<Obj>, Rc<Obj>); 3] = [
+        (
+            "GeneratorFunction",
+            generator_function_ctor,
+            vm.realm.generator_function_proto.clone(),
+            vm.realm.generator_proto.clone(),
+        ),
+        (
+            "AsyncGeneratorFunction",
+            async_generator_function_ctor,
+            vm.realm.async_generator_function_proto.clone(),
+            vm.realm.async_generator_proto.clone(),
+        ),
+        (
+            "AsyncFunction",
+            async_function_ctor,
+            vm.realm.async_function_proto.clone(),
+            vm.realm.async_function_proto.clone(),
+        ),
+    ];
+    for (name, f, fproto, instance_proto) in kinds {
+        let c = make_ctor(vm, name, 1, f, None, &fproto);
+        *c.proto.borrow_mut() = Some(function.clone());
+        let ro = crate::object::NON_ENUM | crate::object::READ_ONLY;
+        fproto.set_with_attrs("constructor", Value::Object(c.clone()), ro);
+        fproto.set_with_attrs(crate::object::TO_STRING_TAG_KEY, name.into(), ro);
+        if !Rc::ptr_eq(&fproto, &instance_proto) {
+            fproto.set_with_attrs("prototype", Value::Object(instance_proto.clone()), ro);
+            instance_proto.set_with_attrs("constructor", Value::Object(fproto.clone()), ro);
+        }
+    }
     let eval = native_fn(vm, "eval", 1, global_eval);
     vm.define_global("eval", eval);
 
@@ -676,7 +707,25 @@ fn fn_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     Ok(format!("function {name}() {{ [native code] }}").into())
 }
 
+type NativeFnPtr = crate::object::NativeFn;
+
+fn generator_function_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    dynamic_function(vm, args, "function*")
+}
+
+fn async_generator_function_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    dynamic_function(vm, args, "async function*")
+}
+
+fn async_function_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    dynamic_function(vm, args, "async function")
+}
+
 fn function_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    dynamic_function(vm, args, "function")
+}
+
+fn dynamic_function(vm: &mut Vm, args: &[Value], kind: &str) -> R {
     let mut params = Vec::new();
     for a in args.iter().take(args.len().saturating_sub(1)) {
         params.push(vm.to_string(a)?.to_string());
@@ -686,7 +735,7 @@ fn function_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         None => String::new(),
     };
     let src = format!(
-        "(function anonymous({}
+        "({kind} anonymous({}
 ) {{
 {}
 }})",

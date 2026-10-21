@@ -364,6 +364,170 @@ Object.defineProperty(globalThis, "%PromiseThenSpecies%", {
   },
   enumerable: false,
 })
+
+const AsyncIteratorProto = Object.getPrototypeOf(Object.getPrototypeOf((async function* () {}).prototype))
+const SYNC = Symbol("sync iterator")
+const iterResult = (value, done) => ({ value, done })
+const closeSyncQuietly = (rec) => {
+  try {
+    const ret = rec.it.return
+    if (ret !== undefined && ret !== null) ret.call(rec.it)
+  } catch {}
+}
+const thenInto = (p, onFulfilled, onRejected, cap) => {
+  const resolve = cap.resolve
+  const reject = cap.reject
+  thenRaw.call(
+    p,
+    (v) => {
+      let r
+      try {
+        r = onFulfilled(v)
+      } catch (e) {
+        reject(e)
+        return
+      }
+      resolve(r)
+    },
+    (e) => {
+      if (onRejected === undefined) {
+        reject(e)
+        return
+      }
+      let r
+      try {
+        r = onRejected(e)
+      } catch (x) {
+        reject(x)
+        return
+      }
+      resolve(r)
+    },
+  )
+}
+const fromSyncContinuation = (result, cap, rec, closeOnRejection) => {
+  const reject = cap.reject
+  let done
+  let value
+  let wrapper
+  try {
+    done = Boolean(result.done)
+    value = result.value
+  } catch (e) {
+    reject(e)
+    return cap.promise
+  }
+  try {
+    wrapper = resolveWith(P, value)
+  } catch (e) {
+    if (!done && closeOnRejection) closeSyncQuietly(rec)
+    reject(e)
+    return cap.promise
+  }
+  const onRejected =
+    done || !closeOnRejection
+      ? undefined
+      : (error) => {
+          closeSyncQuietly(rec)
+          throw error
+        }
+  thenInto(wrapper, (v) => iterResult(v, done), onRejected, cap)
+  return cap.promise
+}
+const AsyncFromSyncIteratorPrototype = Object.create(AsyncIteratorProto)
+for (const [name, fn] of Object.entries({
+  next(...args) {
+    const rec = this[SYNC]
+    const cap = newCapability(P)
+    let result
+    try {
+      result = args.length > 0 ? rec.next.call(rec.it, args[0]) : rec.next.call(rec.it)
+      if (!isObject(result)) throw new TypeError("Iterator result is not an object")
+    } catch (e) {
+      const reject = cap.reject
+      reject(e)
+      return cap.promise
+    }
+    return fromSyncContinuation(result, cap, rec, true)
+  },
+  return(...args) {
+    const rec = this[SYNC]
+    const cap = newCapability(P)
+    const reject = cap.reject
+    let ret
+    try {
+      ret = rec.it.return
+    } catch (e) {
+      reject(e)
+      return cap.promise
+    }
+    if (ret === undefined || ret === null) {
+      const resolve = cap.resolve
+      resolve(iterResult(args[0], true))
+      return cap.promise
+    }
+    let result
+    try {
+      result = args.length > 0 ? ret.call(rec.it, args[0]) : ret.call(rec.it)
+    } catch (e) {
+      reject(e)
+      return cap.promise
+    }
+    if (!isObject(result)) {
+      reject(new TypeError("Iterator result is not an object"))
+      return cap.promise
+    }
+    return fromSyncContinuation(result, cap, rec, false)
+  },
+  throw(...args) {
+    const rec = this[SYNC]
+    const cap = newCapability(P)
+    const reject = cap.reject
+    let thr
+    try {
+      thr = rec.it.throw
+    } catch (e) {
+      reject(e)
+      return cap.promise
+    }
+    if (thr === undefined || thr === null) {
+      try {
+        const ret = rec.it.return
+        if (ret !== undefined && ret !== null) {
+          const r = ret.call(rec.it)
+          if (!isObject(r)) throw new TypeError("Iterator result is not an object")
+        }
+      } catch (e) {
+        reject(e)
+        return cap.promise
+      }
+      reject(new TypeError("The iterator does not provide a 'throw' method"))
+      return cap.promise
+    }
+    let result
+    try {
+      result = args.length > 0 ? thr.call(rec.it, args[0]) : thr.call(rec.it)
+    } catch (e) {
+      reject(e)
+      return cap.promise
+    }
+    if (!isObject(result)) {
+      reject(new TypeError("Iterator result is not an object"))
+      return cap.promise
+    }
+    return fromSyncContinuation(result, cap, rec, true)
+  },
+})) {
+  Object.defineProperty(AsyncFromSyncIteratorPrototype, name, { value: fn, writable: true, enumerable: false, configurable: true })
+}
+Object.defineProperty(globalThis, "%CreateAsyncFromSyncIterator%", {
+  value: (it, next) => {
+    const o = Object.create(AsyncFromSyncIteratorPrototype)
+    Object.defineProperty(o, SYNC, { value: { it, next, done: false } })
+    return o
+  },
+  enumerable: false,
+})
 "##;
 
 pub fn install(vm: &mut Vm) {

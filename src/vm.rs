@@ -82,6 +82,9 @@ pub struct Realm {
     pub iter_proto: Rc<Obj>,
     pub generator_proto: Rc<Obj>,
     pub async_generator_proto: Rc<Obj>,
+    pub generator_function_proto: Rc<Obj>,
+    pub async_generator_function_proto: Rc<Obj>,
+    pub async_function_proto: Rc<Obj>,
     pub promise_proto: Rc<Obj>,
     pub symbol_proto: Rc<Obj>,
     pub regexp_proto: Rc<Obj>,
@@ -110,6 +113,7 @@ impl Realm {
         }
         let iterator_base = mk();
         let async_iterator_base = mk();
+        let function_proto = mk();
         let typed_proto = mk();
         let typed_protos = crate::object::TypedKind::ALL
             .iter()
@@ -124,9 +128,15 @@ impl Realm {
             iter_proto: Obj::new(ObjKind::Ordinary, Some(iterator_base.clone())),
             generator_proto: Obj::new(ObjKind::Ordinary, Some(iterator_base.clone())),
             async_generator_proto: Obj::new(ObjKind::Ordinary, Some(async_iterator_base.clone())),
+            generator_function_proto: Obj::new(ObjKind::Ordinary, Some(function_proto.clone())),
+            async_generator_function_proto: Obj::new(
+                ObjKind::Ordinary,
+                Some(function_proto.clone()),
+            ),
+            async_function_proto: Obj::new(ObjKind::Ordinary, Some(function_proto.clone())),
             iterator_base,
             async_iterator_base,
-            function_proto: mk(),
+            function_proto,
             array_proto: mk(),
             string_proto: Obj::new(
                 ObjKind::Primitive(Value::Str("".into())),
@@ -481,6 +491,17 @@ impl Vm {
         );
         o.flags.set(crate::object::ARGUMENTS);
         Value::Object(o)
+    }
+
+    pub fn get_method(&mut self, v: &Value, key: &str) -> Result<Value, Value> {
+        let m = self.get_prop(v, key)?;
+        if m.is_nullish() {
+            return Ok(Value::Undefined);
+        }
+        if !m.is_callable() {
+            return Err(self.type_error(format!("{} is not a function", inspect_plain(&m))));
+        }
+        Ok(m)
     }
 
     pub fn global_this(&self) -> Value {
@@ -2238,18 +2259,25 @@ impl Vm {
                 return Ok(it);
             }
         }
-        let sync = self.get_iterator(v)?;
-        let wrapper = self.new_object();
-        let next = Value::Object(Obj::new(
-            ObjKind::Bound(Box::new(crate::object::Bound {
-                target: self.async_from_sync_next.clone(),
-                this: sync,
-                args: Vec::new(),
-            })),
-            Some(self.realm.function_proto.clone()),
-        ));
-        wrapper.set_own("next", next);
-        Ok(Value::Object(wrapper))
+        let method = if v.is_nullish() {
+            Value::Undefined
+        } else {
+            self.get_prop(v, ITER_KEY)?
+        };
+        if !method.is_callable() {
+            return Err(self.type_error(format!("{} is not async iterable", inspect_plain(v))));
+        }
+        let it = self.call_value(&method, v.clone(), &[])?;
+        if !it.is_object() {
+            return Err(self.type_error("Result of the Symbol.iterator method is not an object"));
+        }
+        let next = self.get_prop(&it, "next")?;
+        let make = self
+            .globals
+            .get("%CreateAsyncFromSyncIterator%")
+            .cloned()
+            .unwrap_or_default();
+        self.call_value(&make, Value::Undefined, &[it, next])
     }
 
     fn protocol_iterator(&mut self, v: &Value) -> Result<Value, Value> {
@@ -2287,6 +2315,13 @@ impl Vm {
                 let o = o.clone();
                 return match self.resume(&o, Value::Undefined, ResumeMode::Next)? {
                     Step::Yield(v) => Ok(Some(v)),
+                    Step::YieldRaw(r) => {
+                        if self.get_prop(&r, "done")?.truthy() {
+                            Ok(None)
+                        } else {
+                            Ok(Some(self.get_prop(&r, "value")?))
+                        }
+                    }
                     _ => Ok(None),
                 };
             }
@@ -3143,6 +3178,121 @@ impl Vm {
                     self.stack.push(v);
                     self.stack.push(this);
                 }
+                Op::DelegateInit(is_async) => {
+                    let v = pop!();
+                    let it = if is_async {
+                        tri!(self.get_async_iterator(&v))
+                    } else {
+                        let method = if v.is_nullish() {
+                            Value::Undefined
+                        } else {
+                            tri!(self.get_prop(&v, ITER_KEY))
+                        };
+                        if !method.is_callable() {
+                            throw!(
+                                self.type_error(format!("{} is not iterable", inspect_plain(&v)))
+                            );
+                        }
+                        let it = tri!(self.call_value(&method, v.clone(), &[]));
+                        if !it.is_object() {
+                            throw!(self.type_error(
+                                "Result of the Symbol.iterator method is not an object"
+                            ));
+                        }
+                        it
+                    };
+                    let next = tri!(self.get_prop(&it, "next"));
+                    self.stack.push(it);
+                    self.stack.push(next);
+                    self.stack.push(Value::Number(0.0));
+                    self.stack.push(Value::Undefined);
+                }
+                Op::DelegateCall => {
+                    let n = self.stack.len();
+                    let it = self.stack[n - 4].clone();
+                    let next = self.stack[n - 3].clone();
+                    let mode = match self.stack[n - 2] {
+                        Value::Number(m) => m as u8,
+                        _ => 0,
+                    };
+                    let val = self.stack[n - 1].clone();
+                    let r = match mode {
+                        0 => tri!(self.call_value(&next, it, &[val])),
+                        1 => {
+                            let m = tri!(self.get_method(&it, "throw"));
+                            if m.is_undefined() {
+                                let ret = tri!(self.get_method(&it, "return"));
+                                if !ret.is_undefined() {
+                                    let r = tri!(self.call_value(&ret, it.clone(), &[]));
+                                    if !r.is_object() {
+                                        throw!(self.type_error("Iterator result is not an object"));
+                                    }
+                                }
+                                throw!(
+                                    self.type_error(
+                                        "The iterator does not provide a 'throw' method"
+                                    )
+                                );
+                            }
+                            tri!(self.call_value(&m, it, &[val]))
+                        }
+                        _ => {
+                            let m = tri!(self.get_method(&it, "return"));
+                            if m.is_undefined() {
+                                self.stack[n - 2] = Value::Number(3.0);
+                                self.stack.push(val);
+                                continue;
+                            }
+                            tri!(self.call_value(&m, it, &[val]))
+                        }
+                    };
+                    self.stack.push(r);
+                }
+                Op::DelegateDone(exit, ret) => {
+                    let n = self.stack.len();
+                    let mode = match self.stack[n - 3] {
+                        Value::Number(m) => m as u8,
+                        _ => 0,
+                    };
+                    if mode == 3 {
+                        ip = ret as usize;
+                        continue;
+                    }
+                    let r = self.stack[n - 1].clone();
+                    if !r.is_object() {
+                        throw!(self.type_error("Iterator result is not an object"));
+                    }
+                    let done = tri!(self.get_prop(&r, "done")).truthy();
+                    if done {
+                        let v = tri!(self.get_prop(&r, "value"));
+                        self.stack[n - 1] = v;
+                        ip = if mode == 2 { ret } else { exit } as usize;
+                        continue;
+                    }
+                    if proto.is_async {
+                        let v = tri!(self.get_prop(&r, "value"));
+                        self.stack[n - 1] = v;
+                    }
+                }
+                Op::YieldDelegate => {
+                    let v = pop!();
+                    self.frames[fi].ip = ip;
+                    if !self.suspend_frame(fi) {
+                        throw!(self.type_error("Cannot suspend outside of a coroutine"));
+                    }
+                    self.co_signal = Some(if proto.is_async {
+                        Signal::Yield
+                    } else {
+                        Signal::YieldRaw
+                    });
+                    return Ok(v);
+                }
+                Op::DelegateEnd => {
+                    let v = pop!();
+                    let n = self.stack.len();
+                    self.stack.truncate(n - 4);
+                    self.stack.push(v);
+                }
                 Op::ToPropertyKey => {
                     let v = pop!();
                     let k = tri!(self.to_property_key(&v));
@@ -3590,10 +3740,13 @@ impl Vm {
                         upvalues: ups.into_boxed_slice(),
                         home: RefCell::new(home),
                     });
-                    let o = Obj::new(
-                        ObjKind::Function(c),
-                        Some(self.realm.function_proto.clone()),
-                    );
+                    let fproto = match (c.proto.is_generator, c.proto.is_async) {
+                        (true, true) => &self.realm.async_generator_function_proto,
+                        (true, false) => &self.realm.generator_function_proto,
+                        (false, true) => &self.realm.async_function_proto,
+                        _ => &self.realm.function_proto,
+                    };
+                    let o = Obj::new(ObjKind::Function(c), Some(fproto.clone()));
                     self.stack.push(Value::Object(o));
                 }
                 Op::PopTo(n) => {
