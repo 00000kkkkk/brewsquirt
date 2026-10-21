@@ -48,6 +48,7 @@ pub enum IoEvent {
         request: HttpRequest,
         reply: Sender<HttpReply>,
     },
+    Stdin(Option<Vec<u8>>),
 }
 
 pub struct Io {

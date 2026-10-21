@@ -74,6 +74,7 @@ struct FnState {
     num_params: u32,
     arity: u32,
     has_rest: bool,
+    uses_arguments: bool,
     is_async: bool,
     is_generator: bool,
     fields: Option<Rc<Vec<ClassMember>>>,
@@ -99,6 +100,7 @@ impl FnState {
             num_params: 0,
             arity: 0,
             has_rest: false,
+            uses_arguments: false,
             is_async: false,
             is_generator: false,
             fields: None,
@@ -252,6 +254,7 @@ impl Compiler {
             num_params: st.num_params,
             arity: st.arity,
             has_rest: st.has_rest,
+            uses_arguments: st.uses_arguments,
             is_async: st.is_async,
             is_generator: st.is_generator,
             code: st.code,
@@ -1472,6 +1475,10 @@ impl Compiler {
                 }
             }
         }
+        if f.uses_arguments && f.kind != FuncKind::Arrow {
+            self.add_local("arguments".into(), false);
+            self.st().uses_arguments = true;
+        }
         for (i, p) in f.params.iter().enumerate() {
             if let Some(d) = &p.default {
                 let slot = (i + 1) as u32;
@@ -1626,6 +1633,7 @@ impl Compiler {
                     },
                     is_async: false,
                     is_generator: false,
+                    uses_arguments: false,
                     line: c.line,
                 })
             }
@@ -2371,6 +2379,7 @@ impl Compiler {
                     let n = self.plain_args(args)?;
                     self.emit(Op::SuperCall(n));
                 }
+                self.store_var(&"this".into(), true);
                 self.emit_field_inits()?;
             }
             ExprKind::SuperMember(m) => {

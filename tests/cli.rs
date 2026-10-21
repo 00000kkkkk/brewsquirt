@@ -187,3 +187,27 @@ fn test_runner_reports_results() {
     let stdout = normalize(&out.stdout);
     assert!(stdout.contains("tests: 2 passed (2 files"), "{stdout}");
 }
+
+#[test]
+fn stdin_readline_and_exit_code() {
+    use std::io::Write;
+    let mut child = jsq()
+        .current_dir(root())
+        .args([
+            "-e",
+            "import readline from \"node:readline\"\nconst rl = readline.createInterface({ input: process.stdin })\nlet n = 0\nfor await (const line of rl) { n++; console.log(n, line.toUpperCase()) }\nvoid (process.exitCode = n)",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn jsq");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(b"one\r\ntwo\nthree")
+        .expect("write stdin");
+    let out = child.wait_with_output().expect("wait jsq");
+    assert_eq!(normalize(&out.stdout), "1 ONE\n2 TWO\n3 THREE\n");
+    assert_eq!(out.status.code(), Some(3));
+}

@@ -1,6 +1,6 @@
 # JavaSquirt Language Reference
 
-This document describes JavaSquirt 0.5.0. JavaSquirt follows JavaScript semantics: for every
+This document describes JavaSquirt 0.6.0. JavaSquirt follows JavaScript semantics: for every
 supported feature, a program should print the same output under `jsq` as under Node.js. Features
 that are not implemented yet are listed in [Not yet supported](#not-yet-supported).
 
@@ -24,8 +24,11 @@ that are not implemented yet are listed in [Not yet supported](#not-yet-supporte
 - [Dates](#dates)
 - [Regular expressions](#regular-expressions)
 - [Modules](#modules)
+- [Binary data](#binary-data)
 - [Web APIs](#web-apis)
+- [Events and cancellation](#events-and-cancellation)
 - [HTTP servers](#http-servers)
+- [Node.js compatibility](#nodejs-compatibility)
 - [Testing](#testing)
 - [Builtins](#builtins)
 - [Memory management](#memory-management)
@@ -398,6 +401,24 @@ console.log(greet(), greet("jsq"), tally("args", 1, 2, 3))
 
 ```text
 hi stranger hi jsq args: 3
+```
+
+Inside a non-arrow function, `arguments` holds every argument the call received, including
+those beyond the declared parameters. Arrow functions see the `arguments` of the function they
+are written in.
+
+```js
+function sum() {
+  let total = 0
+  for (const n of arguments) total += n
+  return `${arguments.length} numbers, total ${total}`
+}
+
+console.log(sum(1, 2, 3, 4))
+```
+
+```text
+4 numbers, total 10
 ```
 
 ### Closures
@@ -1267,6 +1288,64 @@ cart has 3 items
 true
 ```
 
+## Binary data
+
+`ArrayBuffer` holds raw bytes. Typed arrays and `DataView` read and write them: `Int8Array`,
+`Uint8Array`, `Uint8ClampedArray`, `Int16Array`, `Uint16Array`, `Int32Array`, `Uint32Array`,
+`Float32Array` and `Float64Array`. Typed arrays have the array methods that do not change their
+length (`map`, `filter`, `reduce`, `sort`, `slice`, `subarray`, `set`, `fill`, `indexOf`,
+`includes`, `join`, `at`, `with`, `toSorted` and the rest), and they can be subclassed.
+
+```js
+const buf = new ArrayBuffer(8)
+const bytes = new Uint8Array(buf)
+const view = new DataView(buf)
+view.setUint32(0, 0xcafebabe)
+view.setInt16(4, -2, true)
+console.log(bytes, view.getUint16(0).toString(16))
+
+const samples = Float32Array.from([0.5, 1.25, -3])
+console.log(samples.map((x) => x * 2), samples.reduce((a, b) => a + b, 0))
+console.log(new Uint8ClampedArray([300, -5, 1.5]), new Int8Array([200]))
+```
+
+```text
+Uint8Array(8) [
+  202, 254, 186, 190,
+  254, 255,   0,   0
+] cafe
+Float32Array(3) [ 1, 2.5, -6 ] -1.25
+Uint8ClampedArray(3) [ 255, 0, 2 ] Int8Array(1) [ -56 ]
+```
+
+| API                                   | Description                                               |
+| ------------------------------------- | --------------------------------------------------------- |
+| `new TextEncoder().encode(text)`      | UTF-8 bytes of a string, as a `Uint8Array`                |
+| `new TextDecoder().decode(bytes)`     | A string from UTF-8 bytes; `{ fatal: true }` throws on bad input |
+| `btoa(text)`, `atob(base64)`          | Base64 of Latin-1 text and back                           |
+| `bytes.toHex()`, `Uint8Array.fromHex(text)` | Hex encoding of a `Uint8Array`                      |
+| `bytes.toBase64(options?)`, `Uint8Array.fromBase64(text, options?)` | Base64, or base64url with `{ alphabet: "base64url" }` |
+| `structuredClone(value)`              | Deep copy of objects, arrays, `Map`, `Set`, `Date`, `RegExp`, errors and binary data, keeping cycles |
+| `crypto.getRandomValues(typedArray)`  | Fills an integer typed array with secure random values    |
+| `crypto.randomUUID()`                 | A random version 4 UUID                                   |
+
+```js
+const encoded = new TextEncoder().encode("héllo")
+console.log(encoded, new TextDecoder().decode(encoded))
+console.log(encoded.toHex(), encoded.toBase64(), btoa("squirt"))
+
+const original = { when: new Date(0), tags: new Set(["a"]) }
+original.self = original
+const copy = structuredClone(original)
+console.log(copy.self === copy, copy.tags.has("a"), copy !== original)
+```
+
+```text
+Uint8Array(6) [ 104, 195, 169, 108, 108, 111 ] héllo
+68c3a96c6c6f aMOpbGxv c3F1aXJ0
+true true true
+```
+
 ## Web APIs
 
 The web platform classes are globals, loaded the first time a program mentions one of them.
@@ -1281,8 +1360,9 @@ failures reject with `TypeError: fetch failed`, with the reason in `cause`.
 | ------------ | ------------------------------------------------------------------ |
 | `method`     | Request method, `"GET"` by default                                 |
 | `headers`    | An object, an array of pairs or a `Headers`                        |
-| `body`       | A string or `URLSearchParams`                                      |
+| `body`       | A string, `URLSearchParams`, `ArrayBuffer` or typed array          |
 | `redirect`   | `"follow"`, `"manual"` or `"error"`                                |
+| `signal`     | An `AbortSignal` that cancels the request                          |
 | `timeout`    | Milliseconds before the request fails; no limit by default         |
 
 ```js
@@ -1294,7 +1374,7 @@ const repo = await res.json()
 console.log(repo.full_name, repo.stargazers_count)
 ```
 
-Bodies are text: `text()` and `json()` read them, and each body can be read once.
+`text()`, `json()`, `arrayBuffer()` and `bytes()` read a body, and each body can be read once.
 
 ### `Request`, `Response` and `Headers`
 
@@ -1339,6 +1419,35 @@ name=jsq&tags=fast%26wet false
 ```
 
 `encodeURIComponent`, `encodeURI`, `decodeURIComponent` and `decodeURI` are globals as well.
+
+## Events and cancellation
+
+`EventTarget`, `Event`, `AbortController`, `AbortSignal` and `DOMException` are globals.
+`AbortSignal.timeout(ms)` aborts after a delay without keeping the program alive, and
+`AbortSignal.any(signals)` aborts when any of the signals does.
+
+```js
+const controller = new AbortController()
+controller.signal.addEventListener("abort", () => console.log("aborted:", controller.signal.reason.name))
+controller.abort()
+
+try {
+  await fetch("https://example.com", { signal: AbortSignal.abort() })
+} catch (e) {
+  console.log(e.name, e.message)
+}
+
+const target = new EventTarget()
+target.addEventListener("ping", (e) => console.log("got", e.type), { once: true })
+target.dispatchEvent(new Event("ping"))
+target.dispatchEvent(new Event("ping"))
+```
+
+```text
+aborted: AbortError
+AbortError This operation was aborted
+got ping
+```
 
 ## HTTP servers
 
@@ -1402,6 +1511,71 @@ server.listen(0, async () => {
 
 ```text
 GET /ping?x=1
+```
+
+## Node.js compatibility
+
+Programs written for Node.js can import its core modules with or without the `node:` prefix.
+Each one is backed by the same runtime as the `squirt:` modules.
+
+| Module                         | What is there                                                       |
+| ------------------------------ | ------------------------------------------------------------------- |
+| `node:fs`                      | `readFileSync`, `writeFileSync`, `appendFileSync`, `existsSync`, `statSync`, `lstatSync`, `readdirSync` (with `withFileTypes` and `recursive`), `mkdirSync`, `mkdtempSync`, `rmSync`, `rmdirSync`, `unlinkSync`, `renameSync`, `copyFileSync`, `cpSync`, `realpathSync`, `symlinkSync`, `readlinkSync`, `accessSync`, callback versions of each, and `fs.promises` |
+| `node:fs/promises`             | The promise versions                                                |
+| `node:path`, `node:os`, `node:child_process` | As `squirt:path`, `squirt:os` and `squirt:child_process` |
+| `node:events`                  | `EventEmitter` with `on`, `once`, `off`, `emit`, `prependListener`, `listenerCount`, `eventNames`, and `events.once` |
+| `node:buffer`                  | `Buffer`                                                            |
+| `node:assert`                  | `ok`, `equal`, `strictEqual`, `deepStrictEqual`, `throws`, `rejects`, `match` and the rest |
+| `node:util`                    | `inspect`, `format`, `promisify`, `callbackify`, `inherits`, `types`, `isDeepStrictEqual` |
+| `node:url`                     | `URL`, `URLSearchParams`, `fileURLToPath`, `pathToFileURL`          |
+| `node:readline`, `node:readline/promises` | `createInterface` with `line` events, async iteration and `question` |
+| `node:http`                    | `createServer` and `STATUS_CODES`                                   |
+| `node:timers`, `node:timers/promises` | Timers, and `setTimeout` as a promise                        |
+| `node:process`                 | `process`                                                           |
+
+File system errors carry Node's `code`, `syscall`, `path` and `errno`, such as
+`ENOENT: no such file or directory, open 'missing.txt'`.
+
+`Buffer` is a `Uint8Array` subclass with `Buffer.from`, `alloc`, `concat`, `byteLength`,
+`compare`, `isBuffer`, `toString` and `write` in `utf8`, `hex`, `base64`, `base64url`, `latin1`,
+`ascii` and `utf16le`, plus `equals`, `indexOf`, `includes`, `slice`, `toJSON` and the
+`readUInt32LE`-style accessors.
+
+```js
+import { readFileSync, writeFileSync, rmSync } from "node:fs"
+import { EventEmitter } from "node:events"
+
+writeFileSync("greeting.txt", Buffer.from("hello from jsq"))
+const text = readFileSync("greeting.txt", "utf8")
+console.log(text, readFileSync("greeting.txt").subarray(0, 5))
+rmSync("greeting.txt")
+
+const bus = new EventEmitter()
+bus.once("done", (n) => console.log("done after", n))
+bus.emit("done", 3)
+console.log(Buffer.from("squirt").toString("base64"), bus.listenerCount("done"))
+```
+
+```text
+hello from jsq <Buffer 68 65 6c 6c 6f>
+done after 3
+c3F1aXJ0 0
+```
+
+`process` also has `stdout.write`, `stderr.write`, `stdin`, `nextTick`, `hrtime`, `uptime`,
+`pid`, `arch`, `versions`, `chdir` and `exitCode`, which becomes the exit status when the
+program ends. `process.stdin` emits `data` and `end`, supports `for await`, and works with
+`readline`:
+
+```js
+import readline from "node:readline"
+
+const rl = readline.createInterface({ input: process.stdin })
+let count = 0
+for await (const line of rl) {
+  count++
+  console.log(`${count}: ${line}`)
+}
 ```
 
 ## Testing
@@ -1497,7 +1671,8 @@ numeric arrays and `<ref *1>` markers for cycles. A first argument containing `%
 | `Map`    | `new Map(entries?)`, `set`, `get`, `has`, `delete`, `clear`, `size`, `forEach`                 |
 | `Set`    | `new Set(values?)`, `add`, `has`, `delete`, `clear`, `size`, `forEach`                         |
 | Errors   | `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, `URIError`, `EvalError`   |
-| Web      | `URL`, `URLSearchParams`, `Headers`, `Request`, `Response`                                     |
+| Web      | `URL`, `URLSearchParams`, `Headers`, `Request`, `Response`, `EventTarget`, `Event`, `AbortController`, `AbortSignal`, `DOMException` |
+| Binary   | `ArrayBuffer`, typed arrays, `DataView`, `TextEncoder`, `TextDecoder`, `Buffer`, `atob`, `btoa`, `structuredClone`, `crypto` |
 | Weak     | `WeakMap` (`get`, `set`, `has`, `delete`), `WeakSet` (`add`, `has`, `delete`), `WeakRef` (`deref`) with object keys |
 | Timing   | `performance.now()` for a monotonic clock in milliseconds, `Date.now()` for epoch milliseconds |
 | `squirt` | `squirt(n = 3)` returns `n` droplets, the one builtin no other language ships                   |
@@ -1531,7 +1706,13 @@ a|b 42 7
 | --------------------- | ---------------------------------------------------------- |
 | `process.argv`        | Array of strings with the program's command-line arguments |
 | `process.env`         | Object with the environment variables                      |
-| `process.exit(code?)` | Exits immediately with `code`, `0` by default              |
+| `process.exit(code?)` | Exits immediately with `code`, `process.exitCode` or `0`   |
+| `process.exitCode`    | The exit status used when the program ends normally        |
+| `process.stdout.write(data)` | Writes a string or bytes without a newline          |
+| `process.stdin`       | Standard input, see [Node.js compatibility](#nodejs-compatibility) |
+| `process.platform`, `process.arch`, `process.pid`, `process.versions` | Host details |
+| `process.cwd()`, `process.chdir(dir)` | The working directory                      |
+| `process.nextTick(fn, ...args)`, `process.hrtime()`, `process.uptime()` | Scheduling and timing |
 
 ```js
 const name = process.env.USER ?? "anonymous"
@@ -1614,8 +1795,10 @@ Dependency specs:
 These are on the roadmap and currently produce a `SyntaxError` or are absent:
 
 - `FinalizationRegistry`
-- Binary data: `ArrayBuffer`, typed arrays, and binary request or response bodies
-- Streaming bodies, `AbortController`, WebSockets and HTTPS servers
+- `BigInt`, `BigInt64Array` and `BigUint64Array`
+- Resizable and shared `ArrayBuffer`, `Blob` and `FormData`
+- Streaming bodies, WebSockets and HTTPS servers
+- `node:net`, `node:worker_threads` and `node:crypto`
 - `Intl` and locale-aware formatting beyond `en-US`
 - Getters on the global object (`globalThis`)
 - Tracing garbage collection

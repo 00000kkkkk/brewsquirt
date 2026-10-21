@@ -152,7 +152,7 @@ JavaSquirt 0.4.0 implements a large, practical subset of modern JavaScript:
 
 - **Values**: `undefined`, `null`, booleans, numbers, strings, arrays, objects, functions, classes, `Map`, `Set`, `Error`
 - **Bindings**: block-scoped `let` and `const`, hoisted function declarations
-- **Functions**: arrow functions, default parameters, rest parameters, closures
+- **Functions**: arrow functions, default parameters, rest parameters, `arguments`, closures
 - **Spread and destructuring**: spread in calls, arrays and objects; object and array destructuring with defaults and rest in `let`, `const` and parameters
 - **Control flow**: `if`/`else`, `while`, `do`/`while`, `for`, `for...of`, `for...in`, `switch`, `break`, `continue`
 - **Errors**: `try`/`catch`/`finally`, `throw`, `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, `URIError`, `EvalError`, with stack traces
@@ -170,6 +170,9 @@ JavaSquirt 0.4.0 implements a large, practical subset of modern JavaScript:
 - **Memory**: reference counting plus a cycle collector, so cyclic garbage is reclaimed
 - **Modules**: ES module `import` and `export` (named, default, namespace, renamed), relative and bare-name resolution
 - **Standard library**: `squirt:fs`, `squirt:path`, `squirt:os`, `squirt:child_process`, `squirt:util`
+- **Binary data**: `ArrayBuffer`, typed arrays, `DataView`, `TextEncoder`, `TextDecoder`, `Buffer`, base64 and hex, `structuredClone`, `crypto.randomUUID`
+- **Node.js compatibility**: `node:fs`, `node:path`, `node:events`, `node:assert`, `node:readline`, `node:util`, `node:url` and more, so many Node scripts run unchanged; `process.stdin`, `process.stdout.write`, `process.exitCode`
+- **Cancellation**: `AbortController`, `AbortSignal.timeout`, `EventTarget` and `DOMException`
 - **Networking**: `fetch` over HTTP and HTTPS, `URL`, `URLSearchParams`, `Headers`, `Request`, `Response`, and HTTP servers with `squirt:http` (`serve` and Node-style `createServer`)
 - **Testing**: `jsq test` with `squirt:test` (`describe`, `test`, `expect`, `assert`, hooks, async tests)
 - **Console**: output formatted exactly like Node's `util.inspect`
@@ -219,7 +222,9 @@ javasquirt/
     compiler.rs, bytecode.rs  single-pass compiler and instruction set
     vm.rs, value.rs, object.rs  stack VM, values, objects and prototypes
     builtins/                 console, Math, JSON, Map, Set, Error and friends
-    builtins/web.rs           fetch, URL, Request, Response and squirt:http
+    builtins/web.rs           fetch, URL, Request, Response, events, abort and squirt:http
+    builtins/binary.rs        ArrayBuffer, typed arrays, DataView, text codecs, crypto
+    builtins/node.rs          node: modules, Buffer, EventEmitter, readline, stdin
     builtins/testing.rs       squirt:test and squirt:util
     io.rs                     HTTP client and server threads feeding the event loop
     event_loop.rs             microtasks, timers, promises and I/O events
@@ -269,7 +274,9 @@ typos
 - [x] `Date`
 - [x] `fetch`, `URL` and HTTP servers
 - [x] Test runner
-- [ ] `ArrayBuffer`, typed arrays and binary bodies
+- [x] `ArrayBuffer`, typed arrays and binary bodies
+- [x] Node.js core modules
+- [ ] `BigInt`
 - [ ] WebSockets
 - [ ] Rope strings for fast `+=` in loops
 - [ ] Shapes and inline caches for property access

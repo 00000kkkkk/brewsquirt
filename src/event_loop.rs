@@ -609,6 +609,17 @@ impl Vm {
         if let Some(key) = self.timer_keys.remove(&id) {
             self.timers.remove(&key);
         }
+        self.unref_timers.remove(&id);
+    }
+
+    pub fn unref_timer(&mut self, id: u64) {
+        if self.timer_keys.contains_key(&id) {
+            self.unref_timers.insert(id);
+        }
+    }
+
+    fn has_refed_timers(&self) -> bool {
+        self.timers.len() > self.unref_timers.len()
     }
 
     fn run_next_timer(&mut self) -> Result<bool, Value> {
@@ -616,6 +627,9 @@ impl Vm {
             return Ok(false);
         };
         self.timer_keys.remove(&timer.id);
+        if timer.interval.is_none() {
+            self.unref_timers.remove(&timer.id);
+        }
         let now = self.start.elapsed().as_nanos();
         if due > now {
             self.flush();
@@ -645,6 +659,9 @@ impl Vm {
             return Ok(true);
         }
         if self.io.pending == 0 {
+            if !self.has_refed_timers() {
+                return Ok(false);
+            }
             return self.run_next_timer();
         }
         let wait = match self.timers.first_key_value() {

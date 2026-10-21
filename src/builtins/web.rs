@@ -7,19 +7,189 @@ use std::time::Duration;
 
 type R = Result<Value, Value>;
 
-pub const LAZY_GLOBALS: [&str; 6] = [
+pub const LAZY_GLOBALS: [&str; 11] = [
     "fetch",
     "Headers",
     "Request",
     "Response",
     "URL",
     "URLSearchParams",
+    "AbortController",
+    "AbortSignal",
+    "Event",
+    "EventTarget",
+    "DOMException",
 ];
 
 const WEB_SRC: &str = r##"
 (native) => {
   const lower = (name) => String(name).toLowerCase()
   let internal = false
+  const encoder = new TextEncoder()
+  const decoder = new TextDecoder()
+
+  const DOM_CODES = {
+    IndexSizeError: 1,
+    NotFoundError: 8,
+    NotSupportedError: 9,
+    InvalidStateError: 11,
+    SyntaxError: 12,
+    InvalidAccessError: 15,
+    TypeMismatchError: 17,
+    NetworkError: 19,
+    AbortError: 20,
+    TimeoutError: 23,
+    DataCloneError: 25,
+  }
+
+  class DOMException extends Error {
+    constructor(message = "", name = "Error") {
+      super(message)
+      const n = typeof name === "object" && name !== null ? String(name.name ?? "Error") : String(name)
+      Object.defineProperty(this, "name", { value: n, writable: true, configurable: true })
+      const lines = String(this.stack ?? "").split("\n")
+      lines[0] = `${n}: ${this.message}`
+      Object.defineProperty(this, "stack", { value: lines.join("\n"), writable: true, configurable: true })
+    }
+    get code() {
+      return DOM_CODES[this.name] ?? 0
+    }
+  }
+
+  const STOP = Symbol("stop")
+
+  class Event {
+    #type
+    #stopped = false
+    constructor(type, init = {}) {
+      if (arguments.length === 0) throw new TypeError('The "type" argument must be specified')
+      this.#type = String(type)
+      this.bubbles = !!init?.bubbles
+      this.cancelable = !!init?.cancelable
+      this.defaultPrevented = false
+      this.timeStamp = performance.now()
+      this.target = null
+      this.currentTarget = null
+    }
+    get type() {
+      return this.#type
+    }
+    preventDefault() {
+      if (this.cancelable) this.defaultPrevented = true
+    }
+    stopPropagation() {}
+    stopImmediatePropagation() {
+      this.#stopped = true
+    }
+    get [STOP]() {
+      return this.#stopped
+    }
+  }
+
+  class EventTarget {
+    #listeners = new Map()
+    addEventListener(type, listener, options) {
+      if (listener == null) return
+      const once = typeof options === "object" && options !== null && !!options.once
+      const signal = typeof options === "object" && options !== null ? options.signal : undefined
+      if (signal?.aborted) return
+      const key = String(type)
+      let list = this.#listeners.get(key)
+      if (!list) this.#listeners.set(key, (list = []))
+      if (list.some((l) => l.listener === listener)) return
+      list.push({ listener, once })
+      signal?.addEventListener("abort", () => this.removeEventListener(key, listener), { once: true })
+    }
+    removeEventListener(type, listener) {
+      const list = this.#listeners.get(String(type))
+      if (!list) return
+      const i = list.findIndex((l) => l.listener === listener)
+      if (i >= 0) list.splice(i, 1)
+    }
+    dispatchEvent(event) {
+      if (!(event instanceof Event)) throw new TypeError('The "event" argument must be an instance of Event')
+      event.target = this
+      event.currentTarget = this
+      const handler = this["on" + event.type]
+      if (typeof handler === "function") handler.call(this, event)
+      for (const l of [...(this.#listeners.get(event.type) ?? [])]) {
+        if (event[STOP]) break
+        if (l.once) this.removeEventListener(event.type, l.listener)
+        if (typeof l.listener === "function") l.listener.call(this, event)
+        else l.listener.handleEvent(event)
+      }
+      event.currentTarget = null
+      return !event.defaultPrevented
+    }
+  }
+
+  const SIGNAL_KEY = Symbol("signal")
+  const ABORT = Symbol("abort")
+
+  class AbortSignal extends EventTarget {
+    #aborted = false
+    #reason = undefined
+    #onabort = null
+    constructor(key) {
+      if (key !== SIGNAL_KEY) throw new TypeError("Illegal constructor")
+      super()
+    }
+    get aborted() {
+      return this.#aborted
+    }
+    get reason() {
+      return this.#reason
+    }
+    get onabort() {
+      return this.#onabort
+    }
+    set onabort(fn) {
+      this.#onabort = typeof fn === "function" ? fn : null
+    }
+    throwIfAborted() {
+      if (this.#aborted) throw this.#reason
+    }
+    [ABORT](reason) {
+      if (this.#aborted) return
+      this.#aborted = true
+      this.#reason = reason === undefined ? new DOMException("This operation was aborted", "AbortError") : reason
+      this.dispatchEvent(new Event("abort"))
+    }
+    static abort(reason) {
+      const s = new AbortSignal(SIGNAL_KEY)
+      s[ABORT](reason)
+      return s
+    }
+    static timeout(ms) {
+      const s = new AbortSignal(SIGNAL_KEY)
+      const id = setTimeout(() => {
+        s[ABORT](new DOMException("The operation was aborted due to timeout", "TimeoutError"))
+      }, Number(ms))
+      native.unref(id)
+      return s
+    }
+    static any(signals) {
+      const s = new AbortSignal(SIGNAL_KEY)
+      const list = [...signals]
+      const hit = list.find((x) => x.aborted)
+      if (hit) {
+        s[ABORT](hit.reason)
+        return s
+      }
+      for (const x of list) x.addEventListener("abort", () => s[ABORT](x.reason), { once: true })
+      return s
+    }
+  }
+
+  class AbortController {
+    #signal = new AbortSignal(SIGNAL_KEY)
+    get signal() {
+      return this.#signal
+    }
+    abort(reason) {
+      this.#signal[ABORT](reason)
+    }
+  }
 
   class Headers {
     #map = new Map()
@@ -412,11 +582,22 @@ const WEB_SRC: &str = r##"
     }
   }
 
-  function bodyText(body) {
+  function bodyInit(body) {
     if (body == null) return null
     if (typeof body === "string") return body
     if (body instanceof URLSearchParams) return body.toString()
+    if (body instanceof Uint8Array && internal) return body
+    if (body instanceof ArrayBuffer) return new Uint8Array(body.slice(0))
+    if (ArrayBuffer.isView(body)) {
+      return new Uint8Array(body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength))
+    }
     return String(body)
+  }
+
+  function toBytes(body) {
+    if (body == null) return new Uint8Array(0)
+    if (typeof body === "string") return encoder.encode(body)
+    return body
   }
 
   function defaultType(body) {
@@ -429,7 +610,7 @@ const WEB_SRC: &str = r##"
     #body
     #used = false
     constructor(body) {
-      this.#body = bodyText(body)
+      this.#body = bodyInit(body)
     }
     get body() {
       return this.#body
@@ -440,13 +621,21 @@ const WEB_SRC: &str = r##"
     #take() {
       if (this.#used) throw new TypeError("Body is unusable: Body has already been read")
       this.#used = true
-      return this.#body ?? ""
+      return this.#body
     }
     async text() {
-      return this.#take()
+      const b = this.#take()
+      return typeof b === "string" ? b : b === null ? "" : decoder.decode(b)
     }
     async json() {
-      return JSON.parse(this.#take())
+      return JSON.parse(await this.text())
+    }
+    async bytes() {
+      return new Uint8Array(await this.arrayBuffer())
+    }
+    async arrayBuffer() {
+      const b = toBytes(this.#take())
+      return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)
     }
   }
 
@@ -501,7 +690,7 @@ const WEB_SRC: &str = r##"
         if (t) this.headers.set("content-type", t)
       }
       this.redirect = init.redirect ?? src?.redirect ?? "follow"
-      this.signal = init.signal ?? src?.signal ?? null
+      this.signal = init.signal ?? src?.signal ?? new AbortSignal(SIGNAL_KEY)
     }
     clone() {
       if (this.bodyUsed) throw new TypeError("Request.clone: Body has already been consumed.")
@@ -515,8 +704,9 @@ const WEB_SRC: &str = r##"
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       throw new TypeError("fetch failed", { cause: new Error(`unsupported protocol ${url.protocol}`) })
     }
-    if (init.signal?.aborted) throw init.signal.reason ?? new Error("This operation was aborted")
-    const raw = await native.fetch(
+    const signal = req.signal
+    signal.throwIfAborted()
+    const [id, pending] = native.fetch(
       req.method,
       url.href,
       [...req.headers],
@@ -524,6 +714,23 @@ const WEB_SRC: &str = r##"
       Number(init.timeout ?? 0),
       req.redirect !== "manual",
     )
+    const raw = await new Promise((resolve, reject) => {
+      const onAbort = () => {
+        native.abort(id)
+        reject(signal.reason)
+      }
+      signal.addEventListener("abort", onAbort, { once: true })
+      pending.then(
+        (v) => {
+          signal.removeEventListener("abort", onAbort)
+          resolve(v)
+        },
+        (e) => {
+          signal.removeEventListener("abort", onAbort)
+          reject(e)
+        },
+      )
+    })
     if (req.redirect === "error" && raw.status >= 300 && raw.status < 400) {
       throw new TypeError("fetch failed", { cause: new Error("unexpected redirect") })
     }
@@ -577,7 +784,7 @@ const WEB_SRC: &str = r##"
       internal = true
       let req
       try {
-        const hasBody = raw.body !== "" && raw.method !== "GET" && raw.method !== "HEAD"
+        const hasBody = raw.body.length > 0 && raw.method !== "GET" && raw.method !== "HEAD"
         req = new Request(raw.url, { method: raw.method, headers: raw.headers, body: hasBody ? raw.body : null })
         req.remoteAddress = raw.remote
       } finally {
@@ -596,7 +803,7 @@ const WEB_SRC: &str = r##"
         })
         .then(([status, headers, body]) => {
           server.pendingRequests--
-          native.reply(replyId, status, headers, String(body))
+          native.reply(replyId, status, headers, typeof body === "string" ? body : toBytes(body))
         })
     }
     return server
@@ -611,7 +818,8 @@ const WEB_SRC: &str = r##"
       this.headers = Object.fromEntries(req.headers)
       this.httpVersion = "1.1"
       this.socket = { remoteAddress: req.remoteAddress }
-      this.#body = req.body ?? ""
+      const b = req.body
+      this.#body = b == null ? "" : typeof b === "string" ? b : decoder.decode(b)
     }
     on(event, fn) {
       if (event === "data" && this.#body !== "") queueMicrotask(() => fn(this.#body))
@@ -663,19 +871,32 @@ const WEB_SRC: &str = r##"
       return this
     }
     write(chunk) {
-      if (chunk != null) this.#chunks.push(String(chunk))
+      if (chunk != null) this.#chunks.push(chunk)
       this.headersSent = true
       return true
     }
     end(chunk, cb) {
       if (typeof chunk === "function") [chunk, cb] = [undefined, chunk]
       if (this.writableEnded) return this
-      if (chunk != null) this.#chunks.push(String(chunk))
+      if (chunk != null) this.#chunks.push(chunk)
       this.writableEnded = true
       this.headersSent = true
+      const textual = this.#chunks.every((c) => typeof c !== "object")
+      let body
+      if (textual) {
+        body = this.#chunks.join("")
+      } else {
+        const parts = this.#chunks.map((c) => (typeof c === "object" ? new Uint8Array(c.buffer ?? c, c.byteOffset ?? 0, c.byteLength) : encoder.encode(String(c))))
+        body = new Uint8Array(parts.reduce((n, p) => n + p.length, 0))
+        let at = 0
+        for (const p of parts) {
+          body.set(p, at)
+          at += p.length
+        }
+      }
       internal = true
       try {
-        this.#done(new Response(this.#chunks.join(""), { status: this.statusCode, headers: this.#headers }))
+        this.#done(new Response(body, { status: this.statusCode, headers: this.#headers }))
       } finally {
         internal = false
       }
@@ -726,7 +947,22 @@ const WEB_SRC: &str = r##"
 
   const STATUS_CODES = native.statusCodes
 
-  return { Headers, Request, Response, URL, URLSearchParams, fetch, serve, createServer, STATUS_CODES }
+  return {
+    Headers,
+    Request,
+    Response,
+    URL,
+    URLSearchParams,
+    AbortController,
+    AbortSignal,
+    Event,
+    EventTarget,
+    DOMException,
+    fetch,
+    serve,
+    createServer,
+    STATUS_CODES,
+  }
 }
 "##;
 
@@ -745,6 +981,8 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     method(vm, &natives, "serve", 3, native_serve);
     method(vm, &natives, "reply", 4, native_reply);
     method(vm, &natives, "close", 1, native_close);
+    method(vm, &natives, "abort", 1, native_abort);
+    method(vm, &natives, "unref", 1, native_unref);
     let codes = vm.new_object();
     for code in 100..600u16 {
         let text = io::status_text(code);
@@ -773,6 +1011,7 @@ pub fn http_module(vm: &mut Vm) -> Result<Value, Value> {
         "Request",
         "Response",
         "Headers",
+        "AbortController",
     ] {
         let v = vm.get_prop(&web, name)?;
         o.set_own(name, v);
@@ -918,7 +1157,10 @@ fn native_fetch(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let headers = pairs(vm, &arg(args, 2))?;
     let body = match arg(args, 3) {
         Value::Undefined | Value::Null => None,
-        v => Some(vm.to_string(&v)?.as_bytes().to_vec()),
+        v => match super::binary::buffer_source_bytes(&v) {
+            Some(b) => Some(b),
+            None => Some(vm.to_string(&v)?.as_bytes().to_vec()),
+        },
     };
     let ms = vm.to_number(&arg(args, 4))?;
     let timeout = (ms > 0.0).then(|| Duration::from_millis(ms as u64));
@@ -927,6 +1169,7 @@ fn native_fetch(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let id = vm.io.next_id();
     vm.io.pending += 1;
     vm.io_fetches.insert(id, p.clone());
+    let pair = vm.new_array(vec![(id as f64).into(), Value::Object(p)]);
     io::spawn_fetch(
         vm.io.tx.clone(),
         id,
@@ -939,7 +1182,21 @@ fn native_fetch(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             follow,
         },
     );
-    Ok(Value::Object(p))
+    Ok(pair)
+}
+
+fn native_abort(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let id = vm.to_number(&arg(args, 0))? as u64;
+    if vm.io_fetches.remove(&id).is_some() {
+        vm.io.pending -= 1;
+    }
+    Ok(Value::Undefined)
+}
+
+fn native_unref(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let id = vm.to_number(&arg(args, 0))? as u64;
+    vm.unref_timer(id);
+    Ok(Value::Undefined)
 }
 
 fn native_serve(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
@@ -973,7 +1230,10 @@ fn native_reply(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let id = vm.to_number(&arg(args, 0))? as u64;
     let status = vm.to_number(&arg(args, 1))? as u16;
     let headers = pairs(vm, &arg(args, 2))?;
-    let body = vm.to_string(&arg(args, 3))?.as_bytes().to_vec();
+    let body = match super::binary::buffer_source_bytes(&arg(args, 3)) {
+        Some(b) => b,
+        None => vm.to_string(&arg(args, 3))?.as_bytes().to_vec(),
+    };
     if let Some(tx) = vm.io_replies.remove(&id) {
         let _ = tx.send(HttpReply {
             status,
@@ -1000,7 +1260,7 @@ fn fetch_value(vm: &mut Vm, r: FetchResponse) -> Value {
     o.set_own("url", r.url.into());
     let headers = pairs_value(vm, r.headers);
     o.set_own("headers", headers);
-    o.set_own("body", String::from_utf8_lossy(&r.body).into_owned().into());
+    o.set_own("body", super::binary::new_uint8(vm, r.body));
     Value::Object(o)
 }
 
@@ -1010,13 +1270,14 @@ fn request_value(vm: &mut Vm, r: HttpRequest) -> Value {
     o.set_own("url", r.url.into());
     let headers = pairs_value(vm, r.headers);
     o.set_own("headers", headers);
-    o.set_own("body", String::from_utf8_lossy(&r.body).into_owned().into());
+    o.set_own("body", super::binary::new_uint8(vm, r.body));
     o.set_own("remote", r.remote.into());
     Value::Object(o)
 }
 
 pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
     match ev {
+        IoEvent::Stdin(chunk) => super::node::handle_stdin(vm, chunk)?,
         IoEvent::Fetch { id, result } => {
             let Some(p) = vm.io_fetches.remove(&id) else {
                 return Ok(());

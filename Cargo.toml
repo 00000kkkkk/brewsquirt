@@ -1,6 +1,6 @@
 [package]
 name = "javasquirt"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.85"
 description = "High-performance language with JS semantics and Rust speed"
@@ -24,6 +24,7 @@ path = "src/bin/vrotdaem.rs"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6", features = ["derive"] }
 fancy-regex = "0.19"
+getrandom = "0.2"
 indexmap = { version = "2.14", features = ["serde"] }
 mimalloc = { version = "0.1", default-features = false }
 rustc-hash = "2.1"

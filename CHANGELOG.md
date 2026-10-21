@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-21
+
+### Added
+
+- Binary data: `ArrayBuffer`, `DataView` and the nine typed arrays (`Int8Array` through
+  `Float64Array`, including `Uint8ClampedArray`) with their array methods, `from`, `of`,
+  `subarray`, `set`, iteration and subclassing.
+- `TextEncoder`, `TextDecoder`, `atob`, `btoa`, `Uint8Array.prototype.toHex` and `toBase64`,
+  `Uint8Array.fromHex` and `fromBase64`.
+- `structuredClone`, `crypto.getRandomValues` and `crypto.randomUUID`.
+- `EventTarget`, `Event`, `AbortController`, `AbortSignal` (`abort`, `timeout`, `any`) and
+  `DOMException`.
+- Binary bodies everywhere: `arrayBuffer()` and `bytes()` on `Request` and `Response`, typed
+  array and `ArrayBuffer` bodies for `fetch`, `serve` and `createServer`.
+- `fetch` cancellation through `signal`.
+- Node.js core modules, with or without the `node:` prefix: `fs` (sync, callback and promise
+  APIs with Node error codes), `fs/promises`, `path`, `os`, `child_process`, `events`,
+  `buffer`, `assert`, `util`, `url`, `readline`, `readline/promises`, `http`, `timers`,
+  `timers/promises` and `process`.
+- `Buffer` with the common encodings and the integer and float accessors.
+- `process.stdin` with `data`/`end` events and `for await`, `process.stdout.write`,
+  `process.stderr.write`, `process.nextTick`, `process.hrtime`, `process.uptime`,
+  `process.pid`, `process.arch`, `process.versions`, `process.chdir` and `process.exitCode`.
+- The `arguments` object.
+
+### Fixed
+
+- `super()` in a class that extends a builtin now binds `this` to the object the builtin
+  constructor returns.
+- Timers created by `AbortSignal.timeout` no longer keep the program running.
+
 ## [0.5.0] - 2026-10-21
 
 ### Added
@@ -150,7 +181,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Continuous integration on Linux, macOS and Windows, MSRV check, cargo-deny, CodeQL, coverage,
   benchmarks, and release archives for five targets.
 
-[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.2.0...v0.3.0

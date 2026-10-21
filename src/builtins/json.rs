@@ -129,6 +129,7 @@ impl Ser<'_> {
         }
         let entries: Vec<(Rc<str>, Value)> = match &o.kind {
             ObjKind::Map(_) | ObjKind::Set(_) | ObjKind::Iter(_) => Vec::new(),
+            ObjKind::Typed(_) => vm.own_entries(&Value::Object(o.clone())),
             _ => o
                 .props
                 .borrow()

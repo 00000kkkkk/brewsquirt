@@ -234,6 +234,7 @@ pub struct FuncDef {
     pub kind: FuncKind,
     pub is_async: bool,
     pub is_generator: bool,
+    pub uses_arguments: bool,
     pub line: u32,
 }
 

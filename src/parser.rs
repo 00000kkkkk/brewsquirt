@@ -59,6 +59,7 @@ pub fn parse(src: &str) -> R<Vec<Stmt>> {
         pos: 0,
         no_in: false,
         fn_depth: 0,
+        args_used: Vec::new(),
         in_async: false,
         in_generator: false,
         class_ids: Vec::new(),
@@ -81,6 +82,7 @@ struct Parser {
     in_generator: bool,
     class_ids: Vec<u32>,
     next_class_id: u32,
+    args_used: Vec<bool>,
 }
 
 impl Parser {
@@ -799,9 +801,11 @@ impl Parser {
         let saved = (self.in_async, self.in_generator);
         self.in_async = is_async;
         self.in_generator = is_generator;
+        self.args_used.push(false);
         let parsed = self
             .params()
             .and_then(|(params, rest)| Ok((params, rest, self.function_body()?)));
+        let uses_arguments = self.args_used.pop().unwrap_or(false);
         (self.in_async, self.in_generator) = saved;
         let (params, rest, body) = parsed?;
         Ok(Rc::new(FuncDef {
@@ -812,6 +816,7 @@ impl Parser {
             kind,
             is_async,
             is_generator,
+            uses_arguments,
             line,
         }))
     }
@@ -1190,6 +1195,7 @@ impl Parser {
                 kind: FuncKind::Arrow,
                 is_async,
                 is_generator: false,
+                uses_arguments: false,
                 line,
             })),
             line,
@@ -1817,6 +1823,7 @@ impl Parser {
                         in_generator: self.in_generator,
                         class_ids: self.class_ids.clone(),
                         next_class_id: self.next_class_id,
+                        args_used: vec![false],
                     };
                     if sub.is_eof() {
                         return Err(sub.error("Unexpected token '}'"));
@@ -1824,6 +1831,11 @@ impl Parser {
                     let e = sub.expression()?;
                     if !sub.is_eof() {
                         return Err(sub.unexpected());
+                    }
+                    if sub.args_used.first() == Some(&true) {
+                        if let Some(top) = self.args_used.last_mut() {
+                            *top = true;
+                        }
                     }
                     exprs.push(e);
                 }
@@ -1968,6 +1980,11 @@ impl Parser {
                     n if is_reserved(n) => return Err(self.unexpected()),
                     _ => {
                         self.advance();
+                        if &*name == "arguments" {
+                            if let Some(top) = self.args_used.last_mut() {
+                                *top = true;
+                            }
+                        }
                         ExprKind::Ident(name)
                     }
                 }

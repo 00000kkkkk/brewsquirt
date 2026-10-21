@@ -172,6 +172,7 @@ pub struct FunctionProto {
     pub num_params: u32,
     pub arity: u32,
     pub has_rest: bool,
+    pub uses_arguments: bool,
     pub is_async: bool,
     pub is_generator: bool,
     pub code: Vec<Op>,

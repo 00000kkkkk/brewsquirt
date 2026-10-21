@@ -190,6 +190,189 @@ pub enum ObjKind {
     WeakMap(Box<RefCell<WeakEntries>>),
     WeakSet(Box<RefCell<WeakKeys>>),
     WeakRef(std::rc::Weak<Obj>),
+    ArrayBuffer(RefCell<Vec<u8>>),
+    Typed(Box<View>),
+    DataView(Box<View>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TypedKind {
+    Int8,
+    Uint8,
+    Uint8Clamped,
+    Int16,
+    Uint16,
+    Int32,
+    Uint32,
+    Float32,
+    Float64,
+}
+
+fn modulo32(n: f64) -> u32 {
+    if !n.is_finite() {
+        return 0;
+    }
+    n.trunc().rem_euclid(4294967296.0) as u32
+}
+
+impl TypedKind {
+    pub const ALL: [TypedKind; 9] = [
+        TypedKind::Int8,
+        TypedKind::Uint8,
+        TypedKind::Uint8Clamped,
+        TypedKind::Int16,
+        TypedKind::Uint16,
+        TypedKind::Int32,
+        TypedKind::Uint32,
+        TypedKind::Float32,
+        TypedKind::Float64,
+    ];
+
+    pub fn size(self) -> usize {
+        match self {
+            TypedKind::Int8 | TypedKind::Uint8 | TypedKind::Uint8Clamped => 1,
+            TypedKind::Int16 | TypedKind::Uint16 => 2,
+            TypedKind::Int32 | TypedKind::Uint32 | TypedKind::Float32 => 4,
+            TypedKind::Float64 => 8,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            TypedKind::Int8 => "Int8Array",
+            TypedKind::Uint8 => "Uint8Array",
+            TypedKind::Uint8Clamped => "Uint8ClampedArray",
+            TypedKind::Int16 => "Int16Array",
+            TypedKind::Uint16 => "Uint16Array",
+            TypedKind::Int32 => "Int32Array",
+            TypedKind::Uint32 => "Uint32Array",
+            TypedKind::Float32 => "Float32Array",
+            TypedKind::Float64 => "Float64Array",
+        }
+    }
+
+    pub fn is_float(self) -> bool {
+        matches!(self, TypedKind::Float32 | TypedKind::Float64)
+    }
+
+    pub fn read(self, b: &[u8], little: bool) -> f64 {
+        macro_rules! rd {
+            ($t:ty, $n:expr) => {{
+                let mut a = [0u8; $n];
+                a.copy_from_slice(&b[..$n]);
+                (if little {
+                    <$t>::from_le_bytes(a)
+                } else {
+                    <$t>::from_be_bytes(a)
+                }) as f64
+            }};
+        }
+        match self {
+            TypedKind::Int8 => b[0] as i8 as f64,
+            TypedKind::Uint8 | TypedKind::Uint8Clamped => b[0] as f64,
+            TypedKind::Int16 => rd!(i16, 2),
+            TypedKind::Uint16 => rd!(u16, 2),
+            TypedKind::Int32 => rd!(i32, 4),
+            TypedKind::Uint32 => rd!(u32, 4),
+            TypedKind::Float32 => rd!(f32, 4),
+            TypedKind::Float64 => rd!(f64, 8),
+        }
+    }
+
+    pub fn write(self, b: &mut [u8], n: f64, little: bool) {
+        macro_rules! wr {
+            ($v:expr) => {{
+                let v = $v;
+                let bytes = if little {
+                    v.to_le_bytes()
+                } else {
+                    v.to_be_bytes()
+                };
+                b[..bytes.len()].copy_from_slice(&bytes);
+            }};
+        }
+        match self {
+            TypedKind::Int8 | TypedKind::Uint8 => b[0] = modulo32(n) as u8,
+            TypedKind::Uint8Clamped => {
+                b[0] = if n.is_nan() || n <= 0.0 {
+                    0
+                } else if n >= 255.0 {
+                    255
+                } else {
+                    let f = n.floor();
+                    let d = n - f;
+                    let r = if d > 0.5 || (d == 0.5 && f % 2.0 != 0.0) {
+                        f + 1.0
+                    } else {
+                        f
+                    };
+                    r as u8
+                }
+            }
+            TypedKind::Int16 | TypedKind::Uint16 => wr!(modulo32(n) as u16),
+            TypedKind::Int32 | TypedKind::Uint32 => wr!(modulo32(n)),
+            TypedKind::Float32 => wr!(n as f32),
+            TypedKind::Float64 => wr!(n),
+        }
+    }
+}
+
+pub struct View {
+    pub kind: TypedKind,
+    pub buffer: Rc<Obj>,
+    pub offset: usize,
+    pub length: usize,
+}
+
+impl View {
+    pub fn byte_len(&self) -> usize {
+        self.length * self.kind.size()
+    }
+
+    pub fn store(&self) -> &RefCell<Vec<u8>> {
+        match &self.buffer.kind {
+            ObjKind::ArrayBuffer(b) => b,
+            _ => unreachable!("view over a non-buffer"),
+        }
+    }
+
+    pub fn get(&self, i: usize) -> Option<f64> {
+        if i >= self.length {
+            return None;
+        }
+        let size = self.kind.size();
+        let start = self.offset + i * size;
+        let b = self.store().borrow();
+        b.get(start..start + size).map(|x| self.kind.read(x, true))
+    }
+
+    pub fn set(&self, i: usize, n: f64) {
+        if i >= self.length {
+            return;
+        }
+        let size = self.kind.size();
+        let start = self.offset + i * size;
+        let mut b = self.store().borrow_mut();
+        if let Some(x) = b.get_mut(start..start + size) {
+            self.kind.write(x, n, true);
+        }
+    }
+
+    pub fn values(&self) -> Vec<f64> {
+        let size = self.kind.size();
+        let b = self.store().borrow();
+        let end = (self.offset + self.byte_len()).min(b.len());
+        b[self.offset.min(end)..end]
+            .chunks_exact(size)
+            .map(|c| self.kind.read(c, true))
+            .collect()
+    }
+
+    pub fn bytes(&self) -> Vec<u8> {
+        let b = self.store().borrow();
+        let end = (self.offset + self.byte_len()).min(b.len());
+        b[self.offset.min(end)..end].to_vec()
+    }
 }
 
 pub type WeakEntries = rustc_hash::FxHashMap<usize, (std::rc::Weak<Obj>, Value)>;

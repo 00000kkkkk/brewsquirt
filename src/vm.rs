@@ -77,6 +77,10 @@ pub struct Realm {
     pub weakset_proto: Rc<Obj>,
     pub weakref_proto: Rc<Obj>,
     pub error_protos: Vec<Rc<Obj>>,
+    pub array_buffer_proto: Rc<Obj>,
+    pub typed_proto: Rc<Obj>,
+    pub typed_protos: Vec<Rc<Obj>>,
+    pub dataview_proto: Rc<Obj>,
 }
 
 impl Realm {
@@ -88,7 +92,16 @@ impl Realm {
         for _ in 1..ErrorKind::ALL.len() {
             error_protos.push(Obj::new(ObjKind::Ordinary, Some(error_proto.clone())));
         }
+        let typed_proto = mk();
+        let typed_protos = crate::object::TypedKind::ALL
+            .iter()
+            .map(|_| Obj::new(ObjKind::Ordinary, Some(typed_proto.clone())))
+            .collect();
         Realm {
+            array_buffer_proto: mk(),
+            typed_proto,
+            typed_protos,
+            dataview_proto: mk(),
             function_proto: mk(),
             array_proto: mk(),
             string_proto: mk(),
@@ -191,6 +204,7 @@ pub struct Vm {
     pub(crate) timers: BTreeMap<(u128, u64), Timer>,
     pub(crate) timer_keys: FxHashMap<u64, (u128, u64)>,
     pub(crate) timer_seq: u64,
+    pub(crate) unref_timers: rustc_hash::FxHashSet<u64>,
     pub(crate) pending_rejections: Vec<Rc<Obj>>,
     pub(crate) co_signal: Option<Signal>,
     pub accessors_used: bool,
@@ -208,6 +222,9 @@ pub struct Vm {
     pub(crate) io_servers: FxHashMap<u64, (Value, crate::io::ServerHandle)>,
     pub(crate) io_replies: FxHashMap<u64, std::sync::mpsc::Sender<crate::io::HttpReply>>,
     pub(crate) web: Option<Value>,
+    pub(crate) node: Option<Value>,
+    pub(crate) stdin_handler: Option<Value>,
+    pub(crate) stdin_stopped: bool,
 }
 
 impl Vm {
@@ -247,6 +264,7 @@ impl Vm {
             timers: BTreeMap::new(),
             timer_keys: FxHashMap::default(),
             timer_seq: 0,
+            unref_timers: rustc_hash::FxHashSet::default(),
             pending_rejections: Vec::new(),
             co_signal: None,
             accessors_used: false,
@@ -264,6 +282,9 @@ impl Vm {
             io_servers: FxHashMap::default(),
             io_replies: FxHashMap::default(),
             web: None,
+            node: None,
+            stdin_handler: None,
+            stdin_stopped: false,
         };
         crate::gc::configure_from_env();
         builtins::install(&mut vm);
@@ -387,6 +408,33 @@ impl Vm {
         let _ = self.err.flush();
     }
 
+    pub fn load_lazy_global(&mut self, name: &str) -> Result<bool, Value> {
+        if self.web.is_none() && builtins::web::LAZY_GLOBALS.contains(&name) {
+            builtins::web::load(self)?;
+            return Ok(true);
+        }
+        if self.node.is_none() && builtins::node::LAZY_GLOBALS.contains(&name) {
+            builtins::node::load(self)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub fn import_node(&mut self, name: &str) -> Result<Option<Value>, Value> {
+        let key = format!("node:{name}");
+        if let Some(v) = self.builtin_modules.get(&key) {
+            return Ok(Some(v.clone()));
+        }
+        match builtins::node::module(self, name) {
+            Some(Ok(v)) => {
+                self.builtin_modules.insert(key, v.clone());
+                Ok(Some(v))
+            }
+            Some(Err(e)) => Err(e),
+            None => Ok(None),
+        }
+    }
+
     pub fn import_builtin(&mut self, name: &str) -> Result<Value, Value> {
         if let Some(v) = self.builtin_modules.get(name) {
             return Ok(v.clone());
@@ -408,6 +456,20 @@ impl Vm {
     pub fn import_module(&mut self, spec: &str, from: &Rc<ModuleInfo>) -> Result<Value, Value> {
         if let Some(name) = spec.strip_prefix("squirt:") {
             return self.import_builtin(name);
+        }
+        if let Some(name) = spec.strip_prefix("node:") {
+            return match self.import_node(name)? {
+                Some(v) => Ok(v),
+                None => {
+                    Err(self
+                        .make_error(ErrorKind::Error, format!("No such built-in module: {spec}")))
+                }
+            };
+        }
+        if !spec.starts_with('.') && !spec.starts_with('/') && !spec.contains(':') {
+            if let Some(v) = self.import_node(spec)? {
+                return Ok(v);
+            }
         }
         let path = match module::resolve(spec, &from.dir) {
             Ok(p) => p,
@@ -665,6 +727,9 @@ impl Vm {
         let p = &c.proto;
         let np = p.num_params as usize;
         let ci = self.stack.len() - argc - 2;
+        let all_args = p
+            .uses_arguments
+            .then(|| self.stack[ci + 2..ci + 2 + argc].to_vec());
         if argc < np {
             for _ in argc..np {
                 self.stack.push(Value::Undefined);
@@ -680,6 +745,10 @@ impl Vm {
             self.stack.push(arr);
         } else if argc > np {
             self.stack.truncate(ci + 2 + np);
+        }
+        if let Some(all) = all_args {
+            let arr = self.new_array(all);
+            self.stack.push(arr);
         }
         self.frames.push(Frame {
             closure: c,
@@ -899,6 +968,27 @@ impl Vm {
             ObjKind::Map(m) if key == "size" => {
                 return Value::Number(m.borrow().len() as f64);
             }
+            ObjKind::Typed(t) => {
+                if let Some(i) = array_index(key) {
+                    return t.get(i).map(Value::Number).unwrap_or_default();
+                }
+                match key {
+                    "length" => return Value::Number(t.length as f64),
+                    "byteLength" => return Value::Number(t.byte_len() as f64),
+                    "byteOffset" => return Value::Number(t.offset as f64),
+                    "buffer" => return Value::Object(t.buffer.clone()),
+                    _ => {}
+                }
+            }
+            ObjKind::DataView(t) => match key {
+                "byteLength" => return Value::Number(t.length as f64),
+                "byteOffset" => return Value::Number(t.offset as f64),
+                "buffer" => return Value::Object(t.buffer.clone()),
+                _ => {}
+            },
+            ObjKind::ArrayBuffer(b) if key == "byteLength" => {
+                return Value::Number(b.borrow().len() as f64);
+            }
             ObjKind::Set(s) if key == "size" => {
                 return Value::Number(s.borrow().len() as f64);
             }
@@ -1031,6 +1121,16 @@ impl Vm {
                         return Ok(());
                     }
                 }
+                if let ObjKind::Typed(t) = &o.kind {
+                    if let Some(i) = array_index(&key) {
+                        let x = self.to_number(&val)?;
+                        t.set(i, x);
+                        return Ok(());
+                    }
+                    if matches!(&*key, "length" | "byteLength" | "byteOffset" | "buffer") {
+                        return Ok(());
+                    }
+                }
                 if let ObjKind::Array(a) = &o.kind {
                     if let Some(i) = array_index(&key) {
                         return self.set_array_index(a, i, val);
@@ -1084,6 +1184,9 @@ impl Vm {
                         if let ObjKind::Array(a) = &o.kind {
                             return Ok(a.borrow().get(i).cloned().unwrap_or_default());
                         }
+                        if let ObjKind::Typed(t) = &o.kind {
+                            return Ok(t.get(i).map(Value::Number).unwrap_or_default());
+                        }
                     }
                     Value::Str(s) => {
                         return Ok(char_at16(s, i).map(Value::from).unwrap_or_default());
@@ -1102,6 +1205,14 @@ impl Vm {
                 let i = *n as usize;
                 if i as f64 == *n && !o.frozen.get() {
                     return self.set_array_index(a, i, val);
+                }
+            }
+            if let ObjKind::Typed(t) = &o.kind {
+                let i = *n as usize;
+                if i as f64 == *n {
+                    let x = self.to_number(&val)?;
+                    t.set(i, x);
+                    return Ok(());
                 }
             }
         }
@@ -1504,6 +1615,11 @@ impl Vm {
                         keys.push(Value::Str(i.to_string().into()));
                     }
                 }
+                if let ObjKind::Typed(t) = &o.kind {
+                    for i in 0..t.length {
+                        keys.push(Value::Str(i.to_string().into()));
+                    }
+                }
                 for (k, _) in o.props.borrow().enumerable() {
                     if !is_symbol_key(k) {
                         keys.push(Value::Str(k.clone()));
@@ -1806,11 +1922,7 @@ impl Vm {
                     }
                     let n = name!(k);
                     let mut slot = self.globals.slot(&n);
-                    if slot.is_none()
-                        && self.web.is_none()
-                        && builtins::web::LAZY_GLOBALS.contains(&&*n)
-                    {
-                        tri!(builtins::web::load(self));
+                    if slot.is_none() && tri!(self.load_lazy_global(&n)) {
                         slot = self.globals.slot(&n);
                     }
                     match slot {
@@ -1865,8 +1977,8 @@ impl Vm {
                 }
                 Op::TypeofGlobal(k) => {
                     let n = name!(k);
-                    if self.web.is_none() && builtins::web::LAZY_GLOBALS.contains(&&*n) {
-                        tri!(builtins::web::load(self));
+                    if self.globals.slot(&n).is_none() {
+                        tri!(self.load_lazy_global(&n));
                     }
                     let t = self
                         .globals
@@ -2697,6 +2809,11 @@ impl Vm {
                 if let ObjKind::Array(a) = &o.kind {
                     for (i, x) in a.borrow().iter().enumerate() {
                         out.push((Rc::from(i.to_string()), x.clone()));
+                    }
+                }
+                if let ObjKind::Typed(t) = &o.kind {
+                    for (i, x) in t.values().into_iter().enumerate() {
+                        out.push((Rc::from(i.to_string()), Value::Number(x)));
                     }
                 }
                 for (k, x) in o.props.borrow().enumerable() {

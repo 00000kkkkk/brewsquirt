@@ -1,0 +1,15 @@
+[ 'listener ping true', 'object ping', 'listener ping true' ]
+x true true false
+false undefined
+true AbortError This operation was aborted true true [ 'listener', 'onabort' ]
+thrown AbortError 20
+true custom
+true custom
+TypeError Illegal constructor
+NotFoundError nope 8 NotFoundError: nope true
+timeout TimeoutError The operation was aborted due to timeout
+lazy false
+null hi✓
+Uint8Array(6) [ 104, 195, 169, 108, 108, 111 ]
+Uint8Array(4) [ 1, 0, 2, 0 ]
+null ArrayBuffer { [Uint8Contents]: <01 02 03>, [byteLength]: 3 }

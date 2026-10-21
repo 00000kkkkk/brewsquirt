@@ -1,0 +1,94 @@
+import fs from "node:fs"
+import { readFileSync, writeFileSync, existsSync } from "fs"
+import fsp from "node:fs/promises"
+import path from "node:path"
+import { EventEmitter, once } from "node:events"
+import assert from "node:assert"
+import { promisify, inspect, format } from "node:util"
+import { Buffer as B } from "node:buffer"
+import { setTimeout as wait } from "node:timers/promises"
+import { fileURLToPath, pathToFileURL } from "node:url"
+import os from "node:os"
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jsq-"))
+const file = path.join(dir, "a.txt")
+writeFileSync(file, "hello\nworld\n")
+fs.appendFileSync(file, Buffer.from([0x21, 0x0a]))
+console.log(readFileSync(file, "utf8"), readFileSync(file), readFileSync(file).toString("base64"))
+console.log(existsSync(file), existsSync(path.join(dir, "nope")), fs.statSync(file).size, fs.statSync(file).isFile(), fs.statSync(dir).isDirectory())
+fs.mkdirSync(path.join(dir, "sub", "deep"), { recursive: true })
+fs.writeFileSync(path.join(dir, "sub", "b.bin"), new Uint8Array([1, 2, 3]))
+console.log(fs.readdirSync(dir), fs.readdirSync(dir, { withFileTypes: true }).map((d) => `${d.name}:${d.isDirectory()}`))
+console.log(fs.readdirSync(dir, { recursive: true }).map((p) => p.split(path.sep).join("/")).sort())
+fs.renameSync(file, path.join(dir, "c.txt"))
+fs.copyFileSync(path.join(dir, "c.txt"), path.join(dir, "d.txt"))
+console.log(fs.readdirSync(dir))
+try {
+  fs.readFileSync("missing-file.txt")
+} catch (e) {
+  console.log(e.code, e.syscall, e.path, e.message)
+}
+try {
+  fs.rmSync(path.join(dir, "sub"))
+} catch (e) {
+  console.log(e.code)
+}
+fs.rmSync(path.join(dir, "sub"), { recursive: true })
+fs.rmSync(path.join(dir, "ghost"), { force: true })
+fs.unlinkSync(path.join(dir, "d.txt"))
+console.log(await fsp.readFile(path.join(dir, "c.txt"), "utf8"), (await fsp.readdir(dir)).length)
+await fsp.writeFile(path.join(dir, "e.json"), JSON.stringify({ ok: 1 }))
+console.log(JSON.parse(await fsp.readFile(path.join(dir, "e.json"), { encoding: "utf8" })))
+fs.readFile(path.join(dir, "e.json"), "utf8", (err, data) => console.log("callback", err, data))
+await wait(5)
+fs.rmSync(dir, { recursive: true, force: true })
+console.log(fs.existsSync(dir))
+
+const b = Buffer.from("héllo wörld")
+console.log(b, b.length, b.toString(), b.toString("hex"), b.toString("base64"), b.toString("latin1"))
+console.log(Buffer.from("68656c6c6f", "hex").toString(), Buffer.from("aGVsbG8=", "base64").toString(), Buffer.from("aGVsbG8", "base64url").toString())
+console.log(Buffer.alloc(4, "ab"), Buffer.alloc(3), Buffer.concat([Buffer.from("a"), Buffer.from("bc")]), Buffer.byteLength("✓"), Buffer.isBuffer(b), Buffer.isBuffer(new Uint8Array(1)))
+const nb = Buffer.alloc(8)
+nb.writeUInt32BE(0xdeadbeef, 0)
+nb.writeInt16LE(-2, 4)
+console.log(nb, nb.readUInt32BE(0), nb.readInt16LE(4), nb.readUint8(0), nb.slice(0, 2), nb.subarray(2, 4) instanceof Buffer)
+console.log(b.indexOf("wö"), b.includes("xyz"), b.equals(Buffer.from("héllo wörld")), Buffer.compare(Buffer.from("a"), Buffer.from("b")), JSON.stringify(Buffer.from("hi")))
+console.log(Buffer.from(JSON.parse(JSON.stringify(Buffer.from("hi")))).toString(), B === Buffer, Buffer.from(new Uint16Array([1, 2]).buffer))
+console.log(Buffer.alloc(60), [Buffer.from("x")], { b: Buffer.from("y") })
+
+class Bus extends EventEmitter {}
+const bus = new Bus()
+const log = []
+bus.on("msg", (a, b) => log.push(`on ${a} ${b}`))
+bus.once("msg", (a) => log.push(`once ${a}`))
+bus.prependListener("msg", () => log.push("first"))
+console.log(bus.emit("msg", 1, 2), bus.emit("msg", 3, 4), bus.emit("none"), bus.listenerCount("msg"), bus.eventNames())
+console.log(log)
+try {
+  bus.emit("error", new Error("boom"))
+} catch (e) {
+  console.log("caught", e.message)
+}
+setTimeout(() => bus.emit("ready", "go"), 5)
+console.log(await once(bus, "ready"))
+
+assert.strictEqual(1, 1)
+assert.deepStrictEqual({ a: [1, 2] }, { a: [1, 2] })
+assert.ok(true)
+assert.throws(() => {
+  throw new TypeError("bad")
+}, TypeError)
+assert.throws(() => JSON.parse("{"), { name: "SyntaxError" })
+await assert.rejects(Promise.reject(new Error("x")), /x/)
+try {
+  assert.strictEqual(1, 2)
+} catch (e) {
+  console.log(e.name, e.code, e.actual, e.expected, e.operator)
+}
+const sleepCb = (ms, cb) => setTimeout(() => cb(null, ms * 2), ms)
+console.log(await promisify(sleepCb)(3), format("%s-%d", "a", 1), inspect({ z: 1 }))
+console.log(typeof fileURLToPath(pathToFileURL("x.txt")), pathToFileURL("/tmp/a b.txt").href.startsWith("file:///"))
+process.stdout.write("no newline")
+process.stdout.write(" then\n")
+const ticked = await new Promise((resolve) => process.nextTick(resolve, "ticked"))
+console.log(ticked, typeof process.hrtime()[0], process.arch.length > 0, typeof process.pid, typeof process.uptime())

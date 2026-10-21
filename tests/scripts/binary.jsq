@@ -1,0 +1,71 @@
+console.log(new Uint8Array([1,2,3]), new Float32Array([1.5, 2, 0.1]), new Int16Array(0), new Uint8Array(200))
+console.log(new ArrayBuffer(3), new ArrayBuffer(0), new ArrayBuffer(60), new ArrayBuffer(130))
+console.log(new DataView(new ArrayBuffer(4), 1, 2))
+console.log({ a: new Uint8Array([1]), b: [new Float64Array([1, 2])] })
+console.log([new Uint8Array(10)], new Uint8Array(30))
+const u = new Uint8Array([1,2]); u.extra = 5; console.log(u)
+console.log(String(new Uint8Array([1,2])), Object.prototype.toString.call(new Uint8Array(1)), JSON.stringify({u: new Uint8Array([1,2])}))
+const i8 = new Int8Array([127, 128, -129, 255, 1.9, -1.9, NaN, Infinity])
+const u8c = new Uint8ClampedArray([-5, 300, 1.5, 2.5, 0.5, 254.5, NaN])
+const u16 = new Uint16Array([65536, -1, 70000])
+const i32 = new Int32Array([2 ** 31, -(2 ** 31) - 1, 4294967295])
+const u32 = new Uint32Array([-1, 2 ** 32 + 5])
+const f32 = new Float32Array([Math.PI, 1e40, -0])
+const f64 = new Float64Array([Math.PI, -0, NaN])
+console.log(i8, u8c, u16, i32, u32, f32, f64)
+const buf = new ArrayBuffer(8)
+const view = new Uint8Array(buf)
+const words = new Uint16Array(buf, 2, 2)
+words[0] = 0x1234
+words[1] = 0xabcd
+console.log(view, words, words.byteOffset, words.byteLength, words.length, words.buffer === buf, Uint16Array.BYTES_PER_ELEMENT)
+const dv = new DataView(buf)
+dv.setUint32(4, 0xdeadbeef)
+dv.setInt16(0, -2, true)
+console.log(view, dv.getUint32(4), dv.getUint32(4, true), dv.getInt16(0, true), dv.getUint8(0), dv.getFloat32(4))
+dv.setFloat64(0, Math.E)
+console.log(dv.getFloat64(0), dv.getFloat64(0, true), view)
+const a = Uint8Array.from([5, 3, 9, 1], (x) => x * 2)
+console.log(a, Uint8Array.of(1, 2, 300), Float64Array.from(new Set([1.5, 2.5])))
+console.log(a.map((x) => x + 1), a.filter((x) => x > 5), a.reduce((s, x) => s + x, 0), a.join("-"), a.indexOf(18), a.includes(6), a.at(-1))
+console.log([...a], Array.from(a.entries()), [...a.keys()], a.some((x) => x > 17), a.every((x) => x % 2 === 0), a.find((x) => x > 6), a.findLastIndex((x) => x < 10))
+console.log(a.slice(1, 3), a.subarray(1, 3), a.toSorted(), a.toReversed(), a.with(0, 77), a)
+const sub = a.subarray(1, 3)
+sub[0] = 100
+console.log(a, sub, sub.byteOffset)
+a.sort((x, y) => y - x)
+console.log(a, a.reverse(), a.fill(7, 1, 3), a.copyWithin(0, 2))
+const t = new Uint8Array(6)
+t.set([1, 2, 3], 2)
+t.set(new Uint8Array([9]), 0)
+console.log(t, Object.keys(t), Object.entries(new Uint8Array([4, 5])), t.length)
+for (const x of new Uint8Array([10, 20])) console.log(x)
+for (const k in new Uint8Array([10, 20])) console.log("key", k)
+console.log(new Float64Array([1, NaN, -0, 0, -Infinity, 3]).sort(), new Int8Array([3, -1, 2]).sort())
+try { new Uint16Array(new ArrayBuffer(3)) } catch (e) { console.log(e.name, e.message) }
+try { new Uint16Array(new ArrayBuffer(4), 1) } catch (e) { console.log(e.name, e.message) }
+try { Uint8Array(2) } catch (e) { console.log(e.name, e.message) }
+try { new Uint8Array(-1) } catch (e) { console.log(e.name, e.message) }
+try { dv.getUint32(6) } catch (e) { console.log(e.name, e.message) }
+console.log(ArrayBuffer.isView(dv), ArrayBuffer.isView(buf), buf.slice(2, 4), buf.byteLength, new Uint8Array(buf.slice(4)))
+console.log(new TextEncoder().encode("héllo ✓"), new TextDecoder().decode(new Uint8Array([104, 195, 169, 0xe2, 0x9c, 0x93])))
+console.log(new TextDecoder().decode(new Uint8Array([0xef, 0xbb, 0xbf, 65, 0xff, 66])), new TextDecoder().decode(), new TextEncoder().encoding)
+try { new TextDecoder("utf-8", { fatal: true }).decode(new Uint8Array([0xff])) } catch (e) { console.log(e.name) }
+const into = new Uint8Array(5)
+console.log(new TextEncoder().encodeInto("a✓bc", into), into)
+console.log(btoa("hello world"), atob("aGVsbG8gd29ybGQ="), btoa(String.fromCharCode(255, 0, 128)), atob(" aGk= "))
+try { btoa("✓") } catch (e) { console.log(e.name) }
+const orig = { n: 1, d: new Date(0), r: /x/gi, m: new Map([[1, { deep: [1, 2] }]]), s: new Set(["a"]), u: new Uint8Array([1, 2]), nested: { arr: [1, [2]] } }
+orig.self = orig
+const cl = structuredClone(orig)
+console.log(cl, cl !== orig, cl.self === cl, cl.m.get(1) !== orig.m.get(1), cl.u.buffer !== orig.u.buffer, cl.d instanceof Date)
+try { structuredClone({ f() {} }) } catch (e) { console.log(e.name) }
+const e2 = structuredClone(new TypeError("bad"))
+console.log(e2 instanceof TypeError, e2.message, e2.name)
+const rnd = crypto.getRandomValues(new Uint8Array(16))
+console.log(rnd.length, typeof crypto.randomUUID(), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(crypto.randomUUID()))
+class Bytes extends Uint8Array {
+  sum() { return this.reduce((a, b) => a + b, 0) }
+}
+const bb = new Bytes([1, 2, 3])
+console.log(bb.sum(), bb instanceof Uint8Array, bb instanceof Bytes, bb.length)

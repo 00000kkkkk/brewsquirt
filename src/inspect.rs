@@ -682,6 +682,133 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
                 inner,
             )
         }
+        ObjKind::Typed(t) if class_name(o).as_deref() == Some("Buffer") => {
+            let bytes = t.bytes();
+            let mut s = String::from("<Buffer");
+            for b in bytes.iter().take(50) {
+                s.push_str(&format!(" {b:02x}"));
+            }
+            if bytes.len() > 50 {
+                let more = bytes.len() - 50;
+                s.push_str(&format!(
+                    " ... {more} more byte{}",
+                    if more == 1 { "" } else { "s" }
+                ));
+            }
+            s.push('>');
+            s
+        }
+        ObjKind::Typed(t) => {
+            let values = t.values();
+            let total = values.len();
+            let name = t.kind.name();
+            let props = own_props(o, false);
+            if total == 0 && props.is_empty() {
+                return format!("{name}(0) []");
+            }
+            if rt > MAX_DEPTH {
+                return format!("[{name}]");
+            }
+            let inner = enter(ctx, ptr, rt);
+            let mut output: Vec<String> = values
+                .iter()
+                .take(MAX_ITEMS)
+                .map(|&n| format_number(n))
+                .collect();
+            let has_more = total > MAX_ITEMS;
+            if has_more {
+                let more = total - MAX_ITEMS;
+                output.push(format!(
+                    "... {more} more item{}",
+                    if more == 1 { "" } else { "s" }
+                ));
+            }
+            let numeric_len = output.len();
+            for (k, v) in &props {
+                output.push(format_prop(ctx, k, v, inner));
+            }
+            let numeric = numeric_len == output.len();
+            let mut base = format!("{name}({total})");
+            leave(ctx, ptr, &mut base);
+            reduce(
+                ctx,
+                output,
+                Shape {
+                    base,
+                    open: "[".to_string(),
+                    close: "]",
+                    array: Some((has_more, numeric)),
+                },
+                inner,
+            )
+        }
+        ObjKind::ArrayBuffer(b) => {
+            if rt > MAX_DEPTH {
+                return "[ArrayBuffer]".to_string();
+            }
+            let bytes = b.borrow();
+            let shown: Vec<String> = bytes
+                .iter()
+                .take(MAX_ITEMS)
+                .map(|x| format!("{x:02x}"))
+                .collect();
+            let mut contents = shown.join(" ");
+            if bytes.len() > MAX_ITEMS {
+                let more = bytes.len() - MAX_ITEMS;
+                contents.push_str(&format!(
+                    " ... {more} more byte{}",
+                    if more == 1 { "" } else { "s" }
+                ));
+            }
+            let len = bytes.len();
+            drop(bytes);
+            let inner = enter(ctx, ptr, rt);
+            let mut output = vec![
+                format!("[Uint8Contents]: <{contents}>"),
+                format!("[byteLength]: {len}"),
+            ];
+            for (k, v) in own_props(o, false) {
+                output.push(format_prop(ctx, &k, &v, inner));
+            }
+            let mut base = String::new();
+            leave(ctx, ptr, &mut base);
+            reduce(
+                ctx,
+                output,
+                Shape {
+                    base,
+                    open: "ArrayBuffer {".to_string(),
+                    close: "}",
+                    array: None,
+                },
+                inner,
+            )
+        }
+        ObjKind::DataView(t) => {
+            if rt > MAX_DEPTH {
+                return "[DataView]".to_string();
+            }
+            let inner = enter(ctx, ptr, rt);
+            let buffer = child(ctx, &Value::Object(t.buffer.clone()), inner);
+            let output = vec![
+                format!("[byteLength]: {}", t.length),
+                format!("[byteOffset]: {}", t.offset),
+                format!("[buffer]: {buffer}"),
+            ];
+            let mut base = String::new();
+            leave(ctx, ptr, &mut base);
+            reduce(
+                ctx,
+                output,
+                Shape {
+                    base,
+                    open: "DataView {".to_string(),
+                    close: "}",
+                    array: None,
+                },
+                inner,
+            )
+        }
         ObjKind::Ordinary => {
             let cname = class_name(o);
             let prefix = match (&cname, o.proto.borrow().is_none()) {

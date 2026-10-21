@@ -142,7 +142,9 @@ fn obj_edges(o: &Obj, f: &mut dyn FnMut(Edge<'_>)) {
         | ObjKind::RegExp(_)
         | ObjKind::Date(_)
         | ObjKind::WeakSet(_)
-        | ObjKind::WeakRef(_) => {}
+        | ObjKind::WeakRef(_)
+        | ObjKind::ArrayBuffer(_) => {}
+        ObjKind::Typed(t) | ObjKind::DataView(t) => f(Edge::Obj(&t.buffer)),
         ObjKind::WeakMap(m) => {
             if let Ok(m) = m.try_borrow() {
                 for (_, v) in m.values() {

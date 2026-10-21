@@ -1,7 +1,9 @@
 mod array;
+pub mod binary;
 mod collections;
 mod date;
 mod json;
+pub mod node;
 mod number;
 mod object;
 mod promise;
@@ -24,6 +26,7 @@ pub use json::{json_parse, json_stringify};
 pub use promise::run_prelude;
 pub use regexp::make_regexp;
 pub use symbol::{iter_result, symbol_text};
+pub use system::exit_code;
 
 pub fn arg(args: &[Value], i: usize) -> Value {
     args.get(i).cloned().unwrap_or_default()
@@ -102,6 +105,7 @@ pub fn install(vm: &mut Vm) {
     symbol::install(vm);
     system::install(vm);
     web::install(vm);
+    binary::install(vm);
 }
 
 pub fn hide_builtin_members(vm: &mut Vm) {
@@ -132,10 +136,13 @@ pub fn hide_builtin_members(vm: &mut Vm) {
         &r.weakmap_proto,
         &r.weakset_proto,
         &r.weakref_proto,
+        &r.array_buffer_proto,
+        &r.typed_proto,
+        &r.dataview_proto,
     ] {
         hide(p);
     }
-    for p in &r.error_protos {
+    for p in r.error_protos.iter().chain(r.typed_protos.iter()) {
         hide(p);
     }
     for name in [
@@ -164,6 +171,19 @@ pub fn hide_builtin_members(vm: &mut Vm) {
         "Math",
         "JSON",
         "Reflect",
+        "ArrayBuffer",
+        "DataView",
+        "TextEncoder",
+        "TextDecoder",
+        "Int8Array",
+        "Uint8Array",
+        "Uint8ClampedArray",
+        "Int16Array",
+        "Uint16Array",
+        "Int32Array",
+        "Uint32Array",
+        "Float32Array",
+        "Float64Array",
     ] {
         if let Some(Value::Object(o)) = vm.globals.get(name) {
             hide(o);

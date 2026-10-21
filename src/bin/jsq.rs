@@ -128,7 +128,10 @@ fn finish(vm: &mut Vm, r: Result<Option<String>, javasquirt::Value>) -> ExitCode
                 vm.write_out("\n");
             }
             vm.flush();
-            ExitCode::SUCCESS
+            match javasquirt::builtins::exit_code(vm) {
+                0 => ExitCode::SUCCESS,
+                n => ExitCode::from(n as u8),
+            }
         }
         Err(e) => {
             let msg = vm.format_uncaught(&e);

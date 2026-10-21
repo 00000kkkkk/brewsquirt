@@ -123,7 +123,10 @@ fn execute(command: Command) -> Result<ExitCode, String> {
                     let r = vm.run_file(&main).and_then(|_| vm.run_event_loop());
                     vm.flush();
                     match r {
-                        Ok(_) => ExitCode::SUCCESS,
+                        Ok(_) => match javasquirt::builtins::exit_code(&mut vm) {
+                            0 => ExitCode::SUCCESS,
+                            n => ExitCode::from(n as u8),
+                        },
                         Err(e) => {
                             eprintln!("{}", vm.format_uncaught(&e));
                             ExitCode::FAILURE

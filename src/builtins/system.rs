@@ -34,6 +34,62 @@ pub fn install(vm: &mut Vm) {
     process.set_own("version", format!("v{}", crate::VERSION).into());
     method(vm, &process, "exit", 1, exit);
     method(vm, &process, "cwd", 0, cwd);
+    method(vm, &process, "chdir", 1, chdir);
+    method(vm, &process, "nextTick", 1, next_tick);
+    method(vm, &process, "hrtime", 1, hrtime);
+    method(vm, &process, "uptime", 0, uptime);
+    method(vm, &process, "memoryUsage", 0, memory_usage);
+    method(vm, &process, "on", 2, process_on);
+    method(vm, &process, "once", 2, process_on);
+    method(vm, &process, "off", 2, process_on);
+    process.set_own("pid", Value::Number(std::process::id() as f64));
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "x86" => "ia32",
+        other => other,
+    };
+    process.set_own("arch", arch.into());
+    process.set_own("exitCode", Value::Undefined);
+    process.set_own(
+        "execPath",
+        std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+            .into(),
+    );
+    let versions = vm.new_object();
+    versions.set_own("jsq", crate::VERSION.into());
+    versions.set_own("javasquirt", crate::VERSION.into());
+    process.set_own("versions", Value::Object(versions));
+    process.set_own(
+        "release",
+        Value::Object({
+            let r = vm.new_object();
+            r.set_own("name", "javasquirt".into());
+            r
+        }),
+    );
+    for (name, fd, f) in [
+        ("stdout", 1.0, stdout_write as crate::object::NativeFn),
+        ("stderr", 2.0, stderr_write as crate::object::NativeFn),
+    ] {
+        let stream = vm.new_object();
+        method(vm, &stream, "write", 1, f);
+        use std::io::IsTerminal;
+        let tty = if fd == 1.0 {
+            std::io::stdout().is_terminal()
+        } else {
+            std::io::stderr().is_terminal()
+        };
+        stream.set_own("isTTY", Value::Bool(tty));
+        stream.set_own("fd", Value::Number(fd));
+        method(vm, &stream, "on", 2, process_on);
+        method(vm, &stream, "once", 2, process_on);
+        process.set_own(name, Value::Object(stream));
+    }
+    let getter = native_fn(vm, "stdin", 0, process_stdin);
+    vm.define_accessor(&process, "stdin".into(), getter, false);
     vm.define_global("process", Value::Object(process));
 
     let performance = vm.new_object();
@@ -189,11 +245,109 @@ fn assert(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 
 fn exit(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let code = match arg(args, 0) {
-        Value::Undefined => 0,
+        Value::Undefined => exit_code(vm),
         v => to_integer(vm, &v)? as i32,
     };
     vm.flush();
     std::process::exit(code)
+}
+
+pub fn exit_code(vm: &mut Vm) -> i32 {
+    let Some(process) = vm.globals.get("process").cloned() else {
+        return 0;
+    };
+    match vm.get_prop(&process, "exitCode") {
+        Ok(Value::Number(n)) => n as i32,
+        Ok(Value::Str(s)) => s.parse().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn write_chunk(vm: &mut Vm, args: &[Value]) -> Result<Vec<u8>, Value> {
+    let v = arg(args, 0);
+    if let Some(b) = super::binary::buffer_source_bytes(&v) {
+        return Ok(b);
+    }
+    Ok(vm.to_string(&v)?.as_bytes().to_vec())
+}
+
+fn call_write_callback(vm: &mut Vm, args: &[Value]) {
+    if let Some(cb) = args.iter().skip(1).find(|a| a.is_callable()) {
+        vm.queue_microtask(cb.clone(), Vec::new());
+    }
+}
+
+fn stdout_write(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let bytes = write_chunk(vm, args)?;
+    let _ = vm.out.write_all(&bytes);
+    call_write_callback(vm, args);
+    Ok(Value::Bool(true))
+}
+
+fn stderr_write(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let bytes = write_chunk(vm, args)?;
+    let _ = vm.out.flush();
+    let _ = vm.err.write_all(&bytes);
+    let _ = vm.err.flush();
+    call_write_callback(vm, args);
+    Ok(Value::Bool(true))
+}
+
+fn process_on(_vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    Ok(this)
+}
+
+fn process_stdin(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    let node = super::node::load(vm)?;
+    let stdin = vm.get_prop(&node, "stdin")?;
+    if let Value::Object(p) = &this {
+        p.set_own("stdin", stdin.clone());
+    }
+    Ok(stdin)
+}
+
+fn chdir(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let p = vm.to_string(&arg(args, 0))?;
+    std::env::set_current_dir(&*p).map_err(|e| super::node::fs_error(vm, &e, "chdir", &p, None))?;
+    Ok(Value::Undefined)
+}
+
+fn next_tick(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let f = arg(args, 0);
+    expect_fn(vm, &f)?;
+    vm.queue_microtask(f, args.get(1..).unwrap_or(&[]).to_vec());
+    Ok(Value::Undefined)
+}
+
+fn hrtime(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let t = vm.start.elapsed();
+    let mut secs = t.as_secs() as f64;
+    let mut nanos = t.subsec_nanos() as f64;
+    if let Value::Object(prev) = arg(args, 0) {
+        let prev_secs = vm.get_prop(&Value::Object(prev.clone()), "0")?;
+        let prev_nanos = vm.get_prop(&Value::Object(prev), "1")?;
+        let prev_secs = vm.to_number(&prev_secs)?;
+        let prev_nanos = vm.to_number(&prev_nanos)?;
+        secs -= prev_secs;
+        nanos -= prev_nanos;
+        if nanos < 0.0 {
+            secs -= 1.0;
+            nanos += 1e9;
+        }
+    }
+    Ok(vm.new_array(vec![Value::Number(secs), Value::Number(nanos)]))
+}
+
+fn uptime(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    Ok(Value::Number(vm.start.elapsed().as_secs_f64()))
+}
+
+fn memory_usage(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    let o = vm.new_object();
+    for key in ["rss", "heapTotal", "heapUsed", "external", "arrayBuffers"] {
+        o.set_own(key, Value::Number(0.0));
+    }
+    Ok(Value::Object(o))
 }
 
 fn cwd(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
