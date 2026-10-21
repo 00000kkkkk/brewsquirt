@@ -34,7 +34,14 @@ pub fn install(vm: &mut Vm) {
     let sp = vm.realm.symbol_proto.clone();
     method(vm, &sp, "toString", 0, symbol_to_string);
     method(vm, &sp, "valueOf", 0, symbol_value_of);
-    let symbol = make_ctor(vm, "Symbol", 0, symbol_ctor, None, &sp);
+    let symbol = make_ctor(
+        vm,
+        "Symbol",
+        0,
+        symbol_ctor,
+        Some(crate::object::wrapper_marker),
+        &sp,
+    );
     method(vm, &symbol, "for", 1, symbol_for);
     method(vm, &symbol, "keyFor", 1, symbol_key_for);
     vm.symbol_iterator = well_known("Symbol.iterator", ITER_KEY);
@@ -203,7 +210,7 @@ fn new_symbol(vm: &mut Vm, description: Option<Rc<str>>) -> Value {
 }
 
 fn symbol_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    if this.is_object() {
+    if super::constructing(&this) {
         return Err(vm.type_error("Symbol is not a constructor"));
     }
     let description = match arg(args, 0) {
@@ -238,14 +245,20 @@ pub fn symbol_text(s: &Symbol) -> String {
 }
 
 fn symbol_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    match &this {
+    match crate::object::unwrap_primitive(&this)
+        .as_ref()
+        .unwrap_or(&this)
+    {
         Value::Symbol(s) => Ok(symbol_text(s).into()),
         _ => Err(vm.type_error("Symbol.prototype.toString requires that 'this' be a Symbol")),
     }
 }
 
-fn symbol_value_of(_vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    Ok(this)
+fn symbol_value_of(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    match crate::object::unwrap_primitive(&this).unwrap_or(this) {
+        Value::Symbol(s) => Ok(Value::Symbol(s)),
+        _ => Err(vm.type_error("Symbol.prototype.valueOf requires that 'this' be a Symbol")),
+    }
 }
 
 fn array_values(vm: &mut Vm, this: Value, _args: &[Value]) -> R {

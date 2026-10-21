@@ -143,7 +143,8 @@ fn obj_edges(o: &Obj, f: &mut dyn FnMut(Edge<'_>)) {
         | ObjKind::Date(_)
         | ObjKind::WeakSet(_)
         | ObjKind::WeakRef(_)
-        | ObjKind::ArrayBuffer(_) => {}
+        | ObjKind::ArrayBuffer(_)
+        | ObjKind::Primitive(_) => {}
         ObjKind::Typed(t) | ObjKind::DataView(t) => f(Edge::Obj(&t.buffer)),
         ObjKind::Global => {}
         ObjKind::Proxy(p) => {

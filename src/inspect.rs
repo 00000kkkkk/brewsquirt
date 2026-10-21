@@ -692,6 +692,18 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             }
         }
         ObjKind::Accessor(_) => "[Getter/Setter]".to_string(),
+        ObjKind::Primitive(p) => {
+            let kind = match p {
+                Value::Str(_) => "String",
+                Value::Number(_) => "Number",
+                Value::Bool(_) => "Boolean",
+                Value::Symbol(_) => "Symbol",
+                Value::BigInt(_) => "BigInt",
+                _ => "Object",
+            };
+            let inner = format_value(ctx, p, rt, false);
+            format!("[{kind}: {inner}]")
+        }
         ObjKind::RegExp(r) => format!("/{}/{}", r.data.source, r.data.flags),
         ObjKind::Date(t) => {
             crate::builtins::iso_string(t.get()).unwrap_or_else(|| "Invalid Date".to_string())

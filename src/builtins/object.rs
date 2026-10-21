@@ -121,18 +121,19 @@ pub fn install(vm: &mut Vm) {
     let bp = vm.realm.boolean_proto.clone();
     method(vm, &bp, "toString", 0, bool_to_string);
     method(vm, &bp, "valueOf", 0, bool_value_of);
-    let boolean = make_ctor(vm, "Boolean", 1, boolean_ctor, None, &bp);
+    let boolean = make_ctor(
+        vm,
+        "Boolean",
+        1,
+        boolean_ctor,
+        Some(crate::object::wrapper_marker),
+        &bp,
+    );
     vm.define_global("Boolean", Value::Object(boolean));
 }
 
 fn to_object(vm: &mut Vm, v: &Value) -> Result<Rc<Obj>, Value> {
-    match v {
-        Value::Object(o) => Ok(o.clone()),
-        Value::Undefined | Value::Null => {
-            Err(vm.type_error("Cannot convert undefined or null to object"))
-        }
-        _ => Ok(vm.new_object()),
-    }
+    vm.to_object(v)
 }
 
 fn property_is_enumerable(vm: &mut Vm, this: Value, args: &[Value]) -> R {
@@ -209,6 +210,9 @@ fn object_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
             ObjKind::RegExp(_) => "RegExp",
             ObjKind::Date(_) => "Date",
             ObjKind::Typed(t) => t.kind.name(),
+            ObjKind::Primitive(Value::Str(_)) => "String",
+            ObjKind::Primitive(Value::Number(_)) => "Number",
+            ObjKind::Primitive(Value::Bool(_)) => "Boolean",
             ObjKind::Proxy(p) => {
                 let t = p.target.borrow().clone();
                 match t {
@@ -257,7 +261,8 @@ fn is_prototype_of(_vm: &mut Vm, this: Value, args: &[Value]) -> R {
 fn object_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     match arg(args, 0) {
         Value::Object(o) => Ok(Value::Object(o)),
-        _ => Ok(Value::Object(vm.new_object())),
+        Value::Undefined | Value::Null => Ok(Value::Object(vm.new_object())),
+        v => Ok(Value::Object(vm.wrap_primitive(v))),
     }
 }
 
@@ -690,7 +695,7 @@ fn global_eval(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         Ok(p) => p,
         Err(e) => return Err(vm.syntax_error_value(&e, "<eval>")),
     };
-    vm.run_proto(proto)
+    vm.run_script_proto(proto)
 }
 
 fn error_ctor<const K: usize>(vm: &mut Vm, this: Value, args: &[Value]) -> R {
@@ -791,14 +796,32 @@ fn error_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     }
 }
 
-fn boolean_ctor(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    Ok(Value::Bool(arg(args, 0).truthy()))
+fn boolean_ctor(_vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let b = Value::Bool(arg(args, 0).truthy());
+    Ok(super::box_for(&this, b.clone()).unwrap_or(b))
 }
 
-fn bool_to_string(_vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    Ok(if this.truthy() { "true" } else { "false" }.into())
+fn this_bool(vm: &mut Vm, this: &Value, name: &str) -> Result<bool, Value> {
+    match crate::object::unwrap_primitive(this)
+        .as_ref()
+        .unwrap_or(this)
+    {
+        Value::Bool(b) => Ok(*b),
+        _ => Err(vm.type_error(format!(
+            "Boolean.prototype.{name} requires that 'this' be a Boolean"
+        ))),
+    }
 }
 
-fn bool_value_of(_vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    Ok(Value::Bool(this.truthy()))
+fn bool_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    Ok(if this_bool(vm, &this, "toString")? {
+        "true"
+    } else {
+        "false"
+    }
+    .into())
+}
+
+fn bool_value_of(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    Ok(Value::Bool(this_bool(vm, &this, "valueOf")?))
 }

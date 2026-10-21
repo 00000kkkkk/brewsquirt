@@ -10,50 +10,152 @@ type R = Result<Value, Value>;
 
 pub fn install(vm: &mut Vm) {
     let ap = vm.realm.array_proto.clone();
-    let methods: &[(&str, u32, crate::object::NativeFn)] = &[
-        ("push", 1, push),
-        ("pop", 0, pop),
-        ("shift", 0, shift),
-        ("unshift", 1, unshift),
-        ("slice", 2, slice),
-        ("splice", 2, splice),
-        ("concat", 1, concat),
-        ("join", 1, join),
-        ("reverse", 0, reverse),
-        ("indexOf", 1, index_of),
-        ("lastIndexOf", 1, last_index_of),
-        ("includes", 1, includes),
-        ("find", 1, find),
-        ("findIndex", 1, find_index),
-        ("findLast", 1, find_last),
-        ("findLastIndex", 1, find_last_index),
-        ("filter", 1, filter),
-        ("map", 1, map),
-        ("forEach", 1, for_each),
-        ("reduce", 1, reduce),
-        ("reduceRight", 1, reduce_right),
-        ("some", 1, some),
-        ("every", 1, every),
-        ("sort", 1, sort),
-        ("toSorted", 1, to_sorted),
-        ("toReversed", 0, to_reversed),
-        ("flat", 0, flat),
-        ("flatMap", 1, flat_map),
-        ("fill", 1, fill),
-        ("at", 1, at),
-        ("keys", 0, keys),
-        ("values", 0, values),
-        ("entries", 0, entries),
-        ("toString", 0, to_string),
-    ];
-    for (name, arity, f) in methods {
-        method(vm, &ap, name, *arity, *f);
+    let fns: &[crate::object::NativeFn] = dispatch_table!(
+        0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33
+        34 35 36 37
+    );
+    for (i, (name, arity, _, _)) in METHODS.iter().enumerate() {
+        method(vm, &ap, name, *arity, fns[i]);
     }
     let array = make_ctor(vm, "Array", 1, array_ctor, None, &ap);
     method(vm, &array, "isArray", 1, is_array);
     method(vm, &array, "from", 1, from);
     method(vm, &array, "of", 0, of);
     vm.define_global("Array", Value::Object(array));
+}
+
+const METHODS: &[(&str, u32, crate::object::NativeFn, bool)] = &[
+    ("push", 1, push, false),
+    ("pop", 0, pop, false),
+    ("shift", 0, shift, false),
+    ("unshift", 1, unshift, false),
+    ("slice", 2, slice, true),
+    ("splice", 2, splice, true),
+    ("concat", 1, concat, true),
+    ("join", 1, join, false),
+    ("reverse", 0, reverse, false),
+    ("indexOf", 1, index_of, false),
+    ("lastIndexOf", 1, last_index_of, false),
+    ("includes", 1, includes, false),
+    ("find", 1, find, false),
+    ("findIndex", 1, find_index, false),
+    ("findLast", 1, find_last, false),
+    ("findLastIndex", 1, find_last_index, false),
+    ("filter", 1, filter, true),
+    ("map", 1, map, true),
+    ("forEach", 1, for_each, false),
+    ("reduce", 1, reduce, false),
+    ("reduceRight", 1, reduce_right, false),
+    ("some", 1, some, false),
+    ("every", 1, every, false),
+    ("sort", 1, sort, false),
+    ("toSorted", 1, to_sorted, false),
+    ("toReversed", 0, to_reversed, false),
+    ("flat", 0, flat, true),
+    ("flatMap", 1, flat_map, true),
+    ("fill", 1, fill, false),
+    ("at", 1, at, false),
+    ("keys", 0, keys, false),
+    ("values", 0, values, false),
+    ("entries", 0, entries, false),
+    ("toString", 0, to_string, false),
+    ("copyWithin", 2, copy_within, false),
+    ("toSpliced", 2, to_spliced, false),
+    ("with", 2, with, false),
+    ("toLocaleString", 0, to_locale_string, false),
+];
+
+macro_rules! dispatch_table {
+    ($($i:literal)*) => {
+        &[$(dispatch::<$i> as crate::object::NativeFn),*]
+    };
+}
+use dispatch_table;
+
+fn dispatch<const I: usize>(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let (name, _, f, species) = METHODS[I];
+    if let Value::Object(o) = &this {
+        if matches!(o.kind, ObjKind::Array(_)) && (!species || species_intact(vm, o)) {
+            return f(vm, this, args);
+        }
+    }
+    generic(vm, name, this, args)
+}
+
+fn species_intact(vm: &Vm, o: &Obj) -> bool {
+    let Some(ctor) = &vm.array_ctor else {
+        return true;
+    };
+    let plain = o
+        .proto
+        .borrow()
+        .as_ref()
+        .is_some_and(|p| Rc::ptr_eq(p, &vm.realm.array_proto));
+    if !plain || o.props.borrow().contains_key("constructor") {
+        return false;
+    }
+    let same_ctor = matches!(
+        vm.realm.array_proto.props.borrow().get("constructor"),
+        Some(Value::Object(c)) if Rc::ptr_eq(c, ctor)
+    );
+    same_ctor
+        && ctor
+            .props
+            .borrow()
+            .get(crate::object::SPECIES_KEY)
+            .is_some_and(|v| v.strict_eq(&vm.array_species))
+}
+
+fn generic(vm: &mut Vm, name: &str, this: Value, args: &[Value]) -> R {
+    let g = match vm.globals.get("%ArrayGeneric%").cloned() {
+        Some(g) => g,
+        None => {
+            let dir = std::env::current_dir().unwrap_or_default();
+            let proto = vm
+                .compile(
+                    super::extras::ARRAY_GENERIC,
+                    "<prelude>",
+                    dir,
+                    crate::compiler::Mode::Module,
+                )
+                .map_err(|e| vm.syntax_error_value(&e, "<prelude>"))?;
+            vm.run_proto(proto)?;
+            vm.globals
+                .get("%ArrayGeneric%")
+                .cloned()
+                .unwrap_or_default()
+        }
+    };
+    let f = vm.get_prop(&g, name)?;
+    vm.call_value(&f, this, args)
+}
+
+fn copy_within(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    generic(vm, "copyWithin", this, args)
+}
+
+fn to_spliced(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    generic(vm, "toSpliced", this, args)
+}
+
+fn with(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    generic(vm, "with", this, args)
+}
+
+fn to_locale_string(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    generic(vm, "toLocaleString", this, args)
+}
+
+pub fn capture_species(vm: &mut Vm) {
+    if let Some(Value::Object(a)) = vm.globals.get("Array").cloned() {
+        vm.array_species = a
+            .props
+            .borrow()
+            .get(crate::object::SPECIES_KEY)
+            .cloned()
+            .unwrap_or_default();
+        vm.array_ctor = Some(a);
+    }
 }
 
 fn this_array(vm: &mut Vm, this: &Value, name: &str) -> Result<Rc<Obj>, Value> {
@@ -138,7 +240,17 @@ fn is_array(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     }
 }
 
-fn from(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+fn subclass_ctor(vm: &Vm, this: &Value) -> bool {
+    match (this, &vm.array_ctor) {
+        (Value::Object(o), Some(a)) => !Rc::ptr_eq(o, a) && vm.is_constructor(this),
+        _ => false,
+    }
+}
+
+fn from(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    if subclass_ctor(vm, &this) {
+        return generic(vm, "from", this, args);
+    }
     let src = arg(args, 0);
     let list = match &src {
         Value::Object(o)
@@ -170,7 +282,10 @@ fn from(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(vm.new_array(out))
 }
 
-fn of(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+fn of(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    if subclass_ctor(vm, &this) {
+        return generic(vm, "of", this, args);
+    }
     Ok(vm.new_array(args.to_vec()))
 }
 

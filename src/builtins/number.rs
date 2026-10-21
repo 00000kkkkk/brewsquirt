@@ -13,8 +13,15 @@ pub fn install(vm: &mut Vm) {
     method(vm, &np, "toString", 1, to_string);
     method(vm, &np, "toPrecision", 1, to_precision);
     method(vm, &np, "valueOf", 0, value_of);
-    method(vm, &np, "toLocaleString", 0, to_string);
-    let number = make_ctor(vm, "Number", 1, number_ctor, None, &np);
+    method(vm, &np, "toLocaleString", 0, number_to_locale_string);
+    let number = make_ctor(
+        vm,
+        "Number",
+        1,
+        number_ctor,
+        Some(crate::object::wrapper_marker),
+        &np,
+    );
     method(vm, &number, "isInteger", 1, is_integer);
     method(vm, &number, "isSafeInteger", 1, is_safe_integer);
     method(vm, &number, "isFinite", 1, number_is_finite);
@@ -45,7 +52,14 @@ pub fn install(vm: &mut Vm) {
         "BigInt".into(),
         crate::object::NON_ENUM | crate::object::READ_ONLY,
     );
-    let bigint = make_ctor(vm, "BigInt", 1, bigint_ctor, None, &bp);
+    let bigint = make_ctor(
+        vm,
+        "BigInt",
+        1,
+        bigint_ctor,
+        Some(crate::object::wrapper_marker),
+        &bp,
+    );
     method(vm, &bigint, "asIntN", 2, bigint_as_int_n);
     method(vm, &bigint, "asUintN", 2, bigint_as_uint_n);
     vm.define_global("BigInt", Value::Object(bigint));
@@ -115,20 +129,36 @@ pub fn install(vm: &mut Vm) {
 }
 
 fn this_num(vm: &mut Vm, this: &Value) -> Result<f64, Value> {
-    match this {
+    match crate::object::unwrap_primitive(this)
+        .as_ref()
+        .unwrap_or(this)
+    {
         Value::Number(n) => Ok(*n),
         _ => Err(vm.type_error("Number.prototype method called on incompatible receiver")),
     }
 }
 
-fn number_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    if args.is_empty() {
-        return Ok(Value::Number(0.0));
-    }
-    match vm.to_numeric(&args[0])? {
-        Value::BigInt(b) => Ok(Value::Number(crate::bigint::to_f64(&b))),
-        other => Ok(other),
-    }
+fn number_to_locale_string(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let n = this_num(vm, &this)?;
+    super::intl_format(
+        vm,
+        "NumberFormat",
+        arg(args, 0),
+        arg(args, 1),
+        Value::Number(n),
+    )
+}
+
+fn number_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let n = if args.is_empty() {
+        Value::Number(0.0)
+    } else {
+        match vm.to_numeric(&args[0])? {
+            Value::BigInt(b) => Value::Number(crate::bigint::to_f64(&b)),
+            other => other,
+        }
+    };
+    Ok(super::box_for(&this, n.clone()).unwrap_or(n))
 }
 
 fn to_bigint(vm: &mut Vm, v: &Value) -> Result<std::rc::Rc<num_bigint::BigInt>, Value> {
@@ -155,7 +185,7 @@ fn to_bigint(vm: &mut Vm, v: &Value) -> Result<std::rc::Rc<num_bigint::BigInt>, 
 }
 
 fn bigint_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    if this.is_object() {
+    if super::constructing(&this) {
         return Err(vm.type_error("BigInt is not a constructor"));
     }
     let v = arg(args, 0);
@@ -201,7 +231,10 @@ fn this_bigint(
     this: &Value,
     name: &str,
 ) -> Result<std::rc::Rc<num_bigint::BigInt>, Value> {
-    match this {
+    match crate::object::unwrap_primitive(this)
+        .as_ref()
+        .unwrap_or(this)
+    {
         Value::BigInt(b) => Ok(b.clone()),
         _ => Err(vm.type_error(format!(
             "BigInt.prototype.{name} requires that 'this' be a BigInt"
@@ -221,8 +254,17 @@ fn bigint_to_string(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     Ok(crate::bigint::to_string_radix(&b, radix as u32).into())
 }
 
-fn bigint_to_locale_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+fn bigint_to_locale_string(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let b = this_bigint(vm, &this, "toLocaleString")?;
+    if !args.is_empty() {
+        return super::intl_format(
+            vm,
+            "NumberFormat",
+            arg(args, 0),
+            arg(args, 1),
+            Value::BigInt(b),
+        );
+    }
     let text = b.to_string();
     let (sign, digits) = match text.strip_prefix('-') {
         Some(d) => ("-", d.to_string()),

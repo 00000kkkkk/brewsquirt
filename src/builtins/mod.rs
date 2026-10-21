@@ -1,8 +1,9 @@
-mod array;
+pub mod array;
 pub mod binary;
 mod collections;
 mod date;
 mod extras;
+pub mod intl;
 mod intrinsics;
 mod json;
 pub mod node;
@@ -32,6 +33,20 @@ pub use regexp::make_regexp;
 pub use symbol::{iter_result, symbol_from_key, symbol_text};
 pub use system::exit_code;
 
+pub fn intl_format(
+    vm: &mut Vm,
+    ctor: &str,
+    locales: Value,
+    options: Value,
+    value: Value,
+) -> Result<Value, Value> {
+    let intl = intl::load(vm)?;
+    let c = vm.get_prop(&intl, ctor)?;
+    let fmt = vm.construct(&c, &[locales, options])?;
+    let f = vm.get_prop(&fmt, "format")?;
+    vm.call_value(&f, fmt, &[value])
+}
+
 pub fn arg(args: &[Value], i: usize) -> Value {
     args.get(i).cloned().unwrap_or_default()
 }
@@ -46,6 +61,19 @@ pub fn native_fn(vm: &Vm, name: &str, arity: u32, func: NativeFn) -> Value {
         })),
         Some(vm.realm.function_proto.clone()),
     ))
+}
+
+pub fn box_for(this: &Value, v: Value) -> Option<Value> {
+    match this {
+        Value::Object(o) if matches!(o.kind, ObjKind::Primitive(Value::Undefined)) => Some(
+            Value::Object(Obj::new(ObjKind::Primitive(v), o.proto.borrow().clone())),
+        ),
+        _ => None,
+    }
+}
+
+pub fn constructing(this: &Value) -> bool {
+    matches!(this, Value::Object(o) if matches!(o.kind, ObjKind::Primitive(Value::Undefined)))
 }
 
 pub fn method(vm: &Vm, target: &Rc<Obj>, name: &str, arity: u32, func: NativeFn) {

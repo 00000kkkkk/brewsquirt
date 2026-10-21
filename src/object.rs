@@ -19,6 +19,8 @@ pub const NOT_EXTENSIBLE: u8 = 1;
 pub const ELEMENTS_FROZEN: u8 = 2;
 pub const ELEMENTS_SEALED: u8 = 4;
 pub const HAS_HOLES: u8 = 8;
+pub const NAME_DELETED: u8 = 16;
+pub const LENGTH_DELETED: u8 = 32;
 
 #[derive(Default)]
 struct PropExtra {
@@ -376,6 +378,21 @@ pub enum ObjKind {
     DataView(Box<View>),
     Global,
     Proxy(Box<ProxyData>),
+    Primitive(Value),
+}
+
+pub fn wrapper_marker() -> ObjKind {
+    ObjKind::Primitive(Value::Undefined)
+}
+
+pub fn unwrap_primitive(v: &Value) -> Option<Value> {
+    match v {
+        Value::Object(o) => match &o.kind {
+            ObjKind::Primitive(p) if !p.is_undefined() => Some(p.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 pub struct ProxyData {

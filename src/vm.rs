@@ -58,6 +58,15 @@ impl ErrorKind {
     }
 }
 
+pub struct Pristine {
+    array_iter: Value,
+    map_iter: Value,
+    set_iter: Value,
+    string_iter: Value,
+    iter_next: Value,
+    gen_next: Value,
+}
+
 pub struct Realm {
     pub object_proto: Rc<Obj>,
     pub function_proto: Rc<Obj>,
@@ -256,6 +265,9 @@ pub struct Vm {
     pub iter_value_fn: Value,
     pub default_has_instance: Value,
     pub proto_accessor: Value,
+    pub(crate) array_species: Value,
+    pub(crate) pristine: Option<Box<Pristine>>,
+    pub(crate) array_ctor: Option<Rc<Obj>>,
     pub(crate) io: crate::io::Io,
     pub(crate) io_fetches: FxHashMap<u64, Rc<Obj>>,
     pub(crate) io_servers: FxHashMap<u64, (Value, crate::io::ServerHandle)>,
@@ -324,6 +336,9 @@ impl Vm {
             iter_value_fn: Value::Undefined,
             default_has_instance: Value::Undefined,
             proto_accessor: Value::Undefined,
+            array_species: Value::Undefined,
+            pristine: None,
+            array_ctor: None,
             io: crate::io::Io::default(),
             io_fetches: FxHashMap::default(),
             io_servers: FxHashMap::default(),
@@ -337,6 +352,8 @@ impl Vm {
         builtins::install(&mut vm);
         builtins::run_prelude(&mut vm);
         builtins::hide_builtin_members(&mut vm);
+        builtins::array::capture_species(&mut vm);
+        vm.capture_pristine();
         vm
     }
 
@@ -383,6 +400,56 @@ impl Vm {
         v
     }
 
+    pub fn wrap_primitive(&self, v: Value) -> Rc<Obj> {
+        let proto = match &v {
+            Value::Str(_) => &self.realm.string_proto,
+            Value::Number(_) => &self.realm.number_proto,
+            Value::Bool(_) => &self.realm.boolean_proto,
+            Value::Symbol(_) => &self.realm.symbol_proto,
+            Value::BigInt(_) => &self.realm.bigint_proto,
+            _ => &self.realm.object_proto,
+        };
+        Obj::new(ObjKind::Primitive(v), Some(proto.clone()))
+    }
+
+    pub fn to_object(&mut self, v: &Value) -> Result<Rc<Obj>, Value> {
+        match v {
+            Value::Object(o) => Ok(o.clone()),
+            Value::Undefined | Value::Null => {
+                Err(self.type_error("Cannot convert undefined or null to object"))
+            }
+            _ => Ok(self.wrap_primitive(v.clone())),
+        }
+    }
+
+    pub fn global_this(&self) -> Value {
+        self.globals.get("globalThis").cloned().unwrap_or_default()
+    }
+
+    pub fn run_script_proto(&mut self, proto: Rc<FunctionProto>) -> Result<Value, Value> {
+        let closure = Rc::new(Closure {
+            gc_slot: std::cell::Cell::new(u32::MAX),
+            proto,
+            upvalues: Box::new([]),
+            home: RefCell::new(None),
+        });
+        let f = Value::Object(Obj::new(
+            ObjKind::Function(closure),
+            Some(self.realm.function_proto.clone()),
+        ));
+        let this = self.global_this();
+        self.call_value(&f, this, &[])
+    }
+
+    pub fn run_script(&mut self, src: &str, name: &str) -> Result<Value, Value> {
+        let dir = std::env::current_dir().unwrap_or_default();
+        let proto = match self.compile(src, name, dir, Mode::Repl) {
+            Ok(p) => p,
+            Err(e) => return Err(self.syntax_error_value(&e, name)),
+        };
+        self.run_script_proto(proto)
+    }
+
     pub fn run_proto(&mut self, proto: Rc<FunctionProto>) -> Result<Value, Value> {
         let closure = Rc::new(Closure {
             gc_slot: std::cell::Cell::new(u32::MAX),
@@ -404,7 +471,11 @@ impl Vm {
             Err(e) => return Err(self.syntax_error_value(&e, name)),
         };
         let is_async = proto.is_async;
-        let v = self.run_proto(proto)?;
+        let v = if mode == Mode::Repl {
+            self.run_script_proto(proto)?
+        } else {
+            self.run_proto(proto)?
+        };
         if is_async {
             return self.await_value(&v);
         }
@@ -470,6 +541,10 @@ impl Vm {
         }
         if self.node.is_none() && builtins::node::LAZY_GLOBALS.contains(&name) {
             builtins::node::load(self)?;
+            return Ok(true);
+        }
+        if builtins::intl::LAZY_GLOBALS.contains(&name) && self.globals.get(name).is_none() {
+            builtins::intl::load(self)?;
             return Ok(true);
         }
         Ok(false)
@@ -1197,8 +1272,12 @@ impl Vm {
                             );
                             return Value::Object(p);
                         }
-                        "name" => return Value::Str(c.proto.name.clone()),
-                        "length" => return Value::Number(c.proto.arity as f64),
+                        "name" if o.flags.get() & crate::object::NAME_DELETED == 0 => {
+                            return Value::Str(c.proto.name.clone());
+                        }
+                        "length" if o.flags.get() & crate::object::LENGTH_DELETED == 0 => {
+                            return Value::Number(c.proto.arity as f64);
+                        }
                         _ => {}
                     }
                 }
@@ -1209,8 +1288,12 @@ impl Vm {
                 }
                 {
                     match key {
-                        "name" => return Value::Str(n.name.clone()),
-                        "length" => return Value::Number(n.arity as f64),
+                        "name" if o.flags.get() & crate::object::NAME_DELETED == 0 => {
+                            return Value::Str(n.name.clone());
+                        }
+                        "length" if o.flags.get() & crate::object::LENGTH_DELETED == 0 => {
+                            return Value::Number(n.arity as f64);
+                        }
                         _ => {}
                     }
                 }
@@ -1250,6 +1333,16 @@ impl Vm {
                 "buffer" => return Value::Object(t.buffer.clone()),
                 _ => {}
             },
+            ObjKind::Primitive(Value::Str(s)) => {
+                if key == "length" {
+                    return Value::Number(len16(s) as f64);
+                }
+                if let Some(i) = array_index(key) {
+                    if let Some(c) = char_at16(s, i) {
+                        return Value::from(c);
+                    }
+                }
+            }
             ObjKind::ArrayBuffer(b) if key == "byteLength" => {
                 return Value::Number(b.borrow().len() as f64);
             }
@@ -1399,6 +1492,11 @@ impl Vm {
                         let n = self.to_number(&val)?;
                         r.last_index.set(n);
                         return Ok(());
+                    }
+                }
+                if let ObjKind::Primitive(Value::Str(s)) = &o.kind {
+                    if &*key == "length" || array_index(&key).is_some_and(|i| i < len16(s)) {
+                        return Err(self.read_only_error(o, &key));
                     }
                 }
                 if let ObjKind::Typed(t) = &o.kind {
@@ -1851,6 +1949,11 @@ impl Vm {
                         .is_some_and(|p| p.get_chain(&k).is_some()));
                 }
             }
+            ObjKind::Primitive(Value::Str(s)) => {
+                if &*k == "length" || array_index(&k).is_some_and(|i| i < len16(s)) {
+                    return Ok(true);
+                }
+            }
             ObjKind::Function(_) | ObjKind::Native(_) => {
                 if matches!(&*k, "name" | "length" | "prototype") {
                     return Ok(true);
@@ -1861,10 +1964,94 @@ impl Vm {
         Ok(o.get_chain(&k).is_some())
     }
 
+    fn capture_pristine(&mut self) {
+        let own = |o: &Rc<Obj>, k: &str| o.props.borrow().get(k).cloned().unwrap_or_default();
+        let gen_next = self
+            .realm
+            .generator_proto
+            .get_chain("next")
+            .unwrap_or_default();
+        self.pristine = Some(Box::new(Pristine {
+            array_iter: own(&self.realm.array_proto, ITER_KEY),
+            map_iter: own(&self.realm.map_proto, ITER_KEY),
+            set_iter: own(&self.realm.set_proto, ITER_KEY),
+            string_iter: own(&self.realm.string_proto, ITER_KEY),
+            iter_next: own(&self.realm.iter_proto, "next"),
+            gen_next,
+        }));
+    }
+
+    fn builtin_iterable(&self, o: &Rc<Obj>) -> bool {
+        let Some(p) = &self.pristine else {
+            return true;
+        };
+        let (proto, orig) = match &o.kind {
+            ObjKind::Array(_) => (&self.realm.array_proto, &p.array_iter),
+            ObjKind::Map(_) => (&self.realm.map_proto, &p.map_iter),
+            ObjKind::Set(_) => (&self.realm.set_proto, &p.set_iter),
+            ObjKind::Iter(_) => {
+                return !o.props.borrow().contains_key("next")
+                    && self
+                        .realm
+                        .iter_proto
+                        .props
+                        .borrow()
+                        .get("next")
+                        .is_some_and(|v| v.strict_eq(&p.iter_next));
+            }
+            ObjKind::Coroutine(_) => {
+                return o
+                    .get_chain("next")
+                    .is_some_and(|v| v.strict_eq(&p.gen_next));
+            }
+            _ => return false,
+        };
+        let plain = o
+            .proto
+            .borrow()
+            .as_ref()
+            .is_some_and(|x| Rc::ptr_eq(x, proto));
+        plain
+            && !o.props.borrow().contains_key(ITER_KEY)
+            && proto
+                .props
+                .borrow()
+                .get(ITER_KEY)
+                .is_some_and(|v| v.strict_eq(orig))
+            && self
+                .realm
+                .iter_proto
+                .props
+                .borrow()
+                .get("next")
+                .is_some_and(|v| v.strict_eq(&p.iter_next))
+    }
+
+    fn string_iterable(&self) -> bool {
+        let Some(p) = &self.pristine else {
+            return true;
+        };
+        self.realm
+            .string_proto
+            .props
+            .borrow()
+            .get(ITER_KEY)
+            .is_some_and(|v| v.strict_eq(&p.string_iter))
+            && self
+                .realm
+                .iter_proto
+                .props
+                .borrow()
+                .get("next")
+                .is_some_and(|v| v.strict_eq(&p.iter_next))
+    }
+
     pub fn get_iterator(&mut self, v: &Value) -> Result<Value, Value> {
         match v {
-            Value::Str(s) => Ok(self.new_iter(IterState::Str(s.clone(), 0))),
-            Value::Object(o) => match &o.kind {
+            Value::Str(s) if self.string_iterable() => {
+                Ok(self.new_iter(IterState::Str(s.clone(), 0)))
+            }
+            Value::Object(o) if self.builtin_iterable(o) => match &o.kind {
                 ObjKind::Array(_) => Ok(self.new_iter(IterState::Array(o.clone(), 0))),
                 ObjKind::Map(_) => Ok(self.new_iter(IterState::MapEntries(o.clone(), 0))),
                 ObjKind::Set(_) => Ok(self.new_iter(IterState::SetValues(o.clone(), 0))),
@@ -1872,7 +2059,11 @@ impl Vm {
                 ObjKind::Coroutine(c) if c.is_generator && !c.is_async => Ok(v.clone()),
                 _ => self.protocol_iterator(v),
             },
-            _ => Err(self.type_error(format!("{} is not iterable", inspect_plain(v)))),
+            Value::Object(_) | Value::Str(_) => self.protocol_iterator(v),
+            _ if v.is_nullish() => {
+                Err(self.type_error(format!("{} is not iterable", inspect_plain(v))))
+            }
+            _ => self.protocol_iterator(v),
         }
     }
 
@@ -1912,8 +2103,10 @@ impl Vm {
             return Err(self.type_error("Result of the Symbol.iterator method is not an object"));
         };
         match &o.kind {
-            ObjKind::Iter(_) => Ok(it),
-            ObjKind::Coroutine(c) if c.is_generator && !c.is_async => Ok(it),
+            ObjKind::Iter(_) if self.builtin_iterable(o) => Ok(it),
+            ObjKind::Coroutine(c) if c.is_generator && !c.is_async && self.builtin_iterable(o) => {
+                Ok(it)
+            }
             _ => {
                 let next = self.get_prop(&it, "next")?;
                 Ok(self.new_iter(IterState::Protocol(it, next)))
@@ -2069,7 +2262,9 @@ impl Vm {
     pub fn iterate(&mut self, v: &Value) -> Result<Vec<Value>, Value> {
         if let Value::Object(o) = v {
             if let ObjKind::Array(a) = &o.kind {
-                return Ok(a.borrow().clone());
+                if self.builtin_iterable(o) {
+                    return Ok(a.borrow().clone());
+                }
             }
         }
         let it = self.get_iterator(v)?;
@@ -2114,6 +2309,12 @@ impl Vm {
                 for i in 0..t.length {
                     keys.push(Value::Str(i.to_string().into()));
                 }
+            }
+            if let ObjKind::Primitive(Value::Str(s)) = &o.kind {
+                for i in 0..len16(s) {
+                    keys.push(Value::Str(i.to_string().into()));
+                }
+                keys.push(Value::Str("length".into()));
             }
             if o.is_callable() {
                 let mut virtual_keys = vec!["length", "name"];
@@ -2179,6 +2380,11 @@ impl Vm {
                 }
                 if let ObjKind::Typed(t) = &o.kind {
                     for i in 0..t.length {
+                        keys.push(Value::Str(i.to_string().into()));
+                    }
+                }
+                if let ObjKind::Primitive(Value::Str(s)) = &o.kind {
+                    for i in 0..len16(s) {
                         keys.push(Value::Str(i.to_string().into()));
                     }
                 }
@@ -2702,6 +2908,16 @@ impl Vm {
                             let args = self.stack.split_off(ti + 1);
                             let this = pop!();
                             let r = tri!(f(self, this.clone(), &args));
+                            if let (Value::Object(ro), Value::Object(t)) = (&r, &this) {
+                                let reused = Rc::ptr_eq(ro, t)
+                                    || args.iter().any(
+                                        |a| matches!(a, Value::Object(x) if Rc::ptr_eq(x, ro)),
+                                    );
+                                if !reused {
+                                    let p = t.proto.borrow().clone();
+                                    *ro.proto.borrow_mut() = p;
+                                }
+                            }
                             self.stack.push(if r.is_object() { r } else { this });
                         }
                         _ => throw!(self.type_error("Super constructor is not a constructor")),
@@ -2760,6 +2976,20 @@ impl Vm {
                         },
                     };
                     self.stack.push(v);
+                }
+                Op::RequireObject => {
+                    if let Some(v) = self.stack.last() {
+                        if v.is_nullish() {
+                            let t = if v.is_undefined() {
+                                "undefined"
+                            } else {
+                                "null"
+                            };
+                            throw!(
+                                self.type_error(format!("Cannot destructure '{t}' as it is {t}."))
+                            );
+                        }
+                    }
                 }
                 Op::ToNumeric => {
                     let a = pop!();
@@ -3595,6 +3825,12 @@ impl Vm {
                         if !o.is_hole(i) {
                             out.push((Rc::from(i.to_string()), x.clone()));
                         }
+                    }
+                }
+                if let ObjKind::Primitive(Value::Str(s)) = &o.kind {
+                    for i in 0..len16(s) {
+                        let c = char_at16(s, i).unwrap_or_default();
+                        out.push((Rc::from(i.to_string()), Value::from(c)));
                     }
                 }
                 if let ObjKind::Typed(t) = &o.kind {

@@ -40,13 +40,20 @@ pub fn install(vm: &mut Vm) {
         ("padEnd", 2, pad_end),
         ("concat", 1, concat),
         ("localeCompare", 1, locale_compare),
-        ("toString", 0, to_string),
-        ("valueOf", 0, to_string),
+        ("toString", 0, this_string_value),
+        ("valueOf", 0, this_string_value),
     ];
     for (name, arity, f) in methods {
         method(vm, &sp, name, *arity, *f);
     }
-    let string = make_ctor(vm, "String", 1, string_ctor, None, &sp);
+    let string = make_ctor(
+        vm,
+        "String",
+        1,
+        string_ctor,
+        Some(crate::object::wrapper_marker),
+        &sp,
+    );
     method(vm, &string, "fromCharCode", 1, from_char_code);
     method(vm, &string, "fromCodePoint", 1, from_code_point);
     method(vm, &string, "raw", 1, string_raw);
@@ -54,6 +61,9 @@ pub fn install(vm: &mut Vm) {
 }
 
 fn this_str(vm: &mut Vm, this: &Value) -> Result<Rc<str>, Value> {
+    if let Some(Value::Str(s)) = crate::object::unwrap_primitive(this) {
+        return Ok(s);
+    }
     if this.is_nullish() {
         return Err(vm.type_error("String.prototype method called on null or undefined"));
     }
@@ -64,14 +74,22 @@ fn str_arg(vm: &mut Vm, args: &[Value], i: usize) -> Result<Rc<str>, Value> {
     vm.to_string(&arg(args, i))
 }
 
-fn string_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    if args.is_empty() {
-        return Ok("".into());
+fn string_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let s = if args.is_empty() {
+        Value::from("")
+    } else if let (Value::Symbol(s), false) = (&args[0], super::constructing(&this)) {
+        Value::from(super::symbol_text(s))
+    } else {
+        Value::Str(vm.to_string(&args[0])?)
+    };
+    Ok(super::box_for(&this, s.clone()).unwrap_or(s))
+}
+
+fn this_string_value(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    match crate::object::unwrap_primitive(&this).unwrap_or(this) {
+        Value::Str(s) => Ok(Value::Str(s)),
+        _ => Err(vm.type_error("String.prototype.valueOf requires that 'this' be a String")),
     }
-    if let Value::Symbol(s) = &args[0] {
-        return Ok(super::symbol_text(s).into());
-    }
-    Ok(Value::Str(vm.to_string(&args[0])?))
 }
 
 fn string_raw(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
@@ -116,10 +134,6 @@ fn from_code_point(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         }
     }
     Ok(s.into())
-}
-
-fn to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    Ok(Value::Str(this_str(vm, &this)?))
 }
 
 fn char_at(vm: &mut Vm, this: Value, args: &[Value]) -> R {
@@ -475,9 +489,9 @@ fn concat(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 fn locale_compare(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_str(vm, &this)?;
     let other = str_arg(vm, args, 0)?;
-    Ok(Value::Number(match s.cmp(&other) {
-        std::cmp::Ordering::Less => -1.0,
-        std::cmp::Ordering::Equal => 0.0,
-        std::cmp::Ordering::Greater => 1.0,
-    }))
+    let intl = super::intl::load(vm)?;
+    let c = vm.get_prop(&intl, "Collator")?;
+    let col = vm.construct(&c, &[arg(args, 1), arg(args, 2)])?;
+    let f = vm.get_prop(&col, "compare")?;
+    vm.call_value(&f, col, &[Value::Str(s), Value::Str(other)])
 }

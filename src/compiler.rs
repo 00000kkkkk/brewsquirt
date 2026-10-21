@@ -1591,6 +1591,7 @@ impl Compiler {
                 _ => return Err(self.err("Invalid destructuring assignment target")),
             },
             Pattern::Object { props, rest } => {
+                self.emit(Op::RequireObject);
                 for prop in props {
                     self.emit(Op::Dup);
                     match &prop.key {

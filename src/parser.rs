@@ -142,11 +142,13 @@ impl Parser {
     }
 
     fn is_kw(&self, kw: &str) -> bool {
-        matches!(&self.peek().tok, Tok::Ident(s) if &**s == kw)
+        let t = self.peek();
+        !t.escaped && matches!(&t.tok, Tok::Ident(s) if &**s == kw)
     }
 
     fn is_kw_at(&self, n: usize, kw: &str) -> bool {
-        matches!(&self.peek_at(n).tok, Tok::Ident(s) if &**s == kw)
+        let t = self.peek_at(n);
+        !t.escaped && matches!(&t.tok, Tok::Ident(s) if &**s == kw)
     }
 
     fn eat_kw(&mut self, kw: &str) -> bool {
@@ -221,6 +223,9 @@ impl Parser {
 
     fn binding_ident(&mut self) -> R<Rc<str>> {
         match self.word() {
+            Some(s) if is_reserved(&s) && self.peek().escaped => {
+                Err(self.error("Keyword must not contain escaped characters"))
+            }
             Some(s) if is_reserved(&s) => {
                 Err(self.error(format!("Unexpected reserved word '{s}'")))
             }
@@ -295,7 +300,11 @@ impl Parser {
         if self.eat(P::Semi) {
             return Ok(StmtKind::Empty);
         }
-        let word = self.word();
+        let word = if self.peek().escaped {
+            None
+        } else {
+            self.word()
+        };
         match word.as_deref() {
             Some("let") | Some("const") | Some("var")
                 if matches!(
@@ -1981,6 +1990,9 @@ impl Parser {
                 ExprKind::Object(props)
             }
             Tok::Punct(P::Hash) => ExprKind::Str(self.private_name()?),
+            Tok::Ident(name) if self.peek().escaped && is_reserved(name) => {
+                return Err(self.error("Keyword must not contain escaped characters"));
+            }
             Tok::Ident(name) => {
                 let name = name.clone();
                 match &*name {

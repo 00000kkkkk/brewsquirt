@@ -61,12 +61,38 @@ fn regex_allowed(prev: Option<&Tok>) -> bool {
     }
 }
 
+fn nfkc_gap(c: char) -> bool {
+    matches!(
+        c,
+        '\u{37a}' | '\u{e33}' | '\u{eb3}' | '\u{309b}' | '\u{309c}' | '\u{fc5e}'
+            ..='\u{fc63}'
+                | '\u{fdfa}'
+                | '\u{fdfb}'
+                | '\u{fe70}'
+                | '\u{fe72}'
+                | '\u{fe74}'
+                | '\u{fe76}'
+                | '\u{fe78}'
+                | '\u{fe7a}'
+                | '\u{fe7c}'
+                | '\u{fe7e}'
+                | '\u{ff9e}'
+                | '\u{ff9f}'
+    )
+}
+
 pub fn is_id_start(c: char) -> bool {
-    c.is_alphabetic() || c == '_' || c == '$'
+    if c.is_ascii() {
+        return c.is_ascii_alphabetic() || c == '_' || c == '$';
+    }
+    unicode_ident::is_xid_start(c) || nfkc_gap(c)
 }
 
 pub fn is_id_continue(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '$' || c == '\u{200c}' || c == '\u{200d}'
+    if c.is_ascii() {
+        return c.is_ascii_alphanumeric() || c == '_' || c == '$';
+    }
+    unicode_ident::is_xid_continue(c) || nfkc_gap(c) || c == '\u{200c}' || c == '\u{200d}'
 }
 
 struct Lexer {
@@ -118,6 +144,7 @@ impl Lexer {
                     line,
                     col,
                     nl_before: true,
+                    escaped: false,
                     start,
                     end: start,
                 });
@@ -134,6 +161,7 @@ impl Lexer {
                             line,
                             col,
                             nl_before: true,
+                            escaped: false,
                             start,
                             end: start,
                         });
@@ -142,17 +170,21 @@ impl Lexer {
                     depth -= 1;
                 }
             }
+            let begin = self.pos;
             let regex_ok = regex_allowed(out.last().map(|t| &t.tok));
             let tok = if c == '/' && regex_ok {
                 self.regex()?
             } else {
                 self.next_token(c)?
             };
+            let escaped =
+                matches!(tok, Tok::Ident(_)) && self.chars[begin..self.pos].contains(&'\\');
             out.push(Token {
                 tok,
                 line,
                 col,
                 nl_before: nl,
+                escaped,
                 start,
                 end: self.offsets[self.pos],
             });
@@ -212,10 +244,26 @@ impl Lexer {
         if c == '`' {
             return self.template();
         }
-        if is_id_start(c) {
+        if is_id_start(c) || c == '\\' {
             let mut s = String::new();
             while let Some(c) = self.peek() {
-                if is_id_continue(c) {
+                let first = s.is_empty();
+                if c == '\\' {
+                    self.bump();
+                    if self.bump() != Some('u') {
+                        return Err(self.err("Invalid Unicode escape sequence"));
+                    }
+                    let ch = char::from_u32(self.unicode_escape()?)
+                        .filter(|&ch| {
+                            if first {
+                                is_id_start(ch)
+                            } else {
+                                is_id_continue(ch)
+                            }
+                        })
+                        .ok_or_else(|| self.err("Invalid Unicode escape sequence"))?;
+                    s.push(ch);
+                } else if is_id_continue(c) {
                     s.push(c);
                     self.bump();
                 } else {
@@ -223,9 +271,6 @@ impl Lexer {
                 }
             }
             return Ok(Tok::Ident(s.into()));
-        }
-        if c == '\\' {
-            return Err(self.err("Unicode escapes in identifiers are not supported"));
         }
         for (text, p) in PUNCTUATORS {
             if self.matches(text) {

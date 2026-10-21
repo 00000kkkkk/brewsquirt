@@ -69,6 +69,12 @@ impl Ser<'_> {
             let r = r.clone();
             v = vm.call_value(&r, holder.clone(), &[key.into(), v])?;
         }
+        match crate::object::unwrap_primitive(&v) {
+            Some(Value::Number(_)) => v = Value::Number(vm.to_number(&v)?),
+            Some(Value::Str(_)) => v = Value::Str(vm.to_string(&v)?),
+            Some(p @ (Value::Bool(_) | Value::BigInt(_))) => v = p,
+            _ => {}
+        }
         self.write(vm, &v, depth, out)
     }
 

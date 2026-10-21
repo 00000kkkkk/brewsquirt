@@ -1,7 +1,7 @@
 use crate::inspect::inspect_plain;
 use crate::object::{
-    Accessor, ELEMENTS_FROZEN, ELEMENTS_SEALED, NON_CONFIG, NON_ENUM, NOT_EXTENSIBLE, Obj, ObjKind,
-    READ_ONLY, array_index,
+    Accessor, ELEMENTS_FROZEN, ELEMENTS_SEALED, LENGTH_DELETED, NAME_DELETED, NON_CONFIG, NON_ENUM,
+    NOT_EXTENSIBLE, Obj, ObjKind, READ_ONLY, array_index,
 };
 use crate::value::Value;
 use crate::vm::Vm;
@@ -127,10 +127,27 @@ impl Vm {
                     return Some((Value::Number(a.borrow().len() as f64), attrs));
                 }
             }
+            ObjKind::Primitive(Value::Str(s)) => {
+                if key == "length" {
+                    return Some((
+                        Value::Number(crate::value::len16(s) as f64),
+                        NON_ENUM | READ_ONLY | NON_CONFIG,
+                    ));
+                }
+                if let Some(i) = array_index(key) {
+                    if let Some(c) = crate::value::char_at16(s, i) {
+                        return Some((Value::from(c), READ_ONLY | NON_CONFIG));
+                    }
+                }
+            }
             ObjKind::Typed(t) => {
                 if let Some(i) = array_index(key) {
                     return t.get(i).map(|n| (Value::Number(n), 0));
                 }
+            }
+            ObjKind::Global => {
+                let raw = self.globals.get(key)?.clone();
+                return Some((raw, self.globals.attrs_of(key)));
             }
             ObjKind::Function(c) => {
                 let props = o.props.borrow();
@@ -138,9 +155,14 @@ impl Vm {
                     return Some((v.clone(), props.attrs(key)));
                 }
                 drop(props);
+                let gone = o.flags.get();
                 return match key {
-                    "name" => Some((Value::Str(c.proto.name.clone()), NON_ENUM | READ_ONLY)),
-                    "length" => Some((Value::Number(c.proto.arity as f64), NON_ENUM | READ_ONLY)),
+                    "name" if gone & NAME_DELETED == 0 => {
+                        Some((Value::Str(c.proto.name.clone()), NON_ENUM | READ_ONLY))
+                    }
+                    "length" if gone & LENGTH_DELETED == 0 => {
+                        Some((Value::Number(c.proto.arity as f64), NON_ENUM | READ_ONLY))
+                    }
                     "prototype" if c.proto.is_constructor() => {
                         let v = self.get_obj(o, "prototype");
                         Some((v, NON_ENUM | NON_CONFIG))
@@ -153,9 +175,14 @@ impl Vm {
                 if let Some(v) = props.get(key) {
                     return Some((v.clone(), props.attrs(key)));
                 }
+                let gone = o.flags.get();
                 return match key {
-                    "name" => Some((Value::Str(n.name.clone()), NON_ENUM | READ_ONLY)),
-                    "length" => Some((Value::Number(n.arity as f64), NON_ENUM | READ_ONLY)),
+                    "name" if gone & NAME_DELETED == 0 => {
+                        Some((Value::Str(n.name.clone()), NON_ENUM | READ_ONLY))
+                    }
+                    "length" if gone & LENGTH_DELETED == 0 => {
+                        Some((Value::Number(n.arity as f64), NON_ENUM | READ_ONLY))
+                    }
                     _ => None,
                 };
             }
@@ -302,6 +329,13 @@ impl Vm {
                     if attrs & READ_ONLY != 0 {
                         o.flags.set(o.flags.get() | ELEMENTS_FROZEN);
                     }
+                    return Ok(());
+                }
+            }
+            ObjKind::Primitive(Value::Str(s)) => {
+                if &**key == "length"
+                    || array_index(key).is_some_and(|i| i < crate::value::len16(s))
+                {
                     return Ok(());
                 }
             }
@@ -495,6 +529,11 @@ impl Vm {
                     return false;
                 }
             }
+            ObjKind::Primitive(Value::Str(s)) => {
+                if key == "length" || array_index(key).is_some_and(|i| i < crate::value::len16(s)) {
+                    return false;
+                }
+            }
             ObjKind::Typed(t) => {
                 if let Some(i) = array_index(key) {
                     return i >= t.length;
@@ -505,6 +544,13 @@ impl Vm {
         let attrs = o.props.borrow().attrs(key);
         if attrs & NON_CONFIG != 0 && o.has_own(key) {
             return false;
+        }
+        if o.is_callable() && !o.has_own(key) {
+            match key {
+                "name" => o.flags.set(o.flags.get() | NAME_DELETED),
+                "length" => o.flags.set(o.flags.get() | LENGTH_DELETED),
+                _ => {}
+            }
         }
         o.props.borrow_mut().shift_remove(key);
         true

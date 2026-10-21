@@ -143,6 +143,7 @@ pub enum Op {
     TemplateCache(u32, u32),
     TemplateStore(u32),
     ToNumeric,
+    RequireObject,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

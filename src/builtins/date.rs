@@ -582,27 +582,79 @@ fn to_utc_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     .into())
 }
 
-fn to_locale_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+fn locale_with_defaults(vm: &mut Vm, t: f64, args: &[Value], date: bool, time: bool) -> R {
+    let opts = vm.new_object();
+    let given = arg(args, 1);
+    let mut has_fields = false;
+    if given.is_object() {
+        for (k, v) in vm.own_entries_resolved(&given, false)? {
+            if matches!(
+                &*k,
+                "weekday"
+                    | "year"
+                    | "month"
+                    | "day"
+                    | "hour"
+                    | "minute"
+                    | "second"
+                    | "dateStyle"
+                    | "timeStyle"
+            ) && !v.is_undefined()
+            {
+                has_fields = true;
+            }
+            opts.set_own(k, v);
+        }
+    }
+    if !has_fields {
+        if date {
+            for k in ["year", "month", "day"] {
+                opts.set_own(k, "numeric".into());
+            }
+        }
+        if time {
+            for k in ["hour", "minute", "second"] {
+                opts.set_own(k, "numeric".into());
+            }
+        }
+    }
+    let d = Value::Object(Obj::new(
+        ObjKind::Date(std::cell::Cell::new(t)),
+        Some(vm.realm.date_proto.clone()),
+    ));
+    super::intl_format(vm, "DateTimeFormat", arg(args, 0), Value::Object(opts), d)
+}
+
+fn to_locale_string(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (_, t) = this_time(vm, &this)?;
     if t.is_nan() {
         return Ok("Invalid Date".into());
+    }
+    if !args.is_empty() {
+        return locale_with_defaults(vm, t, args, true, true);
     }
     let p = split(local_time(t));
     Ok(format!("{}, {}", locale_date(&p), locale_time(&p)).into())
 }
 
-fn to_locale_date_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+fn to_locale_date_string(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (_, t) = this_time(vm, &this)?;
     if t.is_nan() {
         return Ok("Invalid Date".into());
     }
+    if !args.is_empty() {
+        return locale_with_defaults(vm, t, args, true, false);
+    }
     Ok(locale_date(&split(local_time(t))).into())
 }
 
-fn to_locale_time_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+fn to_locale_time_string(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (_, t) = this_time(vm, &this)?;
     if t.is_nan() {
         return Ok("Invalid Date".into());
+    }
+    if !args.is_empty() {
+        return locale_with_defaults(vm, t, args, false, true);
     }
     Ok(locale_time(&split(local_time(t))).into())
 }

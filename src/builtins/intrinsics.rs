@@ -200,6 +200,16 @@ fn view_prop<const I: usize>(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 fn symbol_description(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     match &this {
         Value::Symbol(s) => Ok(s.description.clone().map(Value::Str).unwrap_or_default()),
+        v if crate::object::unwrap_primitive(v).is_some() => {
+            match crate::object::unwrap_primitive(v) {
+                Some(Value::Symbol(s)) => {
+                    Ok(s.description.clone().map(Value::Str).unwrap_or_default())
+                }
+                _ => Err(
+                    vm.type_error("Symbol.prototype.description requires that 'this' be a Symbol")
+                ),
+            }
+        }
         _ => Err(vm.type_error("Symbol.prototype.description requires that 'this' be a Symbol")),
     }
 }
@@ -289,7 +299,10 @@ fn lookup_setter(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 }
 
 fn this_number(vm: &mut Vm, this: &Value) -> Result<f64, Value> {
-    match this {
+    match crate::object::unwrap_primitive(this)
+        .as_ref()
+        .unwrap_or(this)
+    {
         Value::Number(n) => Ok(*n),
         _ => Err(vm.type_error("Number.prototype.toExponential requires that 'this' be a Number")),
     }
