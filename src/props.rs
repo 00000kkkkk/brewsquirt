@@ -135,7 +135,12 @@ impl Vm {
                 }
             }
             ObjKind::RegExp(r) if key == "lastIndex" => {
-                return Some((r.last_index.borrow().clone(), NON_ENUM | NON_CONFIG));
+                let ro = if o.flags.get() & ELEMENTS_FROZEN != 0 {
+                    READ_ONLY
+                } else {
+                    0
+                };
+                return Some((r.last_index.borrow().clone(), NON_ENUM | NON_CONFIG | ro));
             }
             ObjKind::Primitive(Value::Str(s)) => {
                 if key == "length" {
@@ -359,6 +364,10 @@ impl Vm {
             }
             ObjKind::RegExp(r) if &**key == "lastIndex" => {
                 *r.last_index.borrow_mut() = raw;
+                if attrs & READ_ONLY != 0 {
+                    o.flags.set(o.flags.get() | ELEMENTS_FROZEN);
+                    self.readonly_used = true;
+                }
                 return Ok(());
             }
             ObjKind::Primitive(Value::Str(s)) => {
@@ -598,6 +607,14 @@ impl Vm {
                 if let Some(n) = crate::builtins::typed::canonical_numeric(key) {
                     return crate::builtins::typed::valid_index(t, n).is_none();
                 }
+            }
+            ObjKind::RegExp(_) if key == "lastIndex" => return false,
+            ObjKind::Function(c)
+                if key == "prototype"
+                    && (c.proto.is_constructor() || c.proto.is_generator)
+                    && !o.has_own(key) =>
+            {
+                return false;
             }
             _ => {}
         }

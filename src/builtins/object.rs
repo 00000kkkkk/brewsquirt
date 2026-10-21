@@ -169,6 +169,12 @@ fn to_object(vm: &mut Vm, v: &Value) -> Result<Rc<Obj>, Value> {
 
 fn property_is_enumerable(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let k = vm.to_property_key(&arg(args, 0))?;
+    if let Value::Object(o) = &this {
+        if crate::builtins::reflect::is_proxy(o) {
+            let d = vm.op_get_own_property(o, &k)?;
+            return Ok(Value::Bool(d.is_some_and(|d| d.enumerable == Some(true))));
+        }
+    }
     let own = has_own_key(vm, &this, &k)?.truthy();
     Ok(Value::Bool(
         own && match &this {
@@ -208,6 +214,9 @@ fn has_own_property(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 
 fn has_own_key(vm: &mut Vm, target: &Value, k: &str) -> R {
     Ok(Value::Bool(match target {
+        Value::Object(o) if crate::builtins::reflect::is_proxy(o) => {
+            vm.op_get_own_property(o, k)?.is_some()
+        }
         Value::Object(o) => vm.own_property(o, k).is_some(),
         Value::Str(s) => {
             crate::object::array_index(k).is_some_and(|i| i < crate::value::len16(s))
@@ -634,6 +643,12 @@ fn own_symbols(o: &Obj) -> Vec<Value> {
 
 fn get_own_property_symbols(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let list = match arg(args, 0) {
+        Value::Object(o) if crate::builtins::reflect::is_proxy(&o) => vm
+            .op_own_keys(&o)?
+            .into_iter()
+            .filter(|k| crate::object::is_symbol_key(k))
+            .map(|k| crate::builtins::symbol_from_key(&k))
+            .collect(),
         Value::Object(o) => own_symbols(&o),
         Value::Undefined | Value::Null => {
             return Err(vm.type_error("Cannot convert undefined or null to object"));

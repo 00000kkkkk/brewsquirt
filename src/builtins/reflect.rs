@@ -52,14 +52,26 @@ impl Vm {
             let (t, h) = proxy_parts(self, o, "getPrototypeOf")?;
             return match trap(self, &h, "getPrototypeOf")? {
                 Some(f) => {
-                    let r = self.call_value(&f, Value::Object(h), &[Value::Object(t)])?;
-                    match r {
-                        Value::Object(p) => Ok(Some(p)),
-                        Value::Null => Ok(None),
-                        _ => Err(self.type_error(
-                            "'getPrototypeOf' on proxy: trap returned neither object nor null",
-                        )),
+                    let r = self.call_value(&f, Value::Object(h), &[Value::Object(t.clone())])?;
+                    let p = match r {
+                        Value::Object(p) => Some(p),
+                        Value::Null => None,
+                        _ => {
+                            return Err(self.type_error(
+                                "'getPrototypeOf' on proxy: trap returned neither object nor null",
+                            ));
+                        }
+                    };
+                    if self.op_is_extensible(&t)? {
+                        return Ok(p);
                     }
+                    let tp = self.op_get_prototype_of(&t)?;
+                    if !same_proto(&p, &tp) {
+                        return Err(self.type_error(
+                            "'getPrototypeOf' on proxy: proxy target is non-extensible but the trap did not return its actual prototype",
+                        ));
+                    }
+                    Ok(p)
                 }
                 None => self.op_get_prototype_of(&t),
             };
@@ -76,9 +88,22 @@ impl Vm {
             let (t, h) = proxy_parts(self, o, "setPrototypeOf")?;
             return match trap(self, &h, "setPrototypeOf")? {
                 Some(f) => {
-                    let p = proto.map(Value::Object).unwrap_or(Value::Null);
-                    let r = self.call_value(&f, Value::Object(h), &[Value::Object(t), p])?;
-                    Ok(r.truthy())
+                    let p = proto.clone().map(Value::Object).unwrap_or(Value::Null);
+                    let r =
+                        self.call_value(&f, Value::Object(h), &[Value::Object(t.clone()), p])?;
+                    if !r.truthy() {
+                        return Ok(false);
+                    }
+                    if self.op_is_extensible(&t)? {
+                        return Ok(true);
+                    }
+                    let tp = self.op_get_prototype_of(&t)?;
+                    if !same_proto(&proto, &tp) {
+                        return Err(self.type_error(
+                            "'setPrototypeOf' on proxy: trap returned truish for setting a new prototype on the non-extensible proxy target",
+                        ));
+                    }
+                    Ok(true)
                 }
                 None => self.op_set_prototype_of(&t, proto),
             };
@@ -114,8 +139,14 @@ impl Vm {
             let (t, h) = proxy_parts(self, o, "isExtensible")?;
             return match trap(self, &h, "isExtensible")? {
                 Some(f) => {
-                    let r = self.call_value(&f, Value::Object(h), &[Value::Object(t)])?;
-                    Ok(r.truthy())
+                    let r = self.call_value(&f, Value::Object(h), &[Value::Object(t.clone())])?;
+                    let target = self.op_is_extensible(&t)?;
+                    if r.truthy() != target {
+                        return Err(self.type_error(format!(
+                            "'isExtensible' on proxy: trap result does not reflect extensibility of proxy target (which is '{target}')"
+                        )));
+                    }
+                    Ok(target)
                 }
                 None => self.op_is_extensible(&t),
             };
@@ -128,7 +159,12 @@ impl Vm {
             let (t, h) = proxy_parts(self, o, "preventExtensions")?;
             return match trap(self, &h, "preventExtensions")? {
                 Some(f) => {
-                    let r = self.call_value(&f, Value::Object(h), &[Value::Object(t)])?;
+                    let r = self.call_value(&f, Value::Object(h), &[Value::Object(t.clone())])?;
+                    if r.truthy() && self.op_is_extensible(&t)? {
+                        return Err(self.type_error(
+                            "'preventExtensions' on proxy: trap returned truish but the proxy target is extensible",
+                        ));
+                    }
                     Ok(r.truthy())
                 }
                 None => self.op_prevent_extensions(&t),
@@ -277,8 +313,18 @@ impl Vm {
             let (t, h) = proxy_parts(self, o, "has")?;
             return match trap(self, &h, "has")? {
                 Some(f) => {
-                    let r =
-                        self.call_value(&f, Value::Object(h), &[Value::Object(t), key_value(key)])?;
+                    let r = self.call_value(
+                        &f,
+                        Value::Object(h),
+                        &[Value::Object(t.clone()), key_value(key)],
+                    )?;
+                    if !r.truthy() {
+                        if let Some(td) = self.op_get_own_property(&t, key)? {
+                            if td.configurable == Some(false) || !self.op_is_extensible(&t)? {
+                                return Err(self.proxy_invariant("has", key));
+                            }
+                        }
+                    }
                     Ok(r.truthy())
                 }
                 None => self.op_has_property(&t, key),
@@ -313,11 +359,32 @@ impl Vm {
         if is_proxy(o) {
             let (t, h) = proxy_parts(self, o, "get")?;
             return match trap(self, &h, "get")? {
-                Some(f) => self.call_value(
-                    &f,
-                    Value::Object(h),
-                    &[Value::Object(t), key_value(key), receiver.clone()],
-                ),
+                Some(f) => {
+                    let r = self.call_value(
+                        &f,
+                        Value::Object(h),
+                        &[Value::Object(t.clone()), key_value(key), receiver.clone()],
+                    )?;
+                    if let Some(td) = self.op_get_own_property(&t, key)? {
+                        if td.configurable == Some(false) {
+                            if td.is_accessor() {
+                                if td.get.as_ref().is_none_or(|g| g.is_undefined())
+                                    && !r.is_undefined()
+                                {
+                                    return Err(self.proxy_invariant("get", key));
+                                }
+                            } else if td.writable == Some(false)
+                                && !crate::props::same_value(
+                                    &r,
+                                    td.value.as_ref().unwrap_or(&Value::Undefined),
+                                )
+                            {
+                                return Err(self.proxy_invariant("get", key));
+                            }
+                        }
+                    }
+                    Ok(r)
+                }
                 None => self.op_get(&t, key, receiver),
             };
         }
@@ -352,9 +419,33 @@ impl Vm {
                     let r = self.call_value(
                         &f,
                         Value::Object(h),
-                        &[Value::Object(t), key_value(&key), val, receiver.clone()],
+                        &[
+                            Value::Object(t.clone()),
+                            key_value(&key),
+                            val.clone(),
+                            receiver.clone(),
+                        ],
                     )?;
-                    Ok(r.truthy())
+                    if !r.truthy() {
+                        return Ok(false);
+                    }
+                    if let Some(td) = self.op_get_own_property(&t, &key)? {
+                        if td.configurable == Some(false) {
+                            if td.is_accessor() {
+                                if td.set.as_ref().is_none_or(|s| s.is_undefined()) {
+                                    return Err(self.proxy_invariant("set", &key));
+                                }
+                            } else if td.writable == Some(false)
+                                && !crate::props::same_value(
+                                    &val,
+                                    td.value.as_ref().unwrap_or(&Value::Undefined),
+                                )
+                            {
+                                return Err(self.proxy_invariant("set", &key));
+                            }
+                        }
+                    }
+                    Ok(true)
                 }
                 None => self.op_set(&t, key, val, receiver),
             };
@@ -398,6 +489,30 @@ impl Vm {
         let Value::Object(r) = receiver else {
             return Ok(false);
         };
+        if is_proxy(r) {
+            return match self.op_get_own_property(r, &key)? {
+                Some(ed) => {
+                    if ed.is_accessor() || ed.writable == Some(false) {
+                        return Ok(false);
+                    }
+                    let d = PropDesc {
+                        value: Some(val),
+                        ..PropDesc::default()
+                    };
+                    self.op_define_own_property(r, key, d, false)
+                }
+                None => {
+                    let d = PropDesc {
+                        value: Some(val),
+                        writable: Some(true),
+                        enumerable: Some(true),
+                        configurable: Some(true),
+                        ..PropDesc::default()
+                    };
+                    self.op_define_own_property(r, key, d, false)
+                }
+            };
+        }
         if let Some((raw, attrs)) = self.own_property(r, &key) {
             if accessor_parts(&raw).is_some() || attrs & crate::object::READ_ONLY != 0 {
                 return Ok(false);
@@ -459,23 +574,71 @@ impl Vm {
             let (t, h) = proxy_parts(self, o, "ownKeys")?;
             return match trap(self, &h, "ownKeys")? {
                 Some(f) => {
-                    let r = self.call_value(&f, Value::Object(h), &[Value::Object(t)])?;
+                    let r = self.call_value(&f, Value::Object(h), &[Value::Object(t.clone())])?;
                     if !r.is_object() {
                         return Err(self.type_error("CreateListFromArrayLike called on non-object"));
                     }
-                    let items = self.iterate(&r)?;
-                    let mut out = Vec::with_capacity(items.len());
+                    let items = array_like(self, &r)?;
+                    let mut out: Vec<Rc<str>> = Vec::with_capacity(items.len());
+                    let mut seen = std::collections::HashSet::new();
                     for v in items {
-                        match &v {
-                            Value::Str(s) => out.push(s.clone()),
-                            Value::Symbol(s) => out.push(s.key.clone()),
+                        let k = match &v {
+                            Value::Str(s) => s.clone(),
+                            Value::Symbol(s) => s.key.clone(),
                             _ => {
                                 return Err(self.type_error(format!(
                                     "{} is not a valid property name",
                                     inspect_plain(&v)
                                 )));
                             }
+                        };
+                        if !seen.insert(k.clone()) {
+                            return Err(self.type_error(format!(
+                                "'ownKeys' on proxy: trap returned duplicate entries '{}'",
+                                crate::props::key_text(&k)
+                            )));
                         }
+                        out.push(k);
+                    }
+                    let extensible = self.op_is_extensible(&t)?;
+                    let target_keys = self.op_own_keys(&t)?;
+                    let mut configurable = Vec::new();
+                    let mut fixed = Vec::new();
+                    for k in target_keys {
+                        let d = self.op_get_own_property(&t, &k)?;
+                        if d.is_some_and(|d| d.configurable == Some(false)) {
+                            fixed.push(k);
+                        } else {
+                            configurable.push(k);
+                        }
+                    }
+                    if extensible && fixed.is_empty() {
+                        return Ok(out);
+                    }
+                    let mut rest = seen;
+                    for k in &fixed {
+                        if !rest.remove(k) {
+                            return Err(self.type_error(format!(
+                                "'ownKeys' on proxy: trap result did not include '{}'",
+                                crate::props::key_text(k)
+                            )));
+                        }
+                    }
+                    if extensible {
+                        return Ok(out);
+                    }
+                    for k in &configurable {
+                        if !rest.remove(k) {
+                            return Err(self.type_error(format!(
+                                "'ownKeys' on proxy: trap result did not include '{}'",
+                                crate::props::key_text(k)
+                            )));
+                        }
+                    }
+                    if !rest.is_empty() {
+                        return Err(self.type_error(
+                            "'ownKeys' on proxy: trap returned extra keys but proxy target is non-extensible",
+                        ));
                     }
                     Ok(out)
                 }
@@ -554,7 +717,7 @@ impl Vm {
                 }
                 Ok(r)
             }
-            None => self.construct(&Value::Object(t), args),
+            None => self.construct_with_target(&Value::Object(t), args, new_target),
         }
     }
 }
@@ -583,7 +746,11 @@ pub fn install(vm: &mut Vm) {
     for (name, arity, f) in fns {
         method(vm, &reflect, name, arity, f);
     }
-    reflect.set_own(crate::object::TO_STRING_TAG_KEY, "Reflect".into());
+    reflect.set_with_attrs(
+        crate::object::TO_STRING_TAG_KEY,
+        "Reflect".into(),
+        crate::object::NON_ENUM | crate::object::READ_ONLY,
+    );
     vm.define_global("Reflect", Value::Object(reflect));
 
     let pp = vm.new_object();
@@ -742,6 +909,8 @@ fn make_proxy(vm: &mut Vm, target: &Value, handler: &Value) -> Result<Rc<Obj>, V
     };
     let callable = t.is_callable();
     let constructible = vm.is_constructor(target);
+    vm.proxies_used = true;
+    vm.readonly_used = true;
     Ok(Obj::new(
         ObjKind::Proxy(Box::new(ProxyData {
             target: RefCell::new(Some(t.clone())),
@@ -773,6 +942,16 @@ fn proxy_revocable(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             args: vec![Value::Object(p)],
         })),
         Some(vm.realm.function_proto.clone()),
+    );
+    revoke.set_with_attrs(
+        "length",
+        Value::Number(0.0),
+        crate::object::NON_ENUM | crate::object::READ_ONLY,
+    );
+    revoke.set_with_attrs(
+        "name",
+        Value::Str("".into()),
+        crate::object::NON_ENUM | crate::object::READ_ONLY,
     );
     out.set_own("revoke", Value::Object(revoke));
     Ok(Value::Object(out))
@@ -830,4 +1009,12 @@ fn compatible(extensible: bool, desc: &PropDesc, current: &Option<PropDesc>) -> 
         }
     }
     true
+}
+
+fn same_proto(a: &Option<Rc<Obj>>, b: &Option<Rc<Obj>>) -> bool {
+    match (a, b) {
+        (Some(x), Some(y)) => Rc::ptr_eq(x, y),
+        (None, None) => true,
+        _ => false,
+    }
 }

@@ -1156,6 +1156,23 @@ impl Obj {
         self.props.borrow().contains_key(key)
     }
 
+    pub fn get_chain_plain(&self, key: &str) -> Option<Value> {
+        if let Some(v) = self.props.borrow().get(key) {
+            return Some(v.clone());
+        }
+        let mut cur = self.proto.borrow().clone();
+        while let Some(o) = cur {
+            if !matches!(o.kind, ObjKind::Ordinary) {
+                return None;
+            }
+            if let Some(v) = o.props.borrow().get(key) {
+                return Some(v.clone());
+            }
+            cur = o.proto.borrow().clone();
+        }
+        Some(Value::Undefined)
+    }
+
     pub fn get_chain(&self, key: &str) -> Option<Value> {
         if let Some(v) = self.props.borrow().get(key) {
             return Some(v.clone());
@@ -1222,5 +1239,5 @@ pub fn array_index(key: &str) -> Option<usize> {
         }
         n = n * 10 + (c - b'0') as usize;
     }
-    Some(n)
+    (n < 4294967295).then_some(n)
 }

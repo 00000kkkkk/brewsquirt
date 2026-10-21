@@ -15,9 +15,31 @@ const needFn = (f, what) => {
 }
 
 const IteratorPrototype = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))
-const RECORD = Symbol("record")
-const GEN = Symbol("generator")
-const STARTED = Symbol("started")
+class Stamp {
+  constructor(o) {
+    return o
+  }
+}
+class HelperBrand extends Stamp {
+  #state
+  constructor(o, state) {
+    super(o)
+    this.#state = state
+  }
+  static state(o) {
+    return isObj(o) && #state in o ? o.#state : undefined
+  }
+}
+class WrapBrand extends Stamp {
+  #rec
+  constructor(o, rec) {
+    super(o)
+    this.#rec = rec
+  }
+  static rec(o) {
+    return isObj(o) && #rec in o ? o.#rec : undefined
+  }
+}
 
 function Iterator() {
   if (new.target === undefined || new.target === Iterator) {
@@ -96,35 +118,34 @@ const guard = (rec, fn) => {
 
 const HelperPrototype = Object.create(IteratorPrototype)
 const helperState = (O) => {
-  if (!isObj(O) || !Object.prototype.hasOwnProperty.call(O, GEN)) {
+  const state = HelperBrand.state(O)
+  if (state === undefined) {
     throw new TypeError("Iterator helper method called on incompatible receiver")
   }
-  return O
+  return state
 }
 defineAll(HelperPrototype, {
   next() {
     const O = helperState(this)
-    O[STARTED].value = true
-    return O[GEN].next()
+    O.started = true
+    return O.gen.next()
   },
   return() {
     const O = helperState(this)
-    if (!O[STARTED].value) {
-      O[STARTED].value = true
-      O[GEN].return()
-      closeNormal(O[RECORD].it)
+    if (!O.started) {
+      O.started = true
+      O.gen.return()
+      closeNormal(O.rec.it)
       return { value: undefined, done: true }
     }
-    return O[GEN].return()
+    return O.gen.return()
   },
 })
 Object.defineProperty(HelperPrototype, Symbol.toStringTag, { value: "Iterator Helper", writable: false, enumerable: false, configurable: true })
 
 const helper = (rec, body) => {
   const out = Object.create(HelperPrototype)
-  Object.defineProperty(out, GEN, { value: body() })
-  Object.defineProperty(out, RECORD, { value: rec })
-  Object.defineProperty(out, STARTED, { value: { value: false } })
+  new HelperBrand(out, { gen: body(), rec, started: false })
   return out
 }
 function* yieldGuarded(rec, value) {
@@ -470,10 +491,11 @@ Object.defineProperty(IteratorPrototype.windows, "length", { value: 1, configura
 
 const WrapPrototype = Object.create(IteratorPrototype)
 const wrapState = (O) => {
-  if (!isObj(O) || !Object.prototype.hasOwnProperty.call(O, RECORD)) {
+  const rec = WrapBrand.rec(O)
+  if (rec === undefined) {
     throw new TypeError("Iterator wrapper method called on incompatible receiver")
   }
-  return O[RECORD]
+  return rec
 }
 defineAll(WrapPrototype, {
   next() {
@@ -493,7 +515,7 @@ define(Iterator, "from", {
     const rec = flattenable(O, true)
     if (rec.it instanceof Iterator) return rec.it
     const wrapper = Object.create(WrapPrototype)
-    Object.defineProperty(wrapper, RECORD, { value: rec })
+    new WrapBrand(wrapper, rec)
     return wrapper
   },
 }.from)

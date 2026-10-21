@@ -71,10 +71,14 @@ fn last_index(vm: &mut Vm, o: &Obj) -> Result<f64, Value> {
     })
 }
 
-fn set_last_index(o: &Obj, v: f64) {
+fn set_last_index(vm: &mut Vm, o: &Obj, v: f64) -> Result<(), Value> {
     if let ObjKind::RegExp(r) = &o.kind {
+        if o.flags.get() & crate::object::ELEMENTS_FROZEN != 0 {
+            return Err(vm.read_only_error(o, "lastIndex"));
+        }
         *r.last_index.borrow_mut() = Value::Number(v);
     }
+    Ok(())
 }
 
 pub fn pristine(vm: &Vm, v: &Value, sym: usize) -> Option<(Rc<Obj>, Rc<RegexData>)> {
@@ -118,7 +122,7 @@ pub fn exec_raw(vm: &mut Vm, obj: &Obj, data: &RegexData, s: &str) -> Result<Opt
     let start16 = if tracks { li } else { 0.0 };
     if start16 > len16(s) as f64 {
         if tracks {
-            set_last_index(obj, 0.0);
+            set_last_index(vm, obj, 0.0)?;
         }
         return Ok(None);
     }
@@ -126,8 +130,8 @@ pub fn exec_raw(vm: &mut Vm, obj: &Obj, data: &RegexData, s: &str) -> Result<Opt
     let found = data.find_at(s, pos).map_err(|e| run_error(vm, e))?;
     if tracks {
         match &found {
-            Some(m) => set_last_index(obj, utf16_index(s, m.end) as f64),
-            None => set_last_index(obj, 0.0),
+            Some(m) => set_last_index(vm, obj, utf16_index(s, m.end) as f64)?,
+            None => set_last_index(vm, obj, 0.0)?,
         }
     }
     Ok(found)
@@ -276,7 +280,7 @@ pub fn string_match(vm: &mut Vm, s: Rc<str>, pattern: &Value) -> R {
         };
     }
     let found = all_matches(vm, &data, &s)?;
-    set_last_index(&o, 0.0);
+    set_last_index(vm, &o, 0.0)?;
     if found.is_empty() {
         return Ok(Value::Null);
     }
@@ -389,7 +393,7 @@ pub fn string_replace_regexp(
     }
     let matches = if data.global {
         let m = all_matches(vm, data, &s)?;
-        set_last_index(obj, 0.0);
+        set_last_index(vm, obj, 0.0)?;
         m
     } else {
         exec_raw(vm, obj, data, &s)?.into_iter().collect()

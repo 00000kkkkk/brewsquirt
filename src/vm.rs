@@ -139,7 +139,10 @@ impl Realm {
             iterator_base,
             async_iterator_base,
             function_proto,
-            array_proto: mk(),
+            array_proto: Obj::new(
+                ObjKind::Array(RefCell::new(Vec::new())),
+                Some(object_proto.clone()),
+            ),
             string_proto: Obj::new(
                 ObjKind::Primitive(Value::Str("".into())),
                 Some(object_proto.clone()),
@@ -273,6 +276,7 @@ pub struct Vm {
     pub(crate) co_signal: Option<Signal>,
     pub accessors_used: bool,
     pub(crate) readonly_used: bool,
+    pub(crate) proxies_used: bool,
     pub(crate) global_accessors: bool,
     pub(crate) next_new_target: Option<Rc<Obj>>,
     pub(crate) gen_return_pending: bool,
@@ -347,6 +351,7 @@ impl Vm {
             co_signal: None,
             accessors_used: false,
             readonly_used: false,
+            proxies_used: false,
             global_accessors: false,
             next_new_target: None,
             gen_return_pending: false,
@@ -386,6 +391,7 @@ impl Vm {
         vm.capture_pristine();
         vm.accessors_used = false;
         vm.readonly_used = false;
+        vm.proxies_used = false;
         vm
     }
 
@@ -1306,6 +1312,40 @@ impl Vm {
                 }
             }
         }
+        if let (Value::Object(o), Value::Object(nt)) = (callee, new_target) {
+            if let ObjKind::Function(c) = &o.kind {
+                if c.proto.is_constructor() && !Rc::ptr_eq(o, nt) {
+                    let proto = match self.get_prop(new_target, "prototype")? {
+                        Value::Object(p) => p,
+                        _ if &*c.proto.module.name == "<prelude>" => self
+                            .function_prototype(o)
+                            .unwrap_or_else(|| self.realm.object_proto.clone()),
+                        _ => self.realm.object_proto.clone(),
+                    };
+                    let kind = self
+                        .root_ctor_kind(o)
+                        .map(|k| k())
+                        .unwrap_or(ObjKind::Ordinary);
+                    let this = Value::Object(Obj::new(kind, Some(proto)));
+                    let c = c.clone();
+                    let mark = self.stack.len();
+                    self.stack.push(callee.clone());
+                    self.stack.push(this);
+                    self.stack.extend_from_slice(args);
+                    self.next_new_target = Some(nt.clone());
+                    if let Err(e) = self.push_frame(c, args.len(), true) {
+                        self.next_new_target = None;
+                        self.stack.truncate(mark);
+                        return Err(e);
+                    }
+                    self.native_depth += 1;
+                    let stop = self.frames.len() - 1;
+                    let r = self.run(stop);
+                    self.native_depth -= 1;
+                    return r;
+                }
+            }
+        }
         let r = self.construct(callee, args)?;
         if !new_target.strict_eq(callee) {
             if let (Value::Object(obj), Value::Object(nt)) = (&r, new_target) {
@@ -1475,7 +1515,7 @@ impl Vm {
                     }
                     let proto = o.proto.borrow().clone();
                     return match proto {
-                        Some(p) => self.get_obj(&p, key),
+                        Some(p) => self.get_inherited(&p, key),
                         None => Value::Undefined,
                     };
                 }
@@ -1603,7 +1643,24 @@ impl Vm {
         }
         let proto = o.proto.borrow().clone();
         match proto {
-            Some(p) => self.get_obj(&p, key),
+            Some(p) => self.get_inherited(&p, key),
+            None => Value::Undefined,
+        }
+    }
+
+    fn get_inherited(&self, o: &Rc<Obj>, key: &str) -> Value {
+        match &o.kind {
+            ObjKind::Map(_) | ObjKind::Set(_) if key == "size" => {}
+            ObjKind::Typed(_)
+                if matches!(key, "length" | "byteLength" | "byteOffset" | "buffer") => {}
+            _ => return self.get_obj(o, key),
+        }
+        if let Some(v) = o.props.borrow().get(key) {
+            return v.clone();
+        }
+        let proto = o.proto.borrow().clone();
+        match proto {
+            Some(p) => self.get_inherited(&p, key),
             None => Value::Undefined,
         }
     }
@@ -1672,6 +1729,9 @@ impl Vm {
                     }
                     _ => {}
                 }
+                if self.proxies_used && proxy_in_chain(o) {
+                    return self.op_get(o, key, v);
+                }
                 let raw = self.get_obj(o, key);
                 self.resolve_accessor(raw, v)
             }
@@ -1738,6 +1798,15 @@ impl Vm {
                     ObjKind::Global => return self.set_global_prop(key, val),
                     _ => {}
                 }
+                if self.proxies_used && proxy_in_chain(o) {
+                    if !self.op_set(o, key.clone(), val, target)? {
+                        return Err(self.type_error(format!(
+                            "Cannot assign to property '{}'",
+                            crate::props::key_text(&key)
+                        )));
+                    }
+                    return Ok(());
+                }
                 if self.accessors_used {
                     if let Some(setter) = self.accessor_setter(o, &key) {
                         if setter.is_callable() {
@@ -1752,6 +1821,9 @@ impl Vm {
                 }
                 if let ObjKind::RegExp(r) = &o.kind {
                     if &*key == "lastIndex" {
+                        if o.flags.get() & crate::object::ELEMENTS_FROZEN != 0 {
+                            return Err(self.read_only_error(o, &key));
+                        }
                         *r.last_index.borrow_mut() = val;
                         return Ok(());
                     }
@@ -1948,7 +2020,11 @@ impl Vm {
         if let (Value::Object(o), Value::Number(n)) = (obj, key) {
             if let ObjKind::Array(a) = &o.kind {
                 let i = *n as usize;
-                if i as f64 == *n && o.flags.get() & !crate::object::HAS_HOLES == 0 {
+                if i as f64 == *n
+                    && o.flags.get() & !crate::object::HAS_HOLES == 0
+                    && !(self.proxies_used && proxy_in_chain(o))
+                    && !Rc::ptr_eq(o, &self.realm.array_proto)
+                {
                     return self.set_array_index(o, a, i, val);
                 }
             }
@@ -2234,18 +2310,6 @@ impl Vm {
                     if i < a.borrow().len() && !o.is_hole(i) {
                         return Ok(true);
                     }
-                    if i < a.borrow().len() {
-                        return Ok(o
-                            .proto
-                            .borrow()
-                            .as_ref()
-                            .is_some_and(|p| p.get_chain(&k).is_some()));
-                    }
-                    return Ok(o
-                        .proto
-                        .borrow()
-                        .as_ref()
-                        .is_some_and(|p| p.get_chain(&k).is_some()));
                 }
             }
             ObjKind::Primitive(Value::Str(s)) => {
@@ -2685,7 +2749,9 @@ impl Vm {
         if let Value::Object(o) = v {
             if let ObjKind::Array(a) = &o.kind {
                 for i in 0..a.borrow().len() {
-                    keys.push(Value::Str(i.to_string().into()));
+                    if !o.is_hole(i) {
+                        keys.push(Value::Str(i.to_string().into()));
+                    }
                 }
                 keys.push(Value::Str("length".into()));
             }
@@ -3069,11 +3135,11 @@ impl Vm {
                             let Value::Str(key) = &proto.consts[k as usize] else {
                                 unreachable!()
                             };
-                            let v = o.get_chain(key).unwrap_or_default();
-                            if matches!(&v, Value::Object(a) if a.is_accessor()) {
-                                None
-                            } else {
-                                Some(v)
+                            match o.get_chain_plain(key) {
+                                Some(v) if !matches!(&v, Value::Object(a) if a.is_accessor()) => {
+                                    Some(v)
+                                }
+                                _ => None,
                             }
                         }
                         _ => None,
@@ -3096,11 +3162,11 @@ impl Vm {
                             let Value::Str(key) = &proto.consts[k as usize] else {
                                 unreachable!()
                             };
-                            let v = o.get_chain(key).unwrap_or_default();
-                            if matches!(&v, Value::Object(a) if a.is_accessor()) {
-                                None
-                            } else {
-                                Some(v)
+                            match o.get_chain_plain(key) {
+                                Some(v) if !matches!(&v, Value::Object(a) if a.is_accessor()) => {
+                                    Some(v)
+                                }
+                                _ => None,
                             }
                         }
                         _ => None,
@@ -3259,11 +3325,12 @@ impl Vm {
                         Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => {
                             let key = &proto.consts[k as usize];
                             let Value::Str(key) = key else { unreachable!() };
-                            let v = o.get_chain(key).unwrap_or_default();
-                            if matches!(&v, Value::Object(a) if a.is_accessor()) {
-                                tri!(self.resolve_accessor(v, &obj))
-                            } else {
-                                v
+                            match o.get_chain_plain(key) {
+                                Some(v) if matches!(&v, Value::Object(a) if a.is_accessor()) => {
+                                    tri!(self.resolve_accessor(v, &obj))
+                                }
+                                Some(v) => v,
+                                None => tri!(self.get_prop(&obj, key)),
                             }
                         }
                         _ => {
@@ -4760,4 +4827,15 @@ fn name_anonymous(f: &Value, key: &str, prefix: &str) {
 fn private_label(key: &str) -> String {
     let body = key.strip_prefix('\u{0}').unwrap_or(key);
     body.rsplit_once('@').map_or(body, |(a, _)| a).to_string()
+}
+
+pub(crate) fn proxy_in_chain(o: &Rc<Obj>) -> bool {
+    let mut cur = o.proto.borrow().clone();
+    while let Some(p) = cur {
+        if matches!(p.kind, ObjKind::Proxy(_)) {
+            return true;
+        }
+        cur = p.proto.borrow().clone();
+    }
+    false
 }
