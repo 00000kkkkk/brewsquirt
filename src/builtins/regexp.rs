@@ -14,6 +14,7 @@ pub fn install(vm: &mut Vm) {
     method(vm, &rp, "exec", 1, exec);
     method(vm, &rp, "test", 1, test);
     method(vm, &rp, "toString", 0, to_string);
+    method(vm, &rp, "compile", 2, regexp_compile);
     let ctor = make_ctor(vm, "RegExp", 2, regexp_ctor, None, &rp);
     vm.define_global("RegExp", Value::Object(ctor));
 }
@@ -21,7 +22,7 @@ pub fn install(vm: &mut Vm) {
 pub fn new_regexp(vm: &Vm, data: Rc<RegexData>) -> Value {
     Value::Object(Obj::new(
         ObjKind::RegExp(RegExpObj {
-            data,
+            data: RefCell::new(data),
             last_index: RefCell::new(Value::Number(0.0)),
         }),
         Some(vm.realm.regexp_proto.clone()),
@@ -38,7 +39,7 @@ pub fn make_regexp(vm: &mut Vm, source: &str, flags: &str) -> R {
 pub fn as_regexp(v: &Value) -> Option<(Rc<Obj>, Rc<RegexData>)> {
     match v {
         Value::Object(o) => match &o.kind {
-            ObjKind::RegExp(r) => Some((o.clone(), r.data.clone())),
+            ObjKind::RegExp(r) => Some((o.clone(), r.data.borrow().clone())),
             _ => None,
         },
         _ => None,
@@ -193,6 +194,39 @@ fn test(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (o, data) = this_regexp(vm, &this)?;
     let s = vm.to_string(&arg(args, 0))?;
     Ok(Value::Bool(exec_raw(vm, &o, &data, &s)?.is_some()))
+}
+
+fn regexp_compile(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let (o, _) = this_regexp(vm, &this)?;
+    let pattern = arg(args, 0);
+    let flags = arg(args, 1);
+    let (source, flags): (Rc<str>, Rc<str>) = match as_regexp(&pattern) {
+        Some((_, d)) => {
+            if !flags.is_undefined() {
+                return Err(
+                    vm.type_error("Cannot supply flags when constructing one RegExp from another")
+                );
+            }
+            (d.source.clone(), d.flags.clone())
+        }
+        None => {
+            let s = match pattern {
+                Value::Undefined => Rc::from(""),
+                p => vm.to_string(&p)?,
+            };
+            let f = match flags {
+                Value::Undefined => Rc::from(""),
+                f => vm.to_string(&f)?,
+            };
+            (s, f)
+        }
+    };
+    let data = compile(&source, &flags).map_err(|m| vm.make_error(ErrorKind::SyntaxError, m))?;
+    if let ObjKind::RegExp(r) = &o.kind {
+        *r.data.borrow_mut() = data;
+    }
+    vm.set_prop(&this, "lastIndex".into(), Value::Number(0.0))?;
+    Ok(this)
 }
 
 fn to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {

@@ -160,7 +160,7 @@ fn regexp_prop<const I: usize>(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
         });
     }
     if let ObjKind::RegExp(r) = &o.kind {
-        let d = &r.data;
+        let d = r.data.borrow().clone();
         let flag = |c: char| Value::Bool(d.flags.contains(c));
         return Ok(match name {
             "source" => crate::regexp::escape_source(&d.source).into(),

@@ -2,6 +2,10 @@ use crate::token::{P, PUNCTUATORS, SyntaxError, TemplatePart, Tok, Token};
 use std::rc::Rc;
 
 pub fn tokenize(src: &str) -> Result<Vec<Token>, SyntaxError> {
+    tokenize_goal(src, false)
+}
+
+pub fn tokenize_goal(src: &str, html: bool) -> Result<Vec<Token>, SyntaxError> {
     let chars: Vec<char> = src.chars().collect();
     let mut offsets = Vec::with_capacity(chars.len() + 1);
     let mut b = 0u32;
@@ -11,6 +15,7 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, SyntaxError> {
     }
     offsets.push(b);
     let mut lexer = Lexer {
+        html,
         chars,
         offsets,
         pos: 0,
@@ -96,6 +101,7 @@ pub fn is_id_continue(c: char) -> bool {
 }
 
 struct Lexer {
+    html: bool,
     chars: Vec<char>,
     offsets: Vec<u32>,
     pos: usize,
@@ -192,6 +198,15 @@ impl Lexer {
         }
     }
 
+    fn skip_line(&mut self) {
+        while let Some(c) = self.peek() {
+            if matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}') {
+                break;
+            }
+            self.bump();
+        }
+    }
+
     fn skip_trivia(&mut self) -> Result<bool, SyntaxError> {
         let mut nl = false;
         loop {
@@ -203,13 +218,22 @@ impl Lexer {
                 Some(c) if c.is_whitespace() || c == '\u{feff}' => {
                     self.bump();
                 }
-                Some('/') if self.peek_at(1) == Some('/') => {
-                    while let Some(c) = self.peek() {
-                        if c == '\n' {
-                            break;
-                        }
-                        self.bump();
-                    }
+                Some('/') if self.peek_at(1) == Some('/') => self.skip_line(),
+                Some('<')
+                    if self.html
+                        && self.peek_at(1) == Some('!')
+                        && self.peek_at(2) == Some('-')
+                        && self.peek_at(3) == Some('-') =>
+                {
+                    self.skip_line()
+                }
+                Some('-')
+                    if self.html
+                        && (nl || self.pos == 0)
+                        && self.peek_at(1) == Some('-')
+                        && self.peek_at(2) == Some('>') =>
+                {
+                    self.skip_line()
                 }
                 Some('/') if self.peek_at(1) == Some('*') => {
                     let (line, col) = (self.line, self.col);

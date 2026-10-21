@@ -1,5 +1,5 @@
 use crate::ast::*;
-use crate::lexer::tokenize;
+
 use crate::number::number_to_string;
 use crate::token::{P, SyntaxError, TemplatePart, Tok, Token};
 use std::rc::Rc;
@@ -68,7 +68,7 @@ pub fn parse_script(src: &str) -> R<Vec<Stmt>> {
 }
 
 fn parse_goal(src: &str, script: bool) -> R<Vec<Stmt>> {
-    let toks = tokenize(src)?;
+    let toks = crate::lexer::tokenize_goal(src, script)?;
     let mut parser = Parser {
         script,
         toks,

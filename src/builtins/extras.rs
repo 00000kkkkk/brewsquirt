@@ -641,12 +641,59 @@ for (const [name, tag, attr] of [
   ["sub", "sub"],
   ["sup", "sup"],
 ]) {
-  define(String.prototype, name, named(name, function (value) {
-    if (this == null) throw new TypeError(`String.prototype.${name} called on null or undefined`)
+  const html = (self, value) => {
+    if (self == null) throw new TypeError(`String.prototype.${name} called on null or undefined`)
+    const S = String(self)
     const open = attr ? `<${tag} ${attr}="${String(value).replace(/"/g, "&quot;")}">` : `<${tag}>`
-    return `${open}${String(this)}</${tag}>`
-  }))
+    return `${open}${S}</${tag}>`
+  }
+  const fn = attr
+    ? { [name](value) { return html(this, value) } }[name]
+    : { [name]() { return html(this) } }[name]
+  define(String.prototype, name, fn)
 }
+
+const hex2 = (n) => n.toString(16).toUpperCase().padStart(2, "0")
+const hex4 = (n) => n.toString(16).toUpperCase().padStart(4, "0")
+const ESCAPE_KEEP = /[A-Za-z0-9@*_+\-./]/
+define(globalThis, "escape", {
+  escape(string) {
+    const S = String(string)
+    let R = ""
+    for (let i = 0; i < S.length; i++) {
+      const c = S[i]
+      if (ESCAPE_KEEP.test(c)) R += c
+      else {
+        const n = S.charCodeAt(i)
+        R += n < 256 ? "%" + hex2(n) : "%u" + hex4(n)
+      }
+    }
+    return R
+  },
+}.escape)
+define(globalThis, "unescape", {
+  unescape(string) {
+    const S = String(string)
+    const isHex = (s) => /^[0-9A-Fa-f]+$/.test(s)
+    let R = ""
+    let k = 0
+    while (k < S.length) {
+      let c = S[k]
+      if (c === "%") {
+        if (k + 6 <= S.length && S[k + 1] === "u" && isHex(S.slice(k + 2, k + 6))) {
+          c = String.fromCharCode(parseInt(S.slice(k + 2, k + 6), 16))
+          k += 5
+        } else if (k + 3 <= S.length && isHex(S.slice(k + 1, k + 3))) {
+          c = String.fromCharCode(parseInt(S.slice(k + 1, k + 3), 16))
+          k += 2
+        }
+      }
+      R += c
+      k++
+    }
+    return R
+  },
+}.unescape)
 
 defineAll(Date.prototype, {
   getYear() {

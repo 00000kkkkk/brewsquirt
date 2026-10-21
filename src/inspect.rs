@@ -711,7 +711,10 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             let inner = format_value(ctx, p, rt, false);
             format!("[{kind}: {inner}]")
         }
-        ObjKind::RegExp(r) => format!("/{}/{}", r.data.source, r.data.flags),
+        ObjKind::RegExp(r) => {
+            let d = r.data.borrow();
+            format!("/{}/{}", d.source, d.flags)
+        }
         ObjKind::Date(t) => {
             crate::builtins::iso_string(t.get()).unwrap_or_else(|| "Invalid Date".to_string())
         }

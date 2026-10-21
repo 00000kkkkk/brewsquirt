@@ -520,7 +520,10 @@ fn clone_value(vm: &mut Vm, v: &Value, memo: &mut Vec<(*const Obj, Value)>) -> R
             ObjKind::Date(std::cell::Cell::new(t.get())),
             Some(vm.realm.date_proto.clone()),
         )),
-        ObjKind::RegExp(r) => crate::builtins::make_regexp(vm, &r.data.source, &r.data.flags)?,
+        ObjKind::RegExp(r) => {
+            let d = r.data.borrow().clone();
+            crate::builtins::make_regexp(vm, &d.source, &d.flags)?
+        }
         ObjKind::ArrayBuffer(b) => {
             let bytes = b.borrow().clone();
             Value::Object(new_buffer(vm, bytes))
