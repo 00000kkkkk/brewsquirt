@@ -919,16 +919,20 @@ impl Compiler {
         let import_names: Vec<Rc<str>> =
             imports.iter().filter_map(|i| i.namespace.clone()).collect();
         for (n, c) in &names {
-            let lexical = !repl
-                && !funcs.iter().any(|f| f.name.as_ref() == Some(n))
+            let lexical_kind = !funcs.iter().any(|f| f.name.as_ref() == Some(n))
                 && !n.starts_with("%import")
                 && !import_names.contains(n);
+            let lexical = !repl && lexical_kind;
             if lexical {
                 self.emit(Op::Uninit);
                 self.add_lexical(n.clone(), *c);
                 continue;
             }
-            self.emit(Op::Undefined);
+            if repl && lexical_kind {
+                self.emit(Op::Uninit);
+            } else {
+                self.emit(Op::Undefined);
+            }
             if repl {
                 if *c {
                     self.repl_consts.push(n.clone());

@@ -605,7 +605,7 @@ impl Vm {
         if attrs & NON_CONFIG != 0 && o.has_own(key) {
             return false;
         }
-        if o.is_callable() && !o.has_own(key) {
+        if o.is_callable() {
             match key {
                 "name" => o.flags.set(o.flags.get() | NAME_DELETED),
                 "length" => o.flags.set(o.flags.get() | LENGTH_DELETED),

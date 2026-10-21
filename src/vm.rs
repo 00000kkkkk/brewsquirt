@@ -2389,6 +2389,11 @@ impl Vm {
     pub fn get_async_iterator(&mut self, v: &Value) -> Result<Value, Value> {
         if !v.is_nullish() {
             let method = self.get_prop(v, crate::object::ASYNC_ITER_KEY)?;
+            if !method.is_nullish() && !method.is_callable() {
+                return Err(
+                    self.type_error(format!("{} is not a function", inspect_plain(&method)))
+                );
+            }
             if method.is_callable() {
                 let it = self.call_value(&method, v.clone(), &[])?;
                 if !it.is_object() {
@@ -3153,6 +3158,9 @@ impl Vm {
                     let cached = proto.global_cache[k as usize].get();
                     if cached != u32::MAX && !self.global_accessors {
                         let v = self.globals.at(cached).clone();
+                        if matches!(v, Value::Uninit) {
+                            throw!(self.tdz_error(&proto, k));
+                        }
                         self.stack.push(v);
                         continue;
                     }
@@ -3165,6 +3173,9 @@ impl Vm {
                         Some(slot) => {
                             proto.global_cache[k as usize].set(slot);
                             let mut v = self.globals.at(slot).clone();
+                            if matches!(v, Value::Uninit) {
+                                throw!(self.tdz_error(&proto, k));
+                            }
                             if self.global_accessors {
                                 if let Value::Object(a) = &v {
                                     if a.is_accessor() {
@@ -3195,6 +3206,9 @@ impl Vm {
                     }
                     match self.globals.slot(&n) {
                         Some(slot) => {
+                            if matches!(self.globals.at(slot), Value::Uninit) {
+                                throw!(self.tdz_error(&proto, k));
+                            }
                             if self.global_accessors || self.globals.readonly {
                                 tri!(self.set_global_prop(n.clone(), v));
                                 continue;
@@ -3226,6 +3240,9 @@ impl Vm {
                     let n = name!(k);
                     if self.globals.slot(&n).is_none() {
                         tri!(self.load_lazy_global(&n));
+                    }
+                    if matches!(self.globals.get(&n), Some(Value::Uninit)) {
+                        throw!(self.tdz_error(&proto, k));
                     }
                     let t = self
                         .globals
@@ -4417,6 +4434,11 @@ impl Vm {
                     name_anonymous(&f, &k, if setter { "set " } else { "get " });
                     if let Some(Value::Object(o)) = self.stack.last() {
                         let o = o.clone();
+                        if let Value::Object(func) = &f {
+                            if let ObjKind::Function(c) = &func.kind {
+                                *c.home.borrow_mut() = Some(o.clone());
+                            }
+                        }
                         self.define_accessor(&o, k, f, setter);
                     }
                 }
