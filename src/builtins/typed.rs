@@ -25,9 +25,25 @@ fn new_buffer_with_max(vm: &Vm, bytes: Vec<u8>, max: Option<usize>) -> Rc<Obj> {
         ObjKind::ArrayBuffer(Box::new(BufferData {
             bytes: RefCell::new(bytes),
             max,
+            shared: false,
         })),
         Some(vm.realm.array_buffer_proto.clone()),
     )
+}
+
+fn new_shared_buffer(vm: &Vm, bytes: Vec<u8>, max: Option<usize>) -> Rc<Obj> {
+    Obj::new(
+        ObjKind::ArrayBuffer(Box::new(BufferData {
+            bytes: RefCell::new(bytes),
+            max,
+            shared: true,
+        })),
+        Some(vm.realm.shared_buffer_proto.clone()),
+    )
+}
+
+fn is_shared(o: &Obj) -> bool {
+    matches!(&o.kind, ObjKind::ArrayBuffer(b) if b.shared)
 }
 
 fn buffer_max(o: &Obj) -> Option<usize> {
@@ -366,6 +382,34 @@ fn install_buffer(vm: &mut Vm) {
     );
     method(vm, &ab, "isView", 1, ab_is_view);
     vm.define_global("ArrayBuffer", Value::Object(ab));
+
+    let sbp = vm.realm.shared_buffer_proto.clone();
+    method(vm, &sbp, "slice", 2, sab_slice);
+    method(vm, &sbp, "grow", 1, sab_grow);
+    getter(vm, &sbp, "byteLength", sab_byte_length);
+    getter(vm, &sbp, "maxByteLength", sab_max_byte_length);
+    getter(vm, &sbp, "growable", sab_growable);
+    sbp.set_with_attrs(
+        TO_STRING_TAG_KEY,
+        "SharedArrayBuffer".into(),
+        NON_ENUM | READ_ONLY,
+    );
+    let sab = make_ctor(
+        vm,
+        "SharedArrayBuffer",
+        1,
+        sab_ctor,
+        Some(crate::object::wrapper_marker),
+        &sbp,
+    );
+    let species = native_fn(vm, "get [Symbol.species]", 0, species_getter);
+    sab.set_with_attrs(
+        SPECIES_KEY,
+        raw_accessor(species, Value::Undefined),
+        NON_ENUM,
+    );
+    vm.define_global("SharedArrayBuffer", Value::Object(sab));
+    install_atomics(vm);
 }
 
 fn install_typed(vm: &mut Vm) {
@@ -427,7 +471,7 @@ fn install_typed(vm: &mut Vm) {
         NON_ENUM,
     );
 
-    let ctors: [NativeFn; 11] = [
+    let ctors: [NativeFn; 12] = [
         typed_ctor::<0>,
         typed_ctor::<1>,
         typed_ctor::<2>,
@@ -439,6 +483,7 @@ fn install_typed(vm: &mut Vm) {
         typed_ctor::<8>,
         typed_ctor::<9>,
         typed_ctor::<10>,
+        typed_ctor::<11>,
     ];
     let mut made = Vec::with_capacity(ctors.len() + 1);
     for (i, kind) in TypedKind::ALL.iter().enumerate() {
@@ -472,7 +517,7 @@ fn install_typed(vm: &mut Vm) {
 
 fn install_dataview(vm: &mut Vm) {
     let dvp = vm.realm.dataview_proto.clone();
-    let accessors: [(&str, NativeFn, &str, NativeFn); 10] = [
+    let accessors: [(&str, NativeFn, &str, NativeFn); 11] = [
         ("getInt8", dv_get::<0>, "setInt8", dv_set::<0>),
         ("getUint8", dv_get::<1>, "setUint8", dv_set::<1>),
         ("getInt16", dv_get::<3>, "setInt16", dv_set::<3>),
@@ -483,6 +528,7 @@ fn install_dataview(vm: &mut Vm) {
         ("getFloat64", dv_get::<8>, "setFloat64", dv_set::<8>),
         ("getBigInt64", dv_get::<9>, "setBigInt64", dv_set::<9>),
         ("getBigUint64", dv_get::<10>, "setBigUint64", dv_set::<10>),
+        ("getFloat16", dv_get::<11>, "setFloat16", dv_set::<11>),
     ];
     for (g, gf, s, sf) in accessors {
         method(vm, &dvp, g, 1, gf);
@@ -511,7 +557,9 @@ fn marker_proto(this: &Value) -> Option<Rc<Obj>> {
 
 fn this_buffer(vm: &mut Vm, this: &Value, name: &str) -> Result<Rc<Obj>, Value> {
     match this {
-        Value::Object(o) if matches!(o.kind, ObjKind::ArrayBuffer(_)) => Ok(o.clone()),
+        Value::Object(o) if matches!(o.kind, ObjKind::ArrayBuffer(_)) && !is_shared(o) => {
+            Ok(o.clone())
+        }
         _ => Err(vm.type_error(format!(
             "Method ArrayBuffer.prototype.{name} called on incompatible receiver {}",
             inspect_plain(this)
@@ -1688,5 +1736,346 @@ fn dv_set<const K: usize>(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     if let Some(bytes) = b.get_mut(start..start + kind.size()) {
         kind.write_value(bytes, &value, little);
     }
+    Ok(Value::Undefined)
+}
+
+fn this_shared(vm: &mut Vm, this: &Value, name: &str) -> Result<Rc<Obj>, Value> {
+    match this {
+        Value::Object(o) if is_shared(o) => Ok(o.clone()),
+        _ => Err(vm.type_error(format!(
+            "Method SharedArrayBuffer.prototype.{name} called on incompatible receiver {}",
+            inspect_plain(this)
+        ))),
+    }
+}
+
+fn sab_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    if !constructing(&this) {
+        return Err(vm.type_error("Constructor SharedArrayBuffer requires 'new'"));
+    }
+    let len = to_index(vm, &arg(args, 0), "array buffer length")?;
+    let options = arg(args, 1);
+    let max = if options.is_object() {
+        let m = vm.get_prop(&options, "maxByteLength")?;
+        if m.is_undefined() {
+            None
+        } else {
+            Some(to_index(vm, &m, "array buffer max length")?)
+        }
+    } else {
+        None
+    };
+    if let Some(m) = max {
+        if len > m {
+            return Err(vm.range_error(format!(
+                "Invalid array buffer max length: byte length {len} exceeds max {m}"
+            )));
+        }
+        if m > MAX_ALLOC {
+            return Err(vm.range_error("Array buffer allocation failed"));
+        }
+    }
+    let bytes = alloc_bytes(vm, len)?;
+    let buf = new_shared_buffer(vm, bytes, max);
+    if let Some(p) = marker_proto(&this) {
+        *buf.proto.borrow_mut() = Some(p);
+    }
+    Ok(Value::Object(buf))
+}
+
+fn sab_byte_length(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    let o = this_shared(vm, &this, "byteLength")?;
+    Ok(Value::Number(buffer_len(&o) as f64))
+}
+
+fn sab_max_byte_length(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    let o = this_shared(vm, &this, "maxByteLength")?;
+    Ok(Value::Number(
+        buffer_max(&o).unwrap_or_else(|| buffer_len(&o)) as f64,
+    ))
+}
+
+fn sab_growable(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    let o = this_shared(vm, &this, "growable")?;
+    Ok(Value::Bool(buffer_max(&o).is_some()))
+}
+
+fn sab_grow(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let o = this_shared(vm, &this, "grow")?;
+    let Some(max) = buffer_max(&o) else {
+        return Err(vm.type_error(format!(
+            "Method SharedArrayBuffer.prototype.grow called on incompatible receiver {}",
+            inspect_plain(&this)
+        )));
+    };
+    let new_len = to_index(vm, &arg(args, 0), "length")?;
+    let cur = buffer_len(&o);
+    if new_len > max || new_len < cur {
+        return Err(vm.range_error("SharedArrayBuffer.prototype.grow: Invalid length parameter"));
+    }
+    if let ObjKind::ArrayBuffer(b) = &o.kind {
+        b.borrow_mut().resize(new_len, 0);
+    }
+    Ok(Value::Undefined)
+}
+
+fn sab_slice(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let o = this_shared(vm, &this, "slice")?;
+    let len = buffer_len(&o);
+    let first = relative(vm, &arg(args, 0), len, 0)?;
+    let fin = relative(vm, &arg(args, 1), len, len)?;
+    let new_len = fin.saturating_sub(first);
+    let default = vm
+        .globals
+        .get("SharedArrayBuffer")
+        .cloned()
+        .unwrap_or_default();
+    let c = species_constructor(vm, &this, default.clone())?;
+    let target = if c.strict_eq(&default) {
+        let bytes = alloc_bytes(vm, new_len)?;
+        new_shared_buffer(vm, bytes, None)
+    } else {
+        let r = vm.construct(&c, &[Value::Number(new_len as f64)])?;
+        let t = match &r {
+            Value::Object(t) if is_shared(t) => t.clone(),
+            _ => {
+                return Err(vm.type_error("Species constructor did not return a SharedArrayBuffer"));
+            }
+        };
+        if Rc::ptr_eq(&t, &o) {
+            return Err(
+                vm.type_error("SharedArrayBuffer subclass returned this from species constructor")
+            );
+        }
+        if buffer_len(&t) < new_len {
+            return Err(vm.type_error("Species constructor returned a too small SharedArrayBuffer"));
+        }
+        t
+    };
+    if let (ObjKind::ArrayBuffer(src), ObjKind::ArrayBuffer(dst)) = (&o.kind, &target.kind) {
+        let part = {
+            let src = src.borrow();
+            let end = fin.min(src.len());
+            if first < end {
+                src[first..end].to_vec()
+            } else {
+                Vec::new()
+            }
+        };
+        let mut dst = dst.borrow_mut();
+        let n = part.len().min(dst.len());
+        dst[..n].copy_from_slice(&part[..n]);
+    }
+    Ok(Value::Object(target))
+}
+
+fn install_atomics(vm: &mut Vm) {
+    let atomics = vm.new_object();
+    let fns: [(&str, u32, NativeFn); 13] = [
+        ("add", 3, atomics_rmw::<0>),
+        ("and", 3, atomics_rmw::<1>),
+        ("compareExchange", 4, atomics_compare_exchange),
+        ("exchange", 3, atomics_rmw::<2>),
+        ("isLockFree", 1, atomics_is_lock_free),
+        ("load", 2, atomics_load),
+        ("notify", 3, atomics_notify),
+        ("or", 3, atomics_rmw::<3>),
+        ("store", 3, atomics_store),
+        ("sub", 3, atomics_rmw::<4>),
+        ("wait", 4, atomics_wait),
+        ("xor", 3, atomics_rmw::<5>),
+        ("pause", 0, atomics_pause),
+    ];
+    for (name, arity, f) in fns {
+        method(vm, &atomics, name, arity, f);
+        atomics.props.borrow_mut().set_enumerable(name, false);
+    }
+    vm.define_global("Atomics", Value::Object(atomics));
+}
+
+fn integer_view(vm: &mut Vm, v: &Value, waitable: bool) -> Result<Rc<Obj>, Value> {
+    let o = match v {
+        Value::Object(o) if matches!(o.kind, ObjKind::Typed(_)) => o.clone(),
+        _ => return Err(vm.type_error("Atomics operations require an integer TypedArray")),
+    };
+    let t = view_of(&o);
+    if t.out_of_bounds() {
+        return Err(vm.type_error("Atomics operation on a detached or out of bounds TypedArray"));
+    }
+    let ok = if waitable {
+        matches!(t.kind, TypedKind::Int32 | TypedKind::BigInt64)
+    } else {
+        !matches!(
+            t.kind,
+            TypedKind::Uint8Clamped | TypedKind::Float16 | TypedKind::Float32 | TypedKind::Float64
+        )
+    };
+    if !ok {
+        return Err(vm.type_error("Atomics operation on an invalid TypedArray type"));
+    }
+    Ok(o)
+}
+
+fn atomic_index(vm: &mut Vm, o: &Obj, v: &Value) -> Result<usize, Value> {
+    let i = to_index(vm, v, "atomic access index")?;
+    if i >= view_of(o).len() {
+        return Err(vm.range_error("Invalid atomic access index"));
+    }
+    Ok(i)
+}
+
+fn atomic_value(vm: &mut Vm, kind: TypedKind, v: &Value) -> R {
+    if kind.is_big() {
+        return Ok(Value::BigInt(super::number::to_bigint(vm, v)?));
+    }
+    let n = to_integer(vm, v)?;
+    Ok(Value::Number(if n == 0.0 { 0.0 } else { n }))
+}
+
+fn revalidate(vm: &mut Vm, o: &Obj, i: usize) -> Result<(), Value> {
+    let t = view_of(o);
+    if t.out_of_bounds() {
+        return Err(vm.type_error("Atomics operation on a detached or out of bounds TypedArray"));
+    }
+    if i >= t.len() {
+        return Err(vm.range_error("Invalid atomic access index"));
+    }
+    Ok(())
+}
+
+fn atomics_load(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let o = integer_view(vm, &arg(args, 0), false)?;
+    let i = atomic_index(vm, &o, &arg(args, 1))?;
+    revalidate(vm, &o, i)?;
+    Ok(get_el(&o, i))
+}
+
+fn atomics_store(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let o = integer_view(vm, &arg(args, 0), false)?;
+    let i = atomic_index(vm, &o, &arg(args, 1))?;
+    let kind = view_of(&o).kind;
+    let v = atomic_value(vm, kind, &arg(args, 2))?;
+    revalidate(vm, &o, i)?;
+    view_of(&o).set(i, &v);
+    Ok(v)
+}
+
+fn big_op(op: usize, a: &num_bigint::BigInt, b: &num_bigint::BigInt) -> num_bigint::BigInt {
+    match op {
+        0 => a + b,
+        1 => a & b,
+        2 => b.clone(),
+        3 => a | b,
+        4 => a - b,
+        _ => a ^ b,
+    }
+}
+
+fn num_op(op: usize, a: f64, b: f64) -> f64 {
+    let (x, y) = (a as i64, b.rem_euclid(18446744073709551616.0) as u64 as i64);
+    match op {
+        0 => (x.wrapping_add(y)) as f64,
+        1 => (x & y) as f64,
+        2 => b,
+        3 => (x | y) as f64,
+        4 => (x.wrapping_sub(y)) as f64,
+        _ => (x ^ y) as f64,
+    }
+}
+
+fn atomics_rmw<const OP: usize>(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let o = integer_view(vm, &arg(args, 0), false)?;
+    let i = atomic_index(vm, &o, &arg(args, 1))?;
+    let kind = view_of(&o).kind;
+    let v = coerce(vm, kind, &arg(args, 2))?;
+    revalidate(vm, &o, i)?;
+    let old = get_el(&o, i);
+    let new = match (&old, &v) {
+        (Value::BigInt(a), Value::BigInt(b)) => Value::BigInt(Rc::new(big_op(OP, a, b))),
+        (Value::Number(a), Value::Number(b)) => {
+            let b = if b.is_finite() { b.trunc() } else { 0.0 };
+            Value::Number(num_op(OP, *a, b))
+        }
+        _ => v.clone(),
+    };
+    view_of(&o).set(i, &new);
+    Ok(old)
+}
+
+fn atomics_compare_exchange(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let o = integer_view(vm, &arg(args, 0), false)?;
+    let i = atomic_index(vm, &o, &arg(args, 1))?;
+    let kind = view_of(&o).kind;
+    let expected = coerce(vm, kind, &arg(args, 2))?;
+    let replacement = coerce(vm, kind, &arg(args, 3))?;
+    revalidate(vm, &o, i)?;
+    let t = view_of(&o);
+    let old = get_el(&o, i);
+    let size = kind.size();
+    let mut a = [0u8; 8];
+    let mut b = [0u8; 8];
+    kind.write_value(&mut a[..size], &expected, true);
+    let cur = {
+        let st = t.store().borrow();
+        let s = t.offset + i * size;
+        st[s..s + size].to_vec()
+    };
+    kind.write_value(&mut b[..size], &old, true);
+    if cur[..] == a[..size] {
+        t.set(i, &replacement);
+    }
+    Ok(old)
+}
+
+fn atomics_is_lock_free(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let n = to_integer(vm, &arg(args, 0))?;
+    Ok(Value::Bool(matches!(n as i64, 1 | 2 | 4 | 8)))
+}
+
+fn atomics_notify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let o = integer_view(vm, &arg(args, 0), true)?;
+    let i = atomic_index(vm, &o, &arg(args, 1))?;
+    let count = arg(args, 2);
+    if !count.is_undefined() {
+        let c = to_integer(vm, &count)?;
+        let _ = c.max(0.0);
+    }
+    revalidate(vm, &o, i)?;
+    Ok(Value::Number(0.0))
+}
+
+fn atomics_wait(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let o = integer_view(vm, &arg(args, 0), true)?;
+    if !is_shared(&view_of(&o).buffer) {
+        return Err(vm.type_error("Atomics.wait requires a shared typed array"));
+    }
+    let i = atomic_index(vm, &o, &arg(args, 1))?;
+    let kind = view_of(&o).kind;
+    let v = coerce(vm, kind, &arg(args, 2))?;
+    let t = vm.to_number(&arg(args, 3))?;
+    let timeout = if t.is_nan() {
+        f64::INFINITY
+    } else {
+        t.max(0.0)
+    };
+    if !get_el(&o, i).strict_eq(&v) {
+        return Ok("not-equal".into());
+    }
+    if timeout.is_finite() {
+        std::thread::sleep(std::time::Duration::from_secs_f64(timeout / 1000.0));
+        return Ok("timed-out".into());
+    }
+    Err(vm.type_error("Atomics.wait would block forever on the main thread"))
+}
+
+fn atomics_pause(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let n = arg(args, 0);
+    if !n.is_undefined() {
+        let ok = matches!(n, Value::Number(x) if x.fract() == 0.0 && x.is_finite());
+        if !ok {
+            return Err(vm.type_error("Atomics.pause expects an integer or undefined"));
+        }
+    }
+    std::hint::spin_loop();
     Ok(Value::Undefined)
 }

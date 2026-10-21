@@ -236,6 +236,8 @@ pub fn hide_builtin_members(vm: &mut Vm) {
         "JSON",
         "Reflect",
         "ArrayBuffer",
+        "SharedArrayBuffer",
+        "Atomics",
         "DataView",
         "TextEncoder",
         "TextDecoder",
@@ -250,6 +252,7 @@ pub fn hide_builtin_members(vm: &mut Vm) {
         "Float64Array",
         "BigInt64Array",
         "BigUint64Array",
+        "Float16Array",
         "BigInt",
         "Proxy",
     ] {

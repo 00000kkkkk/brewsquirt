@@ -94,6 +94,7 @@ pub struct Realm {
     pub weakref_proto: Rc<Obj>,
     pub error_protos: Vec<Rc<Obj>>,
     pub array_buffer_proto: Rc<Obj>,
+    pub shared_buffer_proto: Rc<Obj>,
     pub typed_proto: Rc<Obj>,
     pub typed_protos: Vec<Rc<Obj>>,
     pub dataview_proto: Rc<Obj>,
@@ -121,6 +122,7 @@ impl Realm {
             .collect();
         Realm {
             array_buffer_proto: mk(),
+            shared_buffer_proto: mk(),
             typed_proto,
             typed_protos,
             dataview_proto: mk(),

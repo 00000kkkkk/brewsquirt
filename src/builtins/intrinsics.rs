@@ -384,24 +384,7 @@ fn math_f16round(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 fn f16_round(x: f64) -> f64 {
-    if !x.is_finite() || x == 0.0 {
-        return x;
-    }
-    let a = x.abs();
-    if a >= 65520.0 {
-        return f64::INFINITY.copysign(x);
-    }
-    let e = a.log2().floor().max(-14.0);
-    let step = 2f64.powf(e - 10.0);
-    let q = a / step;
-    let f = q.floor();
-    let d = q - f;
-    let r = if d > 0.5 || (d == 0.5 && f % 2.0 != 0.0) {
-        f + 1.0
-    } else {
-        f
-    };
-    (r * step).copysign(x)
+    crate::object::f16_round(x)
 }
 
 fn error_is_error(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {

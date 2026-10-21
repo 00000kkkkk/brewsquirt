@@ -434,6 +434,62 @@ pub enum TypedKind {
     Float64,
     BigInt64,
     BigUint64,
+    Float16,
+}
+
+pub fn f16_round(x: f64) -> f64 {
+    if !x.is_finite() || x == 0.0 {
+        return x;
+    }
+    let a = x.abs();
+    if a >= 65520.0 {
+        return f64::INFINITY.copysign(x);
+    }
+    let e = a.log2().floor().max(-14.0);
+    let step = 2f64.powf(e - 10.0);
+    let q = a / step;
+    let f = q.floor();
+    let d = q - f;
+    let r = if d > 0.5 || (d == 0.5 && f % 2.0 != 0.0) {
+        f + 1.0
+    } else {
+        f
+    };
+    (r * step).copysign(x)
+}
+
+fn f16_to_f64(h: u16) -> f64 {
+    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exp = ((h >> 10) & 0x1f) as i32;
+    let frac = (h & 0x3ff) as f64;
+    let v = match exp {
+        0 => frac * 2f64.powi(-24),
+        31 if frac == 0.0 => f64::INFINITY,
+        31 => f64::NAN,
+        _ => (1.0 + frac / 1024.0) * 2f64.powi(exp - 15),
+    };
+    sign * v
+}
+
+fn f64_to_f16(x: f64) -> u16 {
+    if x.is_nan() {
+        return 0x7e00;
+    }
+    let sign: u16 = if x.is_sign_negative() { 0x8000 } else { 0 };
+    let r = f16_round(x.abs());
+    if r == 0.0 {
+        return sign;
+    }
+    if r.is_infinite() {
+        return sign | 0x7c00;
+    }
+    if r < 2f64.powi(-14) {
+        return sign | (r / 2f64.powi(-24)).round() as u16;
+    }
+    let bits = r.to_bits();
+    let e = ((bits >> 52) & 0x7ff) as i32 - 1023;
+    let mant = ((bits >> 42) & 0x3ff) as u16;
+    sign | (((e + 15) as u16) << 10) | mant
 }
 
 fn modulo32(n: f64) -> u32 {
@@ -454,7 +510,7 @@ fn big_bits(v: &Value) -> u64 {
 }
 
 impl TypedKind {
-    pub const ALL: [TypedKind; 11] = [
+    pub const ALL: [TypedKind; 12] = [
         TypedKind::Int8,
         TypedKind::Uint8,
         TypedKind::Uint8Clamped,
@@ -466,12 +522,13 @@ impl TypedKind {
         TypedKind::Float64,
         TypedKind::BigInt64,
         TypedKind::BigUint64,
+        TypedKind::Float16,
     ];
 
     pub fn size(self) -> usize {
         match self {
             TypedKind::Int8 | TypedKind::Uint8 | TypedKind::Uint8Clamped => 1,
-            TypedKind::Int16 | TypedKind::Uint16 => 2,
+            TypedKind::Int16 | TypedKind::Uint16 | TypedKind::Float16 => 2,
             TypedKind::Int32 | TypedKind::Uint32 | TypedKind::Float32 => 4,
             TypedKind::Float64 | TypedKind::BigInt64 | TypedKind::BigUint64 => 8,
         }
@@ -490,11 +547,15 @@ impl TypedKind {
             TypedKind::Float64 => "Float64Array",
             TypedKind::BigInt64 => "BigInt64Array",
             TypedKind::BigUint64 => "BigUint64Array",
+            TypedKind::Float16 => "Float16Array",
         }
     }
 
     pub fn is_float(self) -> bool {
-        matches!(self, TypedKind::Float32 | TypedKind::Float64)
+        matches!(
+            self,
+            TypedKind::Float16 | TypedKind::Float32 | TypedKind::Float64
+        )
     }
 
     pub fn is_big(self) -> bool {
@@ -524,6 +585,15 @@ impl TypedKind {
             TypedKind::Float64 => rd!(f64, 8),
             TypedKind::BigInt64 => rd!(i64, 8),
             TypedKind::BigUint64 => rd!(u64, 8),
+            TypedKind::Float16 => {
+                let mut a = [0u8; 2];
+                a.copy_from_slice(&b[..2]);
+                f16_to_f64(if little {
+                    u16::from_le_bytes(a)
+                } else {
+                    u16::from_be_bytes(a)
+                })
+            }
         }
     }
 
@@ -599,6 +669,7 @@ impl TypedKind {
             TypedKind::Float32 => wr!(n as f32),
             TypedKind::Float64 => wr!(n),
             TypedKind::BigInt64 | TypedKind::BigUint64 => wr!(0u64),
+            TypedKind::Float16 => wr!(f64_to_f16(n)),
         }
     }
 }
@@ -606,6 +677,7 @@ impl TypedKind {
 pub struct BufferData {
     pub bytes: RefCell<Vec<u8>>,
     pub max: Option<usize>,
+    pub shared: bool,
 }
 
 impl std::ops::Deref for BufferData {
