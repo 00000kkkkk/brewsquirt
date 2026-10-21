@@ -1,0 +1,30 @@
+import nativePath from "squirt:path"
+import { execSync, spawnSync } from "squirt:child_process"
+import os from "squirt:os"
+import util from "squirt:util"
+
+const path = nativePath.posix
+console.log(path.join("/a/b", "../c", "./d.txt"), path.join("a", "", "b/", "c"), path.join(""), path.join("..", "x"))
+console.log(path.normalize("/a//b/../c/."), path.normalize("a/./b/"), path.normalize("../../x"), path.normalize("/../x"))
+console.log(path.dirname("/a/b/c.txt"), path.dirname("c.txt"), path.dirname("/"), path.dirname("/a"), path.dirname("a/b/"))
+console.log(path.basename("/a/b/c.txt"), path.basename("/a/b/c.txt", ".txt"), path.basename("/a/b/"), path.basename("x.tar.gz", ".gz"))
+console.log(path.extname("index.html"), path.extname("archive.tar.gz"), path.extname(".bashrc"), path.extname("noext"), path.extname("dot."))
+console.log(path.isAbsolute("/x"), path.isAbsolute("x/y"), path.relative("/a/b/c", "/a/d"), path.relative("/a", "/a/b/c"), path.relative("/a/b", "/a/b"))
+console.log(path.parse("/home/user/file.txt"), path.parse("file"))
+console.log(path.format({ dir: "/home/user", base: "f.txt" }), path.format({ root: "/", name: "a", ext: ".b" }), path.sep, path.delimiter)
+console.log(path.resolve("/root", "x", "../y"), path.resolve("/a", "/b", "c"))
+console.log(typeof nativePath.join, nativePath.win32.join("C:/a", "b", "..", "c"), nativePath.win32.isAbsolute("C:/x"), nativePath.win32.isAbsolute("x"))
+
+console.log(typeof os.platform(), typeof os.arch(), os.availableParallelism() > 0, os.cpus().length > 0, os.EOL.length > 0)
+
+const echoed = execSync("echo squirt").trim()
+console.log(echoed)
+const r = spawnSync("git", ["--version"])
+console.log(r.status, r.stdout.startsWith("git version"))
+try {
+  execSync("exit 3")
+} catch (e) {
+  console.log("failed with", e.status)
+}
+
+console.log(util.inspect("a'b"), util.inspect({ a: [1, { b: 2 }] }), util.format("%s=%d", "x", 5), util.isDeepStrictEqual({ a: [1] }, { a: [1] }), util.isDeepStrictEqual([1], [2]))

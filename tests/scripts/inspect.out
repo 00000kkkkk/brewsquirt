@@ -1,7 +1,12 @@
 undefined null true 42 -0 top-level string
 [ 'a', "it's", 'say "hi"' ]
 { a: [ 1, { b: [Object] } ] }
-[ [Function: named], [Function (anonymous)], [class Foo], [Function: max] ]
+[
+  [Function: named],
+  [Function (anonymous)],
+  [class Foo],
+  [Function: max]
+]
 Map(1) { { k: 1 } => [ 1, 2 ] } Set(0) {} Map(0) {}
 { 'key with space': 1, valid_id: 2, '$dollar': 3, '1abc': 4 }
 <ref *1> { name: 'c', me: [Circular *1] }

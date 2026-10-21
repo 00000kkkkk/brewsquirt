@@ -370,18 +370,27 @@ impl Vm {
         let _ = self.err.flush();
     }
 
+    pub fn import_builtin(&mut self, name: &str) -> Result<Value, Value> {
+        if let Some(v) = self.builtin_modules.get(name) {
+            return Ok(v.clone());
+        }
+        let v = match builtins::builtin_module(self, name) {
+            Some(Ok(v)) => v,
+            Some(Err(e)) => return Err(e),
+            None => {
+                return Err(self.make_error(
+                    ErrorKind::Error,
+                    format!("Cannot find module 'squirt:{name}'"),
+                ));
+            }
+        };
+        self.builtin_modules.insert(name.to_string(), v.clone());
+        Ok(v)
+    }
+
     pub fn import_module(&mut self, spec: &str, from: &Rc<ModuleInfo>) -> Result<Value, Value> {
         if let Some(name) = spec.strip_prefix("squirt:") {
-            if let Some(v) = self.builtin_modules.get(name) {
-                return Ok(v.clone());
-            }
-            let Some(v) = builtins::builtin_module(self, name) else {
-                return Err(
-                    self.make_error(ErrorKind::Error, format!("Cannot find module '{spec}'"))
-                );
-            };
-            self.builtin_modules.insert(name.to_string(), v.clone());
-            return Ok(v);
+            return self.import_builtin(name);
         }
         let path = match module::resolve(spec, &from.dir) {
             Ok(p) => p,

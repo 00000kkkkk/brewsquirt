@@ -1,0 +1,17 @@
+import { test, expect } from "squirt:test"
+
+test("good", () => {
+  expect(1).toBe(1)
+})
+
+test("bad equality", () => {
+  expect({ a: 1 }).toEqual({ a: 2 })
+})
+
+test("bad throw", () => {
+  throw new RangeError("boom")
+})
+
+test("async bad", async () => {
+  await expect(Promise.resolve(1)).rejects.toThrow()
+})

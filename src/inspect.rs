@@ -5,26 +5,71 @@ use std::rc::Rc;
 
 const MAX_DEPTH: usize = 2;
 const MAX_ITEMS: usize = 100;
+const BREAK_LENGTH: usize = 80;
+const COMPACT: usize = 3;
+
+struct Ctx {
+    indent: usize,
+    current_depth: usize,
+    seen: Vec<*const Obj>,
+    circular: Vec<*const Obj>,
+}
+
+impl Ctx {
+    fn new() -> Ctx {
+        Ctx {
+            indent: 0,
+            current_depth: 0,
+            seen: Vec::new(),
+            circular: Vec::new(),
+        }
+    }
+}
 
 pub fn inspect_top(v: &Value) -> String {
     match v {
         Value::Str(s) => s.to_string(),
-        _ => with_refs(v, true),
+        _ => format_value(&mut Ctx::new(), v, 0, true),
     }
 }
 
 pub fn inspect_plain(v: &Value) -> String {
-    with_refs(v, false)
+    format_value(&mut Ctx::new(), v, 0, false)
 }
 
-fn with_refs(v: &Value, top: bool) -> String {
-    let mut seen = Vec::new();
-    let mut circular = Vec::new();
-    let s = format_value(v, 0, &mut seen, &mut circular, top);
-    match v {
-        Value::Object(o) if circular.contains(&Rc::as_ptr(o)) => format!("<ref *1> {s}"),
-        _ => s,
+fn len16(s: &str) -> usize {
+    if s.is_ascii() {
+        s.len()
+    } else {
+        s.encode_utf16().count()
     }
+}
+
+fn width(s: &str) -> usize {
+    if s.is_ascii() {
+        return s.len();
+    }
+    s.chars()
+        .map(|c| {
+            let cp = c as u32;
+            if cp >= 0x1100
+                && (cp <= 0x115f
+                    || (0x2e80..=0xa4cf).contains(&cp)
+                    || (0xac00..=0xd7a3).contains(&cp)
+                    || (0xf900..=0xfaff).contains(&cp)
+                    || (0xfe30..=0xfe4f).contains(&cp)
+                    || (0xff00..=0xff60).contains(&cp)
+                    || (0xffe0..=0xffe6).contains(&cp)
+                    || (0x1f300..=0x1f64f).contains(&cp)
+                    || (0x1f900..=0x1f9ff).contains(&cp)
+                    || (0x20000..=0x3fffd).contains(&cp))
+            {
+                2
+            } else {
+                1
+            }
+        })
+        .sum()
 }
 
 pub fn quote(s: &str) -> String {
@@ -60,6 +105,30 @@ pub fn quote(s: &str) -> String {
     out
 }
 
+fn format_string(ctx: &Ctx, s: &str) -> String {
+    let n = len16(s);
+    if n > 16 && n > BREAK_LENGTH.saturating_sub(ctx.indent + 4) && s.contains('\n') {
+        let mut pieces = Vec::new();
+        let mut start = 0;
+        for (i, c) in s.char_indices() {
+            if c == '\n' {
+                pieces.push(&s[start..i + 1]);
+                start = i + 1;
+            }
+        }
+        if start < s.len() {
+            pieces.push(&s[start..]);
+        }
+        let joiner = format!(" +\n{}", " ".repeat(ctx.indent + 2));
+        return pieces
+            .iter()
+            .map(|p| quote(p))
+            .collect::<Vec<_>>()
+            .join(&joiner);
+    }
+    quote(s)
+}
+
 fn is_identifier(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
@@ -71,7 +140,9 @@ fn is_identifier(s: &str) -> bool {
 }
 
 fn format_key(k: &str) -> String {
-    if is_identifier(k) {
+    if crate::object::is_symbol_key(k) {
+        format!("Symbol({})", crate::object::symbol_key_description(k))
+    } else if is_identifier(k) {
         k.to_string()
     } else {
         quote(k)
@@ -158,21 +229,7 @@ fn format_number(n: f64) -> String {
     }
 }
 
-fn wrap(open: &str, items: Vec<String>, close: &str) -> String {
-    if items.is_empty() {
-        format!("{}{}", open.trim_end(), close.trim_start())
-    } else {
-        format!("{open}{}{close}", items.join(", "))
-    }
-}
-
-fn format_value(
-    v: &Value,
-    depth: usize,
-    seen: &mut Vec<*const Obj>,
-    circ: &mut Vec<*const Obj>,
-    top: bool,
-) -> String {
+fn format_value(ctx: &mut Ctx, v: &Value, rt: usize, top: bool) -> String {
     match v {
         Value::Undefined => "undefined".to_string(),
         Value::Null => "null".to_string(),
@@ -182,26 +239,23 @@ fn format_value(
             if top {
                 s.to_string()
             } else {
-                quote(s)
+                format_string(ctx, s)
             }
         }
-        Value::Object(o) => format_object(o, depth, seen, circ, top),
+        Value::Object(o) => format_object(ctx, o, rt, top),
         Value::Symbol(sym) => crate::builtins::symbol_text(sym),
     }
 }
 
-fn format_prop(
-    k: &str,
-    v: &Value,
-    depth: usize,
-    seen: &mut Vec<*const Obj>,
-    circ: &mut Vec<*const Obj>,
-) -> String {
-    let key = if crate::object::is_symbol_key(k) {
-        format!("Symbol({})", crate::object::symbol_key_description(k))
-    } else {
-        format_key(k)
-    };
+fn child(ctx: &mut Ctx, v: &Value, rt: usize) -> String {
+    ctx.indent += 2;
+    let s = format_value(ctx, v, rt, false);
+    ctx.indent -= 2;
+    s
+}
+
+fn format_prop(ctx: &mut Ctx, k: &str, v: &Value, rt: usize) -> String {
+    let key = format_key(k);
     if let Value::Object(a) = v {
         if let ObjKind::Accessor(acc) = &a.kind {
             let g = !acc.get.borrow().is_undefined();
@@ -214,69 +268,237 @@ fn format_prop(
             return format!("{key}: {text}");
         }
     }
-    format!("{key}: {}", format_value(v, depth + 1, seen, circ, false))
+    format!("{key}: {}", child(ctx, v, rt))
 }
 
-fn props_items(
-    o: &Obj,
-    depth: usize,
-    seen: &mut Vec<*const Obj>,
-    circ: &mut Vec<*const Obj>,
-) -> Vec<String> {
+fn own_props(o: &Obj, skip_function_keys: bool) -> Vec<(Rc<str>, Value)> {
     let mut props: Vec<(Rc<str>, Value)> = o
         .props
         .borrow()
         .iter()
         .filter(|(k, _)| !crate::object::is_private_key(k))
+        .filter(|(k, _)| !skip_function_keys || !matches!(&***k, "prototype" | "name" | "length"))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     props.sort_by_key(|(k, _)| crate::object::is_symbol_key(k));
     props
-        .iter()
-        .map(|(k, v)| format_prop(k, v, depth, seen, circ))
-        .collect()
 }
 
-fn format_object(
-    o: &Rc<Obj>,
-    depth: usize,
-    seen: &mut Vec<*const Obj>,
-    circ: &mut Vec<*const Obj>,
-    top: bool,
-) -> String {
+fn below_break_length(output: &[String], start: usize, base: &str) -> bool {
+    let mut total = output.len() + start;
+    if total + output.len() > BREAK_LENGTH {
+        return false;
+    }
+    for item in output {
+        total += len16(item);
+        if total > BREAK_LENGTH {
+            return false;
+        }
+    }
+    base.is_empty() || !base.contains('\n')
+}
+
+fn pad_start(s: &str, target: usize) -> String {
+    let n = len16(s);
+    if n >= target {
+        s.to_string()
+    } else {
+        format!("{}{s}", " ".repeat(target - n))
+    }
+}
+
+fn pad_end(s: &str, target: usize) -> String {
+    let n = len16(s);
+    if n >= target {
+        s.to_string()
+    } else {
+        format!("{s}{}", " ".repeat(target - n))
+    }
+}
+
+fn group_array_elements(
+    ctx: &Ctx,
+    output: Vec<String>,
+    has_more: bool,
+    numeric: bool,
+) -> Vec<String> {
+    let output_len = if has_more {
+        output.len() - 1
+    } else {
+        output.len()
+    };
+    let sep_space = 2;
+    let mut total_length = 0usize;
+    let mut max_length = 0usize;
+    let mut data_len = Vec::with_capacity(output_len);
+    for item in output.iter().take(output_len) {
+        let len = width(item);
+        data_len.push(len);
+        total_length += len + sep_space;
+        max_length = max_length.max(len);
+    }
+    let actual_max = max_length + sep_space;
+    if actual_max * 3 + ctx.indent < BREAK_LENGTH
+        && (total_length as f64 / actual_max as f64 > 5.0 || max_length <= 6)
+    {
+        let approx_char_heights = 2.5;
+        let average_bias = (actual_max as f64 - total_length as f64 / output.len() as f64).sqrt();
+        let biased_max = (actual_max as f64 - 3.0 - average_bias).max(1.0);
+        let columns = ((approx_char_heights * biased_max * output_len as f64).sqrt() / biased_max)
+            .round()
+            .min(((BREAK_LENGTH - ctx.indent) / actual_max) as f64)
+            .min((COMPACT * 4) as f64)
+            .min(15.0) as usize;
+        if columns <= 1 {
+            return output;
+        }
+        let mut max_line_length = Vec::with_capacity(columns);
+        for i in 0..columns {
+            let mut line_length = 0;
+            let mut j = i;
+            while j < output_len {
+                line_length = line_length.max(data_len[j]);
+                j += columns;
+            }
+            max_line_length.push(line_length + sep_space);
+        }
+        let mut rows = Vec::new();
+        let mut i = 0;
+        while i < output_len {
+            let max = (i + columns).min(output_len);
+            let mut row = String::new();
+            let mut j = i;
+            while j < max - 1 {
+                let padding = max_line_length[j - i] + len16(&output[j]) - data_len[j];
+                let cell = format!("{}, ", output[j]);
+                row.push_str(&if numeric {
+                    pad_start(&cell, padding)
+                } else {
+                    pad_end(&cell, padding)
+                });
+                j += 1;
+            }
+            if numeric {
+                let padding = max_line_length[j - i] + len16(&output[j]) - data_len[j] - sep_space;
+                row.push_str(&pad_start(&output[j], padding));
+            } else {
+                row.push_str(&output[j]);
+            }
+            rows.push(row);
+            i += columns;
+        }
+        if has_more {
+            rows.push(output[output_len].clone());
+        }
+        return rows;
+    }
+    output
+}
+
+struct Shape<'a> {
+    base: String,
+    open: String,
+    close: &'a str,
+    array: Option<(bool, bool)>,
+}
+
+fn reduce(ctx: &Ctx, mut output: Vec<String>, shape: Shape<'_>, rt: usize) -> String {
+    let entries = output.len();
+    if let Some((has_more, numeric)) = shape.array {
+        if entries > 6 {
+            output = group_array_elements(ctx, output, has_more, numeric);
+        }
+    }
+    let base_prefix = if shape.base.is_empty() {
+        String::new()
+    } else {
+        format!("{} ", shape.base)
+    };
+    if ctx.current_depth.saturating_sub(rt) < COMPACT && entries == output.len() {
+        let start = output.len() + ctx.indent + len16(&shape.open) + len16(&shape.base) + 10;
+        if below_break_length(&output, start, &shape.base) {
+            let joined = output.join(", ");
+            if !joined.contains('\n') {
+                return format!("{base_prefix}{} {joined} {}", shape.open, shape.close);
+            }
+        }
+    }
+    let ind = format!("\n{}", " ".repeat(ctx.indent));
+    format!(
+        "{base_prefix}{}{ind}  {}{ind}{}",
+        shape.open,
+        output.join(&format!(",{ind}  ")),
+        shape.close
+    )
+}
+
+fn depth_name(o: &Obj) -> String {
+    match &o.kind {
+        ObjKind::Array(_) => "[Array]".to_string(),
+        ObjKind::Map(_) => "[Map]".to_string(),
+        ObjKind::Set(_) => "[Set]".to_string(),
+        ObjKind::Promise(_) => "[Promise]".to_string(),
+        _ => match class_name(o) {
+            Some(n) => format!("[{n}]"),
+            None => "[Object]".to_string(),
+        },
+    }
+}
+
+fn enter(ctx: &mut Ctx, ptr: *const Obj, rt: usize) -> usize {
+    let rt = rt + 1;
+    ctx.seen.push(ptr);
+    ctx.current_depth = rt;
+    rt
+}
+
+fn leave(ctx: &mut Ctx, ptr: *const Obj, base: &mut String) {
+    ctx.seen.pop();
+    if ctx.circular.contains(&ptr) {
+        *base = if base.is_empty() {
+            "<ref *1>".to_string()
+        } else {
+            format!("<ref *1> {base}")
+        };
+    }
+}
+
+fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
     let ptr = Rc::as_ptr(o);
-    if seen.contains(&ptr) {
-        if !circ.contains(&ptr) {
-            circ.push(ptr);
+    if ctx.seen.contains(&ptr) {
+        if !ctx.circular.contains(&ptr) {
+            ctx.circular.push(ptr);
         }
         return "[Circular *1]".to_string();
     }
     match &o.kind {
         ObjKind::Function(_) | ObjKind::Native(_) | ObjKind::Bound(_) => {
             let desc = function_desc(o);
-            let extra: Vec<(Rc<str>, Value)> = o
-                .props
-                .borrow()
-                .iter()
-                .filter(|(k, _)| !matches!(&***k, "prototype" | "name" | "length"))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            if extra.is_empty() || depth > MAX_DEPTH {
+            let props = own_props(o, true);
+            if props.is_empty() {
                 return desc;
             }
-            seen.push(ptr);
-            let items: Vec<String> = extra
+            if rt > MAX_DEPTH {
+                return desc;
+            }
+            let inner = enter(ctx, ptr, rt);
+            let output: Vec<String> = props
                 .iter()
-                .map(|(k, v)| {
-                    format!(
-                        "{}: {}",
-                        format_key(k),
-                        format_value(v, depth + 1, seen, circ, false)
-                    )
-                })
+                .map(|(k, v)| format_prop(ctx, k, v, inner))
                 .collect();
-            seen.pop();
-            wrap(&format!("{desc} {{ "), items, " }")
+            let mut base = desc;
+            leave(ctx, ptr, &mut base);
+            reduce(
+                ctx,
+                output,
+                Shape {
+                    base,
+                    open: "{".to_string(),
+                    close: "}",
+                    array: None,
+                },
+                inner,
+            )
         }
         ObjKind::Error => {
             if top {
@@ -286,62 +508,112 @@ fn format_object(
             }
         }
         ObjKind::Array(a) => {
-            if depth > MAX_DEPTH {
+            let items: Vec<Value> = a.borrow().iter().take(MAX_ITEMS).cloned().collect();
+            let total = a.borrow().len();
+            let props = own_props(o, false);
+            if total == 0 && props.is_empty() {
+                return "[]".to_string();
+            }
+            if rt > MAX_DEPTH {
                 return "[Array]".to_string();
             }
-            seen.push(ptr);
-            let items_v: Vec<Value> = a.borrow().iter().take(MAX_ITEMS).cloned().collect();
-            let total = a.borrow().len();
-            let mut items: Vec<String> = items_v
-                .iter()
-                .map(|v| format_value(v, depth + 1, seen, circ, false))
-                .collect();
-            if total > MAX_ITEMS {
+            let inner = enter(ctx, ptr, rt);
+            let mut output: Vec<String> = items.iter().map(|v| child(ctx, v, inner)).collect();
+            let has_more = total > MAX_ITEMS;
+            if has_more {
                 let more = total - MAX_ITEMS;
-                items.push(format!(
+                output.push(format!(
                     "... {more} more item{}",
                     if more == 1 { "" } else { "s" }
                 ));
             }
-            items.extend(props_items(o, depth, seen, circ));
-            seen.pop();
-            wrap("[ ", items, " ]")
+            for (k, v) in &props {
+                output.push(format_prop(ctx, k, v, inner));
+            }
+            let all = a.borrow();
+            let numeric = (0..output.len()).all(|i| matches!(all.get(i), Some(Value::Number(_))));
+            drop(all);
+            let mut base = String::new();
+            leave(ctx, ptr, &mut base);
+            reduce(
+                ctx,
+                output,
+                Shape {
+                    base,
+                    open: "[".to_string(),
+                    close: "]",
+                    array: Some((has_more, numeric)),
+                },
+                inner,
+            )
         }
         ObjKind::Map(m) => {
-            if depth > MAX_DEPTH {
-                return "[Map]".to_string();
-            }
-            seen.push(ptr);
             let entries: Vec<(Value, Value)> = m
                 .borrow()
                 .iter()
                 .map(|(k, v)| (k.to_value(), v.clone()))
                 .collect();
-            let items: Vec<String> = entries
+            let prefix = format!("Map({})", entries.len());
+            if entries.is_empty() {
+                return format!("{prefix} {{}}");
+            }
+            if rt > MAX_DEPTH {
+                return "[Map]".to_string();
+            }
+            let inner = enter(ctx, ptr, rt);
+            ctx.indent += 2;
+            let output: Vec<String> = entries
                 .iter()
                 .map(|(k, v)| {
-                    format!(
-                        "{} => {}",
-                        format_value(k, depth + 1, seen, circ, false),
-                        format_value(v, depth + 1, seen, circ, false)
-                    )
+                    let ks = format_value(ctx, k, inner, false);
+                    let vs = format_value(ctx, v, inner, false);
+                    format!("{ks} => {vs}")
                 })
                 .collect();
-            seen.pop();
-            wrap(&format!("Map({}) {{ ", entries.len()), items, " }")
+            ctx.indent -= 2;
+            let mut base = String::new();
+            leave(ctx, ptr, &mut base);
+            reduce(
+                ctx,
+                output,
+                Shape {
+                    base,
+                    open: format!("{prefix} {{"),
+                    close: "}",
+                    array: None,
+                },
+                inner,
+            )
         }
         ObjKind::Set(s) => {
-            if depth > MAX_DEPTH {
+            let vals: Vec<Value> = s.borrow().iter().map(|k| k.to_value()).collect();
+            let prefix = format!("Set({})", vals.len());
+            if vals.is_empty() {
+                return format!("{prefix} {{}}");
+            }
+            if rt > MAX_DEPTH {
                 return "[Set]".to_string();
             }
-            seen.push(ptr);
-            let vals: Vec<Value> = s.borrow().iter().map(|k| k.to_value()).collect();
-            let items: Vec<String> = vals
+            let inner = enter(ctx, ptr, rt);
+            ctx.indent += 2;
+            let output: Vec<String> = vals
                 .iter()
-                .map(|v| format_value(v, depth + 1, seen, circ, false))
+                .map(|v| format_value(ctx, v, inner, false))
                 .collect();
-            seen.pop();
-            wrap(&format!("Set({}) {{ ", vals.len()), items, " }")
+            ctx.indent -= 2;
+            let mut base = String::new();
+            leave(ctx, ptr, &mut base);
+            reduce(
+                ctx,
+                output,
+                Shape {
+                    base,
+                    open: format!("{prefix} {{"),
+                    close: "}",
+                    array: None,
+                },
+                inner,
+            )
         }
         ObjKind::Iter(_) => "Object [Iterator] {}".to_string(),
         ObjKind::Coroutine(c) => {
@@ -361,52 +633,87 @@ fn format_object(
         ObjKind::WeakMap(_) => "WeakMap { <items unknown> }".to_string(),
         ObjKind::WeakSet(_) => "WeakSet { <items unknown> }".to_string(),
         ObjKind::WeakRef(w) => match w.upgrade() {
-            Some(target) if depth <= MAX_DEPTH => {
-                seen.push(ptr);
-                let inner = format_object(&target, depth + 1, seen, circ, false);
-                seen.pop();
-                format!("WeakRef {{ {inner} }}")
+            Some(target) if rt <= MAX_DEPTH => {
+                let inner = enter(ctx, ptr, rt);
+                let s = child(ctx, &Value::Object(target), inner);
+                let mut base = String::new();
+                leave(ctx, ptr, &mut base);
+                reduce(
+                    ctx,
+                    vec![s],
+                    Shape {
+                        base,
+                        open: "WeakRef {".to_string(),
+                        close: "}",
+                        array: None,
+                    },
+                    inner,
+                )
             }
-            Some(_) => "WeakRef { [Object] }".to_string(),
+            Some(_) => "[WeakRef]".to_string(),
             None => "WeakRef { <cleared> }".to_string(),
         },
         ObjKind::Promise(p) => {
-            if depth > MAX_DEPTH {
+            if rt > MAX_DEPTH {
                 return "[Promise]".to_string();
             }
-            seen.push(ptr);
-            let inner = match &p.borrow().state {
-                crate::object::PromiseState::Pending => "<pending>".to_string(),
-                crate::object::PromiseState::Fulfilled(v) => {
-                    format_value(v, depth + 1, seen, circ, false)
-                }
-                crate::object::PromiseState::Rejected(e) => {
-                    format!(
-                        "<rejected> {}",
-                        format_value(e, depth + 1, seen, circ, false)
-                    )
-                }
+            let inner = enter(ctx, ptr, rt);
+            let state = match &p.borrow().state {
+                crate::object::PromiseState::Pending => None,
+                crate::object::PromiseState::Fulfilled(v) => Some((v.clone(), false)),
+                crate::object::PromiseState::Rejected(e) => Some((e.clone(), true)),
             };
-            seen.pop();
-            format!("Promise {{ {inner} }}")
+            let item = match state {
+                None => "<pending>".to_string(),
+                Some((v, false)) => child(ctx, &v, inner),
+                Some((e, true)) => format!("<rejected> {}", child(ctx, &e, inner)),
+            };
+            let mut base = String::new();
+            leave(ctx, ptr, &mut base);
+            reduce(
+                ctx,
+                vec![item],
+                Shape {
+                    base,
+                    open: "Promise {".to_string(),
+                    close: "}",
+                    array: None,
+                },
+                inner,
+            )
         }
         ObjKind::Ordinary => {
             let cname = class_name(o);
-            if depth > MAX_DEPTH {
-                return match cname {
-                    Some(n) => format!("[{n}]"),
-                    None => "[Object]".to_string(),
-                };
-            }
-            seen.push(ptr);
-            let items = props_items(o, depth, seen, circ);
-            seen.pop();
             let prefix = match (&cname, o.proto.borrow().is_none()) {
                 (Some(n), _) => format!("{n} "),
                 (None, true) => "[Object: null prototype] ".to_string(),
                 _ => String::new(),
             };
-            wrap(&format!("{prefix}{{ "), items, " }")
+            let props = own_props(o, false);
+            if props.is_empty() {
+                return format!("{prefix}{{}}");
+            }
+            if rt > MAX_DEPTH {
+                return depth_name(o);
+            }
+            let inner = enter(ctx, ptr, rt);
+            let output: Vec<String> = props
+                .iter()
+                .map(|(k, v)| format_prop(ctx, k, v, inner))
+                .collect();
+            let mut base = String::new();
+            leave(ctx, ptr, &mut base);
+            reduce(
+                ctx,
+                output,
+                Shape {
+                    base,
+                    open: format!("{prefix}{{"),
+                    close: "}",
+                    array: None,
+                },
+                inner,
+            )
         }
     }
 }

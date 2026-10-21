@@ -1,0 +1,21 @@
+/a/c/d.txt a/b/c . ../x
+/a/c a/b/ ../../x /x
+/a/b . / / a
+c.txt c b x.tar
+.html .gz   .
+true false ../../d b/c 
+{
+  root: '/',
+  dir: '/home/user',
+  base: 'file.txt',
+  ext: '.txt',
+  name: 'file'
+} { root: '', dir: '', base: 'file', ext: '', name: 'file' }
+/home/user/f.txt /a.b / :
+/root/y /b/c
+function C:\a\c true false
+string string true true true
+squirt
+0 true
+failed with 3
+"a'b" { a: [ 1, { b: 2 } ] } x=5 true false

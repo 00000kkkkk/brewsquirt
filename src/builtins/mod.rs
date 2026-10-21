@@ -6,9 +6,11 @@ mod number;
 mod object;
 mod promise;
 mod regexp;
+mod stdlib;
 mod string;
 mod symbol;
 mod system;
+mod testing;
 
 use crate::inspect::inspect_plain;
 use crate::object::{Native, NativeFn, Obj, ObjKind};
@@ -100,12 +102,18 @@ pub fn install(vm: &mut Vm) {
     system::install(vm);
 }
 
-pub fn builtin_module(vm: &mut Vm, name: &str) -> Option<Value> {
-    match name {
-        "fs" => Some(system::fs_module(vm)),
-        "process" => vm.globals.get("process").cloned(),
-        "math" => vm.globals.get("Math").cloned(),
-        "json" => vm.globals.get("JSON").cloned(),
-        _ => None,
-    }
+pub fn builtin_module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
+    let v = match name {
+        "fs" => system::fs_module(vm),
+        "path" => stdlib::path_module(vm),
+        "os" => stdlib::os_module(vm),
+        "child_process" => stdlib::child_process_module(vm),
+        "util" => testing::util_module(vm),
+        "test" => return Some(testing::test_module(vm)),
+        "process" => vm.globals.get("process").cloned()?,
+        "math" => vm.globals.get("Math").cloned()?,
+        "json" => vm.globals.get("JSON").cloned()?,
+        _ => return None,
+    };
+    Some(Ok(v))
 }

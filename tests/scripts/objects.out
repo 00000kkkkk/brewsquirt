@@ -1,6 +1,11 @@
 { a: 1, b: 'two', c: [ 3 ], d: { e: { f: [Object] } } }
 [ 'a', 'b', 'c', 'd' ] [ 1, 2 ] [ [ 'x', 1 ] ]
-{ dynamic: true, method: [Function: method], 'quoted-key': 1, answer: 'num' } m 1 num
+{
+  dynamic: true,
+  method: [Function: method],
+  'quoted-key': 1,
+  answer: 'num'
+} m 1 num
 1 two default [ 'c', 'd' ]
 100 true two
 true false true true

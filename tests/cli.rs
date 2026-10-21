@@ -163,3 +163,27 @@ v + 1",
 "
     );
 }
+
+#[test]
+fn test_runner_reports_results() {
+    let dir = root().join("tests").join("testing");
+    let out = run_in(&dir, &["test", "pass.test.jsq"]);
+    let stdout = normalize(&out.stdout);
+    assert!(out.status.success(), "{stdout}{}", normalize(&out.stderr));
+    assert!(stdout.contains("\u{2713} math > adds"), "{stdout}");
+    assert!(
+        stdout.contains("tests: 7 passed, 1 skipped, 1 todo (1 file"),
+        "{stdout}"
+    );
+
+    let out = run_in(&dir, &["test"]);
+    let stdout = normalize(&out.stdout);
+    assert!(!out.status.success(), "{stdout}");
+    assert!(stdout.contains("\u{2717} bad equality"), "{stdout}");
+    assert!(stdout.contains("received: { a: 1 }"), "{stdout}");
+    assert!(stdout.contains("8 passed, 3 failed"), "{stdout}");
+
+    let out = run_in(&dir, &["test", "--filter", "objects"]);
+    let stdout = normalize(&out.stdout);
+    assert!(stdout.contains("tests: 2 passed (2 files"), "{stdout}");
+}

@@ -14,7 +14,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
     name = "jsq",
     version,
     about = "JavaSquirt: JS semantics, Rust speed",
-    after_help = "Run without arguments to open the REPL."
+    after_help = "Run without arguments to open the REPL.
+Run `jsq test [paths] [--filter text]` to run *.test.jsq files."
 )]
 struct Cli {
     #[arg(
@@ -40,7 +41,30 @@ fn main() -> ExitCode {
     handle.join().unwrap_or(ExitCode::FAILURE)
 }
 
+fn test_command(args: &[String]) -> ExitCode {
+    let mut paths = Vec::new();
+    let mut filter = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-t" | "--filter" => filter = it.next().cloned(),
+            _ => paths.push(a.clone()),
+        }
+    }
+    let summary = javasquirt::runner::run_tests(&paths, filter.as_deref());
+    if summary.ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 fn run(cli: Cli) -> ExitCode {
+    if let Some(f) = &cli.file {
+        if f.as_os_str() == "test" && !f.is_file() {
+            return test_command(&cli.args);
+        }
+    }
     let mut argv = vec!["jsq".to_string()];
     if let Some(f) = &cli.file {
         argv.push(f.display().to_string());
