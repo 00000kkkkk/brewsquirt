@@ -745,13 +745,7 @@ fn dynamic_function(vm: &mut Vm, args: &[Value], kind: &str) -> R {
     let dir = std::env::current_dir().unwrap_or_default();
     let trimmed = body.trim_start();
     let sloppy = !(trimmed.starts_with("\"use strict\"") || trimmed.starts_with("'use strict'"));
-    let proto = match vm.compile_unit(
-        &src,
-        "<anonymous>",
-        dir,
-        crate::compiler::Mode::Repl,
-        sloppy,
-    ) {
+    let proto = match vm.compile_script(&src, "<anonymous>", dir, sloppy) {
         Ok(p) => p,
         Err(e) => return Err(vm.syntax_error_value(&e, "<anonymous>")),
     };
@@ -763,7 +757,7 @@ fn global_eval(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         return Ok(arg(args, 0));
     };
     let dir = std::env::current_dir().unwrap_or_default();
-    let proto = match vm.compile(&code, "<eval>", dir, crate::compiler::Mode::Repl) {
+    let proto = match vm.compile_script(&code, "<eval>", dir, false) {
         Ok(p) => p,
         Err(e) => return Err(vm.syntax_error_value(&e, "<eval>")),
     };

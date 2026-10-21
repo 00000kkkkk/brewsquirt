@@ -398,6 +398,41 @@ impl Compiler {
     }
 
     fn emit(&mut self, op: Op) -> usize {
+        let private = |c: &Compiler, k: u32| matches!(c.st_ref().consts.get(k as usize), Some(Value::Str(s)) if s.starts_with("\u{0}#"));
+        match op {
+            Op::GetProp(k) if private(self, k) => return self.emit_raw(Op::GetPrivate(k)),
+            Op::GetLocalProp(s, k) if private(self, k) => {
+                self.emit_raw(Op::GetLocal(s));
+                return self.emit_raw(Op::GetPrivate(k));
+            }
+            Op::GetMethod(k) if private(self, k) => {
+                self.emit_raw(Op::Dup);
+                self.emit_raw(Op::GetPrivate(k));
+                return self.emit_raw(Op::Swap);
+            }
+            Op::GetLocalMethod(s, k) if private(self, k) => {
+                self.emit_raw(Op::GetLocal(s));
+                self.emit_raw(Op::Dup);
+                self.emit_raw(Op::GetPrivate(k));
+                return self.emit_raw(Op::Swap);
+            }
+            Op::SetProp(k) if private(self, k) => return self.emit_raw(Op::SetPrivate(k)),
+            Op::StoreProp(k) if private(self, k) => {
+                self.emit_raw(Op::SetPrivate(k));
+                return self.emit_raw(Op::Pop);
+            }
+            Op::StoreLocalProp(s, k) if private(self, k) => {
+                self.emit_raw(Op::GetLocal(s));
+                self.emit_raw(Op::Swap);
+                self.emit_raw(Op::SetPrivate(k));
+                return self.emit_raw(Op::Pop);
+            }
+            _ => {}
+        }
+        self.emit_raw(op)
+    }
+
+    fn emit_raw(&mut self, op: Op) -> usize {
         let line = self.line;
         let st = self.st();
         st.code.push(op);
@@ -748,6 +783,15 @@ impl Compiler {
                 }
                 match e {
                     ExportDecl::Decl(inner) => {
+                        if let StmtKind::Decl(DeclKind::Var, decls) = &inner.kind {
+                            for (p, _) in decls {
+                                let mut v = Vec::new();
+                                p.bound_names(&mut v);
+                                for n in v {
+                                    self.exports.push(ExportEntry::Local(n.clone(), n));
+                                }
+                            }
+                        }
                         let before = names.len();
                         self.collect_decls(inner, top, names, funcs, imports)?;
                         for (n, _) in names[before..].iter() {
@@ -1996,6 +2040,10 @@ impl Compiler {
         let Some(fields) = self.method_state().and_then(|s| s.fields.clone()) else {
             return Ok(());
         };
+        self.load_var(&"this".into());
+        self.emit(Op::GetCallee);
+        self.emit(Op::CopyPrivates);
+        self.emit(Op::Pop);
         for m in fields.iter() {
             if let ClassMember::Field {
                 key,
@@ -2012,8 +2060,13 @@ impl Compiler {
                                 self.emit(Op::Undefined);
                             }
                         }
+                        let private = k.starts_with("\u{0}#");
                         let k = self.str_const(k);
-                        self.emit(Op::SetProp(k));
+                        if private {
+                            self.emit_raw(Op::InitPrivate(k));
+                        } else {
+                            self.emit_raw(Op::DefineField(k));
+                        }
                     }
                     PropKey::Computed(e) => {
                         self.expr(e)?;
@@ -2086,14 +2139,21 @@ impl Compiler {
         let fields: Vec<ClassMember> = c
             .members
             .iter()
-            .filter(|m| {
-                matches!(
-                    m,
-                    ClassMember::Field {
-                        is_static: false,
-                        ..
-                    }
-                )
+            .filter(|m| match m {
+                ClassMember::Field {
+                    is_static: false, ..
+                } => true,
+                ClassMember::Method {
+                    key: PropKey::Named(k),
+                    is_static: false,
+                    ..
+                }
+                | ClassMember::Accessor {
+                    key: PropKey::Named(k),
+                    is_static: false,
+                    ..
+                } => k.starts_with("\u{0}#"),
+                _ => false,
             })
             .cloned()
             .collect();
@@ -2187,8 +2247,13 @@ impl Compiler {
                                 self.emit(Op::Undefined);
                             }
                         }
+                        let private = n.starts_with("\u{0}#");
                         let k = self.str_const(n);
-                        self.emit(Op::SetProp(k));
+                        if private {
+                            self.emit_raw(Op::InitPrivate(k));
+                        } else {
+                            self.emit_raw(Op::DefineField(k));
+                        }
                         self.emit(Op::Pop);
                     }
                     PropKey::Computed(e) => {

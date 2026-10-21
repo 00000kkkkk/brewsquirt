@@ -46,6 +46,13 @@ const RESERVED: &[&str] = &[
     "yield",
     "let",
     "await",
+    "implements",
+    "interface",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "static",
 ];
 
 pub fn is_reserved(name: &str) -> bool {
@@ -53,8 +60,17 @@ pub fn is_reserved(name: &str) -> bool {
 }
 
 pub fn parse(src: &str) -> R<Vec<Stmt>> {
+    parse_goal(src, false)
+}
+
+pub fn parse_script(src: &str) -> R<Vec<Stmt>> {
+    parse_goal(src, true)
+}
+
+fn parse_goal(src: &str, script: bool) -> R<Vec<Stmt>> {
     let toks = tokenize(src)?;
     let mut parser = Parser {
+        script,
         toks,
         pos: 0,
         no_in: false,
@@ -64,6 +80,7 @@ pub fn parse(src: &str) -> R<Vec<Stmt>> {
         in_async: false,
         in_generator: false,
         class_ids: Vec::new(),
+        field_init: 0,
         next_class_id: 0,
     };
     parser.program()
@@ -82,6 +99,8 @@ struct Parser {
     in_async: bool,
     in_generator: bool,
     class_ids: Vec<(u32, Rc<Vec<Rc<str>>>)>,
+    field_init: u32,
+    script: bool,
     next_class_id: u32,
     args_used: Vec<bool>,
     span_start: Option<u32>,
@@ -278,7 +297,7 @@ impl Parser {
             Some(s) if matches!(&*s, "eval" | "arguments") => {
                 Err(self.error("Unexpected eval or arguments in strict mode"))
             }
-            Some(s) if is_reserved(&s) => {
+            Some(s) if is_reserved(&s) && !(&*s == "await" && self.script && !self.in_async) => {
                 Err(self.error(format!("Unexpected reserved word '{s}'")))
             }
             Some(s) => {
@@ -890,13 +909,16 @@ impl Parser {
         self.in_async = is_async;
         self.in_generator = is_generator;
         self.args_used.push(false);
+        let saved_field = std::mem::take(&mut self.field_init);
         let parsed = self
             .params()
             .and_then(|(params, rest)| Ok((params, rest, self.function_body()?)));
+        self.field_init = saved_field;
         let uses_arguments = self.args_used.pop().unwrap_or(false);
         let end = self.prev_end();
         (self.in_async, self.in_generator) = saved;
         let (params, rest, body) = parsed?;
+        check_strict_params(&params, &rest, &body, line)?;
         Ok(Rc::new(FuncDef {
             name,
             params,
@@ -1125,7 +1147,9 @@ impl Parser {
                     self.in_async = false;
                     self.in_generator = false;
                     self.args_used.push(false);
+                    self.field_init += 1;
                     let body = self.function_body();
+                    self.field_init -= 1;
                     self.args_used.pop();
                     (self.in_async, self.in_generator) = saved;
                     let body = body?;
@@ -1165,7 +1189,7 @@ impl Parser {
             let (key, _) = self.prop_key()?;
             if let Some(setter) = accessor {
                 let fname = match &key {
-                    PropKey::Named(n) => Some(n.clone()),
+                    PropKey::Named(n) => Some(display_name(n)),
                     PropKey::Computed(_) => None,
                 };
                 let kind = if is_static {
@@ -1198,7 +1222,7 @@ impl Parser {
                     FuncKind::Method
                 };
                 let fname = match &key {
-                    PropKey::Named(n) => Some(n.clone()),
+                    PropKey::Named(n) => Some(display_name(n)),
                     PropKey::Computed(_) => None,
                 };
                 if is_ctor && (is_async || is_generator) {
@@ -1232,7 +1256,9 @@ impl Parser {
                 }
                 let value = if self.eat(P::Eq) {
                     self.fn_depth += 1;
+                    self.field_init += 1;
                     let v = self.assignment();
+                    self.field_init -= 1;
                     self.fn_depth -= 1;
                     Some(v?)
                 } else {
@@ -1308,6 +1334,9 @@ impl Parser {
         let parsed = self.arrow_parts();
         (self.in_async, self.in_generator) = saved;
         let (params, rest, body) = parsed?;
+        if let FuncBody::Block(stmts) = &body {
+            check_strict_params(&params, &rest, stmts, line)?;
+        }
         Ok(Expr {
             kind: ExprKind::Function(Rc::new(FuncDef {
                 name: None,
@@ -1624,11 +1653,23 @@ impl Parser {
     }
 
     fn binary(&mut self, min: u8) -> R<Expr> {
+        let t = self.peek();
+        let mut unary_left = matches!(
+            t.tok,
+            Tok::Punct(P::Bang) | Tok::Punct(P::Minus) | Tok::Punct(P::Plus) | Tok::Punct(P::Tilde)
+        ) || (!t.escaped
+            && matches!(&t.tok, Tok::Ident(s) if matches!(&**s, "typeof" | "void" | "delete")));
         let mut left = self.unary()?;
         while let Some((prec, op)) = self.binop_info() {
             if prec < min {
                 break;
             }
+            if unary_left && matches!(op, BinKind::Bin(BinOp::Pow)) {
+                return Err(self.error(
+                    "Unary operator used immediately before exponentiation expression. Parenthesis must be used to disambiguate operator precedence",
+                ));
+            }
+            unary_left = false;
             let line = self.line();
             self.advance();
             let right = if matches!(op, BinKind::Bin(BinOp::Pow)) {
@@ -1677,7 +1718,9 @@ impl Parser {
             Tok::Ident(s) if &**s == "typeof" => UnaryOp::Typeof,
             Tok::Ident(s) if &**s == "void" => UnaryOp::Void,
             Tok::Ident(s) if &**s == "delete" => UnaryOp::Delete,
-            Tok::Ident(s) if &**s == "await" => {
+            Tok::Ident(s)
+                if &**s == "await" && !self.peek().escaped && (self.in_async || !self.script) =>
+            {
                 if !self.in_async && self.fn_depth > 0 {
                     return Err(self.error(
                         "await is only valid in async functions and the top level of modules",
@@ -1708,6 +1751,15 @@ impl Parser {
         };
         self.advance();
         let operand = self.unary()?;
+        if op == UnaryOp::Delete {
+            let inner = &operand;
+            if matches!(&inner.kind, ExprKind::Member { name, .. } if name.starts_with("\u{0}#")) {
+                return Err(self.error("Private fields can not be deleted"));
+            }
+            if matches!(&inner.kind, ExprKind::Ident(_)) {
+                return Err(self.error("Delete of an unqualified identifier in strict mode."));
+            }
+        }
         if op == UnaryOp::Neg {
             if let ExprKind::Number(n) = operand.kind {
                 return Ok(Expr {
@@ -1973,6 +2025,8 @@ impl Parser {
                         in_async: self.in_async,
                         in_generator: self.in_generator,
                         class_ids: self.class_ids.clone(),
+                        field_init: self.field_init,
+                        script: self.script,
                         next_class_id: self.next_class_id,
                         args_used: vec![false],
                         span_start: None,
@@ -2073,6 +2127,11 @@ impl Parser {
             Tok::Ident(name) if self.peek().escaped && is_reserved(name) => {
                 return Err(self.error("Keyword must not contain escaped characters"));
             }
+            Tok::Ident(name) if self.peek().escaped => {
+                let name = name.clone();
+                self.advance();
+                ExprKind::Ident(name)
+            }
             Tok::Ident(name) => {
                 let name = name.clone();
                 match &*name {
@@ -2171,10 +2230,17 @@ impl Parser {
                             ExprKind::DynImport(Box::new(spec))
                         }
                     }
-                    n if is_reserved(n) => return Err(self.unexpected()),
+                    n if is_reserved(n) && !(n == "await" && self.script && !self.in_async) => {
+                        return Err(self.unexpected());
+                    }
                     _ => {
                         self.advance();
                         if &*name == "arguments" {
+                            if self.field_init > 0 {
+                                return Err(self.error(
+                                    "'arguments' is not allowed in class field initializer or static initialization block",
+                                ));
+                            }
                             if let Some(top) = self.args_used.last_mut() {
                                 *top = true;
                             }
@@ -2210,6 +2276,9 @@ impl Parser {
                 let mut is_generator = false;
                 let mut accessor = None;
                 if self.is_kw("async") && !plain_next(self) {
+                    if self.peek_at(1).nl_before {
+                        return Err(self.error("Unexpected line terminator after 'async'"));
+                    }
                     self.advance();
                     is_async = true;
                 }
@@ -2345,4 +2414,46 @@ fn check_class_members(members: &[ClassMember], line: u32) -> R<()> {
         }
     }
     Ok(())
+}
+
+fn check_strict_params(
+    params: &[Param],
+    rest: &Option<Pattern>,
+    body: &[Stmt],
+    line: u32,
+) -> R<()> {
+    let simple = rest.is_none()
+        && params
+            .iter()
+            .all(|p| p.default.is_none() && matches!(p.pattern, Pattern::Ident(_)));
+    if simple {
+        return Ok(());
+    }
+    for s in body {
+        match &s.kind {
+            StmtKind::Expr(e) => match &e.kind {
+                ExprKind::Str(t) => {
+                    if &**t == "use strict" {
+                        return Err(SyntaxError::new(
+                            "Illegal 'use strict' directive in function with non-simple parameter list",
+                            line,
+                            1,
+                        ));
+                    }
+                }
+                _ => break,
+            },
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+fn display_name(n: &Rc<str>) -> Rc<str> {
+    match n.strip_prefix('\u{0}') {
+        Some(body) if body.starts_with('#') => {
+            body.rsplit_once('@').map_or(body, |(a, _)| a).into()
+        }
+        _ => n.clone(),
+    }
 }

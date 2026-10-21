@@ -427,6 +427,26 @@ impl Vm {
         )
     }
 
+    pub fn compile_script(
+        &self,
+        src: &str,
+        name: &str,
+        dir: PathBuf,
+        sloppy: bool,
+    ) -> Result<Rc<FunctionProto>, SyntaxError> {
+        let ast = parser::parse_script(src)?;
+        compile_module(
+            &ast,
+            Rc::new(ModuleInfo {
+                name: name.into(),
+                dir,
+                source: src.into(),
+                sloppy,
+            }),
+            Mode::Repl,
+        )
+    }
+
     pub fn syntax_error_value(&mut self, e: &SyntaxError, name: &str) -> Value {
         let v = self.make_error(ErrorKind::SyntaxError, e.message.clone());
         if let Value::Object(o) = &v {
@@ -495,6 +515,68 @@ impl Vm {
         Value::Object(o)
     }
 
+    fn get_private(&mut self, obj: &Value, key: &str) -> Result<Value, Value> {
+        let Value::Object(o) = obj else {
+            return Err(self.type_error(format!(
+                "Cannot read private member {} from an object whose class did not declare it",
+                private_label(key)
+            )));
+        };
+        let found = o.props.borrow().get(key).cloned();
+        match found {
+            Some(v) => {
+                if let Some((getter, _)) = crate::props::accessor_parts(&v) {
+                    if !getter.is_callable() {
+                        return Err(self.type_error(format!(
+                            "'{}' was defined without a getter",
+                            private_label(key)
+                        )));
+                    }
+                    return self.call_value(&getter, obj.clone(), &[]);
+                }
+                Ok(v)
+            }
+            None => Err(self.type_error(format!(
+                "Cannot read private member {} from an object whose class did not declare it",
+                private_label(key)
+            ))),
+        }
+    }
+
+    fn set_private(&mut self, obj: &Value, key: &str, val: Value) -> Result<(), Value> {
+        let Value::Object(o) = obj else {
+            return Err(self.type_error(format!(
+                "Cannot write private member {} to an object whose class did not declare it",
+                private_label(key)
+            )));
+        };
+        let found = o.props.borrow().get(key).cloned();
+        let Some(v) = found else {
+            return Err(self.type_error(format!(
+                "Cannot write private member {} to an object whose class did not declare it",
+                private_label(key)
+            )));
+        };
+        if let Some((_, setter)) = crate::props::accessor_parts(&v) {
+            if !setter.is_callable() {
+                return Err(self.type_error(format!(
+                    "'{}' was defined without a setter",
+                    private_label(key)
+                )));
+            }
+            self.call_value(&setter, obj.clone(), &[val])?;
+            return Ok(());
+        }
+        if o.props.borrow().attrs(key) & crate::object::READ_ONLY != 0 {
+            return Err(self.type_error(format!(
+                "Private method '{}' is not writable",
+                private_label(key)
+            )));
+        }
+        o.props.borrow_mut().insert(key.into(), val);
+        Ok(())
+    }
+
     pub fn get_method(&mut self, v: &Value, key: &str) -> Result<Value, Value> {
         let m = self.get_prop(v, key)?;
         if m.is_nullish() {
@@ -526,8 +608,13 @@ impl Vm {
     }
 
     pub fn run_script(&mut self, src: &str, name: &str) -> Result<Value, Value> {
-        let dir = std::env::current_dir().unwrap_or_default();
-        let proto = match self.compile(src, name, dir, Mode::Repl) {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let dir = Path::new(name)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty() && p.is_dir())
+            .map(|p| cwd.join(p))
+            .unwrap_or(cwd);
+        let proto = match self.compile_script(src, name, dir, false) {
             Ok(p) => p,
             Err(e) => return Err(self.syntax_error_value(&e, name)),
         };
@@ -2132,6 +2219,9 @@ impl Vm {
             )));
         };
         let k = self.to_property_key(key)?;
+        if crate::object::is_private_key(&k) {
+            return Ok(o.props.borrow().contains_key(&k));
+        }
         match &o.kind {
             ObjKind::Proxy(_) | ObjKind::Global => return self.op_has_property(o, &k),
             ObjKind::Array(a) => {
@@ -3348,6 +3438,76 @@ impl Vm {
                     });
                     return Ok(v);
                 }
+                Op::GetPrivate(k) => {
+                    let obj = pop!();
+                    let key = name!(k);
+                    let v = tri!(self.get_private(&obj, &key));
+                    self.stack.push(v);
+                }
+                Op::SetPrivate(k) => {
+                    let val = pop!();
+                    let obj = pop!();
+                    let key = name!(k);
+                    tri!(self.set_private(&obj, &key, val.clone()));
+                    self.stack.push(val);
+                }
+                Op::InitPrivate(k) => {
+                    let val = pop!();
+                    let key = name!(k);
+                    if let Some(Value::Object(o)) = self.stack.last().cloned() {
+                        if o.props.borrow().contains_key(&key) {
+                            throw!(self.type_error(format!(
+                                "Cannot initialize {} twice on the same object",
+                                private_label(&key)
+                            )));
+                        }
+                        o.set_hidden(key, val);
+                    }
+                }
+                Op::DefineField(k) => {
+                    let val = pop!();
+                    let key = name!(k);
+                    if let Some(Value::Object(o)) = self.stack.last().cloned() {
+                        let d = crate::props::PropDesc {
+                            value: Some(val),
+                            writable: Some(true),
+                            enumerable: Some(true),
+                            configurable: Some(true),
+                            ..Default::default()
+                        };
+                        tri!(self.op_define_own_property(&o, key, d, true));
+                    }
+                }
+                Op::CopyPrivates => {
+                    let callee = pop!();
+                    let this = peek!();
+                    if let (Value::Object(c), Value::Object(t)) = (&callee, &this) {
+                        let proto = self.get_obj(c, "prototype");
+                        if let Value::Object(p) = proto {
+                            let entries: Vec<(Rc<str>, Value)> = p
+                                .props
+                                .borrow()
+                                .iter()
+                                .filter(|(k, _)| crate::object::is_private_key(k))
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                            for (k, v) in entries {
+                                if t.props.borrow().contains_key(&k) {
+                                    throw!(self.type_error(format!(
+                                        "Cannot initialize private methods of class {} twice on the same object",
+                                        private_label(&k)
+                                    )));
+                                }
+                                let attrs = if v.as_object().is_some_and(|a| a.is_accessor()) {
+                                    crate::object::NON_ENUM
+                                } else {
+                                    crate::object::NON_ENUM | crate::object::READ_ONLY
+                                };
+                                t.set_with_attrs(k, v, attrs);
+                            }
+                        }
+                    }
+                }
                 Op::DelegateEnd => {
                     let v = pop!();
                     let n = self.stack.len();
@@ -4474,7 +4634,15 @@ impl Vm {
                 *mc.home.borrow_mut() = Some(target.clone());
             }
         }
-        target.set_hidden(key, method);
+        if crate::object::is_private_key(&key) {
+            target.set_with_attrs(
+                key,
+                method,
+                crate::object::NON_ENUM | crate::object::READ_ONLY,
+            );
+        } else {
+            target.set_hidden(key, method);
+        }
         Ok(())
     }
 
@@ -4563,4 +4731,9 @@ fn name_anonymous(f: &Value, key: &str, prefix: &str) {
         Value::Str(format!("{prefix}{base}").into()),
         crate::object::NON_ENUM | crate::object::READ_ONLY,
     );
+}
+
+fn private_label(key: &str) -> String {
+    let body = key.strip_prefix('\u{0}').unwrap_or(key);
+    body.rsplit_once('@').map_or(body, |(a, _)| a).to_string()
 }
