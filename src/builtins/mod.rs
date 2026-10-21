@@ -11,6 +11,7 @@ mod string;
 mod symbol;
 mod system;
 mod testing;
+pub mod web;
 
 use crate::inspect::inspect_plain;
 use crate::object::{Native, NativeFn, Obj, ObjKind};
@@ -100,6 +101,77 @@ pub fn install(vm: &mut Vm) {
     regexp::install(vm);
     symbol::install(vm);
     system::install(vm);
+    web::install(vm);
+}
+
+pub fn hide_builtin_members(vm: &mut Vm) {
+    let mut seen = Vec::new();
+    let mut hide = |o: &Rc<Obj>| {
+        if !seen.iter().any(|s| Rc::ptr_eq(s, o)) {
+            o.props.borrow_mut().hide_all();
+            seen.push(o.clone());
+        }
+    };
+    let r = &vm.realm;
+    for p in [
+        &r.object_proto,
+        &r.function_proto,
+        &r.array_proto,
+        &r.string_proto,
+        &r.number_proto,
+        &r.boolean_proto,
+        &r.map_proto,
+        &r.set_proto,
+        &r.iter_proto,
+        &r.generator_proto,
+        &r.async_generator_proto,
+        &r.promise_proto,
+        &r.symbol_proto,
+        &r.regexp_proto,
+        &r.date_proto,
+        &r.weakmap_proto,
+        &r.weakset_proto,
+        &r.weakref_proto,
+    ] {
+        hide(p);
+    }
+    for p in &r.error_protos {
+        hide(p);
+    }
+    for name in [
+        "Object",
+        "Function",
+        "Array",
+        "String",
+        "Number",
+        "Boolean",
+        "Symbol",
+        "Promise",
+        "RegExp",
+        "Date",
+        "Map",
+        "Set",
+        "WeakMap",
+        "WeakSet",
+        "WeakRef",
+        "Error",
+        "TypeError",
+        "RangeError",
+        "ReferenceError",
+        "SyntaxError",
+        "URIError",
+        "EvalError",
+        "Math",
+        "JSON",
+        "Reflect",
+    ] {
+        if let Some(Value::Object(o)) = vm.globals.get(name) {
+            hide(o);
+            if let Some(Value::Object(p)) = o.get_own("prototype") {
+                hide(&p);
+            }
+        }
+    }
 }
 
 pub fn builtin_module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
@@ -110,6 +182,7 @@ pub fn builtin_module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
         "child_process" => stdlib::child_process_module(vm),
         "util" => testing::util_module(vm),
         "test" => return Some(testing::test_module(vm)),
+        "http" => return Some(web::http_module(vm)),
         "process" => vm.globals.get("process").cloned()?,
         "math" => vm.globals.get("Math").cloned()?,
         "json" => vm.globals.get("JSON").cloned()?,

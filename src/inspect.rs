@@ -275,7 +275,7 @@ fn own_props(o: &Obj, skip_function_keys: bool) -> Vec<(Rc<str>, Value)> {
     let mut props: Vec<(Rc<str>, Value)> = o
         .props
         .borrow()
-        .iter()
+        .enumerable()
         .filter(|(k, _)| !crate::object::is_private_key(k))
         .filter(|(k, _)| !skip_function_keys || !matches!(&***k, "prototype" | "name" | "length"))
         .map(|(k, v)| (k.clone(), v.clone()))

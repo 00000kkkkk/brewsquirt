@@ -1,0 +1,48 @@
+class Animal {
+  static kingdom = "animalia"
+  constructor(name) {
+    this.name = name
+  }
+  speak() {
+    return `${this.name} makes a sound`
+  }
+  get loud() {
+    return this.speak().toUpperCase()
+  }
+}
+class Dog extends Animal {
+  speak() {
+    return `${this.name} barks`
+  }
+}
+const d = new Dog("rex")
+const keys = []
+for (const k in d) keys.push(k)
+console.log(keys, Object.keys(Dog.prototype), Object.getOwnPropertyNames(Dog.prototype))
+console.log(d, Dog.prototype, Animal, JSON.stringify(d), { ...d })
+
+const base = { inherited: true }
+const child = Object.create(base, { own: { value: 1, enumerable: true }, secret: { value: 2 } })
+child.extra = 3
+const seen = []
+for (const k in child) seen.push(k)
+console.log(seen, Object.keys(child), child.secret, child.propertyIsEnumerable("secret"))
+
+const o = {}
+Object.defineProperty(o, "hidden", { value: "h" })
+Object.defineProperty(o, "shown", { value: "s", enumerable: true, configurable: true })
+Object.defineProperties(o, { a: { value: 1, enumerable: true }, b: { get: () => 2 } })
+console.log(o, Object.entries(o), o.hidden, o.b, Object.getOwnPropertyNames(o))
+console.log(Object.getOwnPropertyDescriptor(o, "hidden").enumerable, Object.getOwnPropertyDescriptor(o, "a").enumerable)
+Object.defineProperty(o, "shown", { enumerable: false })
+console.log(Object.keys(o), o.shown)
+
+function Legacy() {
+  this.x = 1
+}
+Legacy.prototype.method = function () {}
+const l = new Legacy()
+const lk = []
+for (const k in l) lk.push(k)
+console.log(lk, Object.keys(Legacy), Object.keys(Legacy.prototype))
+console.log(Object.keys(Array.prototype).length, Object.keys(Math).length, Object.keys(Promise).length, [].propertyIsEnumerable("length"))

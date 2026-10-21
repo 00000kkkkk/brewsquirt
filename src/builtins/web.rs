@@ -1,0 +1,1056 @@
+use super::{arg, method, native_fn};
+use crate::compiler::Mode;
+use crate::io::{self, FetchRequest, FetchResponse, HttpReply, HttpRequest, IoEvent};
+use crate::value::Value;
+use crate::vm::{ErrorKind, Vm};
+use std::time::Duration;
+
+type R = Result<Value, Value>;
+
+pub const LAZY_GLOBALS: [&str; 6] = [
+    "fetch",
+    "Headers",
+    "Request",
+    "Response",
+    "URL",
+    "URLSearchParams",
+];
+
+const WEB_SRC: &str = r##"
+(native) => {
+  const lower = (name) => String(name).toLowerCase()
+  let internal = false
+
+  class Headers {
+    #map = new Map()
+    constructor(init) {
+      if (init == null) return
+      if (typeof init[Symbol.iterator] === "function") {
+        for (const pair of init) {
+          const [k, v] = [...pair]
+          this.append(k, v)
+        }
+      } else {
+        for (const k of Object.keys(init)) this.append(k, init[k])
+      }
+    }
+    append(name, value) {
+      const k = lower(name)
+      const v = String(value).trim()
+      const cur = this.#map.get(k)
+      this.#map.set(k, cur === undefined ? v : k === "set-cookie" ? `${cur}\n${v}` : `${cur}, ${v}`)
+    }
+    set(name, value) {
+      this.#map.set(lower(name), String(value).trim())
+    }
+    get(name) {
+      const v = this.#map.get(lower(name))
+      if (v === undefined) return null
+      return lower(name) === "set-cookie" ? v.split("\n").join(", ") : v
+    }
+    getSetCookie() {
+      const v = this.#map.get("set-cookie")
+      return v === undefined ? [] : v.split("\n")
+    }
+    has(name) {
+      return this.#map.has(lower(name))
+    }
+    delete(name) {
+      this.#map.delete(lower(name))
+    }
+    forEach(fn, thisArg) {
+      for (const [k, v] of this) fn.call(thisArg, v, k, this)
+    }
+    entries() {
+      const out = []
+      for (const [k, v] of this.#map) {
+        if (k === "set-cookie") for (const c of v.split("\n")) out.push([k, c])
+        else out.push([k, v])
+      }
+      out.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+      return out[Symbol.iterator]()
+    }
+    keys() {
+      return [...this.entries()].map((e) => e[0])[Symbol.iterator]()
+    }
+    values() {
+      return [...this.entries()].map((e) => e[1])[Symbol.iterator]()
+    }
+    [Symbol.iterator]() {
+      return this.entries()
+    }
+    get size() {
+      return this.#map.size
+    }
+    toJSON() {
+      return Object.fromEntries(this.entries())
+    }
+  }
+
+  const PARSE = Symbol("parse")
+  const SYNC = Symbol("sync")
+  const owners = new WeakMap()
+
+  function formEncode(s) {
+    return encodeURIComponent(s)
+      .replace(/%20/g, "+")
+      .replace(/[!'()~]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase())
+  }
+
+  function formDecode(s) {
+    const t = s.replace(/\+/g, " ")
+    try {
+      return decodeURIComponent(t)
+    } catch {
+      return t
+    }
+  }
+
+  class URLSearchParams {
+    #list = []
+    constructor(init = "") {
+      if (init instanceof URLSearchParams) {
+        this.#list = [...init]
+      } else if (typeof init === "object" && init !== null) {
+        if (typeof init[Symbol.iterator] === "function") {
+          for (const pair of init) {
+            const p = [...pair]
+            if (p.length !== 2) throw new TypeError("Each query pair must be an iterable [name, value] tuple")
+            this.#list.push([String(p[0]), String(p[1])])
+          }
+        } else {
+          for (const k of Object.keys(init)) this.#list.push([k, String(init[k])])
+        }
+      } else {
+        this[PARSE](String(init))
+      }
+    }
+    [PARSE](s) {
+      this.#list = []
+      if (s.startsWith("?")) s = s.slice(1)
+      for (const part of s.split("&")) {
+        if (part === "") continue
+        const i = part.indexOf("=")
+        const k = i < 0 ? part : part.slice(0, i)
+        const v = i < 0 ? "" : part.slice(i + 1)
+        this.#list.push([formDecode(k), formDecode(v)])
+      }
+    }
+    #changed() {
+      const url = owners.get(this)
+      if (url) url[SYNC](this.toString())
+    }
+    get size() {
+      return this.#list.length
+    }
+    append(name, value) {
+      this.#list.push([String(name), String(value)])
+      this.#changed()
+    }
+    delete(name, value) {
+      const n = String(name)
+      this.#list = this.#list.filter(([k, v]) => k !== n || (value !== undefined && v !== String(value)))
+      this.#changed()
+    }
+    get(name) {
+      const n = String(name)
+      const hit = this.#list.find(([k]) => k === n)
+      return hit ? hit[1] : null
+    }
+    getAll(name) {
+      const n = String(name)
+      return this.#list.filter(([k]) => k === n).map(([, v]) => v)
+    }
+    has(name, value) {
+      const n = String(name)
+      return this.#list.some(([k, v]) => k === n && (value === undefined || v === String(value)))
+    }
+    set(name, value) {
+      const n = String(name)
+      const v = String(value)
+      const i = this.#list.findIndex(([k]) => k === n)
+      if (i < 0) this.#list.push([n, v])
+      else {
+        this.#list[i] = [n, v]
+        this.#list = this.#list.filter(([k], j) => k !== n || j === i)
+      }
+      this.#changed()
+    }
+    sort() {
+      this.#list = this.#list
+        .map((e, i) => [e, i])
+        .sort((a, b) => (a[0][0] < b[0][0] ? -1 : a[0][0] > b[0][0] ? 1 : a[1] - b[1]))
+        .map(([e]) => e)
+      this.#changed()
+    }
+    forEach(fn, thisArg) {
+      for (const [k, v] of this.#list) fn.call(thisArg, v, k, this)
+    }
+    entries() {
+      return this.#list.map(([k, v]) => [k, v])[Symbol.iterator]()
+    }
+    keys() {
+      return this.#list.map(([k]) => k)[Symbol.iterator]()
+    }
+    values() {
+      return this.#list.map(([, v]) => v)[Symbol.iterator]()
+    }
+    [Symbol.iterator]() {
+      return this.entries()
+    }
+    toString() {
+      return this.#list.map(([k, v]) => formEncode(k) + "=" + formEncode(v)).join("&")
+    }
+  }
+
+  const DEFAULT_PORTS = { "http:": "80", "https:": "443", "ws:": "80", "wss:": "443", "ftp:": "21" }
+  const URL_RE = /^([a-zA-Z][a-zA-Z0-9+.\-]*):(?:\/\/(?:([^:@\/?#]*)(?::([^@\/?#]*))?@)?(\[[^\]]*\]|[^:\/?#]*)(?::([0-9]*))?)?([^?#]*)(\?[^#]*)?(#.*)?$/
+  const SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.\-]*:/
+
+  const isSpecial = (protocol) => protocol in DEFAULT_PORTS || protocol === "file:"
+
+  function encodeSet(s, re) {
+    return s.replace(re, (c) => encodeURIComponent(c))
+  }
+  const PATH_SET = /[\x00-\x20"<>`{}]|[^\x00-\x7f]/gu
+  const QUERY_SET = /[\x00-\x20"<>]|[^\x00-\x7f]/gu
+  const FRAGMENT_SET = /[\x00-\x20"<>`]|[^\x00-\x7f]/gu
+  const USER_SET = /[\x00-\x20"<>`{}\/:;=@\[\\\]^|]|[^\x00-\x7f]/gu
+
+  function normalizePath(path, special) {
+    if (special) path = path.replace(/\\/g, "/")
+    if (path === "") return special ? "/" : ""
+    const out = []
+    const parts = path.split("/")
+    for (let i = 0; i < parts.length; i++) {
+      const seg = parts[i]
+      const last = i === parts.length - 1
+      if (seg === "." || seg.toLowerCase() === "%2e") {
+        if (last) out.push("")
+      } else if (seg === ".." || /^(\.|%2e)(\.|%2e)$/i.test(seg)) {
+        if (out.length > 1) out.pop()
+        if (last) out.push("")
+      } else {
+        out.push(seg)
+      }
+    }
+    let joined = out.join("/")
+    if (!joined.startsWith("/") && special) joined = "/" + joined
+    return encodeSet(joined, PATH_SET)
+  }
+
+  function resolveRef(input, base) {
+    if (SCHEME_RE.test(input)) return input
+    const b = new URL(base)
+    const origin = `${b.protocol}//${b.host}`
+    if (input.startsWith("//")) return b.protocol + input
+    if (input.startsWith("/")) return origin + input
+    if (input.startsWith("?")) return origin + b.pathname + input
+    if (input.startsWith("#")) return origin + b.pathname + b.search + input
+    if (input === "") return origin + b.pathname + b.search
+    const dir = b.pathname.slice(0, b.pathname.lastIndexOf("/") + 1)
+    return origin + dir + input
+  }
+
+  class URL {
+    #protocol = ""
+    #username = ""
+    #password = ""
+    #hostname = ""
+    #port = ""
+    #pathname = ""
+    #search = ""
+    #hash = ""
+    #params = null
+    constructor(input, base) {
+      let s = String(input).trim()
+      if (base !== undefined) s = resolveRef(s, String(base))
+      this.#parse(s, String(input))
+    }
+    #parse(s, original) {
+      const m = URL_RE.exec(s)
+      if (!m) throw new TypeError(`Invalid URL: ${original}`)
+      const protocol = m[1].toLowerCase() + ":"
+      const special = isSpecial(protocol)
+      if (special && protocol !== "file:" && !m[4]) throw new TypeError(`Invalid URL: ${original}`)
+      this.#protocol = protocol
+      this.#username = m[2] ? encodeSet(m[2], USER_SET) : ""
+      this.#password = m[3] ? encodeSet(m[3], USER_SET) : ""
+      this.#hostname = (m[4] ?? "").toLowerCase()
+      let port = m[5] ?? ""
+      if (port !== "") {
+        const n = Number(port)
+        if (n > 65535) throw new TypeError(`Invalid URL: ${original}`)
+        port = String(n)
+      }
+      this.#port = port === DEFAULT_PORTS[protocol] ? "" : port
+      this.#pathname = m[4] === undefined && !special ? encodeSet(m[6], PATH_SET) : normalizePath(m[6], special)
+      this.#search = m[7] && m[7] !== "?" ? encodeSet(m[7], QUERY_SET) : ""
+      this.#hash = m[8] && m[8] !== "#" ? encodeSet(m[8], FRAGMENT_SET) : ""
+      if (this.#params) this.#params[PARSE](this.#search)
+    }
+    [SYNC](query) {
+      this.#search = query === "" ? "" : "?" + query
+    }
+    get href() {
+      const auth = this.#username || this.#password
+        ? this.#username + (this.#password ? ":" + this.#password : "") + "@"
+        : ""
+      const authority = this.#hostname !== "" || isSpecial(this.#protocol) ? "//" + auth + this.host : ""
+      return this.#protocol + authority + this.#pathname + this.#search + this.#hash
+    }
+    set href(v) {
+      this.#parse(String(v), String(v))
+    }
+    get origin() {
+      return this.#protocol in DEFAULT_PORTS ? `${this.#protocol}//${this.host}` : "null"
+    }
+    get protocol() {
+      return this.#protocol
+    }
+    set protocol(v) {
+      const p = String(v).replace(/:.*$/, "").toLowerCase()
+      if (/^[a-z][a-z0-9+.\-]*$/.test(p) && isSpecial(p + ":") === isSpecial(this.#protocol)) {
+        this.#protocol = p + ":"
+        if (this.#port === DEFAULT_PORTS[this.#protocol]) this.#port = ""
+      }
+    }
+    get username() {
+      return this.#username
+    }
+    set username(v) {
+      this.#username = encodeSet(String(v), USER_SET)
+    }
+    get password() {
+      return this.#password
+    }
+    set password(v) {
+      this.#password = encodeSet(String(v), USER_SET)
+    }
+    get host() {
+      return this.#port === "" ? this.#hostname : `${this.#hostname}:${this.#port}`
+    }
+    set host(v) {
+      const m = /^(\[[^\]]*\]|[^:\/?#]*)(?::([0-9]*))?/.exec(String(v))
+      if (!m || m[1] === "") return
+      this.#hostname = m[1].toLowerCase()
+      if (m[2] !== undefined) this.port = m[2]
+    }
+    get hostname() {
+      return this.#hostname
+    }
+    set hostname(v) {
+      const h = String(v)
+      if (h !== "" && !/[:\/?#]/.test(h)) this.#hostname = h.toLowerCase()
+    }
+    get port() {
+      return this.#port
+    }
+    set port(v) {
+      const s = String(v)
+      if (s === "") {
+        this.#port = ""
+        return
+      }
+      const m = /^[0-9]+/.exec(s)
+      if (!m || Number(m[0]) > 65535) return
+      const p = String(Number(m[0]))
+      this.#port = p === DEFAULT_PORTS[this.#protocol] ? "" : p
+    }
+    get pathname() {
+      return this.#pathname
+    }
+    set pathname(v) {
+      let p = String(v)
+      if (isSpecial(this.#protocol) && !p.startsWith("/")) p = "/" + p
+      this.#pathname = normalizePath(p, isSpecial(this.#protocol))
+    }
+    get search() {
+      return this.#search
+    }
+    set search(v) {
+      let s = String(v)
+      if (s.startsWith("?")) s = s.slice(1)
+      this.#search = s === "" ? "" : "?" + encodeSet(s, QUERY_SET)
+      if (this.#params) this.#params[PARSE](this.#search)
+    }
+    get searchParams() {
+      if (!this.#params) {
+        this.#params = new URLSearchParams(this.#search)
+        owners.set(this.#params, this)
+      }
+      return this.#params
+    }
+    get hash() {
+      return this.#hash
+    }
+    set hash(v) {
+      let s = String(v)
+      if (s.startsWith("#")) s = s.slice(1)
+      this.#hash = s === "" ? "" : "#" + encodeSet(s, FRAGMENT_SET)
+    }
+    toString() {
+      return this.href
+    }
+    toJSON() {
+      return this.href
+    }
+    static canParse(input, base) {
+      try {
+        new URL(input, base)
+        return true
+      } catch {
+        return false
+      }
+    }
+    static parse(input, base) {
+      try {
+        return new URL(input, base)
+      } catch {
+        return null
+      }
+    }
+  }
+
+  function bodyText(body) {
+    if (body == null) return null
+    if (typeof body === "string") return body
+    if (body instanceof URLSearchParams) return body.toString()
+    return String(body)
+  }
+
+  function defaultType(body) {
+    if (typeof body === "string") return "text/plain;charset=UTF-8"
+    if (body instanceof URLSearchParams) return "application/x-www-form-urlencoded;charset=UTF-8"
+    return null
+  }
+
+  class Body {
+    #body
+    #used = false
+    constructor(body) {
+      this.#body = bodyText(body)
+    }
+    get body() {
+      return this.#body
+    }
+    get bodyUsed() {
+      return this.#used
+    }
+    #take() {
+      if (this.#used) throw new TypeError("Body is unusable: Body has already been read")
+      this.#used = true
+      return this.#body ?? ""
+    }
+    async text() {
+      return this.#take()
+    }
+    async json() {
+      return JSON.parse(this.#take())
+    }
+  }
+
+  class Response extends Body {
+    constructor(body = null, init = {}) {
+      super(body)
+      const status = init.status ?? 200
+      if (!internal && (status < 200 || status > 599)) {
+        throw new RangeError(`init["status"] must be in the range of 200 to 599, inclusive.`)
+      }
+      this.status = status
+      this.statusText = init.statusText ?? ""
+      this.headers = init.headers instanceof Headers && internal ? init.headers : new Headers(init.headers)
+      if (!internal && body != null && !this.headers.has("content-type")) {
+        const t = defaultType(body)
+        if (t) this.headers.set("content-type", t)
+      }
+      this.ok = status >= 200 && status < 300
+      this.redirected = init.redirected ?? false
+      this.type = internal ? "basic" : "default"
+      this.url = init.url ?? ""
+    }
+    clone() {
+      if (this.bodyUsed) throw new TypeError("Response.clone: Body has already been consumed.")
+      return new Response(this.body, this)
+    }
+    static json(data, init = {}) {
+      const headers = new Headers(init.headers)
+      if (!headers.has("content-type")) headers.set("content-type", "application/json")
+      return new Response(JSON.stringify(data), { ...init, headers })
+    }
+    static redirect(url, status = 302) {
+      if (![301, 302, 303, 307, 308].includes(status)) throw new RangeError("Invalid status code")
+      return new Response(null, { status, headers: { location: String(url) } })
+    }
+  }
+
+  class Request extends Body {
+    constructor(input, init = {}) {
+      const src = input instanceof Request ? input : null
+      const method = String(init.method ?? src?.method ?? "GET").toUpperCase()
+      const body = init.body !== undefined ? init.body : src ? src.body : null
+      if ((method === "GET" || method === "HEAD") && body != null) {
+        throw new TypeError("Request with GET/HEAD method cannot have body.")
+      }
+      super(body)
+      this.method = method
+      this.url = src ? src.url : internal ? String(input) : new URL(String(input)).href
+      this.headers = new Headers(init.headers ?? src?.headers)
+      if (body != null && !this.headers.has("content-type")) {
+        const t = defaultType(body)
+        if (t) this.headers.set("content-type", t)
+      }
+      this.redirect = init.redirect ?? src?.redirect ?? "follow"
+      this.signal = init.signal ?? src?.signal ?? null
+    }
+    clone() {
+      if (this.bodyUsed) throw new TypeError("Request.clone: Body has already been consumed.")
+      return new Request(this)
+    }
+  }
+
+  async function fetch(input, init = {}) {
+    const req = new Request(input, init)
+    const url = new URL(req.url)
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new TypeError("fetch failed", { cause: new Error(`unsupported protocol ${url.protocol}`) })
+    }
+    if (init.signal?.aborted) throw init.signal.reason ?? new Error("This operation was aborted")
+    const raw = await native.fetch(
+      req.method,
+      url.href,
+      [...req.headers],
+      req.body,
+      Number(init.timeout ?? 0),
+      req.redirect !== "manual",
+    )
+    if (req.redirect === "error" && raw.status >= 300 && raw.status < 400) {
+      throw new TypeError("fetch failed", { cause: new Error("unexpected redirect") })
+    }
+    internal = true
+    try {
+      const empty = raw.status === 204 || raw.status === 304 || req.method === "HEAD"
+      return new Response(empty ? null : raw.body, {
+        status: raw.status,
+        statusText: raw.statusText,
+        headers: new Headers(raw.headers),
+        url: raw.url,
+        redirected: raw.url !== url.href,
+      })
+    } finally {
+      internal = false
+    }
+  }
+
+  function toReply(res) {
+    if (res instanceof Response) return [res.status, [...res.headers], res.body ?? ""]
+    if (res === undefined || res === null) return [204, [], ""]
+    if (typeof res === "string") return [200, [["content-type", "text/plain;charset=UTF-8"]], res]
+    return [200, [["content-type", "application/json"]], JSON.stringify(res)]
+  }
+
+  function serve(options, handler) {
+    if (typeof options === "function") [options, handler] = [{}, options]
+    options ??= {}
+    handler ??= options.fetch
+    if (typeof handler !== "function") throw new TypeError("serve() needs a handler function")
+    const onError = options.error
+    const [id, port, address] = native.serve(String(options.hostname ?? "127.0.0.1"), Number(options.port ?? 3000), dispatch)
+    let open = true
+    const server = {
+      hostname: address,
+      port,
+      url: new URL(`http://${address.includes(":") ? `[${address}]` : address}:${port}/`),
+      pendingRequests: 0,
+      stop() {
+        if (open) {
+          open = false
+          native.close(id)
+        }
+      },
+      close() {
+        server.stop()
+      },
+    }
+    function dispatch(raw, replyId) {
+      server.pendingRequests++
+      internal = true
+      let req
+      try {
+        const hasBody = raw.body !== "" && raw.method !== "GET" && raw.method !== "HEAD"
+        req = new Request(raw.url, { method: raw.method, headers: raw.headers, body: hasBody ? raw.body : null })
+        req.remoteAddress = raw.remote
+      } finally {
+        internal = false
+      }
+      Promise.resolve()
+        .then(() => handler(req, server))
+        .then(toReply, (err) => {
+          if (typeof onError === "function") return Promise.resolve().then(() => onError(err)).then(toReply)
+          console.error(err)
+          return [500, [["content-type", "text/plain;charset=UTF-8"]], "Internal Server Error"]
+        })
+        .catch((err) => {
+          console.error(err)
+          return [500, [["content-type", "text/plain;charset=UTF-8"]], "Internal Server Error"]
+        })
+        .then(([status, headers, body]) => {
+          server.pendingRequests--
+          native.reply(replyId, status, headers, String(body))
+        })
+    }
+    return server
+  }
+
+  class IncomingMessage {
+    #body
+    constructor(req) {
+      const u = new URL(req.url)
+      this.method = req.method
+      this.url = u.pathname + u.search
+      this.headers = Object.fromEntries(req.headers)
+      this.httpVersion = "1.1"
+      this.socket = { remoteAddress: req.remoteAddress }
+      this.#body = req.body ?? ""
+    }
+    on(event, fn) {
+      if (event === "data" && this.#body !== "") queueMicrotask(() => fn(this.#body))
+      if (event === "end") queueMicrotask(() => queueMicrotask(() => fn()))
+      return this
+    }
+    once(event, fn) {
+      return this.on(event, fn)
+    }
+    async *[Symbol.asyncIterator]() {
+      if (this.#body !== "") yield this.#body
+    }
+  }
+
+  class ServerResponse {
+    #headers = new Headers()
+    #chunks = []
+    #done
+    constructor(done) {
+      this.#done = done
+      this.statusCode = 200
+      this.statusMessage = ""
+      this.headersSent = false
+      this.writableEnded = false
+    }
+    setHeader(name, value) {
+      this.#headers.delete(name)
+      for (const v of Array.isArray(value) ? value : [value]) this.#headers.append(name, v)
+      return this
+    }
+    getHeader(name) {
+      return this.#headers.get(name) ?? undefined
+    }
+    getHeaders() {
+      return Object.fromEntries(this.#headers)
+    }
+    hasHeader(name) {
+      return this.#headers.has(name)
+    }
+    removeHeader(name) {
+      this.#headers.delete(name)
+    }
+    writeHead(status, message, headers) {
+      if (typeof message === "object" && message !== null) [message, headers] = [undefined, message]
+      this.statusCode = status
+      if (message !== undefined) this.statusMessage = message
+      if (headers) for (const k of Object.keys(headers)) this.setHeader(k, headers[k])
+      this.headersSent = true
+      return this
+    }
+    write(chunk) {
+      if (chunk != null) this.#chunks.push(String(chunk))
+      this.headersSent = true
+      return true
+    }
+    end(chunk, cb) {
+      if (typeof chunk === "function") [chunk, cb] = [undefined, chunk]
+      if (this.writableEnded) return this
+      if (chunk != null) this.#chunks.push(String(chunk))
+      this.writableEnded = true
+      this.headersSent = true
+      internal = true
+      try {
+        this.#done(new Response(this.#chunks.join(""), { status: this.statusCode, headers: this.#headers }))
+      } finally {
+        internal = false
+      }
+      if (typeof cb === "function") queueMicrotask(cb)
+      return this
+    }
+  }
+
+  function createServer(options, listener) {
+    if (typeof options === "function") [options, listener] = [{}, options]
+    let srv = null
+    const handlers = { request: listener ? [listener] : [], listening: [], close: [] }
+    const emit = (name, ...args) => {
+      for (const h of handlers[name] ?? []) h(...args)
+    }
+    const server = {
+      listening: false,
+      on(event, fn) {
+        ;(handlers[event] ??= []).push(fn)
+        return server
+      },
+      listen(port = 0, host, cb) {
+        if (typeof port === "object" && port !== null) [port, host, cb] = [port.port ?? 0, port.host, host]
+        if (typeof host === "function") [host, cb] = [undefined, host]
+        srv = serve({ port, hostname: host ?? "127.0.0.1" }, (req) =>
+          new Promise((resolve) => {
+            emit("request", new IncomingMessage(req), new ServerResponse(resolve))
+          }),
+        )
+        server.listening = true
+        if (typeof cb === "function") handlers.listening.push(cb)
+        queueMicrotask(() => emit("listening"))
+        return server
+      },
+      close(cb) {
+        if (srv) srv.stop()
+        server.listening = false
+        if (typeof cb === "function") handlers.close.push(cb)
+        queueMicrotask(() => emit("close"))
+        return server
+      },
+      address() {
+        return srv ? { address: srv.hostname, family: srv.hostname.includes(":") ? "IPv6" : "IPv4", port: srv.port } : null
+      },
+    }
+    return server
+  }
+
+  const STATUS_CODES = native.statusCodes
+
+  return { Headers, Request, Response, URL, URLSearchParams, fetch, serve, createServer, STATUS_CODES }
+}
+"##;
+
+pub fn load(vm: &mut Vm) -> Result<Value, Value> {
+    if let Some(v) = &vm.web {
+        return Ok(v.clone());
+    }
+    let dir = std::env::current_dir().unwrap_or_default();
+    let proto = match vm.compile(WEB_SRC, "<squirt:web>", dir, Mode::Repl) {
+        Ok(p) => p,
+        Err(e) => return Err(vm.syntax_error_value(&e, "<squirt:web>")),
+    };
+    let factory = vm.run_proto(proto)?;
+    let natives = vm.new_object();
+    method(vm, &natives, "fetch", 6, native_fetch);
+    method(vm, &natives, "serve", 3, native_serve);
+    method(vm, &natives, "reply", 4, native_reply);
+    method(vm, &natives, "close", 1, native_close);
+    let codes = vm.new_object();
+    for code in 100..600u16 {
+        let text = io::status_text(code);
+        if !text.is_empty() {
+            codes.set_own(code.to_string(), text.into());
+        }
+    }
+    natives.set_own("statusCodes", Value::Object(codes));
+    let exports = vm.call_value(&factory, Value::Undefined, &[Value::Object(natives)])?;
+    for name in LAZY_GLOBALS {
+        let v = vm.get_prop(&exports, name)?;
+        vm.define_global(name, v);
+    }
+    vm.web = Some(exports.clone());
+    Ok(exports)
+}
+
+pub fn http_module(vm: &mut Vm) -> Result<Value, Value> {
+    let web = load(vm)?;
+    let o = vm.new_object();
+    for name in [
+        "serve",
+        "createServer",
+        "STATUS_CODES",
+        "fetch",
+        "Request",
+        "Response",
+        "Headers",
+    ] {
+        let v = vm.get_prop(&web, name)?;
+        o.set_own(name, v);
+    }
+    o.set_own("default", Value::Object(o.clone()));
+    Ok(Value::Object(o))
+}
+
+pub fn install(vm: &mut Vm) {
+    let f = native_fn(vm, "encodeURIComponent", 1, encode_uri_component);
+    vm.define_global("encodeURIComponent", f);
+    let f = native_fn(vm, "encodeURI", 1, encode_uri);
+    vm.define_global("encodeURI", f);
+    let f = native_fn(vm, "decodeURIComponent", 1, decode_uri_component);
+    vm.define_global("decodeURIComponent", f);
+    let f = native_fn(vm, "decodeURI", 1, decode_uri);
+    vm.define_global("decodeURI", f);
+}
+
+const URI_RESERVED: &str = ";/?:@&=+$,#";
+const URI_MARK: &str = "-_.!~*'()";
+
+fn encode(s: &str, keep: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || URI_MARK.contains(c) || keep.contains(c) {
+            out.push(c);
+        } else {
+            let mut buf = [0; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        }
+    }
+    out
+}
+
+fn hex(b: u8) -> Option<u8> {
+    (b as char).to_digit(16).map(|d| d as u8)
+}
+
+fn decode(vm: &mut Vm, s: &str, keep: &str) -> R {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    let malformed = |vm: &mut Vm| Err(vm.make_error(ErrorKind::URIError, "URI malformed"));
+    while i < bytes.len() {
+        if bytes[i] != b'%' {
+            out.push(bytes[i]);
+            i += 1;
+            continue;
+        }
+        let Some(b) = bytes
+            .get(i + 1..i + 3)
+            .and_then(|h| Some(hex(h[0])? * 16 + hex(h[1])?))
+        else {
+            return malformed(vm);
+        };
+        if b < 0x80 {
+            if keep.contains(b as char) {
+                out.extend_from_slice(&bytes[i..i + 3]);
+            } else {
+                out.push(b);
+            }
+            i += 3;
+            continue;
+        }
+        let n = match b {
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            _ => return malformed(vm),
+        };
+        let mut seq = vec![b];
+        let mut j = i + 3;
+        for _ in 1..n {
+            if bytes.get(j) != Some(&b'%') {
+                return malformed(vm);
+            }
+            let Some(c) = bytes
+                .get(j + 1..j + 3)
+                .and_then(|h| Some(hex(h[0])? * 16 + hex(h[1])?))
+            else {
+                return malformed(vm);
+            };
+            seq.push(c);
+            j += 3;
+        }
+        if std::str::from_utf8(&seq).is_err() {
+            return malformed(vm);
+        }
+        out.extend_from_slice(&seq);
+        i = j;
+    }
+    match String::from_utf8(out) {
+        Ok(s) => Ok(s.into()),
+        Err(_) => malformed(vm),
+    }
+}
+
+fn encode_uri_component(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let s = vm.to_string(&arg(args, 0))?;
+    Ok(encode(&s, "").into())
+}
+
+fn encode_uri(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let s = vm.to_string(&arg(args, 0))?;
+    Ok(encode(&s, URI_RESERVED).into())
+}
+
+fn decode_uri_component(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let s = vm.to_string(&arg(args, 0))?;
+    decode(vm, &s, "")
+}
+
+fn decode_uri(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let s = vm.to_string(&arg(args, 0))?;
+    decode(vm, &s, URI_RESERVED)
+}
+
+fn pairs(vm: &mut Vm, v: &Value) -> Result<Vec<(String, String)>, Value> {
+    let mut out = Vec::new();
+    for pair in vm.iterate(v)? {
+        let kv = vm.iterate(&pair)?;
+        let k = vm.to_string(&kv.first().cloned().unwrap_or_default())?;
+        let v = vm.to_string(&kv.get(1).cloned().unwrap_or_default())?;
+        out.push((k.to_string(), v.to_string()));
+    }
+    Ok(out)
+}
+
+fn pairs_value(vm: &Vm, headers: Vec<(String, String)>) -> Value {
+    let items = headers
+        .into_iter()
+        .map(|(k, v)| vm.new_array(vec![k.into(), v.into()]))
+        .collect();
+    vm.new_array(items)
+}
+
+fn native_fetch(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let method = vm.to_string(&arg(args, 0))?.to_string();
+    let url = vm.to_string(&arg(args, 1))?.to_string();
+    let headers = pairs(vm, &arg(args, 2))?;
+    let body = match arg(args, 3) {
+        Value::Undefined | Value::Null => None,
+        v => Some(vm.to_string(&v)?.as_bytes().to_vec()),
+    };
+    let ms = vm.to_number(&arg(args, 4))?;
+    let timeout = (ms > 0.0).then(|| Duration::from_millis(ms as u64));
+    let follow = arg(args, 5).truthy();
+    let p = vm.new_promise();
+    let id = vm.io.next_id();
+    vm.io.pending += 1;
+    vm.io_fetches.insert(id, p.clone());
+    io::spawn_fetch(
+        vm.io.tx.clone(),
+        id,
+        FetchRequest {
+            method,
+            url,
+            headers,
+            body,
+            timeout,
+            follow,
+        },
+    );
+    Ok(Value::Object(p))
+}
+
+fn native_serve(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let host = vm.to_string(&arg(args, 0))?.to_string();
+    let port = vm.to_number(&arg(args, 1))?;
+    if !(0.0..=65535.0).contains(&port) {
+        return Err(vm.range_error(format!("port should be >= 0 and < 65536. Received {port}")));
+    }
+    let dispatch = arg(args, 2);
+    let id = vm.io.next_id();
+    let handle = match io::listen(&host, port as u16, id, vm.io.tx.clone()) {
+        Ok(h) => h,
+        Err(e) => {
+            return Err(vm.make_error(
+                ErrorKind::Error,
+                format!("listen failed on {host}:{port}: {e}"),
+            ));
+        }
+    };
+    let addr = handle.addr;
+    vm.io.pending += 1;
+    vm.io_servers.insert(id, (dispatch, handle));
+    Ok(vm.new_array(vec![
+        (id as f64).into(),
+        (addr.port() as f64).into(),
+        addr.ip().to_string().into(),
+    ]))
+}
+
+fn native_reply(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let id = vm.to_number(&arg(args, 0))? as u64;
+    let status = vm.to_number(&arg(args, 1))? as u16;
+    let headers = pairs(vm, &arg(args, 2))?;
+    let body = vm.to_string(&arg(args, 3))?.as_bytes().to_vec();
+    if let Some(tx) = vm.io_replies.remove(&id) {
+        let _ = tx.send(HttpReply {
+            status,
+            headers,
+            body,
+        });
+    }
+    Ok(Value::Undefined)
+}
+
+fn native_close(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let id = vm.to_number(&arg(args, 0))? as u64;
+    if let Some((_, handle)) = vm.io_servers.remove(&id) {
+        handle.close();
+        vm.io.pending -= 1;
+    }
+    Ok(Value::Undefined)
+}
+
+fn fetch_value(vm: &mut Vm, r: FetchResponse) -> Value {
+    let o = vm.new_object();
+    o.set_own("status", (r.status as f64).into());
+    o.set_own("statusText", r.status_text.into());
+    o.set_own("url", r.url.into());
+    let headers = pairs_value(vm, r.headers);
+    o.set_own("headers", headers);
+    o.set_own("body", String::from_utf8_lossy(&r.body).into_owned().into());
+    Value::Object(o)
+}
+
+fn request_value(vm: &mut Vm, r: HttpRequest) -> Value {
+    let o = vm.new_object();
+    o.set_own("method", r.method.into());
+    o.set_own("url", r.url.into());
+    let headers = pairs_value(vm, r.headers);
+    o.set_own("headers", headers);
+    o.set_own("body", String::from_utf8_lossy(&r.body).into_owned().into());
+    o.set_own("remote", r.remote.into());
+    Value::Object(o)
+}
+
+pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
+    match ev {
+        IoEvent::Fetch { id, result } => {
+            let Some(p) = vm.io_fetches.remove(&id) else {
+                return Ok(());
+            };
+            vm.io.pending -= 1;
+            match result {
+                Ok(r) => {
+                    let v = fetch_value(vm, r);
+                    vm.resolve_promise(&p, v);
+                }
+                Err(msg) => {
+                    let e = vm.type_error("fetch failed");
+                    let cause = vm.make_error(ErrorKind::Error, msg);
+                    if let Value::Object(o) = &e {
+                        o.set_own("cause", cause);
+                    }
+                    vm.reject_promise(&p, e);
+                }
+            }
+        }
+        IoEvent::Request {
+            server,
+            request,
+            reply,
+        } => {
+            let Some((dispatch, _)) = vm.io_servers.get(&server) else {
+                return Ok(());
+            };
+            let dispatch = dispatch.clone();
+            let id = vm.io.next_id();
+            vm.io_replies.insert(id, reply);
+            let raw = request_value(vm, request);
+            vm.call_value(&dispatch, Value::Undefined, &[raw, (id as f64).into()])?;
+        }
+    }
+    Ok(())
+}

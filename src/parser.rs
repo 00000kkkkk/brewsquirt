@@ -1701,8 +1701,25 @@ impl Parser {
                     },
                     line,
                 };
-            } else if matches!(self.peek().tok, Tok::Template(_)) && !self.peek().nl_before {
-                return Err(self.error("Tagged templates are not supported yet"));
+            } else if matches!(self.peek().tok, Tok::Template(_)) {
+                let Tok::Template(parts) = self.advance().tok else {
+                    unreachable!()
+                };
+                let (quasis, exprs) = self.template_parts(parts)?;
+                let (cooked, raw) = quasis.into_iter().map(|(c, r)| (c.ok(), r)).unzip();
+                let mut args = vec![Arg::Expr(Expr {
+                    kind: ExprKind::TemplateStrings(cooked, raw),
+                    line,
+                })];
+                args.extend(exprs.into_iter().map(Arg::Expr));
+                e = Expr {
+                    kind: ExprKind::Call {
+                        callee: Box::new(e),
+                        args,
+                        optional: false,
+                    },
+                    line,
+                };
             } else {
                 break;
             }
@@ -1769,11 +1786,27 @@ impl Parser {
     }
 
     fn template(&mut self, parts: Vec<TemplatePart>, line: u32) -> R<Expr> {
+        let (quasis, exprs) = self.template_parts(parts)?;
+        let quasis = quasis
+            .into_iter()
+            .map(|q| q.0)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Expr {
+            kind: ExprKind::Template(quasis, exprs),
+            line,
+        })
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn template_parts(
+        &mut self,
+        parts: Vec<TemplatePart>,
+    ) -> R<(Vec<(Result<Rc<str>, SyntaxError>, Rc<str>)>, Vec<Expr>)> {
         let mut quasis = Vec::new();
         let mut exprs = Vec::new();
         for part in parts {
             match part {
-                TemplatePart::Str(s) => quasis.push(s),
+                TemplatePart::Str(s, raw) => quasis.push((s, raw)),
                 TemplatePart::Expr(toks) => {
                     let mut sub = Parser {
                         toks,
@@ -1796,10 +1829,7 @@ impl Parser {
                 }
             }
         }
-        Ok(Expr {
-            kind: ExprKind::Template(quasis, exprs),
-            line,
-        })
+        Ok((quasis, exprs))
     }
 
     fn primary(&mut self) -> R<Expr> {

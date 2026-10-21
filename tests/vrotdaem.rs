@@ -111,3 +111,29 @@ fn missing_manifest_is_reported() {
     assert!(text(&out.stderr).contains("vrotdaem init"));
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn test_command_runs_package_tests() {
+    let base = temp_dir("test");
+    write(
+        base.join("squirt.json"),
+        r#"{"name":"t","version":"0.1.0","main":"lib.jsq","dependencies":{}}"#,
+    );
+    write(base.join("lib.jsq"), "export const double = (n) => n * 2\n");
+    write(
+        base.join("spec").join("lib.test.jsq"),
+        "import { test, expect } from \"squirt:test\"\nimport { double } from \"../lib.jsq\"\ntest(\"doubles\", () => expect(double(21)).toBe(42))\ntest(\"fails\", () => expect(double(1)).toBe(3))\n",
+    );
+    let nested = base.join("spec");
+    let out = vrotdaem(&nested, &["test", "--filter", "doubles"]);
+    let stdout = text(&out.stdout);
+    assert!(out.status.success(), "{stdout}{}", text(&out.stderr));
+    assert!(stdout.contains("spec/lib.test.jsq"), "{stdout}");
+    assert!(stdout.contains("tests: 1 passed (1 file"), "{stdout}");
+
+    let out = vrotdaem(&nested, &["test"]);
+    let stdout = text(&out.stdout);
+    assert!(!out.status.success(), "{stdout}");
+    assert!(stdout.contains("1 passed, 1 failed"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&base);
+}

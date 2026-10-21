@@ -113,6 +113,8 @@ jobs:
             echo "::endgroup::"
           done
           exit "$failed"
+      - name: Run example tests
+        run: ./target/release/jsq test examples
 
   ci-ok:
     name: ci-ok

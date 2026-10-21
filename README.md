@@ -94,6 +94,7 @@ Each archive has a matching `.sha256` checksum file. Unpack it and put `jsq` and
 | `jsq app.jsq arg1 arg2`         | Run a file; extra arguments land in `process.argv`    |
 | `jsq -e "console.log(2 ** 10)"` | Evaluate a snippet                                    |
 | `jsq --disasm app.jsq`          | Dump the compiled bytecode instead of running it      |
+| `jsq test`                      | Run every `*.test.jsq` file under the current directory |
 | `jsq --version`                 | Print the version                                     |
 
 ### `vrotdaem`: the package manager
@@ -154,10 +155,11 @@ JavaSquirt 0.4.0 implements a large, practical subset of modern JavaScript:
 - **Functions**: arrow functions, default parameters, rest parameters, closures
 - **Spread and destructuring**: spread in calls, arrays and objects; object and array destructuring with defaults and rest in `let`, `const` and parameters
 - **Control flow**: `if`/`else`, `while`, `do`/`while`, `for`, `for...of`, `for...in`, `switch`, `break`, `continue`
-- **Errors**: `try`/`catch`/`finally`, `throw`, `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, with stack traces
+- **Errors**: `try`/`catch`/`finally`, `throw`, `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, `URIError`, `EvalError`, with stack traces
 - **Classes**: constructors, methods, static methods, instance and static fields, `extends`, `super()`, `super.method()`, `new`, `instanceof`, private `#members`
 - **Operators**: arithmetic, `**`, bitwise and shifts including `>>>`, loose and strict equality, `&&`, `||`, `??`, optional chaining `?.`, ternary, `typeof`, `void`, `delete`, `in`, compound assignment including `&&=`, `||=`, `??=`, `++` and `--`
-- **Syntax**: template literals, optional semicolons with JS-style ASI, `//` and `/* */` comments
+- **Syntax**: template literals and tagged templates with `String.raw`, optional semicolons with JS-style ASI, `//` and `/* */` comments
+- **Properties**: enumerable and non-enumerable properties, `Object.defineProperty`, `Object.defineProperties`, `for...in` over inherited properties
 - **Async**: `async`/`await` (including top-level `await`), `Promise` with `all`, `allSettled`, `race`, `any`, an event loop with microtasks, `setTimeout`, `setInterval`, `queueMicrotask` and `sleep`
 - **Async iteration**: `for await...of`, async generators and `Symbol.asyncIterator`
 - **Dates**: `Date` with local time zones, parsing, formatting, getters and setters
@@ -166,8 +168,12 @@ JavaSquirt 0.4.0 implements a large, practical subset of modern JavaScript:
 - **Regular expressions**: `/pattern/flags` literals and `RegExp` with groups, named groups, backreferences and lookaround, plus `match`, `matchAll`, `replace`, `split` and `search`
 - **Private members**: `#fields`, `#methods`, static private members and `#field in obj`
 - **Memory**: reference counting plus a cycle collector, so cyclic garbage is reclaimed
-- **Modules**: ES module `import` and `export` (named, default, namespace, renamed), relative and bare-name resolution, builtin `squirt:fs`
-- **Builtins**: `console`, `Math`, `Number`, `String`, `Array`, `Object`, `JSON`, `Map`, `Set`, `WeakMap`, `WeakSet`, `WeakRef`, `Symbol`, `Promise`, `Date`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `process.argv`, `process.exit`, `process.env`
+- **Modules**: ES module `import` and `export` (named, default, namespace, renamed), relative and bare-name resolution
+- **Standard library**: `squirt:fs`, `squirt:path`, `squirt:os`, `squirt:child_process`, `squirt:util`
+- **Networking**: `fetch` over HTTP and HTTPS, `URL`, `URLSearchParams`, `Headers`, `Request`, `Response`, and HTTP servers with `squirt:http` (`serve` and Node-style `createServer`)
+- **Testing**: `jsq test` with `squirt:test` (`describe`, `test`, `expect`, `assert`, hooks, async tests)
+- **Console**: output formatted exactly like Node's `util.inspect`
+- **Builtins**: `console`, `Math`, `Number`, `String`, `Array`, `Object`, `JSON`, `Map`, `Set`, `WeakMap`, `WeakSet`, `WeakRef`, `Symbol`, `Promise`, `Date`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `encodeURIComponent`, `decodeURIComponent`, `process.argv`, `process.exit`, `process.env`
 
 The full reference with examples lives in [docs/LANGUAGE.md](docs/LANGUAGE.md).
 
@@ -213,12 +219,18 @@ javasquirt/
     compiler.rs, bytecode.rs  single-pass compiler and instruction set
     vm.rs, value.rs, object.rs  stack VM, values, objects and prototypes
     builtins/                 console, Math, JSON, Map, Set, Error and friends
+    builtins/web.rs           fetch, URL, Request, Response and squirt:http
+    builtins/testing.rs       squirt:test and squirt:util
+    io.rs                     HTTP client and server threads feeding the event loop
+    event_loop.rs             microtasks, timers, promises and I/O events
+    runner.rs                 jsq test
     module.rs                 module resolution and loading
     pm/                       vrotdaem internals
     bin/jsq.rs                runtime CLI and REPL
     bin/vrotdaem.rs           package manager CLI
   tests/
     scripts/                  <name>.jsq programs with <name>.out expected stdout
+    testing/                  fixtures for jsq test
   examples/                   runnable .jsq examples, executed in CI
   benches/                    .jsq benchmarks, timed with hyperfine in CI
   docs/LANGUAGE.md            language reference
@@ -255,6 +267,10 @@ typos
 - [x] Cycle collector
 - [x] Async generators and `for await`
 - [x] `Date`
+- [x] `fetch`, `URL` and HTTP servers
+- [x] Test runner
+- [ ] `ArrayBuffer`, typed arrays and binary bodies
+- [ ] WebSockets
 - [ ] Rope strings for fast `+=` in loops
 - [ ] Shapes and inline caches for property access
 - [ ] JIT compiler

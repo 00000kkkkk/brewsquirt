@@ -639,11 +639,44 @@ impl Vm {
         Ok(true)
     }
 
+    fn next_event(&mut self) -> Result<bool, Value> {
+        if let Ok(ev) = self.io.rx.try_recv() {
+            crate::builtins::web::handle_io(self, ev)?;
+            return Ok(true);
+        }
+        if self.io.pending == 0 {
+            return self.run_next_timer();
+        }
+        let wait = match self.timers.first_key_value() {
+            Some(((due, _), _)) => {
+                let now = self.start.elapsed().as_nanos();
+                if *due <= now {
+                    return self.run_next_timer();
+                }
+                Some(Duration::from_nanos((due - now) as u64))
+            }
+            None => None,
+        };
+        self.flush();
+        let ev = match wait {
+            Some(d) => match self.io.rx.recv_timeout(d) {
+                Ok(ev) => ev,
+                Err(_) => return self.run_next_timer(),
+            },
+            None => match self.io.rx.recv() {
+                Ok(ev) => ev,
+                Err(_) => return Ok(false),
+            },
+        };
+        crate::builtins::web::handle_io(self, ev)?;
+        Ok(true)
+    }
+
     pub fn run_event_loop(&mut self) -> Result<(), Value> {
         loop {
             self.run_microtasks()?;
             self.check_rejections()?;
-            if !self.run_next_timer()? {
+            if !self.next_event()? {
                 return Ok(());
             }
         }
@@ -668,7 +701,7 @@ impl Vm {
                 self.run_microtasks()?;
                 continue;
             }
-            if !self.run_next_timer()? {
+            if !self.next_event()? {
                 return Err(self.make_error(
                     ErrorKind::Error,
                     "Promise never settled: the event loop ran out of work",

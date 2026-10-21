@@ -1,0 +1,8 @@
+[ 'name' ] [] [ 'constructor', 'speak' ]
+Dog { name: 'rex' } Animal {} [class Animal] { kingdom: 'animalia' } {"name":"rex"} { name: 'rex' }
+[ 'own', 'extra', 'inherited' ] [ 'own', 'extra' ] 2 false
+{ shown: 's', a: 1 } [ [ 'shown', 's' ], [ 'a', 1 ] ] h 2 [ 'hidden', 'shown', 'a', 'b' ]
+false true
+[ 'a' ] s
+[ 'x', 'method' ] [] [ 'method' ]
+0 0 0 false

@@ -138,7 +138,7 @@ impl P {
 
 #[derive(Clone, Debug)]
 pub enum TemplatePart {
-    Str(Rc<str>),
+    Str(Result<Rc<str>, SyntaxError>, Rc<str>),
     Expr(Vec<Token>),
 }
 

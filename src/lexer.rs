@@ -484,14 +484,29 @@ impl Lexer {
         self.bump();
         let mut parts = Vec::new();
         let mut cur = String::new();
+        let mut raw = String::new();
+        let mut bad = None;
         loop {
+            let start = self.pos;
             match self.bump() {
                 None => return Err(SyntaxError::new("Unterminated template literal", line, col)),
                 Some('`') => break,
-                Some('\\') => self.escape(&mut cur)?,
+                Some('\\') => {
+                    let save = (self.pos, self.line, self.col);
+                    if let Err(e) = self.escape(&mut cur) {
+                        bad.get_or_insert(e);
+                        (self.pos, self.line, self.col) = save;
+                        self.bump();
+                    }
+                    raw.extend(&self.chars[start..self.pos]);
+                }
                 Some('$') if self.peek() == Some('{') => {
                     self.bump();
-                    parts.push(TemplatePart::Str(Rc::from(std::mem::take(&mut cur))));
+                    let cooked = Rc::from(std::mem::take(&mut cur));
+                    parts.push(TemplatePart::Str(
+                        bad.take().map_or(Ok(cooked), Err),
+                        Rc::from(std::mem::take(&mut raw)),
+                    ));
                     let mut toks = Vec::new();
                     self.lex_into(&mut toks, true)?;
                     parts.push(TemplatePart::Expr(toks));
@@ -501,11 +516,18 @@ impl Lexer {
                         self.bump();
                     }
                     cur.push('\n');
+                    raw.push('\n');
                 }
-                Some(c) => cur.push(c),
+                Some(c) => {
+                    cur.push(c);
+                    raw.push(c);
+                }
             }
         }
-        parts.push(TemplatePart::Str(cur.into()));
+        parts.push(TemplatePart::Str(
+            bad.map_or(Ok(cur.into()), Err),
+            raw.into(),
+        ));
         Ok(Tok::Template(parts))
     }
 }

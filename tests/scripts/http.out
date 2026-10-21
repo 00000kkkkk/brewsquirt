@@ -1,0 +1,12 @@
+listening true true
+200 true application/json { hi: 'squirt', method: 'GET' }
+201 Created yes payload ✓
+500 Internal Server Error
+{ plain: true }
+200 true true { hi: 'redir', method: 'GET' }
+302 true
+404 false not found
+0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19
+TypeError fetch failed string
+200 1 text/plain PUT /path?q=1 xyz
+closed

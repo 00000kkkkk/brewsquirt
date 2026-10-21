@@ -262,9 +262,7 @@ function explain(error) {
     if ("actual" in error && error.actual !== undefined) lines.push(`received: ${inspect(error.actual)}`)
     return lines
   }
-  if (error instanceof Error) {
-    return (error.stack ?? String(error)).split("\n").filter((l) => !l.includes("<squirt:test>"))
-  }
+  if (error instanceof Error) return (error.stack ?? String(error)).split("\n")
   return [`thrown: ${inspect(error)}`]
 }
 

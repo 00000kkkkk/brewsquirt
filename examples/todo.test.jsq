@@ -1,0 +1,19 @@
+import { describe, test, expect } from "squirt:test"
+
+function parse(line) {
+  const m = /^\[( |x)\] (.+)$/.exec(line)
+  if (!m) throw new SyntaxError(`bad todo line: ${line}`)
+  return { done: m[1] === "x", title: m[2] }
+}
+
+describe("parse", () => {
+  test("reads open items", () => {
+    expect(parse("[ ] write docs")).toEqual({ done: false, title: "write docs" })
+  })
+  test("reads finished items", () => {
+    expect(parse("[x] ship it")).toMatchObject({ done: true })
+  })
+  test("rejects garbage", () => {
+    expect(() => parse("nope")).toThrow(SyntaxError)
+  })
+})

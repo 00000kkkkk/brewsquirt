@@ -128,6 +128,7 @@ pub enum Op {
     GetLocalProp(u32, u32),
     StoreLocalProp(u32, u32),
     GetLocalMethod(u32, u32),
+    InitHidden(u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -257,6 +258,7 @@ impl FunctionProto {
                 | Op::DeleteProp(c)
                 | Op::GetMethod(c)
                 | Op::InitProp(c)
+                | Op::InitHidden(c)
                 | Op::StoreProp(c)
                 | Op::Import(c)
                 | Op::ThrowConstAssign(c)

@@ -12,6 +12,7 @@ pub enum ExprKind {
     Str(Rc<str>),
     Regex(Rc<str>, Rc<str>),
     Template(Vec<Rc<str>>, Vec<Expr>),
+    TemplateStrings(Vec<Option<Rc<str>>>, Vec<Rc<str>>),
     Bool(bool),
     Null,
     Ident(Rc<str>),

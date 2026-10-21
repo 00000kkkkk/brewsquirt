@@ -29,15 +29,19 @@ pub enum ErrorKind {
     RangeError,
     ReferenceError,
     SyntaxError,
+    URIError,
+    EvalError,
 }
 
 impl ErrorKind {
-    pub const ALL: [ErrorKind; 5] = [
+    pub const ALL: [ErrorKind; 7] = [
         ErrorKind::Error,
         ErrorKind::TypeError,
         ErrorKind::RangeError,
         ErrorKind::ReferenceError,
         ErrorKind::SyntaxError,
+        ErrorKind::URIError,
+        ErrorKind::EvalError,
     ];
 
     pub fn name(self) -> &'static str {
@@ -47,6 +51,8 @@ impl ErrorKind {
             ErrorKind::RangeError => "RangeError",
             ErrorKind::ReferenceError => "ReferenceError",
             ErrorKind::SyntaxError => "SyntaxError",
+            ErrorKind::URIError => "URIError",
+            ErrorKind::EvalError => "EvalError",
         }
     }
 }
@@ -197,6 +203,11 @@ pub struct Vm {
     pub promise_reject_fn: Value,
     pub async_from_sync_next: Value,
     pub iter_value_fn: Value,
+    pub(crate) io: crate::io::Io,
+    pub(crate) io_fetches: FxHashMap<u64, Rc<Obj>>,
+    pub(crate) io_servers: FxHashMap<u64, (Value, crate::io::ServerHandle)>,
+    pub(crate) io_replies: FxHashMap<u64, std::sync::mpsc::Sender<crate::io::HttpReply>>,
+    pub(crate) web: Option<Value>,
 }
 
 impl Vm {
@@ -248,10 +259,16 @@ impl Vm {
             promise_reject_fn: Value::Undefined,
             async_from_sync_next: Value::Undefined,
             iter_value_fn: Value::Undefined,
+            io: crate::io::Io::default(),
+            io_fetches: FxHashMap::default(),
+            io_servers: FxHashMap::default(),
+            io_replies: FxHashMap::default(),
+            web: None,
         };
         crate::gc::configure_from_env();
         builtins::install(&mut vm);
         builtins::run_prelude(&mut vm);
+        builtins::hide_builtin_members(&mut vm);
         vm
     }
 
@@ -435,7 +452,16 @@ impl Vm {
 
     pub fn stack_trace(&self) -> String {
         let mut s = String::new();
-        for f in self.frames.iter().rev().take(12) {
+        for f in self
+            .frames
+            .iter()
+            .rev()
+            .filter(|f| {
+                let m = &f.closure.proto.module.name;
+                !m.starts_with("<squirt:") && &**m != "<prelude>"
+            })
+            .take(12)
+        {
             let p = &f.closure.proto;
             let name = if p.name.is_empty() {
                 "<anonymous>"
@@ -845,8 +871,8 @@ impl Vm {
                     match key {
                         "prototype" if c.proto.is_constructor() => {
                             let p = self.new_object();
-                            p.set_own("constructor", Value::Object(o.clone()));
-                            o.set_own("prototype", Value::Object(p.clone()));
+                            p.set_hidden("constructor", Value::Object(o.clone()));
+                            o.set_hidden("prototype", Value::Object(p.clone()));
                             return Value::Object(p);
                         }
                         "name" => return Value::Str(c.proto.name.clone()),
@@ -1429,6 +1455,46 @@ impl Vm {
         Ok(out)
     }
 
+    pub fn for_in_keys(&self, v: &Value) -> Vec<Value> {
+        let mut keys = self.own_keys(v);
+        let Value::Object(o) = v else {
+            return keys;
+        };
+        let mut seen: rustc_hash::FxHashSet<Rc<str>> = o.props.borrow().keys().cloned().collect();
+        let mut cur = o.proto.borrow().clone();
+        while let Some(p) = cur {
+            for (k, _) in p.props.borrow().iter() {
+                if is_symbol_key(k) || !seen.insert(k.clone()) {
+                    continue;
+                }
+                if p.props.borrow().is_enumerable(k) {
+                    keys.push(Value::Str(k.clone()));
+                }
+            }
+            cur = p.proto.borrow().clone();
+        }
+        keys
+    }
+
+    pub fn own_property_names(&self, v: &Value) -> Vec<Value> {
+        let mut keys = Vec::new();
+        if let Value::Object(o) = v {
+            if let ObjKind::Array(a) = &o.kind {
+                for i in 0..a.borrow().len() {
+                    keys.push(Value::Str(i.to_string().into()));
+                }
+                keys.push(Value::Str("length".into()));
+            }
+            for k in o.props.borrow().keys() {
+                if !is_symbol_key(k) {
+                    keys.push(Value::Str(k.clone()));
+                }
+            }
+            return keys;
+        }
+        self.own_keys(v)
+    }
+
     pub fn own_keys(&self, v: &Value) -> Vec<Value> {
         let mut keys = Vec::new();
         match v {
@@ -1438,7 +1504,7 @@ impl Vm {
                         keys.push(Value::Str(i.to_string().into()));
                     }
                 }
-                for k in o.props.borrow().keys() {
+                for (k, _) in o.props.borrow().enumerable() {
                     if !is_symbol_key(k) {
                         keys.push(Value::Str(k.clone()));
                     }
@@ -1739,7 +1805,15 @@ impl Vm {
                         continue;
                     }
                     let n = name!(k);
-                    match self.globals.slot(&n) {
+                    let mut slot = self.globals.slot(&n);
+                    if slot.is_none()
+                        && self.web.is_none()
+                        && builtins::web::LAZY_GLOBALS.contains(&&*n)
+                    {
+                        tri!(builtins::web::load(self));
+                        slot = self.globals.slot(&n);
+                    }
+                    match slot {
                         Some(slot) => {
                             proto.global_cache[k as usize].set(slot);
                             let v = self.globals.at(slot).clone();
@@ -1791,6 +1865,9 @@ impl Vm {
                 }
                 Op::TypeofGlobal(k) => {
                     let n = name!(k);
+                    if self.web.is_none() && builtins::web::LAZY_GLOBALS.contains(&&*n) {
+                        tri!(builtins::web::load(self));
+                    }
                     let t = self
                         .globals
                         .get(&n)
@@ -2308,6 +2385,12 @@ impl Vm {
                         o.props.borrow_mut().insert(name!(k), v);
                     }
                 }
+                Op::InitHidden(k) => {
+                    let v = pop!();
+                    if let Some(Value::Object(o)) = self.stack.last() {
+                        o.set_hidden(name!(k), v);
+                    }
+                }
                 Op::InitIndex => {
                     let v = pop!();
                     let key = pop!();
@@ -2371,7 +2454,7 @@ impl Vm {
                 }
                 Op::ForInIter => {
                     let v = pop!();
-                    let keys = self.own_keys(&v);
+                    let keys = self.for_in_keys(&v);
                     let it = self.new_iter(IterState::List(keys, 0));
                     self.stack.push(it);
                 }
@@ -2616,7 +2699,7 @@ impl Vm {
                         out.push((Rc::from(i.to_string()), x.clone()));
                     }
                 }
-                for (k, x) in o.props.borrow().iter() {
+                for (k, x) in o.props.borrow().enumerable() {
                     if (include_symbols && !crate::object::is_private_key(k)) || !is_symbol_key(k) {
                         out.push((k.clone(), x.clone()));
                     }
@@ -2689,10 +2772,10 @@ impl Vm {
             }
         };
         let prototype = Obj::new(ObjKind::Ordinary, proto_parent);
-        prototype.set_own("constructor", ctor.clone());
-        ctor_obj.set_own("prototype", Value::Object(prototype));
+        prototype.set_hidden("constructor", ctor.clone());
+        ctor_obj.set_hidden("prototype", Value::Object(prototype));
         if !name.is_empty() {
-            ctor_obj.set_own("name", Value::Str(name));
+            ctor_obj.set_hidden("name", Value::Str(name));
         }
         *ctor_obj.proto.borrow_mut() = Some(ctor_parent);
         if let ObjKind::Function(c) = &ctor_obj.kind {
@@ -2724,7 +2807,7 @@ impl Vm {
                 *mc.home.borrow_mut() = Some(target.clone());
             }
         }
-        target.set_own(key, method);
+        target.set_hidden(key, method);
         Ok(())
     }
 
@@ -2752,7 +2835,8 @@ impl Vm {
                 *mc.home.borrow_mut() = Some(target.clone());
             }
         }
-        self.define_accessor(&target, key, f, setter);
+        self.define_accessor(&target, key.clone(), f, setter);
+        target.props.borrow_mut().set_enumerable(&key, false);
         Ok(())
     }
 

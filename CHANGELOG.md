@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-21
+
+### Added
+
+- `fetch` over HTTP and HTTPS with redirects, timeouts and `TypeError: fetch failed` errors that
+  carry a `cause`, running on background threads that feed the event loop.
+- `URL`, `URLSearchParams`, `Headers`, `Request` and `Response`, loaded the first time a program
+  uses them.
+- `squirt:http` with `serve(options, handler)` for `Request` to `Response` handlers and a
+  Node-style `createServer` with `req`/`res` objects. HTTP/1.1 keep-alive and chunked request
+  bodies are supported.
+- `jsq test` and `vrotdaem test`: discover `*.test.jsq` files, run each in a fresh interpreter,
+  filter with `--filter`, and exit non-zero on failure.
+- `squirt:test` with `describe`, `test`, `it`, `skip`, `only`, `todo`, `beforeEach`,
+  `afterEach`, `expect` with 22 matchers plus `.not`, `.resolves` and `.rejects`, and `assert`.
+- `squirt:path` (`posix` and `win32`), `squirt:os`, `squirt:child_process` (`execSync`,
+  `spawnSync`) and `squirt:util` (`inspect`, `format`, `isDeepStrictEqual`).
+- Tagged templates and `String.raw`.
+- Non-enumerable properties: class members, builtin methods and properties defined with
+  `Object.defineProperty` without `enumerable: true` are skipped by `Object.keys`, `for...in`,
+  spread, `JSON.stringify` and `console.log`. `Object.defineProperties`,
+  `propertyIsEnumerable` and descriptors that report `enumerable`.
+- `for...in` visits enumerable inherited properties.
+- `encodeURIComponent`, `encodeURI`, `decodeURIComponent`, `decodeURI`, `URIError` and
+  `EvalError`.
+
+### Changed
+
+- `console.log` formats values exactly like Node's `util.inspect`: line breaking at 80 columns,
+  grouped numeric arrays, split long strings and `<ref *1>` markers for cycles.
+- Stack traces no longer show frames from builtin modules.
+
 ## [0.4.0] - 2026-10-21
 
 ### Added
@@ -118,7 +150,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Continuous integration on Linux, macOS and Windows, MSRV check, cargo-deny, CodeQL, coverage,
   benchmarks, and release archives for five targets.
 
-[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.1.0...v0.2.0

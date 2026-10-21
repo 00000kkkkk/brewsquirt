@@ -1,0 +1,36 @@
+const u = new URL("https://User:pa ss@Example.COM:443/a/./b/../c d?x=1&y=two words#frag mint")
+console.log(u.href, u.origin, u.host, u.pathname, u.search, u.hash, u.username, u.password)
+console.log(u.searchParams.get("y"), [...u.searchParams.keys()], u.searchParams.size)
+u.searchParams.append("z", "a&b=c")
+u.searchParams.set("x", "42")
+console.log(u.href, u.search)
+u.pathname = "/new path/"
+u.port = "8443"
+u.hash = ""
+console.log(u.href, String(u), JSON.stringify({ u }))
+console.log(new URL("../x/y?q#h", "http://a.com/b/c/d").href, new URL("/root", "http://a.com:8080/b").href, new URL("?z=1", "http://a.com/p").href, new URL("//cdn.net/x", "https://a.com").href)
+console.log(URL.canParse("nope"), URL.canParse("http://ok"), URL.parse("bad"), new URL("file:///C:/x/y.txt").pathname, new URL("mailto:me@x.com").pathname)
+try { new URL("not a url") } catch (e) { console.log(e instanceof TypeError, e.name) }
+const p = new URLSearchParams({ a: "1", b: "x y", c: "é!'()~*" })
+p.append("a", "2")
+console.log(p.toString(), p.getAll("a"), p.has("b"), p.has("a", "3"))
+p.delete("a", "1")
+p.sort()
+console.log(p.toString(), [...p])
+console.log(new URLSearchParams("?q=%E2%9C%93+ok&e=&f").toString(), new URLSearchParams([["k", "v"]]).get("k"))
+console.log(encodeURIComponent("a b&c/é✓"), encodeURI("http://x.com/a b?q=é&r=1#h"), decodeURIComponent("%E2%9C%93%20ok"), decodeURI("%2Fa%20b"))
+try { decodeURIComponent("%E2%9C") } catch (e) { console.log(e.name, e.message) }
+const h = new Headers({ "Content-Type": "text/html", "X-A": "1" })
+h.append("x-a", "2")
+h.append("Set-Cookie", "a=1")
+h.append("Set-Cookie", "b=2")
+console.log(h.get("content-type"), h.get("X-A"), h.has("x-b"), [...h], h.getSetCookie(), h.get("set-cookie"))
+const r = new Response("hello", { status: 201, headers: { "x-q": "1" } })
+console.log(r.status, r.ok, r.headers.get("content-type"), r.bodyUsed, await r.text(), r.bodyUsed)
+try { await r.text() } catch (e) { console.log(e.name) }
+const j = Response.json({ a: 1 }, { status: 400 })
+console.log(j.status, j.ok, j.headers.get("content-type"), await j.json())
+const req = new Request("http://x.com/a?b=1", { method: "post", body: "data", headers: [["X-Y", "z"]] })
+console.log(req.method, req.url, req.headers.get("x-y"), req.headers.get("content-type"), await req.text())
+try { new Request("http://x.com", { body: "x" }) } catch (e) { console.log(e.name, e.message) }
+console.log(typeof fetch, typeof Response)

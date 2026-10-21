@@ -1,0 +1,52 @@
+import { serve, createServer } from "squirt:http"
+
+const server = serve({ port: 0 }, async (req) => {
+  const url = new URL(req.url)
+  if (url.pathname === "/json") return Response.json({ hi: url.searchParams.get("name"), method: req.method })
+  if (url.pathname === "/echo") return new Response(await req.text(), { status: 201, headers: { "x-echo": "yes" } })
+  if (url.pathname === "/boom") throw new Error("kaboom")
+  if (url.pathname === "/obj") return { plain: true }
+  if (url.pathname === "/redirect") return Response.redirect(new URL("/json?name=redir", req.url), 302)
+  return new Response("not found", { status: 404 })
+})
+console.log("listening", server.port > 0, server.url.href.startsWith("http://127.0.0.1:"))
+const base = server.url.href
+const a = await fetch(base + "json?name=squirt")
+console.log(a.status, a.ok, a.headers.get("content-type"), await a.json())
+const b = await fetch(base + "echo", { method: "POST", body: "payload ✓", headers: { "content-type": "text/plain" } })
+console.log(b.status, b.statusText, b.headers.get("x-echo"), await b.text())
+const c = await fetch(base + "boom")
+console.log(c.status, await c.text())
+const d = await fetch(base + "obj")
+console.log(await d.json())
+const e = await fetch(base + "redirect")
+console.log(e.status, e.redirected, e.url.endsWith("/json?name=redir"), await e.json())
+const f = await fetch(base + "redirect", { redirect: "manual" })
+console.log(f.status, f.headers.get("location").endsWith("/json?name=redir"))
+const g = await fetch(base + "nope")
+console.log(g.status, g.ok, await g.text())
+const many = await Promise.all(Array.from({ length: 20 }, (_, i) => fetch(base + "json?name=" + i).then((r) => r.json())))
+console.log(many.map((m) => m.hi).join(","))
+server.stop()
+
+try {
+  await fetch("http://127.0.0.1:1/")
+} catch (err) {
+  console.log(err.name, err.message, typeof err.cause.message)
+}
+
+const node = createServer((req, res) => {
+  let body = ""
+  req.on("data", (c) => (body += c))
+  req.on("end", () => {
+    res.setHeader("content-type", "text/plain")
+    res.writeHead(200, { "x-node": "1" })
+    res.end(`${req.method} ${req.url} ${body}`)
+  })
+})
+node.listen(0, async () => {
+  const { port } = node.address()
+  const r = await fetch(`http://127.0.0.1:${port}/path?q=1`, { method: "PUT", body: "xyz" })
+  console.log(r.status, r.headers.get("x-node"), r.headers.get("content-type"), await r.text())
+  node.close(() => console.log("closed"))
+})

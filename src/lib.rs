@@ -5,6 +5,7 @@ pub mod compiler;
 pub mod event_loop;
 pub mod gc;
 pub mod inspect;
+pub mod io;
 pub mod lexer;
 pub mod module;
 pub mod number;

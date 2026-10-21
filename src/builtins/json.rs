@@ -132,7 +132,7 @@ impl Ser<'_> {
             _ => o
                 .props
                 .borrow()
-                .iter()
+                .enumerable()
                 .filter(|(k, _)| !crate::object::is_symbol_key(k))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),

@@ -2052,6 +2052,27 @@ impl Compiler {
                     self.emit(Op::Template(n));
                 }
             }
+            ExprKind::TemplateStrings(cooked, raw) => {
+                for q in cooked {
+                    match q {
+                        Some(q) => {
+                            let k = self.str_const(q);
+                            self.emit(Op::Const(k));
+                        }
+                        None => {
+                            self.emit(Op::Undefined);
+                        }
+                    }
+                }
+                self.emit(Op::NewArray(cooked.len() as u32));
+                for q in raw {
+                    let k = self.str_const(q);
+                    self.emit(Op::Const(k));
+                }
+                self.emit(Op::NewArray(raw.len() as u32));
+                let k = self.str_const(&"raw".into());
+                self.emit(Op::InitHidden(k));
+            }
             ExprKind::Bool(true) => {
                 self.emit(Op::True);
             }

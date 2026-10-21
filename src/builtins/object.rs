@@ -14,6 +14,7 @@ pub fn install(vm: &mut Vm) {
     method(vm, &op, "toLocaleString", 0, object_to_string);
     method(vm, &op, "valueOf", 0, value_of);
     method(vm, &op, "isPrototypeOf", 1, is_prototype_of);
+    method(vm, &op, "propertyIsEnumerable", 1, property_is_enumerable);
     let object = make_ctor(vm, "Object", 1, object_ctor, None, &op);
     method(vm, &object, "keys", 1, keys);
     method(vm, &object, "values", 1, values);
@@ -26,8 +27,9 @@ pub fn install(vm: &mut Vm) {
     method(vm, &object, "getPrototypeOf", 1, get_prototype_of);
     method(vm, &object, "setPrototypeOf", 2, set_prototype_of);
     method(vm, &object, "hasOwn", 2, has_own);
-    method(vm, &object, "getOwnPropertyNames", 1, keys);
+    method(vm, &object, "getOwnPropertyNames", 1, own_property_names);
     method(vm, &object, "defineProperty", 3, define_property);
+    method(vm, &object, "defineProperties", 2, define_properties);
     method(
         vm,
         &object,
@@ -46,12 +48,14 @@ pub fn install(vm: &mut Vm) {
     let function = make_ctor(vm, "Function", 1, function_ctor, None, &fp);
     vm.define_global("Function", Value::Object(function));
 
-    let ctors: [crate::object::NativeFn; 5] = [
+    let ctors: [crate::object::NativeFn; 7] = [
         error_ctor::<0>,
         error_ctor::<1>,
         error_ctor::<2>,
         error_ctor::<3>,
         error_ctor::<4>,
+        error_ctor::<5>,
+        error_ctor::<6>,
     ];
     let mut base_ctor = None;
     for (i, kind) in ErrorKind::ALL.iter().enumerate() {
@@ -92,6 +96,29 @@ fn to_object(vm: &mut Vm, v: &Value) -> Result<Rc<Obj>, Value> {
         }
         _ => Ok(vm.new_object()),
     }
+}
+
+fn property_is_enumerable(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let k = vm.to_property_key(&arg(args, 0))?;
+    let own = has_own_key(vm, &this, &k)?.truthy();
+    Ok(Value::Bool(
+        own && match &this {
+            Value::Object(o) => match &o.kind {
+                ObjKind::Array(_) if &*k == "length" => false,
+                _ => o.props.borrow().is_enumerable(&k),
+            },
+            _ => true,
+        },
+    ))
+}
+
+fn own_property_names(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let v = arg(args, 0);
+    if v.is_nullish() {
+        return Err(vm.type_error("Cannot convert undefined or null to object"));
+    }
+    let k = vm.own_property_names(&v);
+    Ok(vm.new_array(k))
 }
 
 fn has_own_property(vm: &mut Vm, this: Value, args: &[Value]) -> R {
@@ -261,14 +288,13 @@ fn create(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             )));
         }
     };
-    let o = Obj::new(ObjKind::Ordinary, proto);
+    let o = Value::Object(Obj::new(ObjKind::Ordinary, proto));
     if let Value::Object(_) = arg(args, 1) {
         for (k, d) in vm.own_entries(&arg(args, 1)) {
-            let v = vm.get_prop(&d, "value")?;
-            o.set_own(k, v);
+            define_one(vm, &o, k, &d)?;
         }
     }
-    Ok(Value::Object(o))
+    Ok(o)
 }
 
 fn get_prototype_of(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
@@ -299,31 +325,70 @@ fn set_prototype_of(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(target)
 }
 
+fn define_one(vm: &mut Vm, target: &Value, k: Rc<str>, desc: &Value) -> Result<(), Value> {
+    let Value::Object(o) = target else {
+        return Ok(());
+    };
+    if !desc.is_object() {
+        return Err(vm.type_error(format!(
+            "Property description must be an object: {}",
+            crate::inspect::inspect_plain(desc)
+        )));
+    }
+    let existed = o.has_own(&k);
+    let enumerable = vm.get_prop(desc, "enumerable")?;
+    let getter = vm.get_prop(desc, "get")?;
+    let setter = vm.get_prop(desc, "set")?;
+    if getter.is_callable() || setter.is_callable() {
+        if getter.is_callable() {
+            vm.define_accessor(o, k.clone(), getter, false);
+        }
+        if setter.is_callable() {
+            vm.define_accessor(o, k.clone(), setter, true);
+        }
+    } else if has_key(vm, desc, "value")? || !existed {
+        let v = vm.get_prop(desc, "value")?;
+        if let ObjKind::Array(a) = &o.kind {
+            if let Some(i) = crate::object::array_index(&k) {
+                let mut items = a.borrow_mut();
+                if i >= items.len() {
+                    items.resize(i + 1, Value::Undefined);
+                }
+                items[i] = v;
+                return Ok(());
+            }
+        }
+        o.props.borrow_mut().insert(k.clone(), v);
+    }
+    if !enumerable.is_undefined() {
+        o.props.borrow_mut().set_enumerable(&k, enumerable.truthy());
+    } else if !existed {
+        o.props.borrow_mut().set_enumerable(&k, false);
+    }
+    Ok(())
+}
+
+fn has_key(vm: &mut Vm, obj: &Value, key: &str) -> Result<bool, Value> {
+    vm.has_property(obj, &Value::Str(key.into()))
+}
+
 fn define_property(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let target = arg(args, 0);
     if !target.is_object() {
         return Err(vm.type_error("Object.defineProperty called on non-object"));
     }
     let k = vm.to_property_key(&arg(args, 1))?;
-    let desc = arg(args, 2);
-    if desc.is_object() {
-        let getter = vm.get_prop(&desc, "get")?;
-        let setter = vm.get_prop(&desc, "set")?;
-        if getter.is_callable() || setter.is_callable() {
-            if let Value::Object(o) = &target {
-                if getter.is_callable() {
-                    vm.define_accessor(o, k.clone(), getter, false);
-                }
-                if setter.is_callable() {
-                    vm.define_accessor(o, k, setter, true);
-                }
-            }
-            return Ok(target);
-        }
-        let v = vm.get_prop(&desc, "value")?;
-        if let Value::Object(o) = &target {
-            o.props.borrow_mut().insert(k, v);
-        }
+    define_one(vm, &target, k, &arg(args, 2))?;
+    Ok(target)
+}
+
+fn define_properties(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let target = arg(args, 0);
+    if !target.is_object() {
+        return Err(vm.type_error("Object.defineProperties called on non-object"));
+    }
+    for (k, d) in vm.own_entries(&arg(args, 1)) {
+        define_one(vm, &target, k, &d)?;
     }
     Ok(target)
 }
@@ -358,7 +423,10 @@ fn get_own_property_descriptor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             d.set_own("writable", Value::Bool(!o.frozen.get()));
         }
     }
-    d.set_own("enumerable", Value::Bool(true));
+    d.set_own(
+        "enumerable",
+        Value::Bool(o.props.borrow().is_enumerable(&k)),
+    );
     d.set_own("configurable", Value::Bool(!o.frozen.get()));
     Ok(Value::Object(d))
 }

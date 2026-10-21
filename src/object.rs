@@ -12,14 +12,27 @@ pub type NativeFn = fn(&mut Vm, Value, &[Value]) -> Result<Value, Value>;
 const INDEX_AT: usize = 12;
 
 #[derive(Default)]
+struct PropExtra {
+    index: rustc_hash::FxHashMap<Rc<str>, u32>,
+    hidden: rustc_hash::FxHashSet<Rc<str>>,
+}
+
+#[derive(Default)]
 pub struct PropMap {
     entries: Vec<(Rc<str>, Value)>,
-    index: Option<Box<rustc_hash::FxHashMap<Rc<str>, u32>>>,
+    extra: Option<Box<PropExtra>>,
 }
 
 impl PropMap {
+    fn index(&self) -> Option<&rustc_hash::FxHashMap<Rc<str>, u32>> {
+        self.extra
+            .as_ref()
+            .map(|x| &x.index)
+            .filter(|ix| !ix.is_empty())
+    }
+
     fn find(&self, key: &str) -> Option<usize> {
-        if let Some(ix) = &self.index {
+        if let Some(ix) = self.index() {
             return ix.get(key).map(|&i| i as usize);
         }
         self.entries.iter().position(|(k, _)| **k == *key)
@@ -27,15 +40,47 @@ impl PropMap {
 
     fn reindex(&mut self) {
         if self.entries.len() > INDEX_AT {
-            let mut ix = rustc_hash::FxHashMap::default();
-            ix.reserve(self.entries.len());
+            let x = self.extra.get_or_insert_with(Box::default);
+            x.index.clear();
+            x.index.reserve(self.entries.len());
             for (i, (k, _)) in self.entries.iter().enumerate() {
-                ix.insert(k.clone(), i as u32);
+                x.index.insert(k.clone(), i as u32);
             }
-            self.index = Some(Box::new(ix));
-        } else {
-            self.index = None;
+        } else if let Some(x) = &mut self.extra {
+            x.index.clear();
+            if x.hidden.is_empty() {
+                self.extra = None;
+            }
         }
+    }
+
+    pub fn is_enumerable(&self, key: &str) -> bool {
+        self.extra.as_ref().is_none_or(|x| !x.hidden.contains(key))
+    }
+
+    pub fn set_enumerable(&mut self, key: &str, enumerable: bool) {
+        if enumerable {
+            if let Some(x) = &mut self.extra {
+                x.hidden.remove(key);
+                if x.hidden.is_empty() && x.index.is_empty() {
+                    self.extra = None;
+                }
+            }
+        } else if let Some(i) = self.find(key) {
+            let k = self.entries[i].0.clone();
+            self.extra.get_or_insert_with(Box::default).hidden.insert(k);
+        }
+    }
+
+    pub fn hide_all(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let keys: Vec<Rc<str>> = self.entries.iter().map(|(k, _)| k.clone()).collect();
+        self.extra
+            .get_or_insert_with(Box::default)
+            .hidden
+            .extend(keys);
     }
 
     pub fn get(&self, key: &str) -> Option<&Value> {
@@ -55,9 +100,9 @@ impl PropMap {
             return Some(std::mem::replace(&mut self.entries[i].1, v));
         }
         let i = self.entries.len() as u32;
-        match &mut self.index {
-            Some(ix) => {
-                ix.insert(key.clone(), i);
+        match self.extra.as_mut().filter(|x| !x.index.is_empty()) {
+            Some(x) => {
+                x.index.insert(key.clone(), i);
                 self.entries.push((key, v));
             }
             None => {
@@ -73,10 +118,20 @@ impl PropMap {
     pub fn shift_remove(&mut self, key: &str) -> Option<Value> {
         let i = self.find(key)?;
         let (_, v) = self.entries.remove(i);
-        if self.index.is_some() {
-            self.reindex();
+        if let Some(x) = &mut self.extra {
+            x.hidden.remove(key);
+            if !x.index.is_empty() || x.hidden.is_empty() {
+                self.reindex();
+            }
         }
         Some(v)
+    }
+
+    pub fn enumerable(&self) -> impl Iterator<Item = (&Rc<str>, &Value)> {
+        self.entries
+            .iter()
+            .filter(|(k, _)| self.is_enumerable(k))
+            .map(|(k, v)| (k, v))
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (&Rc<str>, &Value)> {
@@ -105,7 +160,7 @@ impl PropMap {
 
     pub fn clear(&mut self) {
         self.entries.clear();
-        self.index = None;
+        self.extra = None;
     }
 }
 
@@ -411,6 +466,13 @@ impl Obj {
 
     pub fn set_own(&self, key: impl Into<Rc<str>>, v: Value) {
         self.props.borrow_mut().insert(key.into(), v);
+    }
+
+    pub fn set_hidden(&self, key: impl Into<Rc<str>>, v: Value) {
+        let key = key.into();
+        let mut props = self.props.borrow_mut();
+        props.insert(key.clone(), v);
+        props.set_enumerable(&key, false);
     }
 
     pub fn has_own(&self, key: &str) -> bool {

@@ -1,6 +1,6 @@
 # JavaSquirt Language Reference
 
-This document describes JavaSquirt 0.4.0. JavaSquirt follows JavaScript semantics: for every
+This document describes JavaSquirt 0.5.0. JavaSquirt follows JavaScript semantics: for every
 supported feature, a program should print the same output under `jsq` as under Node.js. Features
 that are not implemented yet are listed in [Not yet supported](#not-yet-supported).
 
@@ -24,6 +24,9 @@ that are not implemented yet are listed in [Not yet supported](#not-yet-supporte
 - [Dates](#dates)
 - [Regular expressions](#regular-expressions)
 - [Modules](#modules)
+- [Web APIs](#web-apis)
+- [HTTP servers](#http-servers)
+- [Testing](#testing)
 - [Builtins](#builtins)
 - [Memory management](#memory-management)
 - [CLI reference](#cli-reference)
@@ -1166,6 +1169,292 @@ console.log(exists("notes.txt"))
 false
 ```
 
+### `squirt:path`
+
+Path manipulation with the same rules as Node's `path` module. The default export follows the
+host platform; `posix` and `win32` are always available.
+
+| Member                          | Description                                                  |
+| ------------------------------- | ------------------------------------------------------------ |
+| `join(...parts)`                | Joins and normalizes path segments                           |
+| `resolve(...parts)`             | Resolves to an absolute path, starting from the working directory |
+| `normalize(path)`               | Collapses `.`, `..` and repeated separators                  |
+| `dirname(path)`, `basename(path, ext?)`, `extname(path)` | Path components                 |
+| `isAbsolute(path)`              | `true` for absolute paths                                    |
+| `relative(from, to)`            | The path from `from` to `to`                                 |
+| `parse(path)`, `format(parts)`  | Split into and build from `{ root, dir, base, name, ext }`   |
+| `sep`, `delimiter`              | The platform separator and `PATH` delimiter                  |
+| `posix`, `win32`                | The same API with fixed platform rules                       |
+
+```js
+import path from "squirt:path"
+
+const p = path.posix
+console.log(p.join("/srv/app", "../logs", "today.txt"))
+console.log(p.basename("/a/b/report.pdf", ".pdf"), p.extname("archive.tar.gz"))
+console.log(p.relative("/a/b/c", "/a/d"), p.parse("/home/me/notes.md").name)
+console.log(path.win32.join("C:\\data", "x", "..", "y.txt"))
+```
+
+```text
+/srv/logs/today.txt
+report .gz
+../../d notes
+C:\data\y.txt
+```
+
+### `squirt:os`
+
+| Member                   | Description                                         |
+| ------------------------ | --------------------------------------------------- |
+| `platform()`             | `"win32"`, `"linux"`, `"darwin"` and so on          |
+| `arch()`                 | `"x64"`, `"arm64"` and so on                        |
+| `type()`                 | `"Windows_NT"`, `"Linux"` or `"Darwin"`             |
+| `homedir()`, `tmpdir()`  | Home and temporary directories                      |
+| `hostname()`             | The machine's host name                             |
+| `availableParallelism()` | The number of CPUs the process can use              |
+| `cpus()`                 | One entry per CPU                                   |
+| `EOL`                    | `"\r\n"` on Windows, `"\n"` elsewhere              |
+
+### `squirt:child_process`
+
+| Function                         | Description                                                          |
+| -------------------------------- | -------------------------------------------------------------------- |
+| `execSync(command, options?)`    | Runs `command` in the system shell and returns its stdout as a string. Throws an `Error` with `status`, `stdout` and `stderr` when the command fails |
+| `spawnSync(file, args?, options?)` | Runs a program without a shell and returns `{ status, stdout, stderr }` |
+
+Options: `cwd`, `env` (an object of variables added to the environment), `input` (text written
+to stdin) and, for `spawnSync`, `shell: true` to go through the shell.
+
+```js
+import { execSync, spawnSync } from "squirt:child_process"
+
+console.log(execSync("echo squirt").trim())
+const r = spawnSync("git", ["--version"])
+console.log(r.status, r.stdout.startsWith("git version"))
+try {
+  execSync("exit 3")
+} catch (e) {
+  console.log("failed with", e.status)
+}
+```
+
+```text
+squirt
+0 true
+failed with 3
+```
+
+### `squirt:util`
+
+| Function                       | Description                                                     |
+| ------------------------------ | --------------------------------------------------------------- |
+| `inspect(value)`               | The string `console.log` prints for a value, strings quoted     |
+| `format(fmt, ...args)`         | `printf`-style formatting, as used by `console.log`             |
+| `isDeepStrictEqual(a, b)`      | Structural equality of arrays, plain objects, `Map`, `Set`, `Date` and `RegExp` |
+
+```js
+import { inspect, format, isDeepStrictEqual } from "squirt:util"
+
+console.log(inspect("it's"), inspect({ list: [1, { deep: true }] }))
+console.log(format("%s has %d items", "cart", 3))
+console.log(isDeepStrictEqual({ a: [1, 2] }, { a: [1, 2] }))
+```
+
+```text
+"it's" { list: [ 1, { deep: true } ] }
+cart has 3 items
+true
+```
+
+## Web APIs
+
+The web platform classes are globals, loaded the first time a program mentions one of them.
+
+### `fetch`
+
+`fetch(url, init?)` performs an HTTP or HTTPS request on a background thread and returns a promise
+for a `Response`. Redirects are followed unless `redirect` is `"manual"` or `"error"`. Network
+failures reject with `TypeError: fetch failed`, with the reason in `cause`.
+
+| `init` field | Description                                                        |
+| ------------ | ------------------------------------------------------------------ |
+| `method`     | Request method, `"GET"` by default                                 |
+| `headers`    | An object, an array of pairs or a `Headers`                        |
+| `body`       | A string or `URLSearchParams`                                      |
+| `redirect`   | `"follow"`, `"manual"` or `"error"`                                |
+| `timeout`    | Milliseconds before the request fails; no limit by default         |
+
+```js
+const res = await fetch("https://api.github.com/repos/00000kkkkk/javasquirt", {
+  headers: { accept: "application/vnd.github+json" },
+})
+if (!res.ok) throw new Error(`HTTP ${res.status}`)
+const repo = await res.json()
+console.log(repo.full_name, repo.stargazers_count)
+```
+
+Bodies are text: `text()` and `json()` read them, and each body can be read once.
+
+### `Request`, `Response` and `Headers`
+
+```js
+const res = Response.json({ ok: true }, { status: 201, headers: { "X-Squirt": "1" } })
+console.log(res.status, res.ok, res.headers.get("x-squirt"), res.headers.get("content-type"))
+console.log(await res.json())
+
+const headers = new Headers([["Accept", "text/html"]])
+headers.append("accept", "application/json")
+console.log(headers.get("ACCEPT"), [...headers.keys()])
+
+const req = new Request("https://example.com/api", { method: "post", body: "hi" })
+console.log(req.method, req.url, await req.text())
+```
+
+```text
+201 true 1 application/json
+{ ok: true }
+text/html, application/json [ 'accept' ]
+POST https://example.com/api hi
+```
+
+### `URL` and `URLSearchParams`
+
+```js
+const url = new URL("../docs/intro?lang=en#top", "https://squirt.dev/v1/api/")
+console.log(url.href)
+console.log(url.host, url.pathname, url.searchParams.get("lang"), url.hash)
+url.searchParams.set("q", "nude modules")
+console.log(url.search)
+
+const form = new URLSearchParams({ name: "jsq", tags: "fast&wet" })
+console.log(form.toString(), URL.canParse("not a url"))
+```
+
+```text
+https://squirt.dev/v1/docs/intro?lang=en#top
+squirt.dev /v1/docs/intro en #top
+?lang=en&q=nude+modules
+name=jsq&tags=fast%26wet false
+```
+
+`encodeURIComponent`, `encodeURI`, `decodeURIComponent` and `decodeURI` are globals as well.
+
+## HTTP servers
+
+`squirt:http` serves HTTP/1.1 with keep-alive. Every connection is read on its own thread and
+every request is handled on the program's thread, so handlers never run in parallel.
+
+`serve(options, handler)` starts listening right away and returns a server object. The handler
+receives a `Request` and returns a `Response`, a string, a JSON-serializable value, or a promise
+of one of those. A handler that throws produces a `500` response and prints the error, unless
+`options.error` handles it. The program keeps running while a server is open.
+
+| Option     | Default       | Description                                    |
+| ---------- | ------------- | ---------------------------------------------- |
+| `port`     | `3000`        | `0` picks a free port                          |
+| `hostname` | `"127.0.0.1"` | `"0.0.0.0"` listens on every interface         |
+| `fetch`    |               | The handler, when it is not passed separately  |
+| `error`    |               | Turns an error thrown by the handler into a response |
+
+The server object has `port`, `hostname`, `url`, `pendingRequests` and `stop()`.
+
+```js
+import { serve } from "squirt:http"
+
+const server = serve({ port: 0 }, async (req) => {
+  const url = new URL(req.url)
+  if (url.pathname === "/hello") return Response.json({ hello: url.searchParams.get("name") })
+  if (req.method === "POST") return new Response(await req.text(), { status: 201 })
+  return new Response("not found", { status: 404 })
+})
+
+const a = await fetch(new URL("/hello?name=squirt", server.url))
+console.log(a.status, await a.json())
+const b = await fetch(server.url, { method: "POST", body: "echo" })
+console.log(b.status, await b.text())
+server.stop()
+```
+
+```text
+200 { hello: 'squirt' }
+201 echo
+```
+
+`createServer` mirrors Node's `http.createServer` for code that uses `req`/`res` objects:
+`listen(port, host?, callback?)`, `close(callback?)`, `address()` and `on("request" | "listening" |
+"close")` on the server; `method`, `url`, `headers` and the `data`/`end` events on the request;
+`statusCode`, `setHeader`, `getHeader`, `writeHead`, `write` and `end` on the response.
+
+```js
+import { createServer } from "squirt:http"
+
+const server = createServer((req, res) => {
+  res.writeHead(200, { "content-type": "text/plain" })
+  res.end(`${req.method} ${req.url}`)
+})
+server.listen(0, async () => {
+  const res = await fetch(`http://127.0.0.1:${server.address().port}/ping?x=1`)
+  console.log(await res.text())
+  server.close()
+})
+```
+
+```text
+GET /ping?x=1
+```
+
+## Testing
+
+`jsq test` finds every `*.test.jsq`, `*_test.jsq` and `*.spec.jsq` file under the working
+directory, skipping hidden directories, `target` and `nude_modules`, and runs each file in a
+fresh interpreter. Paths on the command line narrow the search, and `--filter <text>` (or `-t`)
+runs only the tests whose full name contains the text. The exit status is non-zero when a test
+fails or a file cannot be loaded. `vrotdaem test` does the same from the package root.
+
+```js
+import { describe, test, expect, beforeEach } from "squirt:test"
+
+let cart
+beforeEach(() => {
+  cart = []
+})
+
+describe("cart", () => {
+  test("starts empty", () => {
+    expect(cart).toHaveLength(0)
+  })
+  test("adds items", async () => {
+    cart.push(await Promise.resolve({ id: 1, qty: 2 }))
+    expect(cart).toContainEqual({ id: 1, qty: 2 })
+    expect(() => JSON.parse("{")).toThrow(SyntaxError)
+  })
+})
+```
+
+```sh
+$ jsq test
+cart.test.jsq
+  ✓ cart > starts empty (0ms)
+  ✓ cart > adds items (1ms)
+
+tests: 2 passed (1 file, 9ms)
+```
+
+| Export                                  | Description                                                   |
+| --------------------------------------- | ------------------------------------------------------------- |
+| `test(name, fn)`, `it`                  | Registers a test; `fn` may be async                           |
+| `test.skip`, `test.only`, `test.todo`   | Skips a test, runs only the marked tests, or lists a reminder |
+| `describe(name, fn)`, `describe.skip`   | Groups tests under a name prefix                              |
+| `beforeEach(fn)`, `afterEach(fn)`       | Run around every test                                         |
+| `expect(value)`                         | Matchers, `.not`, and `.resolves` / `.rejects` for promises   |
+| `assert(value)`, `assert.equal`, `assert.notEqual`, `assert.deepEqual`, `assert.throws`, `assert.rejects`, `assert.fail` | Plain assertions |
+
+Matchers: `toBe`, `toEqual`, `toStrictEqual`, `toBeTruthy`, `toBeFalsy`, `toBeNull`,
+`toBeUndefined`, `toBeDefined`, `toBeNaN`, `toBeGreaterThan`, `toBeGreaterThanOrEqual`,
+`toBeLessThan`, `toBeLessThanOrEqual`, `toBeCloseTo`, `toBeInstanceOf`, `toContain`,
+`toContainEqual`, `toHaveLength`, `toHaveProperty`, `toMatch`, `toMatchObject` and `toThrow`.
+
 ## Builtins
 
 ### Global functions and values
@@ -1176,6 +1465,9 @@ false
 | `parseFloat(text)`         | Parses a leading decimal number, `NaN` if none               |
 | `isNaN(value)`             | `true` if the value converts to `NaN`                        |
 | `isFinite(value)`          | `true` if the value converts to a finite number              |
+| `encodeURIComponent(text)`, `encodeURI(text)` | Percent-encodes UTF-8 text                  |
+| `decodeURIComponent(text)`, `decodeURI(text)` | Reverses the encoding, `URIError` on bad input |
+| `fetch(url, init?)`        | See [Web APIs](#web-apis)                                    |
 | `NaN`, `Infinity`, `undefined` | The usual global values                                  |
 
 ### `console`
@@ -1187,8 +1479,10 @@ false
 | `console.warn(...args)`  | stderr |
 | `console.error(...args)` | stderr |
 
-Arguments are separated by a single space. Strings print as is; arrays, objects, `Map` and `Set`
-print in a readable inspected form.
+Arguments are separated by a single space. Strings print as is; every other value prints the
+way Node's `util.inspect` shows it, including line breaking at 80 columns, grouping of long
+numeric arrays and `<ref *1>` markers for cycles. A first argument containing `%s`, `%d`, `%i`,
+`%f`, `%j`, `%o`, `%O` or `%%` is a format string.
 
 ### Global objects
 
@@ -1202,7 +1496,8 @@ print in a readable inspected form.
 | `JSON`   | `JSON.stringify(value)` and `JSON.parse(text)`                                                 |
 | `Map`    | `new Map(entries?)`, `set`, `get`, `has`, `delete`, `clear`, `size`, `forEach`                 |
 | `Set`    | `new Set(values?)`, `add`, `has`, `delete`, `clear`, `size`, `forEach`                         |
-| Errors   | `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`                            |
+| Errors   | `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, `URIError`, `EvalError`   |
+| Web      | `URL`, `URLSearchParams`, `Headers`, `Request`, `Response`                                     |
 | Weak     | `WeakMap` (`get`, `set`, `has`, `delete`), `WeakSet` (`add`, `has`, `delete`), `WeakRef` (`deref`) with object keys |
 | Timing   | `performance.now()` for a monotonic clock in milliseconds, `Date.now()` for epoch milliseconds |
 | `squirt` | `squirt(n = 3)` returns `n` droplets, the one builtin no other language ships                   |
@@ -1267,6 +1562,7 @@ collections (default 200000). Small values are useful for stress testing.
 | `jsq <file.jsq> [args...]`    | Runs the file as the entry module. `args` are exposed through `process.argv`. |
 | `jsq -e "<code>"`             | Evaluates the code string as a module.                           |
 | `jsq --disasm <file.jsq>`     | Compiles the file and prints its bytecode without running it.    |
+| `jsq test [paths...] [--filter <text>]` | Runs test files, see [Testing](#testing).           |
 | `jsq --version`               | Prints the version.                                              |
 
 Exit status is `0` on success, the value passed to `process.exit`, or non-zero after a syntax
@@ -1282,6 +1578,7 @@ error or an uncaught exception.
 | `vrotdaem gluboko`             | Installs every dependency into `nude_modules/<name>`.                     |
 | `vrotdaem gluboko --force`     | Deletes `nude_modules/` and reinstalls everything from scratch.           |
 | `vrotdaem run [args...]`       | Runs the manifest's `main` with `jsq` semantics, passing `args` along.    |
+| `vrotdaem test [--filter <t>]` | Runs the package's test files from its root.                              |
 
 Dependency specs:
 
@@ -1317,6 +1614,8 @@ Dependency specs:
 These are on the roadmap and currently produce a `SyntaxError` or are absent:
 
 - `FinalizationRegistry`
+- Binary data: `ArrayBuffer`, typed arrays, and binary request or response bodies
+- Streaming bodies, `AbortController`, WebSockets and HTTPS servers
 - `Intl` and locale-aware formatting beyond `en-US`
 - Getters on the global object (`globalThis`)
 - Tracing garbage collection

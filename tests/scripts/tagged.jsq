@@ -1,0 +1,22 @@
+function tag(strings, ...values) {
+  return strings.map((s, i) => s + (i < values.length ? `[${values[i]}]` : "")).join("")
+}
+const who = "squirt"
+console.log(tag`hello ${who}, ${1 + 2} times\n`)
+console.log(String.raw`C:\new\table ${who}\x`)
+const t = (s) => s
+const arr = t`a${1}b\u0041`
+console.log(arr, arr.raw, Array.isArray(arr.raw), arr.length)
+const obj = {
+  name: "o",
+  greet(strings, x) {
+    return `${this.name}:${strings[0]}${x}`
+  },
+}
+console.log(obj.greet`hi ${42}`)
+const html = (s, ...v) => s.reduce((acc, str, i) => acc + str + (v[i] === undefined ? "" : String(v[i]).replace(/</g, "&lt;")), "")
+console.log(html`<p>${"<b>"}</p>`)
+console.log(String.raw({ raw: ["x", "y", "z"] }, 1, 2, 3))
+const nested = tag`outer ${tag`inner ${"!"}`} end`
+console.log(nested)
+console.log(`plain ${`nested ${1}`}`)

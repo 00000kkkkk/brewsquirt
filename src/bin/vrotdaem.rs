@@ -40,6 +40,16 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    #[command(about = "Run every *.test.jsq file in the package")]
+    Test {
+        #[arg(
+            short = 't',
+            long,
+            help = "Only run tests whose name contains this text"
+        )]
+        filter: Option<String>,
+        paths: Vec<String>,
+    },
 }
 
 fn cwd() -> PathBuf {
@@ -118,6 +128,21 @@ fn execute(command: Command) -> Result<ExitCode, String> {
                             eprintln!("{}", vm.format_uncaught(&e));
                             ExitCode::FAILURE
                         }
+                    }
+                })
+                .map_err(|e| e.to_string())?;
+            return Ok(handle.join().unwrap_or(ExitCode::FAILURE));
+        }
+        Command::Test { filter, paths } => {
+            let root = root()?;
+            std::env::set_current_dir(&root).map_err(|e| e.to_string())?;
+            let handle = std::thread::Builder::new()
+                .stack_size(256 * 1024 * 1024)
+                .spawn(move || {
+                    if javasquirt::runner::run_tests(&paths, filter.as_deref()).ok() {
+                        ExitCode::SUCCESS
+                    } else {
+                        ExitCode::FAILURE
                     }
                 })
                 .map_err(|e| e.to_string())?;

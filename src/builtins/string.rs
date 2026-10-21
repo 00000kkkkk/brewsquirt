@@ -49,6 +49,7 @@ pub fn install(vm: &mut Vm) {
     let string = make_ctor(vm, "String", 1, string_ctor, None, &sp);
     method(vm, &string, "fromCharCode", 1, from_char_code);
     method(vm, &string, "fromCodePoint", 1, from_code_point);
+    method(vm, &string, "raw", 1, string_raw);
     vm.define_global("String", Value::Object(string));
 }
 
@@ -71,6 +72,29 @@ fn string_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         return Ok(super::symbol_text(s).into());
     }
     Ok(Value::Str(vm.to_string(&args[0])?))
+}
+
+fn string_raw(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let strings = arg(args, 0);
+    let raw = vm.get_prop(&strings, "raw")?;
+    let len = vm.get_prop(&raw, "length")?;
+    let len = vm.to_number(&len)?;
+    let len = if len.is_nan() || len < 0.0 {
+        0
+    } else {
+        len as usize
+    };
+    let mut out = String::new();
+    for i in 0..len {
+        let part = vm.get_prop(&raw, &i.to_string())?;
+        out.push_str(&vm.to_string(&part)?);
+        if i + 1 < len {
+            if let Some(sub) = args.get(i + 1) {
+                out.push_str(&vm.to_string(sub)?);
+            }
+        }
+    }
+    Ok(out.into())
 }
 
 fn from_char_code(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

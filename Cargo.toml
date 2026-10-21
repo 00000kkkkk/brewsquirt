@@ -1,6 +1,6 @@
 [package]
 name = "javasquirt"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.85"
 description = "High-performance language with JS semantics and Rust speed"
@@ -29,6 +29,7 @@ mimalloc = { version = "0.1", default-features = false }
 rustc-hash = "2.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
+ureq = "3.4"
 
 [profile.release]
 lto = "fat"
