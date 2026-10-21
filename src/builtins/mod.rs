@@ -53,9 +53,13 @@ pub fn arg(args: &[Value], i: usize) -> Value {
 }
 
 pub fn native_fn(vm: &Vm, name: &str, arity: u32, func: NativeFn) -> Value {
+    let label: Rc<str> = match name.strip_prefix('\u{0}').and_then(|k| k.split_once(':')) {
+        Some((_, desc)) => format!("[{desc}]").into(),
+        None => name.into(),
+    };
     Value::Object(Obj::new(
         ObjKind::Native(Box::new(Native {
-            name: name.into(),
+            name: label,
             arity,
             func,
             ctor: None,

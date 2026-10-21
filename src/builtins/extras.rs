@@ -17,7 +17,7 @@ const needFn = (f, what) => {
 const IteratorPrototype = Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]()))
 const RECORD = Symbol("record")
 const GEN = Symbol("generator")
-const CLOSE = Symbol("close")
+const STARTED = Symbol("started")
 
 function Iterator() {
   if (new.target === undefined || new.target === Iterator) {
@@ -25,237 +25,478 @@ function Iterator() {
   }
 }
 Object.defineProperty(Iterator, "prototype", { value: IteratorPrototype, writable: false, enumerable: false, configurable: false })
-define(IteratorPrototype, "constructor", Iterator)
-Object.defineProperty(IteratorPrototype, Symbol.toStringTag, { value: "Iterator", writable: true, enumerable: false, configurable: true })
 
-const direct = (it) => {
-  if (it === null || (typeof it !== "object" && typeof it !== "function")) {
-    throw new TypeError(`${String(it)} is not an object`)
+const isObj = (v) => v !== null && (typeof v === "object" || typeof v === "function")
+
+const ignoringSetter = (home, key) => function (v) {
+  if (!isObj(this)) throw new TypeError("setter called on non-object")
+  if (this === home) throw new TypeError(`Cannot assign to read only property '${String(key)}' of object`)
+  if (Object.getOwnPropertyDescriptor(this, key) === undefined) {
+    Object.defineProperty(this, key, { value: v, writable: true, enumerable: true, configurable: true })
+  } else {
+    this[key] = v
   }
-  return { it, next: it.next }
 }
-
-const close = (it) => {
-  const ret = it.return
-  if (ret != null) ret.call(it)
-}
-
-const WrapPrototype = Object.create(IteratorPrototype)
-defineAll(WrapPrototype, {
-  next() {
-    return this[RECORD].next.call(this[RECORD].it)
-  },
-  return() {
-    const ret = this[RECORD].it.return
-    return ret == null ? { value: undefined, done: true } : ret.call(this[RECORD].it)
-  },
+Object.defineProperty(IteratorPrototype, Symbol.toStringTag, {
+  get: named("get [Symbol.toStringTag]", function () {
+    return "Iterator"
+  }),
+  set: named("set [Symbol.toStringTag]", ignoringSetter(IteratorPrototype, Symbol.toStringTag)),
+  enumerable: false,
+  configurable: true,
+})
+Object.defineProperty(IteratorPrototype, "constructor", {
+  get: named("get constructor", function () {
+    return Iterator
+  }),
+  set: named("set constructor", ignoringSetter(IteratorPrototype, "constructor")),
+  enumerable: false,
+  configurable: true,
 })
 
-const helper = (record, body) => {
-  let done = false
-  const gen = body()
-  const out = Object.create(HelperPrototype)
-  Object.defineProperty(out, GEN, { value: gen })
-  Object.defineProperty(out, CLOSE, {
-    value: () => {
-      if (!done) {
-        done = true
-        close(record.it)
-      }
-    },
-  })
-  return out
+const requireObject = (O, name) => {
+  if (!isObj(O)) throw new TypeError(`Iterator.prototype.${name} called on non-object`)
+  return O
+}
+const direct = (it) => ({ it, next: it.next, done: false })
+const closeNormal = (it) => {
+  const ret = it.return
+  if (ret === undefined || ret === null) return
+  const r = ret.call(it)
+  if (!isObj(r)) throw new TypeError("Iterator result is not an object")
+}
+const closeThrow = (it) => {
+  try {
+    const ret = it.return
+    if (ret !== undefined && ret !== null) ret.call(it)
+  } catch {}
+}
+const failClose = (O, error) => {
+  closeThrow(O)
+  throw error
+}
+const DONE = Symbol("done")
+const stepValue = (rec) => {
+  const result = rec.next.call(rec.it)
+  if (!isObj(result)) throw new TypeError("Iterator result is not an object")
+  if (result.done) {
+    rec.done = true
+    return DONE
+  }
+  return result.value
+}
+const guard = (rec, fn) => {
+  try {
+    return fn()
+  } catch (e) {
+    closeThrow(rec.it)
+    throw e
+  }
 }
 
 const HelperPrototype = Object.create(IteratorPrototype)
+const helperState = (O) => {
+  if (!isObj(O) || !Object.prototype.hasOwnProperty.call(O, GEN)) {
+    throw new TypeError("Iterator helper method called on incompatible receiver")
+  }
+  return O
+}
 defineAll(HelperPrototype, {
   next() {
-    return this[GEN].next()
+    const O = helperState(this)
+    O[STARTED].value = true
+    return O[GEN].next()
   },
   return() {
-    this[CLOSE]()
-    return this[GEN].return()
+    const O = helperState(this)
+    if (!O[STARTED].value) {
+      O[STARTED].value = true
+      O[GEN].return()
+      closeNormal(O[RECORD].it)
+      return { value: undefined, done: true }
+    }
+    return O[GEN].return()
   },
 })
-Object.defineProperty(HelperPrototype, Symbol.toStringTag, { value: "Iterator Helper", configurable: true })
+Object.defineProperty(HelperPrototype, Symbol.toStringTag, { value: "Iterator Helper", writable: false, enumerable: false, configurable: true })
 
-const toCount = (n, name) => {
-  const v = Number(n)
-  if (Number.isNaN(v)) throw new RangeError(`${String(n)} must be positive`)
-  const i = Math.trunc(v)
-  if (i < 0) throw new RangeError(`${String(n)} must be positive`)
-  return i
+const helper = (rec, body) => {
+  const out = Object.create(HelperPrototype)
+  Object.defineProperty(out, GEN, { value: body() })
+  Object.defineProperty(out, RECORD, { value: rec })
+  Object.defineProperty(out, STARTED, { value: { value: false } })
+  return out
+}
+function* yieldGuarded(rec, value) {
+  let ok = false
+  try {
+    yield value
+    ok = true
+  } finally {
+    if (!ok) closeNormal(rec.it)
+  }
 }
 
-defineAll(IteratorPrototype, {
-  map(fn) {
-    const r = direct(this)
-    needFn(fn)
-    return helper(r, function* () {
-      let i = 0
+const toLimit = (O, limit) => {
+  let n
+  try {
+    n = Number(limit)
+  } catch (e) {
+    failClose(O, e)
+  }
+  if (Number.isNaN(n)) failClose(O, new RangeError(`${String(limit)} must be positive`))
+  const i = n === Infinity || n === -Infinity ? n : Math.trunc(n)
+  if (i < 0) failClose(O, new RangeError(`${String(limit)} must be positive`))
+  if (i !== Infinity && i > Number.MAX_SAFE_INTEGER) failClose(O, new RangeError(`${String(limit)} is too large`))
+  return i
+}
+const needCallable = (O, fn) => {
+  if (typeof fn !== "function") failClose(O, new TypeError(`${typeof fn === "string" ? `"${fn}"` : String(fn)} is not a function`))
+}
+const sizeArg = (O, n, what) => {
+  if (typeof n !== "number") failClose(O, new TypeError(`${what} must be a number`))
+  if (!Number.isInteger(n)) failClose(O, new TypeError(`${what} must be an integer`))
+  if (n < 1 || n > 2 ** 32 - 1) failClose(O, new RangeError(`${what} is out of range`))
+  return n
+}
+
+const flattenable = (obj, strings) => {
+  if (!isObj(obj)) {
+    if (!(strings && typeof obj === "string")) throw new TypeError(`${String(obj)} is not an object`)
+  }
+  const method = obj[Symbol.iterator]
+  let it
+  if (method === undefined || method === null) {
+    it = obj
+  } else {
+    if (typeof method !== "function") throw new TypeError(`${String(method)} is not a function`)
+    it = method.call(obj)
+  }
+  if (!isObj(it)) throw new TypeError(`${String(it)} is not an object`)
+  return direct(it)
+}
+
+const methods = {
+  map(mapper) {
+    const O = requireObject(this, "map")
+    needCallable(O, mapper)
+    const rec = direct(O)
+    return helper(rec, function* () {
+      let counter = 0
       for (;;) {
-        const s = r.next.call(r.it)
-        if (s.done) return
-        yield fn(s.value, i++)
+        const value = stepValue(rec)
+        if (value === DONE) return undefined
+        const c = counter++
+        const mapped = guard(rec, () => mapper(value, c))
+        yield* yieldGuarded(rec, mapped)
       }
     })
   },
-  filter(fn) {
-    const r = direct(this)
-    needFn(fn)
-    return helper(r, function* () {
-      let i = 0
+  filter(predicate) {
+    const O = requireObject(this, "filter")
+    needCallable(O, predicate)
+    const rec = direct(O)
+    return helper(rec, function* () {
+      let counter = 0
       for (;;) {
-        const s = r.next.call(r.it)
-        if (s.done) return
-        if (fn(s.value, i++)) yield s.value
+        const value = stepValue(rec)
+        if (value === DONE) return undefined
+        const c = counter++
+        if (guard(rec, () => predicate(value, c))) yield* yieldGuarded(rec, value)
       }
     })
   },
   take(limit) {
-    const r = direct(this)
-    const n = toCount(limit)
-    return helper(r, function* () {
-      let left = n
+    const O = requireObject(this, "take")
+    const n = toLimit(O, limit)
+    const rec = direct(O)
+    return helper(rec, function* () {
+      let remaining = n
       for (;;) {
-        if (left-- <= 0) {
-          close(r.it)
-          return
+        if (remaining === 0) {
+          closeNormal(rec.it)
+          return undefined
         }
-        const s = r.next.call(r.it)
-        if (s.done) return
-        yield s.value
+        if (remaining !== Infinity) remaining--
+        const value = stepValue(rec)
+        if (value === DONE) return undefined
+        yield* yieldGuarded(rec, value)
       }
     })
   },
   drop(limit) {
-    const r = direct(this)
-    const n = toCount(limit)
-    return helper(r, function* () {
-      let left = n
+    const O = requireObject(this, "drop")
+    const n = toLimit(O, limit)
+    const rec = direct(O)
+    return helper(rec, function* () {
+      let remaining = n
+      while (remaining > 0) {
+        if (remaining !== Infinity) remaining--
+        const value = stepValue(rec)
+        if (value === DONE) return undefined
+      }
       for (;;) {
-        const s = r.next.call(r.it)
-        if (s.done) return
-        if (left > 0) {
-          left--
-          continue
-        }
-        yield s.value
+        const value = stepValue(rec)
+        if (value === DONE) return undefined
+        yield* yieldGuarded(rec, value)
       }
     })
   },
-  flatMap(fn) {
-    const r = direct(this)
-    needFn(fn)
-    return helper(r, function* () {
-      let i = 0
+  flatMap(mapper) {
+    const O = requireObject(this, "flatMap")
+    needCallable(O, mapper)
+    const rec = direct(O)
+    return helper(rec, function* () {
+      let counter = 0
       for (;;) {
-        const s = r.next.call(r.it)
-        if (s.done) return
-        const inner = fn(s.value, i++)
-        if (inner === null || (typeof inner !== "object" && typeof inner !== "function")) {
-          throw new TypeError("flatMap mapper must return an iterable or iterator")
+        const value = stepValue(rec)
+        if (value === DONE) return undefined
+        const c = counter++
+        const inner = guard(rec, () => flattenable(mapper(value, c), false))
+        for (;;) {
+          const v = guard(rec, () => stepValue(inner))
+          if (v === DONE) break
+          let ok = false
+          try {
+            yield v
+            ok = true
+          } finally {
+            if (!ok) {
+              try {
+                closeNormal(inner.it)
+              } catch (e) {
+                closeThrow(rec.it)
+                throw e
+              }
+              closeNormal(rec.it)
+            }
+          }
         }
-        yield* Iterator.from(inner)
       }
     })
   },
-  reduce(fn, ...init) {
-    const r = direct(this)
-    needFn(fn)
+  reduce(reducer, ...rest) {
+    const O = requireObject(this, "reduce")
+    needCallable(O, reducer)
+    const rec = direct(O)
     let acc
-    let i = 0
-    if (init.length > 0) acc = init[0]
-    else {
-      const s = r.next.call(r.it)
-      if (s.done) throw new TypeError("Reduce of empty iterator with no initial value")
-      acc = s.value
-      i = 1
+    let counter
+    if (rest.length === 0) {
+      acc = stepValue(rec)
+      if (acc === DONE) throw new TypeError("Reduce of empty iterator with no initial value")
+      counter = 1
+    } else {
+      acc = rest[0]
+      counter = 0
     }
     for (;;) {
-      const s = r.next.call(r.it)
-      if (s.done) return acc
-      acc = fn(acc, s.value, i++)
+      const value = stepValue(rec)
+      if (value === DONE) return acc
+      const c = counter++
+      const a = acc
+      acc = guard(rec, () => reducer(a, value, c))
     }
   },
   toArray() {
-    const r = direct(this)
-    const out = []
+    const O = requireObject(this, "toArray")
+    const rec = direct(O)
+    const items = []
     for (;;) {
-      const s = r.next.call(r.it)
-      if (s.done) return out
-      out.push(s.value)
+      const value = stepValue(rec)
+      if (value === DONE) return items
+      items.push(value)
     }
   },
   forEach(fn) {
-    const r = direct(this)
-    needFn(fn)
-    let i = 0
+    const O = requireObject(this, "forEach")
+    needCallable(O, fn)
+    const rec = direct(O)
+    let counter = 0
     for (;;) {
-      const s = r.next.call(r.it)
-      if (s.done) return undefined
-      fn(s.value, i++)
+      const value = stepValue(rec)
+      if (value === DONE) return undefined
+      const c = counter++
+      guard(rec, () => fn(value, c))
     }
   },
-  some(fn) {
-    const r = direct(this)
-    needFn(fn)
-    let i = 0
+  some(predicate) {
+    const O = requireObject(this, "some")
+    needCallable(O, predicate)
+    const rec = direct(O)
+    let counter = 0
     for (;;) {
-      const s = r.next.call(r.it)
-      if (s.done) return false
-      if (fn(s.value, i++)) {
-        close(r.it)
+      const value = stepValue(rec)
+      if (value === DONE) return false
+      const c = counter++
+      if (guard(rec, () => predicate(value, c))) {
+        closeNormal(rec.it)
         return true
       }
     }
   },
-  every(fn) {
-    const r = direct(this)
-    needFn(fn)
-    let i = 0
+  every(predicate) {
+    const O = requireObject(this, "every")
+    needCallable(O, predicate)
+    const rec = direct(O)
+    let counter = 0
     for (;;) {
-      const s = r.next.call(r.it)
-      if (s.done) return true
-      if (!fn(s.value, i++)) {
-        close(r.it)
+      const value = stepValue(rec)
+      if (value === DONE) return true
+      const c = counter++
+      if (!guard(rec, () => predicate(value, c))) {
+        closeNormal(rec.it)
         return false
       }
     }
   },
-  find(fn) {
-    const r = direct(this)
-    needFn(fn)
-    let i = 0
+  find(predicate) {
+    const O = requireObject(this, "find")
+    needCallable(O, predicate)
+    const rec = direct(O)
+    let counter = 0
     for (;;) {
-      const s = r.next.call(r.it)
-      if (s.done) return undefined
-      if (fn(s.value, i++)) {
-        close(r.it)
-        return s.value
+      const value = stepValue(rec)
+      if (value === DONE) return undefined
+      const c = counter++
+      if (guard(rec, () => predicate(value, c))) {
+        closeNormal(rec.it)
+        return value
       }
     }
   },
+  includes(searchElement, skippedElements) {
+    const O = requireObject(this, "includes")
+    let toSkip = 0
+    if (skippedElements !== undefined) {
+      if (typeof skippedElements !== "number") failClose(O, new TypeError("skippedElements must be a number"))
+      if (Number.isNaN(skippedElements)) failClose(O, new TypeError("skippedElements must not be NaN"))
+      if (skippedElements === -Infinity) failClose(O, new RangeError("skippedElements must not be negative"))
+      if (skippedElements !== Infinity) {
+        if (!Number.isInteger(skippedElements)) failClose(O, new TypeError("skippedElements must be an integer"))
+        if (skippedElements < 0) failClose(O, new RangeError("skippedElements must not be negative"))
+        if (skippedElements > Number.MAX_SAFE_INTEGER) failClose(O, new RangeError("skippedElements is too large"))
+      }
+      toSkip = skippedElements
+    }
+    const rec = direct(O)
+    let skipped = 0
+    for (;;) {
+      const value = stepValue(rec)
+      if (value === DONE) return false
+      if (skipped < toSkip) {
+        skipped++
+        continue
+      }
+      if (value === searchElement || (value !== value && searchElement !== searchElement)) {
+        closeNormal(rec.it)
+        return true
+      }
+    }
+  },
+  chunks(chunkSize) {
+    const O = requireObject(this, "chunks")
+    const size = sizeArg(O, chunkSize, "chunkSize")
+    const rec = direct(O)
+    return helper(rec, function* () {
+      let buffer = []
+      for (;;) {
+        const value = stepValue(rec)
+        if (value === DONE) {
+          if (buffer.length > 0) yield* yieldGuarded(rec, buffer)
+          return undefined
+        }
+        buffer.push(value)
+        if (buffer.length === size) {
+          const out = buffer
+          buffer = []
+          yield* yieldGuarded(rec, out)
+        }
+      }
+    })
+  },
+  windows(windowSize, undersized) {
+    const O = requireObject(this, "windows")
+    const size = sizeArg(O, windowSize, "windowSize")
+    if (undersized === undefined) undersized = "only-full"
+    if (undersized !== "only-full" && undersized !== "allow-partial") {
+      failClose(O, new TypeError('undersized must be "only-full" or "allow-partial"'))
+    }
+    const rec = direct(O)
+    return helper(rec, function* () {
+      const buffer = []
+      let emitted = false
+      for (;;) {
+        const value = stepValue(rec)
+        if (value === DONE) {
+          if (undersized === "allow-partial" && !emitted && buffer.length > 0) yield* yieldGuarded(rec, buffer.slice())
+          return undefined
+        }
+        if (buffer.length === size) buffer.shift()
+        buffer.push(value)
+        if (buffer.length === size) {
+          emitted = true
+          yield* yieldGuarded(rec, buffer.slice())
+        }
+      }
+    })
+  },
+  join(separator) {
+    const O = requireObject(this, "join")
+    let sep = ","
+    if (separator !== undefined) {
+      try {
+        sep = String(separator)
+      } catch (e) {
+        failClose(O, e)
+      }
+    }
+    const rec = direct(O)
+    let out = ""
+    let first = true
+    for (;;) {
+      const value = stepValue(rec)
+      if (value === DONE) return out
+      if (!first) out += sep
+      first = false
+      if (value !== undefined && value !== null) out += guard(rec, () => String(value))
+    }
+  },
+}
+for (const name of Object.keys(methods)) {
+  define(IteratorPrototype, name, methods[name])
+}
+Object.defineProperty(IteratorPrototype.includes, "length", { value: 1, configurable: true })
+Object.defineProperty(IteratorPrototype.windows, "length", { value: 1, configurable: true })
+
+const WrapPrototype = Object.create(IteratorPrototype)
+const wrapState = (O) => {
+  if (!isObj(O) || !Object.prototype.hasOwnProperty.call(O, RECORD)) {
+    throw new TypeError("Iterator wrapper method called on incompatible receiver")
+  }
+  return O[RECORD]
+}
+defineAll(WrapPrototype, {
+  next() {
+    const rec = wrapState(this)
+    return rec.next.call(rec.it)
+  },
+  return() {
+    const rec = wrapState(this)
+    const ret = rec.it.return
+    if (ret === undefined || ret === null) return { value: undefined, done: true }
+    return ret.call(rec.it)
+  },
 })
 
-define(Iterator, "from", named("from", function from(obj) {
-  if (typeof obj === "string") return obj[Symbol.iterator]()
-  if (obj === null || (typeof obj !== "object" && typeof obj !== "function")) {
-    throw new TypeError(`${String(obj)} is not an object`)
-  }
-  const method = obj[Symbol.iterator]
-  let it
-  if (method != null) {
-    needFn(method)
-    it = method.call(obj)
-  } else {
-    it = obj
-  }
-  if (it instanceof Iterator) return it
-  const wrapper = Object.create(WrapPrototype)
-  Object.defineProperty(wrapper, RECORD, { value: direct(it) })
-  return wrapper
-}))
+define(Iterator, "from", {
+  from(O) {
+    const rec = flattenable(O, true)
+    if (rec.it instanceof Iterator) return rec.it
+    const wrapper = Object.create(WrapPrototype)
+    Object.defineProperty(wrapper, RECORD, { value: rec })
+    return wrapper
+  },
+}.from)
 define(globalThis, "Iterator", Iterator)
 
 const setRecord = (other) => {
@@ -465,7 +706,6 @@ define(globalThis, "FinalizationRegistry", FinalizationRegistry)
 
 const RegExpProto = RegExp.prototype
 const builtinExec = RegExpProto.exec
-const isObj = (v) => v !== null && (typeof v === "object" || typeof v === "function")
 const reLength = (v) => {
   const n = Math.trunc(Number(v)) || 0
   return n <= 0 ? 0 : Math.min(n, 2 ** 53 - 1)
