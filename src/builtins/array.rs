@@ -75,7 +75,11 @@ use dispatch_table;
 fn dispatch<const I: usize>(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (name, _, f, species) = METHODS[I];
     if let Value::Object(o) = &this {
-        if matches!(o.kind, ObjKind::Array(_)) && (!species || species_intact(vm, o)) {
+        if matches!(o.kind, ObjKind::Array(_))
+            && o.flags.get() & crate::object::SLOW_ELEMENTS == 0
+            && !vm.proto_indices
+            && (!species || species_intact(vm, o))
+        {
             return f(vm, this, args);
         }
     }

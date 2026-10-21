@@ -57,9 +57,12 @@ pub fn same_value(a: &Value, b: &Value) -> bool {
     }
 }
 
-fn element_attrs(o: &Obj) -> u8 {
+fn element_attrs(o: &Obj, key: &str) -> u8 {
     let f = o.flags.get();
     let mut a = 0;
+    if f & crate::object::SLOW_ELEMENTS != 0 {
+        a |= o.props.borrow().attrs(key);
+    }
     if f & ELEMENTS_FROZEN != 0 {
         a |= READ_ONLY | NON_CONFIG;
     }
@@ -117,7 +120,11 @@ impl Vm {
                     if o.is_hole(i) {
                         return None;
                     }
-                    return a.borrow().get(i).cloned().map(|v| (v, element_attrs(o)));
+                    return a
+                        .borrow()
+                        .get(i)
+                        .cloned()
+                        .map(|v| (v, element_attrs(o, key)));
                 }
                 if key == "length" {
                     let mut attrs = NON_ENUM | NON_CONFIG;
@@ -312,10 +319,24 @@ impl Vm {
                         }
                         items.resize(i + 1, Value::Undefined);
                     }
+                    let slow = attrs != 0 || accessor_parts(&raw).is_some();
                     items[i] = raw;
                     drop(items);
                     o.mark_holes(old, i);
                     o.fill_hole(i);
+                    if slow {
+                        o.props.borrow_mut().set_index_attrs(key, attrs);
+                        o.flags.set(o.flags.get() | crate::object::SLOW_ELEMENTS);
+                        if accessor_parts(
+                            &o.array().map(|a| a.borrow()[i].clone()).unwrap_or_default(),
+                        )
+                        .is_some()
+                        {
+                            self.accessors_used = true;
+                        }
+                    } else if o.flags.get() & crate::object::SLOW_ELEMENTS != 0 {
+                        o.props.borrow_mut().set_index_attrs(key, 0);
+                    }
                     return Ok(());
                 }
                 if &**key == "length" {
@@ -387,6 +408,7 @@ impl Vm {
         d: PropDesc,
         throw: bool,
     ) -> Result<bool, Value> {
+        self.note_proto_index(o, &key);
         if let ObjKind::Typed(t) = &o.kind {
             if let Some(n) = crate::builtins::typed::canonical_numeric(&key) {
                 let ok = crate::builtins::typed::valid_index(t, n).is_some()
@@ -546,6 +568,13 @@ impl Vm {
                 if let Some(i) = array_index(key) {
                     if o.flags.get() & ELEMENTS_SEALED != 0 && i < a.borrow().len() {
                         return false;
+                    }
+                    if o.flags.get() & crate::object::SLOW_ELEMENTS != 0 {
+                        if o.props.borrow().attrs(key) & NON_CONFIG != 0 && !o.is_hole(i) {
+                            return false;
+                        }
+                        let k: Rc<str> = key.into();
+                        o.props.borrow_mut().set_index_attrs(&k, 0);
                     }
                     let len = a.borrow().len();
                     if let Some(slot) = a.borrow_mut().get_mut(i) {

@@ -690,7 +690,15 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
                 "Object [AsyncFunction] {}".to_string()
             }
         }
-        ObjKind::Accessor(_) => "[Getter/Setter]".to_string(),
+        ObjKind::Accessor(acc) => {
+            let get = !acc.get.borrow().is_undefined();
+            let set = !acc.set.borrow().is_undefined();
+            match (get, set) {
+                (true, false) => "[Getter]".to_string(),
+                (false, true) => "[Setter]".to_string(),
+                _ => "[Getter/Setter]".to_string(),
+            }
+        }
         ObjKind::Primitive(p) => {
             let kind = match p {
                 Value::Str(_) => "String",

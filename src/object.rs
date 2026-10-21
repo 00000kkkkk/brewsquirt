@@ -23,6 +23,7 @@ pub const NAME_DELETED: u8 = 16;
 pub const LENGTH_DELETED: u8 = 32;
 pub const DETACHED: u8 = 64;
 pub const ARGUMENTS: u8 = 128;
+pub const SLOW_ELEMENTS: u8 = 64;
 
 #[derive(Default)]
 struct PropExtra {
@@ -102,6 +103,22 @@ impl PropMap {
                 .attrs
                 .insert(k, bits);
         }
+    }
+
+    pub fn set_index_attrs(&mut self, key: &Rc<str>, bits: u8) {
+        if bits == 0 {
+            if let Some(x) = &mut self.extra {
+                x.attrs.remove(&**key);
+                if x.is_empty() {
+                    self.extra = None;
+                }
+            }
+            return;
+        }
+        self.extra
+            .get_or_insert_with(Box::default)
+            .attrs
+            .insert(key.clone(), bits);
     }
 
     pub fn is_enumerable(&self, key: &str) -> bool {

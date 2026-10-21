@@ -289,6 +289,7 @@ pub struct Vm {
     pub proto_accessor: Value,
     pub(crate) thrower: Value,
     pub(crate) array_species: Value,
+    pub(crate) proto_indices: bool,
     pub(crate) binary_ctors: Vec<Value>,
     pub(crate) pristine: Option<Box<Pristine>>,
     pub(crate) array_ctor: Option<Rc<Obj>>,
@@ -362,6 +363,7 @@ impl Vm {
             proto_accessor: Value::Undefined,
             thrower: Value::Undefined,
             array_species: Value::Undefined,
+            proto_indices: false,
             binary_ctors: Vec::new(),
             pristine: None,
             array_ctor: None,
@@ -1374,7 +1376,19 @@ impl Vm {
                     return Value::Number(a.borrow().len() as f64);
                 }
                 if let Some(i) = array_index(key) {
-                    return a.borrow().get(i).cloned().unwrap_or_default();
+                    if let Some(v) = a.borrow().get(i) {
+                        if !o.is_hole(i) {
+                            return v.clone();
+                        }
+                    }
+                    if !self.proto_indices {
+                        return Value::Undefined;
+                    }
+                    let proto = o.proto.borrow().clone();
+                    return match proto {
+                        Some(p) => self.get_obj(&p, key),
+                        None => Value::Undefined,
+                    };
                 }
             }
             ObjKind::Function(c) => {
@@ -1609,9 +1623,19 @@ impl Vm {
         }
     }
 
+    pub(crate) fn note_proto_index(&mut self, o: &Rc<Obj>, key: &str) {
+        if !self.proto_indices
+            && array_index(key).is_some()
+            && (Rc::ptr_eq(o, &self.realm.array_proto) || Rc::ptr_eq(o, &self.realm.object_proto))
+        {
+            self.proto_indices = true;
+        }
+    }
+
     pub fn set_prop(&mut self, target: &Value, key: Rc<str>, val: Value) -> Result<(), Value> {
         match target {
             Value::Object(o) => {
+                self.note_proto_index(o, &key);
                 match &o.kind {
                     ObjKind::Proxy(_) => {
                         if !self.op_set(o, key.clone(), val, target)? {
@@ -1670,6 +1694,22 @@ impl Vm {
                 if let ObjKind::Array(a) = &o.kind {
                     if let Some(i) = array_index(&key) {
                         let flags = o.flags.get();
+                        if flags & crate::object::SLOW_ELEMENTS != 0 && !o.is_hole(i) {
+                            let raw = a.borrow().get(i).cloned().unwrap_or_default();
+                            if let Some((_, setter)) = crate::props::accessor_parts(&raw) {
+                                if setter.is_callable() {
+                                    self.call_value(&setter, target.clone(), &[val])?;
+                                    return Ok(());
+                                }
+                                return Err(self.type_error(format!(
+                                    "Cannot set property {key} of {} which has only a getter",
+                                    inspect_plain(target)
+                                )));
+                            }
+                            if o.props.borrow().attrs(&key) & crate::object::READ_ONLY != 0 {
+                                return Err(self.read_only_error(o, &key));
+                            }
+                        }
                         if flags != 0 {
                             let len = a.borrow().len();
                             if flags & crate::object::ELEMENTS_FROZEN != 0 && i < len {
@@ -1789,7 +1829,16 @@ impl Vm {
                 match obj {
                     Value::Object(o) => {
                         if let ObjKind::Array(a) = &o.kind {
-                            return Ok(a.borrow().get(i).cloned().unwrap_or_default());
+                            if o.flags.get() & crate::object::SLOW_ELEMENTS == 0 {
+                                if let Some(v) = a.borrow().get(i) {
+                                    if !o.is_hole(i) {
+                                        return Ok(v.clone());
+                                    }
+                                }
+                                if !self.proto_indices {
+                                    return Ok(Value::Undefined);
+                                }
+                            }
                         }
                         if let ObjKind::Typed(t) = &o.kind {
                             return Ok(t.get(i).unwrap_or_default());
@@ -2367,11 +2416,20 @@ impl Vm {
                     return Ok(Some(v));
                 }
                 IterState::Array(arr, i) => {
-                    let v = arr.array().and_then(|a| a.borrow().get(*i).cloned());
-                    if v.is_some() {
-                        *i += 1;
+                    let len = arr.array().map(|a| a.borrow().len()).unwrap_or(0);
+                    if *i >= len {
+                        return Ok(None);
                     }
-                    return Ok(v);
+                    let idx = *i;
+                    *i += 1;
+                    let slow = arr.flags.get() & crate::object::SLOW_ELEMENTS != 0
+                        || (self.proto_indices && arr.is_hole(idx));
+                    if !slow {
+                        return Ok(arr.array().and_then(|a| a.borrow().get(idx).cloned()));
+                    }
+                    let arr = Value::Object(arr.clone());
+                    drop(st);
+                    return Ok(Some(self.get_prop(&arr, &idx.to_string())?));
                 }
                 IterState::Str(s, pos) => {
                     let Some(c) = s[*pos..].chars().next() else {
@@ -2488,7 +2546,10 @@ impl Vm {
     pub fn iterate(&mut self, v: &Value) -> Result<Vec<Value>, Value> {
         if let Value::Object(o) = v {
             if let ObjKind::Array(a) = &o.kind {
-                if self.builtin_iterable(o) {
+                if self.builtin_iterable(o)
+                    && o.flags.get() & crate::object::SLOW_ELEMENTS == 0
+                    && !(self.proto_indices && o.has_holes())
+                {
                     return Ok(a.borrow().clone());
                 }
             }
