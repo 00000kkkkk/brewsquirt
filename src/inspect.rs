@@ -101,9 +101,9 @@ pub fn function_desc(o: &Obj) -> String {
             };
             if let Some(parent) = o.proto.borrow().as_ref() {
                 if let ObjKind::Function(_) | ObjKind::Native(_) = parent.kind {
-                    if let Some(pn) = parent.function_name() {
-                        if !pn.is_empty() {
-                            s.push_str(&format!(" extends {pn}"));
+                    if let Some(parent_name) = parent.function_name() {
+                        if !parent_name.is_empty() {
+                            s.push_str(&format!(" extends {parent_name}"));
                         }
                     }
                 }

@@ -11,6 +11,8 @@ javasquirt = "javasquirt"
 upvalue = "upvalue"
 upvalues = "upvalues"
 disasm = "disasm"
+abd = "abd"
+anull = "anull"
 
 [default.extend-identifiers]
 vrotdaem = "vrotdaem"
