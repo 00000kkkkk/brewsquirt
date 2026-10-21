@@ -719,7 +719,7 @@ pub type WeakKeys = rustc_hash::FxHashMap<usize, std::rc::Weak<Obj>>;
 
 pub struct RegExpObj {
     pub data: Rc<crate::regexp::RegexData>,
-    pub last_index: Cell<f64>,
+    pub last_index: RefCell<Value>,
 }
 
 pub struct Symbol {

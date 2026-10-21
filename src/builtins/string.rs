@@ -121,17 +121,22 @@ fn from_char_code(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         let n = vm.to_number(a)?;
         units.push(crate::number::to_uint32(n) as u16);
     }
-    Ok(String::from_utf16_lossy(&units).into())
+    Ok(crate::value::from16(&units).into())
 }
 
 fn from_code_point(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let mut s = String::new();
     for a in args {
         let n = vm.to_number(a)?;
-        match char::from_u32(n as u32).filter(|_| n.fract() == 0.0 && n >= 0.0) {
-            Some(c) => s.push(c),
-            None => return Err(vm.range_error(format!("Invalid code point {n}"))),
+        if n.fract() != 0.0 || !(0.0..=1114111.0).contains(&n) {
+            return Err(vm.range_error(format!(
+                "Invalid code point {}",
+                crate::number::number_to_string(n)
+            )));
         }
+        let c = char::from_u32(n as u32).unwrap_or_else(|| crate::value::lone_char(n as u16));
+        let mut buf = [0u8; 4];
+        crate::value::push16(&mut s, c.encode_utf8(&mut buf));
     }
     Ok(s.into())
 }
@@ -310,29 +315,159 @@ fn trim_end(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     Ok(this_str(vm, &this)?.trim_end().into())
 }
 
-fn split(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let s = this_str(vm, &this)?;
-    let limit = match arg(args, 1) {
-        Value::Undefined => usize::MAX,
-        v => crate::number::to_uint32(vm.to_number(&v)?) as usize,
-    };
-    if let Some((_, data)) = super::regexp::as_regexp(&arg(args, 0)) {
-        return super::regexp::string_split_regexp(vm, s, &data, limit);
+const MATCH: usize = 0;
+const MATCH_ALL: usize = 1;
+const REPLACE: usize = 2;
+const SEARCH: usize = 3;
+const SPLIT: usize = 4;
+
+const SYMBOL_KEYS: [&str; 5] = [
+    crate::object::MATCH_KEY,
+    crate::object::MATCH_ALL_KEY,
+    crate::object::REPLACE_KEY,
+    crate::object::SEARCH_KEY,
+    crate::object::SPLIT_KEY,
+];
+
+enum Dispatch {
+    Done(Value),
+    Fast(Rc<crate::object::Obj>, Rc<crate::regexp::RegexData>),
+    Plain,
+}
+
+fn coercible(vm: &mut Vm, this: &Value, name: &str) -> Result<(), Value> {
+    if this.is_nullish() {
+        return Err(vm.type_error(format!(
+            "String.prototype.{name} called on null or undefined"
+        )));
     }
-    let parts: Vec<Value> = match arg(args, 0) {
-        Value::Undefined => vec![Value::Str(s.clone())],
-        sep => {
-            let sep = vm.to_string(&sep)?;
-            if sep.is_empty() {
-                s.chars()
-                    .map(|c| Value::Str(c.to_string().into()))
-                    .collect()
-            } else {
-                s.split(&*sep).map(Value::from).collect()
-            }
+    Ok(())
+}
+
+fn dispatch(
+    vm: &mut Vm,
+    this: &Value,
+    target: &Value,
+    sym: usize,
+    rest: &[Value],
+) -> Result<Dispatch, Value> {
+    if target.is_nullish() || matches!(target, Value::Str(_) | Value::Number(_) | Value::Bool(_)) {
+        return Ok(Dispatch::Plain);
+    }
+    if let Some((o, data)) = super::regexp::pristine(vm, target, sym) {
+        return Ok(Dispatch::Fast(o, data));
+    }
+    let m = vm.get_prop(target, SYMBOL_KEYS[sym])?;
+    if m.is_nullish() {
+        return Ok(Dispatch::Plain);
+    }
+    if !m.is_callable() {
+        return Err(vm.type_error(format!(
+            "{} is not a function",
+            crate::inspect::inspect_plain(&m)
+        )));
+    }
+    let mut call_args = Vec::with_capacity(rest.len() + 1);
+    call_args.push(this.clone());
+    call_args.extend_from_slice(rest);
+    Ok(Dispatch::Done(vm.call_value(
+        &m,
+        target.clone(),
+        &call_args,
+    )?))
+}
+
+fn is_regexp(vm: &mut Vm, v: &Value) -> Result<bool, Value> {
+    if !v.is_object() {
+        return Ok(false);
+    }
+    let m = vm.get_prop(v, crate::object::MATCH_KEY)?;
+    if !m.is_undefined() {
+        return Ok(m.truthy());
+    }
+    Ok(super::regexp::as_regexp(v).is_some())
+}
+
+fn require_global(vm: &mut Vm, v: &Value, name: &str) -> Result<(), Value> {
+    if is_regexp(vm, v)? {
+        let flags = vm.get_prop(v, "flags")?;
+        if flags.is_nullish() {
+            return Err(vm.type_error("Cannot convert undefined or null to object"));
         }
+        if !vm.to_string(&flags)?.contains('g') {
+            return Err(vm.type_error(format!(
+                "String.prototype.{name} called with a non-global RegExp argument"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn regexp_create(vm: &mut Vm, pattern: &Value, flags: &str) -> R {
+    let source = match pattern {
+        Value::Undefined => Rc::from(""),
+        p => vm.to_string(p)?,
     };
-    let parts = parts.into_iter().take(limit).collect();
+    super::regexp::make_regexp(vm, &source, flags)
+}
+
+fn invoke_symbol(vm: &mut Vm, rx: &Value, sym: usize, args: &[Value]) -> R {
+    let m = vm.get_prop(rx, SYMBOL_KEYS[sym])?;
+    if !m.is_callable() {
+        return Err(vm.type_error(format!(
+            "{} is not a function",
+            crate::inspect::inspect_plain(&m)
+        )));
+    }
+    vm.call_value(&m, rx.clone(), args)
+}
+
+fn split(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    coercible(vm, &this, "split")?;
+    let separator = arg(args, 0);
+    let limit_arg = arg(args, 1);
+    match dispatch(vm, &this, &separator, SPLIT, &[limit_arg.clone()])? {
+        Dispatch::Done(v) => return Ok(v),
+        Dispatch::Fast(_, data) => {
+            let s = vm.to_string(&this)?;
+            let limit = match &limit_arg {
+                Value::Undefined => u32::MAX as usize,
+                v => crate::number::to_uint32(vm.to_number(v)?) as usize,
+            };
+            return super::regexp::string_split_regexp(vm, s, &data, limit);
+        }
+        Dispatch::Plain => {}
+    }
+    let s = vm.to_string(&this)?;
+    let lim = match &limit_arg {
+        Value::Undefined => u32::MAX as usize,
+        v => crate::number::to_uint32(vm.to_number(v)?) as usize,
+    };
+    let sep = vm.to_string(&separator)?;
+    if lim == 0 {
+        return Ok(vm.new_array(Vec::new()));
+    }
+    if separator.is_undefined() {
+        return Ok(vm.new_array(vec![Value::Str(s)]));
+    }
+    let parts: Vec<Value> = if sep.is_empty() {
+        if s.is_ascii() {
+            s.bytes()
+                .take(lim)
+                .map(|b| Value::Str((b as char).to_string().into()))
+                .collect()
+        } else {
+            units16(&s)
+                .iter()
+                .take(lim)
+                .map(|u| Value::Str(crate::value::from16(&[*u]).into()))
+                .collect()
+        }
+    } else if s.is_empty() {
+        vec![Value::Str(s.clone())]
+    } else {
+        s.split(&*sep).take(lim).map(Value::from).collect()
+    };
     Ok(vm.new_array(parts))
 }
 
@@ -356,13 +491,9 @@ fn replacement(
         return Ok(vm.to_string(&r)?.to_string());
     }
     let template = vm.to_string(rep)?;
-    let (before, after) = match whole.find(matched) {
-        Some(_) => {
-            let b = crate::regexp::byte_index(whole, offset);
-            (&whole[..b], &whole[(b + matched.len()).min(whole.len())..])
-        }
-        None => ("", ""),
-    };
+    let b = crate::regexp::byte_index(whole, offset);
+    let before = &whole[..b];
+    let after = &whole[(b + matched.len()).min(whole.len())..];
     Ok(super::regexp::expand_template(
         &template,
         matched,
@@ -374,40 +505,99 @@ fn replacement(
 }
 
 fn match_fn(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let s = this_str(vm, &this)?;
-    super::regexp::string_match(vm, s, &arg(args, 0))
+    coercible(vm, &this, "match")?;
+    let r = arg(args, 0);
+    match dispatch(vm, &this, &r, MATCH, &[])? {
+        Dispatch::Done(v) => return Ok(v),
+        Dispatch::Fast(..) => {
+            let s = vm.to_string(&this)?;
+            return super::regexp::string_match(vm, s, &r);
+        }
+        Dispatch::Plain => {}
+    }
+    let s = vm.to_string(&this)?;
+    let rx = regexp_create(vm, &r, "")?;
+    if super::regexp::pristine(vm, &rx, MATCH).is_some() {
+        return super::regexp::string_match(vm, s, &rx);
+    }
+    invoke_symbol(vm, &rx, MATCH, &[Value::Str(s)])
 }
 
 fn match_all(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let s = this_str(vm, &this)?;
-    super::regexp::string_match_all(vm, s, &arg(args, 0))
+    coercible(vm, &this, "matchAll")?;
+    let r = arg(args, 0);
+    if !r.is_nullish() {
+        require_global(vm, &r, "matchAll")?;
+    }
+    match dispatch(vm, &this, &r, MATCH_ALL, &[])? {
+        Dispatch::Done(v) => return Ok(v),
+        Dispatch::Fast(..) => {
+            let s = vm.to_string(&this)?;
+            return invoke_symbol(vm, &r, MATCH_ALL, &[Value::Str(s)]);
+        }
+        Dispatch::Plain => {}
+    }
+    let s = vm.to_string(&this)?;
+    let rx = regexp_create(vm, &r, "g")?;
+    invoke_symbol(vm, &rx, MATCH_ALL, &[Value::Str(s)])
 }
 
 fn search(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let s = this_str(vm, &this)?;
-    super::regexp::string_search(vm, s, &arg(args, 0))
+    coercible(vm, &this, "search")?;
+    let r = arg(args, 0);
+    match dispatch(vm, &this, &r, SEARCH, &[])? {
+        Dispatch::Done(v) => return Ok(v),
+        Dispatch::Fast(..) => {
+            let s = vm.to_string(&this)?;
+            return super::regexp::string_search(vm, s, &r);
+        }
+        Dispatch::Plain => {}
+    }
+    let s = vm.to_string(&this)?;
+    let rx = regexp_create(vm, &r, "")?;
+    if super::regexp::pristine(vm, &rx, SEARCH).is_some() {
+        return super::regexp::string_search(vm, s, &rx);
+    }
+    invoke_symbol(vm, &rx, SEARCH, &[Value::Str(s)])
 }
 
 fn replace_impl(vm: &mut Vm, this: Value, args: &[Value], all: bool) -> R {
-    let s = this_str(vm, &this)?;
+    let name = if all { "replaceAll" } else { "replace" };
+    coercible(vm, &this, name)?;
+    let search_value = arg(args, 0);
     let rep = arg(args, 1);
-    if let Some((o, data)) = super::regexp::as_regexp(&arg(args, 0)) {
-        return super::regexp::string_replace_regexp(vm, s, &o, &data, &rep, all);
+    if all && !search_value.is_nullish() {
+        require_global(vm, &search_value, name)?;
     }
-    let pat = str_arg(vm, args, 0)?;
+    match dispatch(vm, &this, &search_value, REPLACE, &[rep.clone()])? {
+        Dispatch::Done(v) => return Ok(v),
+        Dispatch::Fast(o, data) => {
+            let s = vm.to_string(&this)?;
+            return super::regexp::string_replace_regexp(vm, s, &o, &data, &rep, all);
+        }
+        Dispatch::Plain => {}
+    }
+    let s = vm.to_string(&this)?;
+    let pat = vm.to_string(&search_value)?;
+    let rep = if rep.is_callable() {
+        rep
+    } else {
+        Value::Str(vm.to_string(&rep)?)
+    };
     let mut out = String::new();
     let mut last = 0;
     if pat.is_empty() {
-        let r = replacement(vm, &rep, "", 0, &s)?;
         if !all {
+            let r = replacement(vm, &rep, "", 0, &s)?;
             return Ok(format!("{r}{s}").into());
         }
-        for (i, c) in s.char_indices() {
+        let units = units16(&s);
+        for (i, u) in units.iter().enumerate() {
             let r = replacement(vm, &rep, "", i, &s)?;
             out.push_str(&r);
-            out.push(c);
+            crate::value::push16(&mut out, &crate::value::from16(&[*u]));
         }
-        let r = replacement(vm, &rep, "", s.len(), &s)?;
+        let r = replacement(vm, &rep, "", units.len(), &s)?;
         out.push_str(&r);
         return Ok(out.into());
     }
@@ -420,10 +610,10 @@ fn replace_impl(vm: &mut Vm, this: Value, args: &[Value], all: bool) -> R {
         out.push_str(&s[last..i]);
         let offset = len16(&s[..i]);
         let r = replacement(vm, &rep, &pat, offset, &s)?;
-        out.push_str(&r);
+        crate::value::push16(&mut out, &r);
         last = i + pat.len();
     }
-    out.push_str(&s[last..]);
+    crate::value::push16(&mut out, &s[last..]);
     Ok(out.into())
 }
 
@@ -444,7 +634,12 @@ fn repeat(vm: &mut Vm, this: Value, args: &[Value]) -> R {
             crate::number::number_to_string(n)
         )));
     }
-    Ok(s.repeat(n as usize).into())
+    let n = n as usize;
+    let mut out = String::with_capacity(s.len() * n);
+    for _ in 0..n {
+        crate::value::push16(&mut out, &s);
+    }
+    Ok(out.into())
 }
 
 fn pad(vm: &mut Vm, this: Value, args: &[Value], start: bool) -> R {
@@ -461,7 +656,7 @@ fn pad(vm: &mut Vm, this: Value, args: &[Value], start: bool) -> R {
     let need = target - n;
     let fill_units = units16(&fill);
     let padding: Vec<u16> = fill_units.iter().cycle().take(need).copied().collect();
-    let padding = String::from_utf16_lossy(&padding);
+    let padding = crate::value::from16(&padding);
     Ok(if start {
         format!("{padding}{s}")
     } else {
@@ -481,7 +676,8 @@ fn pad_end(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 fn concat(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let mut s = this_str(vm, &this)?.to_string();
     for a in args {
-        s.push_str(&vm.to_string(a)?);
+        let x = vm.to_string(a)?;
+        crate::value::push16(&mut s, &x);
     }
     Ok(s.into())
 }

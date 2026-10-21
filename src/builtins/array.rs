@@ -405,10 +405,11 @@ pub fn join_values(vm: &mut Vm, list: &[Value], sep: &str) -> Result<String, Val
     let mut s = String::new();
     for (i, v) in list.iter().enumerate() {
         if i > 0 {
-            s.push_str(sep);
+            crate::value::push16(&mut s, sep);
         }
         if !v.is_nullish() {
-            s.push_str(&vm.to_string(v)?);
+            let piece = vm.to_string(v)?;
+            crate::value::push16(&mut s, &piece);
         }
     }
     Ok(s)

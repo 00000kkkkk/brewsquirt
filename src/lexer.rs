@@ -492,7 +492,9 @@ impl Lexer {
                     }
                     (self.pos, self.line, self.col) = save;
                 }
-                s.push(char::from_u32(v).unwrap_or('\u{fffd}'));
+                let c = char::from_u32(v).unwrap_or_else(|| crate::value::lone_char(v as u16));
+                let mut buf = [0u8; 4];
+                crate::value::push16(s, c.encode_utf8(&mut buf));
             }
             '\r' => {
                 if self.peek() == Some('\n') {

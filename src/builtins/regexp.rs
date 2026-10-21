@@ -1,10 +1,10 @@
 use super::{arg, make_ctor, method};
 use crate::inspect::inspect_plain;
-use crate::object::{IterState, Obj, ObjKind, RegExpObj};
+use crate::object::{Obj, ObjKind, RegExpObj};
 use crate::regexp::{Match, RegexData, byte_index, compile, next_char_boundary, utf16_index};
 use crate::value::{Value, len16};
 use crate::vm::{ErrorKind, Vm};
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 type R = Result<Value, Value>;
@@ -22,7 +22,7 @@ pub fn new_regexp(vm: &Vm, data: Rc<RegexData>) -> Value {
     Value::Object(Obj::new(
         ObjKind::RegExp(RegExpObj {
             data,
-            last_index: Cell::new(0.0),
+            last_index: RefCell::new(Value::Number(0.0)),
         }),
         Some(vm.realm.regexp_proto.clone()),
     ))
@@ -54,17 +54,57 @@ fn this_regexp(vm: &mut Vm, this: &Value) -> Result<(Rc<Obj>, Rc<RegexData>), Va
     })
 }
 
-fn last_index(o: &Obj) -> f64 {
-    match &o.kind {
-        ObjKind::RegExp(r) => r.last_index.get(),
-        _ => 0.0,
-    }
+fn last_index(vm: &mut Vm, o: &Obj) -> Result<f64, Value> {
+    let v = match &o.kind {
+        ObjKind::RegExp(r) => r.last_index.borrow().clone(),
+        _ => Value::Number(0.0),
+    };
+    let n = match v {
+        Value::Number(n) => n,
+        other => vm.to_number(&other)?,
+    };
+    Ok(if n.is_nan() || n <= 0.0 {
+        0.0
+    } else {
+        n.trunc().min(9007199254740991.0)
+    })
 }
 
 fn set_last_index(o: &Obj, v: f64) {
     if let ObjKind::RegExp(r) = &o.kind {
-        r.last_index.set(v);
+        *r.last_index.borrow_mut() = Value::Number(v);
     }
+}
+
+pub fn pristine(vm: &Vm, v: &Value, sym: usize) -> Option<(Rc<Obj>, Rc<RegexData>)> {
+    let (o, data) = as_regexp(v)?;
+    if !o.props.borrow().is_empty()
+        || !o
+            .proto
+            .borrow()
+            .as_ref()
+            .is_some_and(|p| Rc::ptr_eq(p, &vm.realm.regexp_proto))
+    {
+        return None;
+    }
+    let p = vm.pristine.as_ref()?;
+    let rp = vm.realm.regexp_proto.props.borrow();
+    let key = [
+        crate::object::MATCH_KEY,
+        crate::object::MATCH_ALL_KEY,
+        crate::object::REPLACE_KEY,
+        crate::object::SEARCH_KEY,
+        crate::object::SPLIT_KEY,
+    ][sym];
+    let ok = rp.get("exec").is_some_and(|x| x.strict_eq(&p.regexp_exec))
+        && rp
+            .get(key)
+            .is_some_and(|x| x.strict_eq(&p.regexp_symbols[sym]))
+        && rp
+            .get("flags")
+            .is_some_and(|x| x.strict_eq(&p.regexp_flags));
+    drop(rp);
+    ok.then_some((o, data))
 }
 
 fn run_error(vm: &mut Vm, msg: String) -> Value {
@@ -73,16 +113,8 @@ fn run_error(vm: &mut Vm, msg: String) -> Value {
 
 pub fn exec_raw(vm: &mut Vm, obj: &Obj, data: &RegexData, s: &str) -> Result<Option<Match>, Value> {
     let tracks = data.global || data.sticky;
-    let start16 = if tracks {
-        let li = last_index(obj);
-        if li.is_nan() || li < 0.0 {
-            0.0
-        } else {
-            li.trunc()
-        }
-    } else {
-        0.0
-    };
+    let li = last_index(vm, obj)?;
+    let start16 = if tracks { li } else { 0.0 };
     if start16 > len16(s) as f64 {
         if tracks {
             set_last_index(obj, 0.0);
@@ -219,21 +251,6 @@ pub fn string_match(vm: &mut Vm, s: Rc<str>, pattern: &Value) -> R {
         .map(|m| Value::Str(s[m.start..m.end].into()))
         .collect();
     Ok(vm.new_array(list))
-}
-
-pub fn string_match_all(vm: &mut Vm, s: Rc<str>, pattern: &Value) -> R {
-    let (_, data) = coerce_regexp(vm, pattern, "g")?;
-    if !data.global {
-        return Err(
-            vm.type_error("String.prototype.matchAll called with a non-global RegExp argument")
-        );
-    }
-    let found = all_matches(vm, &data, &s)?;
-    let list = found
-        .iter()
-        .map(|m| match_array(vm, &data, &s, m))
-        .collect();
-    Ok(vm.new_iter(IterState::List(list, 0)))
 }
 
 pub fn string_search(vm: &mut Vm, s: Rc<str>, pattern: &Value) -> R {

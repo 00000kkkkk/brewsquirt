@@ -319,7 +319,7 @@ pub fn utf16_index(s: &str, byte: usize) -> usize {
     if s.is_ascii() {
         return byte;
     }
-    s[..byte.min(s.len())].encode_utf16().count()
+    crate::value::len16(&s[..byte.min(s.len())])
 }
 
 pub fn byte_index(s: &str, unit: usize) -> usize {
@@ -331,7 +331,7 @@ pub fn byte_index(s: &str, unit: usize) -> usize {
         if count >= unit {
             return b;
         }
-        count += ch.len_utf16();
+        count += crate::value::char_len16(ch);
     }
     s.len()
 }
@@ -341,4 +341,41 @@ pub fn next_char_boundary(s: &str, byte: usize) -> usize {
         Some(c) => byte + c.len_utf8(),
         None => byte + 1,
     }
+}
+
+pub fn escape_source(src: &str) -> String {
+    if src.is_empty() {
+        return "(?:)".to_string();
+    }
+    let mut out = String::with_capacity(src.len());
+    let mut in_class = false;
+    let mut escaped = false;
+    for c in src.chars() {
+        if escaped {
+            out.push(c);
+            escaped = false;
+            continue;
+        }
+        match c {
+            '\\' => {
+                out.push(c);
+                escaped = true;
+            }
+            '[' => {
+                in_class = true;
+                out.push(c);
+            }
+            ']' => {
+                in_class = false;
+                out.push(c);
+            }
+            '/' if !in_class => out.push_str("\\/"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            c => out.push(c),
+        }
+    }
+    out
 }

@@ -38,11 +38,7 @@ pub fn inspect_plain(v: &Value) -> String {
 }
 
 fn len16(s: &str) -> usize {
-    if s.is_ascii() {
-        s.len()
-    } else {
-        s.encode_utf16().count()
-    }
+    crate::value::len16(s)
 }
 
 fn width(s: &str) -> usize {
@@ -97,6 +93,9 @@ pub fn quote(s: &str) -> String {
             }
             c if (c as u32) < 0x20 || c as u32 == 0x7f => {
                 out.push_str(&format!("\\x{:02X}", c as u32));
+            }
+            c if crate::value::is_lone(c) => {
+                out.push_str(&format!("\\u{:04X}", crate::value::lone_unit(c)));
             }
             c => out.push(c),
         }

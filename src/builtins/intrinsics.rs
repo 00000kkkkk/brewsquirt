@@ -159,8 +159,21 @@ fn regexp_prop<const I: usize>(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
             _ => Value::Undefined,
         });
     }
-    if let ObjKind::RegExp(_) = &o.kind {
-        return Ok(vm.get_obj(o, name));
+    if let ObjKind::RegExp(r) = &o.kind {
+        let d = &r.data;
+        let flag = |c: char| Value::Bool(d.flags.contains(c));
+        return Ok(match name {
+            "source" => crate::regexp::escape_source(&d.source).into(),
+            "flags" => Value::Str(d.flags.clone()),
+            "global" => flag('g'),
+            "ignoreCase" => flag('i'),
+            "multiline" => flag('m'),
+            "dotAll" => flag('s'),
+            "unicode" => flag('u'),
+            "unicodeSets" => flag('v'),
+            "sticky" => flag('y'),
+            _ => flag('d'),
+        });
     }
     if name == "flags" {
         let mut out = String::new();

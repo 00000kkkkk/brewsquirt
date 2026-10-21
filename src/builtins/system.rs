@@ -275,7 +275,8 @@ fn write_chunk(vm: &mut Vm, args: &[Value]) -> Result<Vec<u8>, Value> {
     if let Some(b) = super::binary::buffer_source_bytes(&v) {
         return Ok(b);
     }
-    Ok(vm.to_string(&v)?.as_bytes().to_vec())
+    let s = vm.to_string(&v)?;
+    Ok(crate::value::utf8_text(&s).as_bytes().to_vec())
 }
 
 fn call_write_callback(vm: &mut Vm, args: &[Value]) {

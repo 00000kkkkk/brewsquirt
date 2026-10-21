@@ -178,24 +178,99 @@ impl Value {
     }
 }
 
-pub fn is_well_formed(_s: &str) -> bool {
-    true
+pub const LONE_BASE: u32 = 0x10F800;
+
+pub fn is_lone(c: char) -> bool {
+    (c as u32) >= LONE_BASE
+}
+
+pub fn lone_unit(c: char) -> u16 {
+    ((c as u32) - LONE_BASE + 0xD800) as u16
+}
+
+pub fn lone_char(u: u16) -> char {
+    char::from_u32(LONE_BASE + (u as u32).saturating_sub(0xD800)).unwrap_or('\u{fffd}')
+}
+
+pub fn char_len16(c: char) -> usize {
+    if is_lone(c) { 1 } else { c.len_utf16() }
+}
+
+fn has_lone(s: &str) -> bool {
+    s.as_bytes()
+        .windows(2)
+        .any(|w| w[0] == 0xF4 && w[1] >= 0x8F)
+}
+
+pub fn is_well_formed(s: &str) -> bool {
+    s.is_ascii() || !s.chars().any(is_lone)
 }
 
 pub fn to_well_formed(s: &str) -> String {
-    s.to_string()
+    s.chars()
+        .map(|c| if is_lone(c) { '\u{fffd}' } else { c })
+        .collect()
+}
+
+pub fn utf8_text(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.is_ascii() || !has_lone(s) {
+        std::borrow::Cow::Borrowed(s)
+    } else {
+        std::borrow::Cow::Owned(to_well_formed(s))
+    }
+}
+
+pub fn from16(u: &[u16]) -> String {
+    char::decode_utf16(u.iter().copied())
+        .map(|r| r.unwrap_or_else(|e| lone_char(e.unpaired_surrogate())))
+        .collect()
+}
+
+pub fn push16(dst: &mut String, src: &str) {
+    let b = dst.as_bytes();
+    if src.as_bytes().first() == Some(&0xF4) && b.len() >= 4 && b[b.len() - 4] == 0xF4 {
+        if let (Some(l), Some(f)) = (dst.chars().next_back(), src.chars().next()) {
+            if is_lone(l) && is_lone(f) {
+                let (hi, lo) = (lone_unit(l), lone_unit(f));
+                if (0xD800..0xDC00).contains(&hi) && (0xDC00..0xE000).contains(&lo) {
+                    let cp = 0x10000 + (((hi - 0xD800) as u32) << 10) + (lo - 0xDC00) as u32;
+                    dst.truncate(dst.len() - l.len_utf8());
+                    dst.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
+                    dst.push_str(&src[f.len_utf8()..]);
+                    return;
+                }
+            }
+        }
+    }
+    dst.push_str(src);
+}
+
+pub fn concat16(a: &str, b: &str) -> String {
+    let mut s = String::with_capacity(a.len() + b.len());
+    s.push_str(a);
+    push16(&mut s, b);
+    s
 }
 
 pub fn len16(s: &str) -> usize {
     if s.is_ascii() {
         s.len()
     } else {
-        s.encode_utf16().count()
+        s.chars().map(char_len16).sum()
     }
 }
 
 pub fn units16(s: &str) -> Vec<u16> {
-    s.encode_utf16().collect()
+    let mut out = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        if is_lone(c) {
+            out.push(lone_unit(c));
+        } else {
+            let mut buf = [0u16; 2];
+            out.extend_from_slice(c.encode_utf16(&mut buf));
+        }
+    }
+    out
 }
 
 pub fn slice16(s: &str, start: usize, end: usize) -> String {
@@ -214,30 +289,33 @@ pub fn slice16(s: &str, start: usize, end: usize) -> String {
     if start >= end {
         return String::new();
     }
-    String::from_utf16_lossy(&u[start..end])
+    from16(&u[start..end])
 }
 
 pub fn code_unit_at(s: &str, i: usize) -> Option<u16> {
     if s.is_ascii() {
         return s.as_bytes().get(i).map(|b| *b as u16);
     }
-    s.encode_utf16().nth(i)
+    let mut pos = 0usize;
+    for c in s.chars() {
+        let n = char_len16(c);
+        if i < pos + n {
+            if is_lone(c) {
+                return Some(lone_unit(c));
+            }
+            let mut buf = [0u16; 2];
+            return Some(c.encode_utf16(&mut buf)[i - pos]);
+        }
+        pos += n;
+    }
+    None
 }
 
 pub fn char_at16(s: &str, i: usize) -> Option<String> {
     if s.is_ascii() {
         return s.get(i..i + 1).map(|c| c.to_string());
     }
-    let u = units16(s);
-    let c = *u.get(i)?;
-    if (0xd800..0xdc00).contains(&c) {
-        if let Some(&low) = u.get(i + 1) {
-            if (0xdc00..0xe000).contains(&low) {
-                return Some(String::from_utf16_lossy(&[c]));
-            }
-        }
-    }
-    Some(String::from_utf16_lossy(&[c]))
+    code_unit_at(s, i).map(|u| from16(&[u]))
 }
 
 pub fn index_of16(hay: &str, needle: &str, from: usize) -> Option<usize> {
@@ -276,6 +354,6 @@ pub fn compare_strings(a: &str, b: &str) -> std::cmp::Ordering {
     if a.is_ascii() && b.is_ascii() {
         a.cmp(b)
     } else {
-        a.encode_utf16().cmp(b.encode_utf16())
+        units16(a).cmp(&units16(b))
     }
 }

@@ -6,7 +6,7 @@ const EXTRAS: &str = r##"
 const define = (obj, name, value) =>
   Object.defineProperty(obj, name, { value, writable: true, enumerable: false, configurable: true })
 const defineAll = (obj, methods) => {
-  for (const [name, fn] of Object.entries(methods)) define(obj, name, fn)
+  for (const name of Reflect.ownKeys(methods)) define(obj, name, methods[name])
 }
 const named = (name, fn) => Object.defineProperty(fn, "name", { value: name, configurable: true })
 const isCallable = (f) => typeof f === "function"
@@ -465,6 +465,318 @@ class FinalizationRegistry {
 }
 Object.defineProperty(FinalizationRegistry.prototype, Symbol.toStringTag, { value: "FinalizationRegistry", configurable: true })
 define(globalThis, "FinalizationRegistry", FinalizationRegistry)
+
+const RegExpProto = RegExp.prototype
+const builtinExec = RegExpProto.exec
+const isObj = (v) => v !== null && (typeof v === "object" || typeof v === "function")
+const reLength = (v) => {
+  const n = Math.trunc(Number(v)) || 0
+  return n <= 0 ? 0 : Math.min(n, 2 ** 53 - 1)
+}
+const reInt = (v) => {
+  const n = Number(v)
+  if (Number.isNaN(n)) return 0
+  return Math.trunc(n)
+}
+const requireObj = (R, name) => {
+  if (!isObj(R)) throw new TypeError(`RegExp.prototype.${name} called on incompatible receiver ${String(R)}`)
+  return R
+}
+const setLastIndex = (R, v) => {
+  if (!Reflect.set(R, "lastIndex", v)) throw new TypeError("Cannot assign to read only property 'lastIndex' of object")
+}
+const regExpExec = (R, S) => {
+  const exec = R.exec
+  if (typeof exec === "function") {
+    const result = exec.call(R, S)
+    if (result !== null && !isObj(result)) throw new TypeError("exec result must be an object or null")
+    return result
+  }
+  return builtinExec.call(R, S)
+}
+const advance = (S, index, unicode) => {
+  if (!unicode || index + 1 >= S.length) return index + 1
+  const c = S.codePointAt(index)
+  return index + (c > 0xffff ? 2 : 1)
+}
+const speciesOf = (O, D) => {
+  const C = O.constructor
+  if (C === undefined) return D
+  if (!isObj(C)) throw new TypeError("object.constructor is not an object")
+  const S = C[Symbol.species]
+  if (S === undefined || S === null) return D
+  if (typeof S === "function") return S
+  throw new TypeError("object.constructor[Symbol.species] is not a constructor")
+}
+const getSubstitution = (matched, str, position, captures, namedCaptures, replacement) => {
+  const m = captures.length
+  const tailPos = position + matched.length
+  let result = ""
+  let i = 0
+  while (i < replacement.length) {
+    const c = replacement[i]
+    if (c !== "$" || i + 1 >= replacement.length) {
+      result += c
+      i++
+      continue
+    }
+    const n = replacement[i + 1]
+    if (n === "$") {
+      result += "$"
+      i += 2
+    } else if (n === "&") {
+      result += matched
+      i += 2
+    } else if (n === "`") {
+      result += str.slice(0, position)
+      i += 2
+    } else if (n === "'") {
+      if (tailPos < str.length) result += str.slice(tailPos)
+      i += 2
+    } else if (n >= "0" && n <= "9") {
+      const d1 = n.charCodeAt(0) - 48
+      const n2 = replacement[i + 2]
+      const hasTwo = n2 !== undefined && n2 >= "0" && n2 <= "9"
+      const two = hasTwo ? d1 * 10 + (n2.charCodeAt(0) - 48) : -1
+      if (hasTwo && two >= 1 && two <= m) {
+        const cap = captures[two - 1]
+        if (cap !== undefined) result += cap
+        i += 3
+      } else if (d1 >= 1 && d1 <= m) {
+        const cap = captures[d1 - 1]
+        if (cap !== undefined) result += cap
+        i += 2
+      } else {
+        result += "$"
+        i += 1
+      }
+    } else if (n === "<") {
+      const close = replacement.indexOf(">", i + 2)
+      if (namedCaptures === undefined || close < 0) {
+        result += "$<"
+        i += 2
+      } else {
+        const groupName = replacement.slice(i + 2, close)
+        const capture = namedCaptures[groupName]
+        if (capture !== undefined) result += String(capture)
+        i = close + 1
+      }
+    } else {
+      result += "$"
+      i += 1
+    }
+  }
+  return result
+}
+
+const RegExpStringIteratorPrototype = Object.create(IteratorPrototype, {
+  next: {
+    value: named("next", function () {
+      const O = this
+      if (!isObj(O) || !(STATE in O)) throw new TypeError("next method called on incompatible receiver")
+      const st = O[STATE]
+      if (st.done) return { value: undefined, done: true }
+      const match = regExpExec(st.R, st.S)
+      if (match === null) {
+        st.done = true
+        return { value: undefined, done: true }
+      }
+      if (!st.global) {
+        st.done = true
+        return { value: match, done: false }
+      }
+      const matchStr = String(match[0])
+      if (matchStr === "") {
+        const thisIndex = reLength(st.R.lastIndex)
+        setLastIndex(st.R, advance(st.S, thisIndex, st.unicode))
+      }
+      return { value: match, done: false }
+    }),
+    writable: true,
+    configurable: true,
+  },
+  [Symbol.toStringTag]: { value: "RegExp String Iterator", configurable: true },
+})
+const STATE = Symbol("regexp iterator state")
+
+defineAll(RegExpProto, {
+  test(S) {
+    const R = requireObj(this, "test")
+    return regExpExec(R, String(S)) !== null
+  },
+  [Symbol.match](string) {
+    const rx = requireObj(this, "[Symbol.match]")
+    const S = String(string)
+    const flags = String(rx.flags)
+    if (!flags.includes("g")) return regExpExec(rx, S)
+    const fullUnicode = flags.includes("u") || flags.includes("v")
+    setLastIndex(rx, 0)
+    const A = []
+    let n = 0
+    for (;;) {
+      const result = regExpExec(rx, S)
+      if (result === null) return n === 0 ? null : A
+      const matchStr = String(result[0])
+      A[n++] = matchStr
+      if (matchStr === "") {
+        const thisIndex = reLength(rx.lastIndex)
+        setLastIndex(rx, advance(S, thisIndex, fullUnicode))
+      }
+    }
+  },
+  [Symbol.matchAll](string) {
+    const R = requireObj(this, "[Symbol.matchAll]")
+    const S = String(string)
+    const C = speciesOf(R, RegExp)
+    const flags = String(R.flags)
+    const matcher = new C(R, flags)
+    setLastIndex(matcher, reLength(R.lastIndex))
+    const it = Object.create(RegExpStringIteratorPrototype)
+    Object.defineProperty(it, STATE, {
+      value: { R: matcher, S, global: flags.includes("g"), unicode: flags.includes("u") || flags.includes("v"), done: false },
+    })
+    return it
+  },
+  [Symbol.replace](string, replaceValue) {
+    const rx = requireObj(this, "[Symbol.replace]")
+    const S = String(string)
+    const lengthS = S.length
+    const functionalReplace = typeof replaceValue === "function"
+    if (!functionalReplace) replaceValue = String(replaceValue)
+    const flags = String(rx.flags)
+    const global = flags.includes("g")
+    let fullUnicode = false
+    if (global) {
+      fullUnicode = flags.includes("u") || flags.includes("v")
+      setLastIndex(rx, 0)
+    }
+    const results = []
+    for (;;) {
+      const result = regExpExec(rx, S)
+      if (result === null) break
+      results.push(result)
+      if (!global) break
+      const matchStr = String(result[0])
+      if (matchStr === "") {
+        const thisIndex = reLength(rx.lastIndex)
+        setLastIndex(rx, advance(S, thisIndex, fullUnicode))
+      }
+    }
+    let accumulated = ""
+    let nextSourcePosition = 0
+    for (const result of results) {
+      const resultLength = reLength(result.length)
+      const nCaptures = Math.max(resultLength - 1, 0)
+      const matched = String(result[0])
+      const matchLength = matched.length
+      const position = Math.max(Math.min(reInt(result.index), lengthS), 0)
+      const captures = []
+      for (let n = 1; n <= nCaptures; n++) {
+        let capN = result[n]
+        if (capN !== undefined) capN = String(capN)
+        captures.push(capN)
+      }
+      let namedCaptures = result.groups
+      let replacement
+      if (functionalReplace) {
+        const args = [matched, ...captures, position, S]
+        if (namedCaptures !== undefined) args.push(namedCaptures)
+        replacement = String(replaceValue(...args))
+      } else {
+        if (namedCaptures !== undefined) namedCaptures = Object(namedCaptures)
+        replacement = getSubstitution(matched, S, position, captures, namedCaptures, replaceValue)
+      }
+      if (position >= nextSourcePosition) {
+        accumulated += S.slice(nextSourcePosition, position) + replacement
+        nextSourcePosition = position + matchLength
+      }
+    }
+    if (nextSourcePosition >= lengthS) return accumulated
+    return accumulated + S.slice(nextSourcePosition)
+  },
+  [Symbol.search](string) {
+    const rx = requireObj(this, "[Symbol.search]")
+    const S = String(string)
+    const previousLastIndex = rx.lastIndex
+    if (!Object.is(previousLastIndex, 0)) setLastIndex(rx, 0)
+    const result = regExpExec(rx, S)
+    const currentLastIndex = rx.lastIndex
+    if (!Object.is(currentLastIndex, previousLastIndex)) setLastIndex(rx, previousLastIndex)
+    return result === null ? -1 : result.index
+  },
+  [Symbol.split](string, limit) {
+    const rx = requireObj(this, "[Symbol.split]")
+    const S = String(string)
+    const C = speciesOf(rx, RegExp)
+    const flags = String(rx.flags)
+    const unicodeMatching = flags.includes("u") || flags.includes("v")
+    const newFlags = flags.includes("y") ? flags : flags + "y"
+    const splitter = new C(rx, newFlags)
+    const A = []
+    let lengthA = 0
+    const lim = limit === undefined ? 2 ** 32 - 1 : Number(limit) >>> 0
+    if (lim === 0) return A
+    const size = S.length
+    if (size === 0) {
+      const z = regExpExec(splitter, S)
+      if (z !== null) return A
+      A[0] = S
+      return A
+    }
+    let p = 0
+    let q = p
+    while (q < size) {
+      setLastIndex(splitter, q)
+      const z = regExpExec(splitter, S)
+      if (z === null) {
+        q = advance(S, q, unicodeMatching)
+        continue
+      }
+      const e = Math.min(reLength(splitter.lastIndex), size)
+      if (e === p) {
+        q = advance(S, q, unicodeMatching)
+        continue
+      }
+      A[lengthA++] = S.slice(p, q)
+      if (lengthA === lim) return A
+      p = e
+      const numberOfCaptures = Math.max(reLength(z.length) - 1, 0)
+      for (let i = 1; i <= numberOfCaptures; i++) {
+        A[lengthA++] = z[i]
+        if (lengthA === lim) return A
+      }
+      q = p
+    }
+    A[lengthA] = S.slice(p, size)
+    return A
+  },
+})
+for (const [key, name] of [
+  [Symbol.match, "[Symbol.match]"],
+  [Symbol.matchAll, "[Symbol.matchAll]"],
+  [Symbol.replace, "[Symbol.replace]"],
+  [Symbol.search, "[Symbol.search]"],
+  [Symbol.split, "[Symbol.split]"],
+]) {
+  named(name, RegExpProto[key])
+}
+Object.defineProperty(RegExpProto, "flags", {
+  get: named("get flags", function () {
+    const R = this
+    if (!isObj(R)) throw new TypeError("RegExp.prototype.flags getter called on non-object")
+    let result = ""
+    if (R.hasIndices) result += "d"
+    if (R.global) result += "g"
+    if (R.ignoreCase) result += "i"
+    if (R.multiline) result += "m"
+    if (R.dotAll) result += "s"
+    if (R.unicode) result += "u"
+    if (R.unicodeSets) result += "v"
+    if (R.sticky) result += "y"
+    return result
+  }),
+  configurable: true,
+})
 
 class SuppressedError extends Error {
   constructor(error, suppressed, message) {

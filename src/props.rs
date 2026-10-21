@@ -127,6 +127,9 @@ impl Vm {
                     return Some((Value::Number(a.borrow().len() as f64), attrs));
                 }
             }
+            ObjKind::RegExp(r) if key == "lastIndex" => {
+                return Some((r.last_index.borrow().clone(), NON_ENUM | NON_CONFIG));
+            }
             ObjKind::Primitive(Value::Str(s)) => {
                 if key == "length" {
                     return Some((
@@ -332,6 +335,10 @@ impl Vm {
                     }
                     return Ok(());
                 }
+            }
+            ObjKind::RegExp(r) if &**key == "lastIndex" => {
+                *r.last_index.borrow_mut() = raw;
+                return Ok(());
             }
             ObjKind::Primitive(Value::Str(s)) => {
                 if &**key == "length"

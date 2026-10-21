@@ -60,6 +60,9 @@ impl ErrorKind {
 
 pub struct Pristine {
     array_iter: Value,
+    pub(crate) regexp_exec: Value,
+    pub(crate) regexp_symbols: [Value; 5],
+    pub(crate) regexp_flags: Value,
     map_iter: Value,
     set_iter: Value,
     string_iter: Value,
@@ -367,6 +370,8 @@ impl Vm {
         builtins::hide_builtin_members(&mut vm);
         builtins::array::capture_species(&mut vm);
         vm.capture_pristine();
+        vm.accessors_used = false;
+        vm.readonly_used = false;
         vm
     }
 
@@ -581,12 +586,12 @@ impl Vm {
     }
 
     pub fn write_out(&mut self, s: &str) {
-        let _ = self.out.write_all(s.as_bytes());
+        let _ = self.out.write_all(crate::value::utf8_text(s).as_bytes());
     }
 
     pub fn write_err(&mut self, s: &str) {
         let _ = self.out.flush();
-        let _ = self.err.write_all(s.as_bytes());
+        let _ = self.err.write_all(crate::value::utf8_text(s).as_bytes());
         let _ = self.err.flush();
     }
 
@@ -907,7 +912,7 @@ impl Vm {
                     self.to_string(&p)?
                 }
             };
-            self.builders[i].1.push_str(&piece);
+            crate::value::push16(&mut self.builders[i].1, &piece);
             return Ok(());
         }
         let current = self.stack[abs].clone();
@@ -932,13 +937,13 @@ impl Vm {
             if total >= 256 && !captured {
                 let mut buf = String::with_capacity(total * 2);
                 buf.push_str(cur);
-                buf.push_str(&piece);
+                crate::value::push16(&mut buf, &piece);
                 self.stack[abs] = Value::Undefined;
                 self.builders.push((abs, buf));
             } else {
                 let mut s = String::with_capacity(total);
                 s.push_str(cur);
-                s.push_str(&piece);
+                crate::value::push16(&mut s, &piece);
                 self.stack[abs] = Value::Str(s.into());
             }
             return Ok(());
@@ -1464,22 +1469,8 @@ impl Vm {
             ObjKind::Set(s) if key == "size" => {
                 return Value::Number(s.borrow().len() as f64);
             }
-            ObjKind::RegExp(r) => {
-                let d = &r.data;
-                let flag = |c: char| Value::Bool(d.flags.contains(c));
-                match key {
-                    "lastIndex" => return Value::Number(r.last_index.get()),
-                    "source" => return Value::Str(d.source.clone()),
-                    "flags" => return Value::Str(d.flags.clone()),
-                    "global" => return flag('g'),
-                    "ignoreCase" => return flag('i'),
-                    "multiline" => return flag('m'),
-                    "sticky" => return flag('y'),
-                    "unicode" => return flag('u'),
-                    "dotAll" => return flag('s'),
-                    "hasIndices" => return flag('d'),
-                    _ => {}
-                }
+            ObjKind::RegExp(r) if key == "lastIndex" => {
+                return r.last_index.borrow().clone();
             }
             _ => {}
         }
@@ -1627,8 +1618,7 @@ impl Vm {
                 }
                 if let ObjKind::RegExp(r) = &o.kind {
                     if &*key == "lastIndex" {
-                        let n = self.to_number(&val)?;
-                        r.last_index.set(n);
+                        *r.last_index.borrow_mut() = val;
                         return Ok(());
                     }
                 }
@@ -1935,7 +1925,7 @@ impl Vm {
             let sb = self.to_string(&pb)?;
             let mut s = String::with_capacity(sa.len() + sb.len());
             s.push_str(&sa);
-            s.push_str(&sb);
+            crate::value::push16(&mut s, &sb);
             return Ok(Value::Str(s.into()));
         }
         if matches!(pa, Value::BigInt(_)) || matches!(pb, Value::BigInt(_)) {
@@ -2130,7 +2120,17 @@ impl Vm {
             .generator_proto
             .get_chain("next")
             .unwrap_or_default();
+        let rp = self.realm.regexp_proto.clone();
         self.pristine = Some(Box::new(Pristine {
+            regexp_exec: own(&rp, "exec"),
+            regexp_flags: own(&rp, "flags"),
+            regexp_symbols: [
+                own(&rp, crate::object::MATCH_KEY),
+                own(&rp, crate::object::MATCH_ALL_KEY),
+                own(&rp, crate::object::REPLACE_KEY),
+                own(&rp, crate::object::SEARCH_KEY),
+                own(&rp, crate::object::SPLIT_KEY),
+            ],
             array_iter: own(&self.realm.array_proto, ITER_KEY),
             map_iter: own(&self.realm.map_proto, ITER_KEY),
             set_iter: own(&self.realm.set_proto, ITER_KEY),
@@ -3240,10 +3240,7 @@ impl Vm {
                     let r = match (&a, &b) {
                         (Value::Number(x), Value::Number(y)) => Value::Number(x + y),
                         (Value::Str(x), Value::Str(y)) => {
-                            let mut s = String::with_capacity(x.len() + y.len());
-                            s.push_str(x);
-                            s.push_str(y);
-                            Value::Str(s.into())
+                            Value::Str(crate::value::concat16(x, y).into())
                         }
                         _ => tri!(self.add_slow(&a, &b)),
                     };
@@ -3872,10 +3869,10 @@ impl Vm {
                     let mut s = String::new();
                     for p in &parts {
                         match p {
-                            Value::Str(x) => s.push_str(x),
+                            Value::Str(x) => crate::value::push16(&mut s, x),
                             _ => {
                                 let x = tri!(self.to_string(p));
-                                s.push_str(&x);
+                                crate::value::push16(&mut s, &x);
                             }
                         }
                     }

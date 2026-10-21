@@ -139,7 +139,10 @@ fn te_encode(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         Value::Undefined => Rc::from(""),
         v => vm.to_string(&v)?,
     };
-    Ok(new_uint8(vm, s.as_bytes().to_vec()))
+    Ok(new_uint8(
+        vm,
+        crate::value::utf8_text(&s).as_bytes().to_vec(),
+    ))
 }
 
 fn te_encode_into(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

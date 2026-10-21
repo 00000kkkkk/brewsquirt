@@ -1114,11 +1114,17 @@ fn decode(vm: &mut Vm, s: &str, keep: &str) -> R {
 
 fn encode_uri_component(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let s = vm.to_string(&arg(args, 0))?;
+    if !crate::value::is_well_formed(&s) {
+        return Err(vm.make_error(ErrorKind::URIError, "URI malformed"));
+    }
     Ok(encode(&s, "").into())
 }
 
 fn encode_uri(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let s = vm.to_string(&arg(args, 0))?;
+    if !crate::value::is_well_formed(&s) {
+        return Err(vm.make_error(ErrorKind::URIError, "URI malformed"));
+    }
     Ok(encode(&s, URI_RESERVED).into())
 }
 

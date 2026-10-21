@@ -26,6 +26,9 @@ pub fn quote_json(s: &str, out: &mut String) {
             '\u{8}' => out.push_str("\\b"),
             '\u{c}' => out.push_str("\\f"),
             c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if crate::value::is_lone(c) => {
+                out.push_str(&format!("\\u{:04x}", crate::value::lone_unit(c)))
+            }
             c => out.push(c),
         }
     }
