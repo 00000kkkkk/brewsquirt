@@ -377,11 +377,6 @@ impl Vm {
                 self.reject_promise(p, e);
                 return;
             }
-            if matches!(o.kind, ObjKind::Promise(_)) {
-                let o = o.clone();
-                self.add_reaction(&o, Reaction::Forward(p.clone()));
-                return;
-            }
             match self.get_prop(&v, "then") {
                 Err(e) => {
                     self.reject_promise(p, e);
@@ -475,12 +470,13 @@ impl Vm {
     }
 
     pub fn resolving_functions(&self, p: &Rc<Obj>) -> (Value, Value) {
+        let record = Value::Object(Obj::new(ObjKind::Ordinary, None));
         let make = |target: &Value| {
             Value::Object(Obj::new(
                 ObjKind::Bound(Box::new(Bound {
                     target: target.clone(),
                     this: Value::Object(p.clone()),
-                    args: Vec::new(),
+                    args: vec![record.clone()],
                 })),
                 Some(self.realm.function_proto.clone()),
             ))

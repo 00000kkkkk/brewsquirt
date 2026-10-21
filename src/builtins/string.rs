@@ -426,7 +426,13 @@ fn split(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     coercible(vm, &this, "split")?;
     let separator = arg(args, 0);
     let limit_arg = arg(args, 1);
-    match dispatch(vm, &this, &separator, SPLIT, std::slice::from_ref(&limit_arg))? {
+    match dispatch(
+        vm,
+        &this,
+        &separator,
+        SPLIT,
+        std::slice::from_ref(&limit_arg),
+    )? {
         Dispatch::Done(v) => return Ok(v),
         Dispatch::Fast(_, data) => {
             let s = vm.to_string(&this)?;
@@ -569,7 +575,13 @@ fn replace_impl(vm: &mut Vm, this: Value, args: &[Value], all: bool) -> R {
     if all && !search_value.is_nullish() {
         require_global(vm, &search_value, name)?;
     }
-    match dispatch(vm, &this, &search_value, REPLACE, std::slice::from_ref(&rep))? {
+    match dispatch(
+        vm,
+        &this,
+        &search_value,
+        REPLACE,
+        std::slice::from_ref(&rep),
+    )? {
         Dispatch::Done(v) => return Ok(v),
         Dispatch::Fast(o, data) => {
             let s = vm.to_string(&this)?;

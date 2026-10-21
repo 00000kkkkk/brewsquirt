@@ -1098,6 +1098,11 @@ impl Obj {
                     .as_object()
                     .and_then(|o| o.function_name())
                     .unwrap_or_else(|| "".into());
+                let resolver = inner.is_empty()
+                    && matches!(&b.this, Value::Object(p) if matches!(p.kind, ObjKind::Promise(_)));
+                if resolver {
+                    return Some("".into());
+                }
                 Some(format!("bound {inner}").into())
             }
             _ => None,

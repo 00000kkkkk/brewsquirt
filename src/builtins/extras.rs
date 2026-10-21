@@ -375,9 +375,6 @@ define(Array, "fromAsync", named("fromAsync", async function fromAsync(items, ma
   return out
 }))
 
-define(Promise, "try", named("try", function (fn, ...args) {
-  return new Promise((resolve) => resolve(fn(...args)))
-}))
 
 Object.defineProperty(Array, Symbol.species, { get: Object.defineProperty(function () { return this }, "name", { value: "get [Symbol.species]" }), configurable: true })
 for (const C of [Map, Set, Promise, RegExp, ArrayBuffer]) {
