@@ -123,6 +123,7 @@ pub enum Op {
     StoreLocal(u32),
     StoreUpval(u32),
     StoreProp(u32),
+    GetAsyncIter,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -1,0 +1,87 @@
+const wait = (ms, v) => new Promise((resolve) => setTimeout(() => resolve(v), ms))
+
+async function* ticker(n) {
+  for (let i = 1; i <= n; i++) {
+    await wait(2)
+    yield i
+  }
+  return "done"
+}
+
+async function* mapAsync(source, f) {
+  for await (const x of source) yield f(x)
+}
+
+async function* concat(...sources) {
+  for (const s of sources) yield* s
+}
+
+async function main() {
+  const seen = []
+  for await (const t of ticker(3)) seen.push(t)
+  console.log("ticker", seen)
+
+  const gen = ticker(2)
+  console.log(await gen.next(), await gen.next(), await gen.next(), await gen.next())
+
+  const doubled = []
+  for await (const x of mapAsync(ticker(3), (v) => v * 10)) doubled.push(x)
+  console.log("mapped", doubled)
+
+  const mixed = []
+  for await (const v of [1, Promise.resolve(2), wait(1, 3)]) mixed.push(v)
+  console.log("sync iterable", mixed)
+
+  const all = []
+  for await (const v of concat(ticker(2), ["a", "b"])) all.push(v)
+  console.log("concat", all)
+
+  const early = ticker(10)
+  for await (const v of early) {
+    if (v === 2) break
+  }
+  console.log("broke early")
+
+  async function* failing() {
+    yield 1
+    throw new Error("stream broke")
+  }
+  try {
+    for await (const v of failing()) console.log("got", v)
+  } catch (e) {
+    console.log("caught", e.message)
+  }
+
+  const queued = ticker(3)
+  const results = await Promise.all([queued.next(), queued.next(), queued.next(), queued.next()])
+  console.log("queued", results.map((r) => (r.done ? `done:${r.value}` : r.value)))
+
+  const custom = {
+    [Symbol.asyncIterator]() {
+      let i = 0
+      return {
+        next: async () => (i < 2 ? { value: `c${i++}`, done: false } : { value: undefined, done: true }),
+      }
+    },
+  }
+  const fromCustom = []
+  for await (const v of custom) fromCustom.push(v)
+  console.log("custom", fromCustom)
+
+  class Feed {
+    constructor(items) {
+      this.items = items
+    }
+    async *[Symbol.asyncIterator]() {
+      for (const item of this.items) {
+        await null
+        yield item.toUpperCase()
+      }
+    }
+  }
+  const feed = []
+  for await (const v of new Feed(["x", "y"])) feed.push(v)
+  console.log("class", feed, typeof ticker(1)[Symbol.asyncIterator])
+}
+
+main().then(() => console.log("end"))

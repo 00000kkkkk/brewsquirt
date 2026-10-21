@@ -136,7 +136,20 @@ fn obj_edges(o: &Obj, f: &mut dyn FnMut(Edge<'_>)) {
         }
     }
     match &o.kind {
-        ObjKind::Ordinary | ObjKind::Error | ObjKind::Native(_) | ObjKind::RegExp(_) => {}
+        ObjKind::Ordinary
+        | ObjKind::Error
+        | ObjKind::Native(_)
+        | ObjKind::RegExp(_)
+        | ObjKind::Date(_)
+        | ObjKind::WeakSet(_)
+        | ObjKind::WeakRef(_) => {}
+        ObjKind::WeakMap(m) => {
+            if let Ok(m) = m.try_borrow() {
+                for (_, v) in m.values() {
+                    value_edge(v, f);
+                }
+            }
+        }
         ObjKind::Array(a) => {
             if let Ok(a) = a.try_borrow() {
                 for v in a.iter() {
@@ -219,6 +232,12 @@ fn obj_edges(o: &Obj, f: &mut dyn FnMut(Edge<'_>)) {
             }
             if let Some(p) = &co.promise {
                 f(Edge::Obj(p));
+            }
+            if let Ok(q) = co.queue.try_borrow() {
+                for r in q.iter() {
+                    value_edge(&r.value, f);
+                    f(Edge::Obj(&r.promise));
+                }
             }
         }
     }
@@ -306,11 +325,19 @@ fn clear(n: &Node, grave: &mut Graveyard) {
                         grave.maps.push(Box::new(std::mem::take(&mut p.reactions)));
                     }
                 }
+                ObjKind::WeakMap(m) => {
+                    if let Ok(mut m) = m.try_borrow_mut() {
+                        grave.maps.push(Box::new(std::mem::take(&mut *m)));
+                    }
+                }
                 ObjKind::Coroutine(co) => {
                     if let Ok(mut saved) = co.saved.try_borrow_mut() {
                         if let Some(sf) = saved.take() {
                             grave.frames.push(sf);
                         }
+                    }
+                    if let Ok(mut q) = co.queue.try_borrow_mut() {
+                        grave.maps.push(Box::new(std::mem::take(&mut *q)));
                     }
                 }
                 _ => {}

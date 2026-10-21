@@ -308,11 +308,10 @@ impl Parser {
                 let line = self.line();
                 self.advance();
                 self.advance();
-                if self.is(P::Star) {
-                    return Err(self.error("async generators are not supported yet"));
-                }
+                let is_generator = self.eat(P::Star);
                 let name = self.binding_ident()?;
-                let f = self.function_full(Some(name), FuncKind::Normal, line, true, false)?;
+                let f =
+                    self.function_full(Some(name), FuncKind::Normal, line, true, is_generator)?;
                 Ok(StmtKind::Function(f))
             }
             Some("class") => Ok(StmtKind::Class(self.class(true)?)),
@@ -503,8 +502,14 @@ impl Parser {
 
     fn for_statement(&mut self) -> R<StmtKind> {
         self.advance();
-        if self.is_kw("await") {
-            return Err(self.error("for await is not supported yet"));
+        let is_await = self.is_kw("await");
+        if is_await {
+            if !self.in_async && self.fn_depth > 0 {
+                return Err(self.error(
+                    "for await is only valid in async functions and the top level of modules",
+                ));
+            }
+            self.advance();
         }
         self.expect(P::LParen)?;
         let init_line = self.line();
@@ -529,6 +534,7 @@ impl Parser {
                     pattern,
                     iter,
                     body: Box::new(body),
+                    is_await,
                 });
             }
             if self.eat_kw("in") {
@@ -593,6 +599,7 @@ impl Parser {
                         pattern,
                         iter: rhs,
                         body,
+                        is_await,
                     }
                 } else {
                     StmtKind::ForIn {
@@ -1026,9 +1033,6 @@ impl Parser {
             }
             if self.eat(P::Star) {
                 is_generator = true;
-            }
-            if is_async && is_generator {
-                return Err(self.error("async generators are not supported yet"));
             }
             if !is_async
                 && !is_generator
@@ -1916,9 +1920,7 @@ impl Parser {
                     "async" if self.is_kw_at(1, "function") && !self.peek_at(1).nl_before => {
                         self.advance();
                         self.advance();
-                        if self.is(P::Star) {
-                            return Err(self.error("async generators are not supported yet"));
-                        }
+                        let is_generator = self.eat(P::Star);
                         let fname = if matches!(self.peek().tok, Tok::Ident(_)) {
                             Some(self.binding_ident()?)
                         } else {
@@ -1929,7 +1931,7 @@ impl Parser {
                             FuncKind::Normal,
                             line,
                             true,
-                            false,
+                            is_generator,
                         )?)
                     }
                     "import" => return Err(self.error("Dynamic import is not supported yet")),
@@ -1971,9 +1973,6 @@ impl Parser {
                 }
                 if self.eat(P::Star) {
                     is_generator = true;
-                }
-                if is_async && is_generator {
-                    return Err(self.error("async generators are not supported yet"));
                 }
                 if !is_async
                     && !is_generator

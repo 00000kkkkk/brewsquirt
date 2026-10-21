@@ -1,6 +1,6 @@
 # JavaSquirt Language Reference
 
-This document describes JavaSquirt 0.3.0. JavaSquirt follows JavaScript semantics: for every
+This document describes JavaSquirt 0.4.0. JavaSquirt follows JavaScript semantics: for every
 supported feature, a program should print the same output under `jsq` as under Node.js. Features
 that are not implemented yet are listed in [Not yet supported](#not-yet-supported).
 
@@ -20,6 +20,8 @@ that are not implemented yet are listed in [Not yet supported](#not-yet-supporte
 - [Getters and setters](#getters-and-setters)
 - [Async functions and promises](#async-functions-and-promises)
 - [Generators and iterators](#generators-and-iterators)
+- [Async iteration](#async-iteration)
+- [Dates](#dates)
 - [Regular expressions](#regular-expressions)
 - [Modules](#modules)
 - [Builtins](#builtins)
@@ -944,6 +946,86 @@ console.log(Math.max(...new Range(1, 9)))
 global registry. Symbol-keyed properties are skipped by `Object.keys`, `for...in` and
 `JSON.stringify`.
 
+## Async iteration
+
+`for await...of` walks an async iterable, awaiting each step. It also accepts ordinary iterables,
+awaiting each value, so an array of promises works. `async function*` declares an async
+generator: it can `await` and `yield`, and every `next()` returns a promise. Calls to `next()`
+made before the previous one settles are queued and answered in order.
+
+```js
+const wait = (ms, v) => new Promise((resolve) => setTimeout(() => resolve(v), ms))
+
+async function* ticks(n) {
+  for (let i = 1; i <= n; i++) {
+    await wait(2)
+    yield i
+  }
+}
+
+async function* scaled(source, k) {
+  for await (const x of source) yield x * k
+}
+
+const out = []
+for await (const v of scaled(ticks(3), 10)) out.push(v)
+console.log(out)
+
+for await (const v of [wait(3, "a"), "b"]) console.log(v)
+
+const gen = ticks(1)
+console.log(await gen.next(), await gen.next())
+```
+
+```text
+[ 10, 20, 30 ]
+a
+b
+{ value: 1, done: false } { value: undefined, done: true }
+```
+
+Objects become async iterable by implementing `[Symbol.asyncIterator]()`, and classes can declare
+`async *[Symbol.asyncIterator]() { ... }`.
+
+## Dates
+
+`Date` stores milliseconds since 1970-01-01T00:00:00Z. Local getters and setters use the
+system time zone, including daylight saving time; the `UTC` variants ignore it.
+
+```js
+const d = new Date(Date.UTC(2026, 9, 21, 14, 5, 9))
+console.log(d.toISOString(), d.getUTCDay(), d.getUTCHours())
+console.log(JSON.stringify({ at: d }))
+
+const due = new Date(d)
+due.setUTCDate(due.getUTCDate() + 30)
+console.log(due.toISOString(), (due - d) / 86400000)
+
+console.log(Date.parse("2026-10-21T12:00:00Z"), new Date("nope").getTime())
+console.log(new Date(Date.UTC(2024, 1, 29)).toUTCString())
+```
+
+```text
+2026-10-21T14:05:09.000Z 3 14
+{"at":"2026-10-21T14:05:09.000Z"}
+2026-11-20T14:05:09.000Z 30
+1792584000000 NaN
+Thu, 29 Feb 2024 00:00:00 GMT
+```
+
+| Group                | Methods                                                                    |
+| -------------------- | -------------------------------------------------------------------------- |
+| Create               | `new Date()`, `new Date(ms)`, `new Date(string)`, `new Date(y, m, d, h, mi, s, ms)` |
+| Static               | `Date.now()`, `Date.parse(string)`, `Date.UTC(y, m, ...)`                  |
+| Local getters        | `getFullYear`, `getMonth`, `getDate`, `getDay`, `getHours`, `getMinutes`, `getSeconds`, `getMilliseconds`, `getTimezoneOffset` |
+| UTC getters          | `getUTCFullYear` ... `getUTCMilliseconds`                                  |
+| Setters              | `setTime` and every `set...`/`setUTC...` counterpart                       |
+| Formatting           | `toISOString`, `toJSON`, `toString`, `toDateString`, `toTimeString`, `toUTCString`, `toLocaleString`, `toLocaleDateString`, `toLocaleTimeString` |
+
+`Date.parse` understands ISO 8601 (date-only strings are UTC, date-time strings without an
+offset are local), plus the formats produced by `toString` and `toUTCString`. Invalid dates have
+a `NaN` time value and print as `Invalid Date`.
+
 ## Regular expressions
 
 Regex literals `/pattern/flags` and `new RegExp(pattern, flags)` follow JavaScript syntax:
@@ -1121,6 +1203,7 @@ print in a readable inspected form.
 | `Map`    | `new Map(entries?)`, `set`, `get`, `has`, `delete`, `clear`, `size`, `forEach`                 |
 | `Set`    | `new Set(values?)`, `add`, `has`, `delete`, `clear`, `size`, `forEach`                         |
 | Errors   | `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`                            |
+| Weak     | `WeakMap` (`get`, `set`, `has`, `delete`), `WeakSet` (`add`, `has`, `delete`), `WeakRef` (`deref`) with object keys |
 | Timing   | `performance.now()` for a monotonic clock in milliseconds, `Date.now()` for epoch milliseconds |
 | `squirt` | `squirt(n = 3)` returns `n` droplets, the one builtin no other language ships                   |
 
@@ -1233,8 +1316,8 @@ Dependency specs:
 
 These are on the roadmap and currently produce a `SyntaxError` or are absent:
 
-- Async generators and `for await`
-- `Date` beyond `Date.now()`
-- `WeakMap`, `WeakSet` and `WeakRef`
+- `FinalizationRegistry`
+- `Intl` and locale-aware formatting beyond `en-US`
+- Getters on the global object (`globalThis`)
 - Tracing garbage collection
 - JIT compilation

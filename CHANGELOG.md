@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-21
+
+### Added
+
+- `Date` with local time zones and daylight saving time, `Date.now`, `Date.parse`, `Date.UTC`,
+  every getter and setter in local and UTC flavors, `toISOString`, `toJSON`, `toString`,
+  `toDateString`, `toTimeString`, `toUTCString` and the `toLocale*` formatters.
+- `WeakMap`, `WeakSet` and `WeakRef`.
+- `for await...of` over async iterables, sync iterables and promises.
+- Async generators: `async function*`, async generator methods, `await` and `yield` together,
+  `yield*` delegation to async iterables, and queued `next()` calls.
+- More benchmarks: property access and method calls, arrays and strings.
+
+### Changed
+
+- Faster VM: comparisons fused with conditional jumps, in-place arithmetic, dedicated
+  increment and store instructions, inline caches for global variables, a reusable argument
+  buffer for native calls, and objects half their previous size with a compact property table.
+- The `jsq` and `vrotdaem` binaries use the mimalloc allocator.
+- Benchmarks compared to 0.3.0: object creation 2.2x faster, loops 1.8x, property access and
+  method calls 1.35x, string processing 1.4x.
+
 ## [0.3.0] - 2026-10-21
 
 ### Added
@@ -96,7 +118,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Continuous integration on Linux, macOS and Windows, MSRV check, cargo-deny, CodeQL, coverage,
   benchmarks, and release archives for five targets.
 
-[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/00000kkkkk/javasquirt/releases/tag/v0.1.0

@@ -131,7 +131,14 @@ pub enum ObjKind {
     Promise(Box<RefCell<PromiseData>>),
     Coroutine(Box<Coroutine>),
     RegExp(RegExpObj),
+    Date(Cell<f64>),
+    WeakMap(Box<RefCell<WeakEntries>>),
+    WeakSet(Box<RefCell<WeakKeys>>),
+    WeakRef(std::rc::Weak<Obj>),
 }
+
+pub type WeakEntries = rustc_hash::FxHashMap<usize, (std::rc::Weak<Obj>, Value)>;
+pub type WeakKeys = rustc_hash::FxHashMap<usize, std::rc::Weak<Obj>>;
 
 pub struct RegExpObj {
     pub data: Rc<crate::regexp::RegexData>,
@@ -213,11 +220,20 @@ pub struct SavedFrame {
     pub started: bool,
 }
 
+pub struct AsyncRequest {
+    pub value: Value,
+    pub mode: crate::event_loop::ResumeMode,
+    pub promise: Rc<Obj>,
+}
+
 pub struct Coroutine {
     pub saved: RefCell<Option<SavedFrame>>,
     pub state: Cell<CoState>,
     pub promise: Option<Rc<Obj>>,
     pub is_generator: bool,
+    pub is_async: bool,
+    pub queue: RefCell<std::collections::VecDeque<AsyncRequest>>,
+    pub awaiting: Cell<bool>,
 }
 
 pub struct Closure {

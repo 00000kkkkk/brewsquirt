@@ -1,0 +1,12 @@
+ticker [ 1, 2, 3 ]
+{ value: 1, done: false } { value: 2, done: false } { value: 'done', done: true } { value: undefined, done: true }
+mapped [ 10, 20, 30 ]
+sync iterable [ 1, 2, 3 ]
+concat [ 1, 2, 'a', 'b' ]
+broke early
+got 1
+caught stream broke
+queued [ 1, 2, 3, 'done:done' ]
+custom [ 'c0', 'c1' ]
+class [ 'X', 'Y' ] function
+end

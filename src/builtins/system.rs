@@ -40,10 +40,6 @@ pub fn install(vm: &mut Vm) {
     method(vm, &performance, "now", 0, perf_now);
     vm.define_global("performance", Value::Object(performance));
 
-    let date = vm.new_object();
-    method(vm, &date, "now", 0, date_now);
-    vm.define_global("Date", Value::Object(date));
-
     let gt = native_fn(vm, "squirt", 0, squirt);
     vm.define_global("squirt", gt);
 
@@ -209,14 +205,6 @@ fn cwd(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
 
 fn perf_now(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
     Ok(Value::Number(vm.start.elapsed().as_secs_f64() * 1000.0))
-}
-
-fn date_now(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as f64)
-        .unwrap_or(0.0);
-    Ok(Value::Number(ms))
 }
 
 fn squirt(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {

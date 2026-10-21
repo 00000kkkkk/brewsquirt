@@ -345,7 +345,9 @@ fn format_object(
         }
         ObjKind::Iter(_) => "Object [Iterator] {}".to_string(),
         ObjKind::Coroutine(c) => {
-            if c.is_generator {
+            if c.is_generator && c.is_async {
+                "Object [AsyncGenerator] {}".to_string()
+            } else if c.is_generator {
                 "Object [Generator] {}".to_string()
             } else {
                 "Object [AsyncFunction] {}".to_string()
@@ -353,6 +355,21 @@ fn format_object(
         }
         ObjKind::Accessor(_) => "[Getter/Setter]".to_string(),
         ObjKind::RegExp(r) => format!("/{}/{}", r.data.source, r.data.flags),
+        ObjKind::Date(t) => {
+            crate::builtins::iso_string(t.get()).unwrap_or_else(|| "Invalid Date".to_string())
+        }
+        ObjKind::WeakMap(_) => "WeakMap { <items unknown> }".to_string(),
+        ObjKind::WeakSet(_) => "WeakSet { <items unknown> }".to_string(),
+        ObjKind::WeakRef(w) => match w.upgrade() {
+            Some(target) if depth <= MAX_DEPTH => {
+                seen.push(ptr);
+                let inner = format_object(&target, depth + 1, seen, circ, false);
+                seen.pop();
+                format!("WeakRef {{ {inner} }}")
+            }
+            Some(_) => "WeakRef { [Object] }".to_string(),
+            None => "WeakRef { <cleared> }".to_string(),
+        },
         ObjKind::Promise(p) => {
             if depth > MAX_DEPTH {
                 return "[Promise]".to_string();

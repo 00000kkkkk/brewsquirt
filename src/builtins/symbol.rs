@@ -44,6 +44,67 @@ pub fn install(vm: &mut Vm) {
     method(vm, &gp, "next", 1, gen_next);
     method(vm, &gp, "return", 1, gen_return);
     method(vm, &gp, "throw", 1, gen_throw);
+
+    let ap = vm.realm.async_generator_proto.clone();
+    method(vm, &ap, "next", 1, async_gen_next);
+    method(vm, &ap, "return", 1, async_gen_return);
+    method(vm, &ap, "throw", 1, async_gen_throw);
+    method(vm, &ap, ASYNC_ITER_KEY, 0, iter_self);
+    vm.async_from_sync_next = super::native_fn(vm, "next", 0, async_from_sync_next);
+    vm.iter_value_fn = super::native_fn(vm, "", 1, iter_value);
+}
+
+fn async_gen_step(vm: &mut Vm, this: Value, value: Value, mode: ResumeMode) -> R {
+    match &this {
+        Value::Object(o) if matches!(&o.kind, ObjKind::Coroutine(c) if c.is_generator && c.is_async) =>
+        {
+            let o = o.clone();
+            Ok(Value::Object(vm.async_gen_enqueue(&o, value, mode)))
+        }
+        _ => {
+            let p = vm.new_promise();
+            let e = vm.type_error("next method called on incompatible receiver");
+            vm.reject_promise(&p, e);
+            Ok(Value::Object(p))
+        }
+    }
+}
+
+fn async_gen_next(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    async_gen_step(vm, this, arg(args, 0), ResumeMode::Next)
+}
+
+fn async_gen_return(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    async_gen_step(vm, this, arg(args, 0), ResumeMode::Return)
+}
+
+fn async_gen_throw(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    async_gen_step(vm, this, arg(args, 0), ResumeMode::Throw)
+}
+
+fn iter_value(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    Ok(iter_result(vm, arg(args, 0), false))
+}
+
+fn async_from_sync_next(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    match vm.iter_next(&this) {
+        Ok(Some(v)) => {
+            let p = vm.to_promise(v);
+            let f = vm.iter_value_fn.clone();
+            Ok(Value::Object(vm.promise_then(&p, f, Value::Undefined)))
+        }
+        Ok(None) => {
+            let p = vm.new_promise();
+            let r = iter_result(vm, Value::Undefined, true);
+            vm.resolve_promise(&p, r);
+            Ok(Value::Object(p))
+        }
+        Err(e) => {
+            let p = vm.new_promise();
+            vm.reject_promise(&p, e);
+            Ok(Value::Object(p))
+        }
+    }
 }
 
 fn new_symbol(vm: &mut Vm, description: Option<Rc<str>>) -> Value {

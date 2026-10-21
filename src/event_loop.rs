@@ -67,15 +67,24 @@ impl Vm {
             started: false,
         };
         if c.proto.is_generator {
+            let is_async = c.proto.is_async;
             let co = Coroutine {
                 saved: RefCell::new(Some(saved)),
                 state: Cell::new(CoState::Suspended),
                 promise: None,
                 is_generator: true,
+                is_async,
+                queue: RefCell::new(Default::default()),
+                awaiting: Cell::new(false),
+            };
+            let proto = if is_async {
+                self.realm.async_generator_proto.clone()
+            } else {
+                self.realm.generator_proto.clone()
             };
             return Ok(Value::Object(Obj::new(
                 ObjKind::Coroutine(Box::new(co)),
-                Some(self.realm.generator_proto.clone()),
+                Some(proto),
             )));
         }
         let promise = self.new_promise();
@@ -85,6 +94,9 @@ impl Vm {
                 state: Cell::new(CoState::Suspended),
                 promise: Some(promise.clone()),
                 is_generator: false,
+                is_async: true,
+                queue: RefCell::new(Default::default()),
+                awaiting: Cell::new(false),
             })),
             None,
         );
@@ -225,6 +237,12 @@ impl Vm {
     }
 
     pub(crate) fn async_step(&mut self, co: &Rc<Obj>, value: Value, mode: ResumeMode) {
+        if let ObjKind::Coroutine(c) = &co.kind {
+            if c.is_generator && c.is_async {
+                self.async_gen_resume(co, value, mode);
+                return;
+            }
+        }
         let promise = match &co.kind {
             ObjKind::Coroutine(c) => c.promise.clone(),
             _ => None,
@@ -239,6 +257,80 @@ impl Vm {
             }
             Ok(Step::Done(v)) | Ok(Step::Yield(v)) => self.resolve_promise(&promise, v),
             Err(e) => self.reject_promise(&promise, e),
+        }
+    }
+
+    pub fn async_gen_enqueue(&mut self, agen: &Rc<Obj>, value: Value, mode: ResumeMode) -> Rc<Obj> {
+        let promise = self.new_promise();
+        if let ObjKind::Coroutine(c) = &agen.kind {
+            c.queue.borrow_mut().push_back(crate::object::AsyncRequest {
+                value,
+                mode,
+                promise: promise.clone(),
+            });
+        }
+        self.async_gen_drain(agen);
+        promise
+    }
+
+    fn async_gen_settle(&mut self, agen: &Rc<Obj>, result: Result<(Value, bool), Value>) {
+        let ObjKind::Coroutine(c) = &agen.kind else {
+            return;
+        };
+        let Some(req) = c.queue.borrow_mut().pop_front() else {
+            return;
+        };
+        match result {
+            Ok((v, done)) => {
+                let r = crate::builtins::iter_result(self, v, done);
+                self.resolve_promise(&req.promise, r);
+            }
+            Err(e) => self.reject_promise(&req.promise, e),
+        }
+    }
+
+    fn async_gen_resume(&mut self, agen: &Rc<Obj>, value: Value, mode: ResumeMode) {
+        let r = self.resume(agen, value, mode);
+        let ObjKind::Coroutine(c) = &agen.kind else {
+            return;
+        };
+        match r {
+            Ok(Step::Await(v)) => {
+                c.awaiting.set(true);
+                let p = self.to_promise(v);
+                self.add_reaction(&p, Reaction::Resume(agen.clone()));
+                return;
+            }
+            Ok(Step::Yield(v)) => self.async_gen_settle(agen, Ok((v, false))),
+            Ok(Step::Done(v)) => self.async_gen_settle(agen, Ok((v, true))),
+            Err(e) => self.async_gen_settle(agen, Err(e)),
+        }
+        c.awaiting.set(false);
+        self.async_gen_drain(agen);
+    }
+
+    fn async_gen_drain(&mut self, agen: &Rc<Obj>) {
+        loop {
+            let ObjKind::Coroutine(c) = &agen.kind else {
+                return;
+            };
+            if c.awaiting.get() || c.state.get() == CoState::Running {
+                return;
+            }
+            let front = c.queue.borrow().front().map(|r| (r.value.clone(), r.mode));
+            let Some((value, mode)) = front else {
+                return;
+            };
+            if c.state.get() == CoState::Done {
+                match mode {
+                    ResumeMode::Throw => self.async_gen_settle(agen, Err(value)),
+                    ResumeMode::Return => self.async_gen_settle(agen, Ok((value, true))),
+                    ResumeMode::Next => self.async_gen_settle(agen, Ok((Value::Undefined, true))),
+                }
+                continue;
+            }
+            self.async_gen_resume(agen, value, mode);
+            return;
         }
     }
 

@@ -801,7 +801,15 @@ impl Compiler {
                 pattern,
                 iter,
                 body,
+                is_await: false,
             } => self.for_each(*decl, pattern, iter, body, false)?,
+            StmtKind::ForOf {
+                decl,
+                pattern,
+                iter,
+                body,
+                is_await: true,
+            } => self.for_await(*decl, pattern, iter, body)?,
             StmtKind::ForIn {
                 decl,
                 pattern,
@@ -1019,6 +1027,96 @@ impl Compiler {
         Ok(())
     }
 
+    fn require_await(&mut self) -> R<()> {
+        let module_top = self.states.len() == 1 && self.st_ref().kind == ProtoKind::Module;
+        if module_top {
+            self.st().is_async = true;
+            Ok(())
+        } else if self.st_ref().is_async {
+            Ok(())
+        } else {
+            Err(self.err("await is only valid in async functions and the top level of modules"))
+        }
+    }
+
+    fn emit_async_next(&mut self) {
+        let next: Rc<str> = "next".into();
+        let k = self.str_const(&next);
+        self.emit(Op::GetMethod(k));
+        self.emit(Op::Call(0, NO_NAME));
+        self.emit(Op::Await);
+    }
+
+    fn for_await(
+        &mut self,
+        decl: Option<DeclKind>,
+        pattern: &Pattern,
+        source: &Expr,
+        body: &Stmt,
+    ) -> R<()> {
+        self.require_await()?;
+        let labels = std::mem::take(&mut self.pending_labels);
+        self.begin_scope();
+        self.expr(source)?;
+        self.pending_labels = labels;
+        self.emit(Op::GetAsyncIter);
+        let iter_name = self.hidden_name("aiter");
+        let iter_slot = self.add_local(iter_name, true);
+        let start = self.here();
+        self.begin_scope();
+        if let Some(kind) = decl {
+            let mut names = Vec::new();
+            pattern.bound_names(&mut names);
+            for n in names {
+                self.emit(Op::Undefined);
+                self.add_local(n, kind == DeclKind::Const);
+            }
+        }
+        self.emit(Op::GetLocal(iter_slot));
+        self.emit_async_next();
+        self.emit(Op::Dup);
+        let done: Rc<str> = "done".into();
+        let k = self.str_const(&done);
+        self.emit(Op::GetProp(k));
+        let exit = self.emit(Op::JumpIfTrue(0));
+        let value: Rc<str> = "value".into();
+        let k = self.str_const(&value);
+        self.emit(Op::GetProp(k));
+        self.bind_pattern(
+            pattern,
+            if decl.is_some() {
+                BindMode::Init
+            } else {
+                BindMode::Assign
+            },
+        )?;
+        let try_depth = self.st_ref().tries.len();
+        let labels = std::mem::take(&mut self.pending_labels);
+        self.st().loops.push(LoopCtx {
+            break_jumps: Vec::new(),
+            continue_jumps: Vec::new(),
+            break_locals: iter_slot as usize,
+            continue_locals: iter_slot as usize + 1,
+            try_depth,
+            is_switch: false,
+            is_block: false,
+            labels,
+        });
+        self.sub_stmt(body)?;
+        let ctx = self.st().loops.pop().expect("loop");
+        for j in ctx.continue_jumps {
+            self.patch_to(j, start);
+        }
+        self.end_scope();
+        self.emit(Op::Jump(start));
+        self.patch(exit);
+        self.end_scope();
+        for j in ctx.break_jumps {
+            self.patch(j);
+        }
+        Ok(())
+    }
+
     fn unwind_tries(&mut self, to_depth: usize) -> R<()> {
         let tries: Vec<TryCtx> = self.st_ref().tries[to_depth..].to_vec();
         for (i, t) in tries.iter().enumerate().rev() {
@@ -1037,7 +1135,12 @@ impl Compiler {
 
     fn return_stmt(&mut self, e: Option<&Expr>) -> R<()> {
         match e {
-            Some(e) => self.expr(e)?,
+            Some(e) => {
+                self.expr(e)?;
+                if self.st_ref().is_async && self.st_ref().is_generator {
+                    self.emit(Op::Await);
+                }
+            }
             None => {
                 self.emit(Op::Undefined);
             }
@@ -2227,14 +2330,7 @@ impl Compiler {
                 }
             }
             ExprKind::Await(x) => {
-                let module_top = self.states.len() == 1 && self.st_ref().kind == ProtoKind::Module;
-                if module_top {
-                    self.st().is_async = true;
-                } else if !self.st_ref().is_async {
-                    return Err(self.err(
-                        "await is only valid in async functions and the top level of modules",
-                    ));
-                }
+                self.require_await()?;
                 self.expr(x)?;
                 self.emit(Op::Await);
             }
@@ -2248,7 +2344,31 @@ impl Compiler {
                         self.emit(Op::Undefined);
                     }
                 }
-                if *delegate {
+                let async_gen = self.st_ref().is_async;
+                if *delegate && async_gen {
+                    self.emit(Op::GetAsyncIter);
+                    let start = self.here();
+                    self.emit(Op::Dup);
+                    self.emit_async_next();
+                    self.emit(Op::Dup);
+                    let done: Rc<str> = "done".into();
+                    let kd = self.str_const(&done);
+                    self.emit(Op::GetProp(kd));
+                    let exit = self.emit(Op::JumpIfTrue(0));
+                    let value: Rc<str> = "value".into();
+                    let kv = self.str_const(&value);
+                    self.emit(Op::GetProp(kv));
+                    self.emit(Op::Yield);
+                    self.emit(Op::Pop);
+                    self.emit(Op::Jump(start));
+                    self.patch(exit);
+                    self.emit(Op::GetProp(kv));
+                    self.emit(Op::Swap);
+                    self.emit(Op::Pop);
+                } else if async_gen {
+                    self.emit(Op::Await);
+                    self.emit(Op::Yield);
+                } else if *delegate {
                     self.emit(Op::GetIter);
                     let start = self.here();
                     self.emit(Op::Dup);

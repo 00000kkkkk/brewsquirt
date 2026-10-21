@@ -1,5 +1,6 @@
 mod array;
 mod collections;
+mod date;
 mod json;
 mod number;
 mod object;
@@ -15,6 +16,7 @@ use crate::value::Value;
 use crate::vm::Vm;
 use std::rc::Rc;
 
+pub use date::{date_to_string, iso_string};
 pub use json::{json_parse, json_stringify};
 pub use promise::run_prelude;
 pub use regexp::make_regexp;
@@ -91,6 +93,7 @@ pub fn install(vm: &mut Vm) {
     number::install(vm);
     json::install(vm);
     collections::install(vm);
+    date::install(vm);
     promise::install(vm);
     regexp::install(vm);
     symbol::install(vm);

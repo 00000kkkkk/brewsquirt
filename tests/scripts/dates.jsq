@@ -1,0 +1,49 @@
+const d = new Date(Date.UTC(2026, 9, 21, 14, 5, 9, 42))
+console.log(d.toISOString(), d.getTime(), JSON.stringify({ d }))
+console.log(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), d.getUTCDay(), d.getUTCHours(), d.getUTCMinutes(), d.getUTCSeconds(), d.getUTCMilliseconds())
+console.log(d.toUTCString(), d.valueOf() === +d, typeof Date.now(), Date.now() > 1.7e12)
+const offset = d.getTimezoneOffset()
+console.log(d.getHours() === new Date(d.getTime() - offset * 60000).getUTCHours())
+console.log(new Date("2026-10-21T12:00:00Z").getTime(), Date.parse("2026-10-21"), Date.parse("2026-10-21T12:00:00.5+02:00"))
+console.log(new Date("not a date").getTime(), String(new Date(NaN)), new Date(8.64e15 + 1).getTime())
+const m = new Date(Date.UTC(2024, 0, 31))
+m.setUTCMonth(1)
+console.log(m.toISOString())
+m.setUTCDate(0)
+console.log(m.toISOString())
+m.setUTCFullYear(2000, 11, 31)
+m.setUTCHours(23, 59, 59, 999)
+console.log(m.toISOString(), m.getUTCDay())
+const leap = [1900, 2000, 2024, 2100].map((y) => new Date(Date.UTC(y, 1, 29)).getUTCMonth() === 1)
+console.log(leap, Date.UTC(1970, 0, 1), Date.UTC(-1, 0, 1), new Date(Date.UTC(-1, 0, 1)).toISOString())
+const a = new Date(Date.UTC(2026, 0, 1))
+const b = new Date(Date.UTC(2026, 11, 25))
+console.log((b - a) / 86400000, a < b, [b, a].sort((x, y) => x - y)[0] === a, Math.max(a, b) === b.getTime())
+console.log(new Date(0).toISOString(), new Date(-1).toISOString(), new Date(Date.UTC(10000, 0, 1)).toISOString())
+console.log(new Date(Date.UTC(2026, 9, 21)) instanceof Date, Object.prototype.toString.call(a), typeof a)
+const copy = new Date(a)
+copy.setTime(0)
+console.log(a.getTime() !== copy.getTime(), new Date(2026, 0, 1).getFullYear(), new Date(99, 0).getFullYear())
+console.log(Date.parse("Wed, 21 Oct 2026 12:04:05 GMT"), Date.parse(new Date(1e12).toUTCString()) === 1e12)
+console.log(new Date(Date.UTC(2026, 9, 21, 9, 30)).toJSON(), new Date(NaN).toJSON())
+try {
+  new Date(NaN).toISOString()
+} catch (e) {
+  console.log(e.name)
+}
+
+const wm = new WeakMap()
+const k1 = {}
+const k2 = {}
+wm.set(k1, "one").set(k2, "two")
+console.log(wm.get(k1), wm.has(k2), wm.delete(k2), wm.has(k2), wm.get({}))
+try {
+  wm.set("str", 1)
+} catch (e) {
+  console.log(e.constructor.name)
+}
+const ws = new WeakSet([k1])
+console.log(ws.has(k1), ws.has(k2), wm, ws)
+const target = { name: "t" }
+const ref = new WeakRef(target)
+console.log(ref.deref() === target, ref.deref().name)

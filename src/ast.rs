@@ -299,6 +299,7 @@ pub enum StmtKind {
         pattern: Pattern,
         iter: Expr,
         body: Box<Stmt>,
+        is_await: bool,
     },
     ForIn {
         decl: Option<DeclKind>,

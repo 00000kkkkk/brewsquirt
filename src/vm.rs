@@ -62,9 +62,14 @@ pub struct Realm {
     pub set_proto: Rc<Obj>,
     pub iter_proto: Rc<Obj>,
     pub generator_proto: Rc<Obj>,
+    pub async_generator_proto: Rc<Obj>,
     pub promise_proto: Rc<Obj>,
     pub symbol_proto: Rc<Obj>,
     pub regexp_proto: Rc<Obj>,
+    pub date_proto: Rc<Obj>,
+    pub weakmap_proto: Rc<Obj>,
+    pub weakset_proto: Rc<Obj>,
+    pub weakref_proto: Rc<Obj>,
     pub error_protos: Vec<Rc<Obj>>,
 }
 
@@ -87,9 +92,14 @@ impl Realm {
             set_proto: mk(),
             iter_proto: mk(),
             generator_proto: mk(),
+            async_generator_proto: mk(),
             promise_proto: mk(),
             symbol_proto: mk(),
             regexp_proto: mk(),
+            date_proto: mk(),
+            weakmap_proto: mk(),
+            weakset_proto: mk(),
+            weakref_proto: mk(),
             error_protos,
             object_proto,
         }
@@ -184,6 +194,8 @@ pub struct Vm {
     pub symbol_async_iterator: Value,
     pub promise_resolve_fn: Value,
     pub promise_reject_fn: Value,
+    pub async_from_sync_next: Value,
+    pub iter_value_fn: Value,
 }
 
 impl Vm {
@@ -232,6 +244,8 @@ impl Vm {
             symbol_async_iterator: Value::Undefined,
             promise_resolve_fn: Value::Undefined,
             promise_reject_fn: Value::Undefined,
+            async_from_sync_next: Value::Undefined,
+            iter_value_fn: Value::Undefined,
         };
         crate::gc::configure_from_env();
         builtins::install(&mut vm);
@@ -1016,11 +1030,11 @@ impl Vm {
             | (Value::Bool(_), Value::Bool(_))
             | (Value::Object(_), Value::Object(_)) => a.strict_eq(b),
             (Value::Object(_), _) => {
-                let p = self.to_primitive(a, true)?;
+                let p = self.default_primitive(a)?;
                 return self.loose_eq(&p, b);
             }
             (_, Value::Object(_)) => {
-                let p = self.to_primitive(b, true)?;
+                let p = self.default_primitive(b)?;
                 return self.loose_eq(a, &p);
             }
             _ => {
@@ -1031,9 +1045,14 @@ impl Vm {
         })
     }
 
+    fn default_primitive(&mut self, v: &Value) -> Result<Value, Value> {
+        let is_date = matches!(v, Value::Object(o) if matches!(o.kind, ObjKind::Date(_)));
+        self.to_primitive(v, !is_date)
+    }
+
     fn add_slow(&mut self, a: &Value, b: &Value) -> Result<Value, Value> {
-        let pa = self.to_primitive(a, true)?;
-        let pb = self.to_primitive(b, true)?;
+        let pa = self.default_primitive(a)?;
+        let pb = self.default_primitive(b)?;
         if matches!(pa, Value::Str(_)) || matches!(pb, Value::Str(_)) {
             let sa = self.to_string(&pa)?;
             let sb = self.to_string(&pb)?;
@@ -1125,11 +1144,37 @@ impl Vm {
                 ObjKind::Map(_) => Ok(self.new_iter(IterState::MapEntries(o.clone(), 0))),
                 ObjKind::Set(_) => Ok(self.new_iter(IterState::SetValues(o.clone(), 0))),
                 ObjKind::Iter(_) => Ok(v.clone()),
-                ObjKind::Coroutine(c) if c.is_generator => Ok(v.clone()),
+                ObjKind::Coroutine(c) if c.is_generator && !c.is_async => Ok(v.clone()),
                 _ => self.protocol_iterator(v),
             },
             _ => Err(self.type_error(format!("{} is not iterable", inspect_plain(v)))),
         }
+    }
+
+    pub fn get_async_iterator(&mut self, v: &Value) -> Result<Value, Value> {
+        if !v.is_nullish() {
+            let method = self.get_prop(v, crate::object::ASYNC_ITER_KEY)?;
+            if method.is_callable() {
+                let it = self.call_value(&method, v.clone(), &[])?;
+                if !it.is_object() {
+                    return Err(self
+                        .type_error("Result of the Symbol.asyncIterator method is not an object"));
+                }
+                return Ok(it);
+            }
+        }
+        let sync = self.get_iterator(v)?;
+        let wrapper = self.new_object();
+        let next = Value::Object(Obj::new(
+            ObjKind::Bound(Box::new(crate::object::Bound {
+                target: self.async_from_sync_next.clone(),
+                this: sync,
+                args: Vec::new(),
+            })),
+            Some(self.realm.function_proto.clone()),
+        ));
+        wrapper.set_own("next", next);
+        Ok(Value::Object(wrapper))
     }
 
     fn protocol_iterator(&mut self, v: &Value) -> Result<Value, Value> {
@@ -1143,7 +1188,7 @@ impl Vm {
         };
         match &o.kind {
             ObjKind::Iter(_) => Ok(it),
-            ObjKind::Coroutine(c) if c.is_generator => Ok(it),
+            ObjKind::Coroutine(c) if c.is_generator && !c.is_async => Ok(it),
             _ => {
                 let next = self.get_prop(&it, "next")?;
                 Ok(self.new_iter(IterState::Protocol(it, next)))
@@ -2277,6 +2322,11 @@ impl Vm {
                             tri!(self.set_prop(&obj, name!(k), val));
                         }
                     }
+                }
+                Op::GetAsyncIter => {
+                    let v = pop!();
+                    let it = tri!(self.get_async_iterator(&v));
+                    self.stack.push(it);
                 }
                 Op::NewRegex(src, flags) => {
                     let source = name!(src);
