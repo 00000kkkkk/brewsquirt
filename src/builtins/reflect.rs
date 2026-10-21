@@ -147,11 +147,31 @@ impl Vm {
             let (t, h) = proxy_parts(self, o, "getOwnPropertyDescriptor")?;
             return match trap(self, &h, "getOwnPropertyDescriptor")? {
                 Some(f) => {
-                    let r =
-                        self.call_value(&f, Value::Object(h), &[Value::Object(t), key_value(key)])?;
+                    let r = self.call_value(
+                        &f,
+                        Value::Object(h),
+                        &[Value::Object(t.clone()), key_value(key)],
+                    )?;
+                    if !r.is_object() && !r.is_undefined() {
+                        return Err(self.type_error(format!(
+                            "'getOwnPropertyDescriptor' on proxy: trap returned neither object nor undefined for property '{}'",
+                            crate::props::key_text(key)
+                        )));
+                    }
+                    let target_desc = self.op_get_own_property(&t, key)?;
                     if r.is_undefined() {
+                        let Some(td) = target_desc else {
+                            return Ok(None);
+                        };
+                        if td.configurable == Some(false) {
+                            return Err(self.proxy_invariant("getOwnPropertyDescriptor", key));
+                        }
+                        if !self.op_is_extensible(&t)? {
+                            return Err(self.proxy_invariant("getOwnPropertyDescriptor", key));
+                        }
                         return Ok(None);
                     }
+                    let extensible = self.op_is_extensible(&t)?;
                     let mut d = self.to_prop_desc(&r)?;
                     if !d.is_accessor() {
                         d.value.get_or_insert(Value::Undefined);
@@ -159,6 +179,26 @@ impl Vm {
                     }
                     d.enumerable.get_or_insert(false);
                     d.configurable.get_or_insert(false);
+                    if !compatible(extensible, &d, &target_desc) {
+                        return Err(self.proxy_invariant("getOwnPropertyDescriptor", key));
+                    }
+                    if d.configurable == Some(false) {
+                        match &target_desc {
+                            None => {
+                                return Err(self.proxy_invariant("getOwnPropertyDescriptor", key));
+                            }
+                            Some(td) if td.configurable != Some(false) => {
+                                return Err(self.proxy_invariant("getOwnPropertyDescriptor", key));
+                            }
+                            Some(td) => {
+                                if d.writable == Some(false) && td.writable == Some(true) {
+                                    return Err(
+                                        self.proxy_invariant("getOwnPropertyDescriptor", key)
+                                    );
+                                }
+                            }
+                        }
+                    }
                     Ok(Some(d))
                 }
                 None => self.op_get_own_property(&t, key),
@@ -185,15 +225,43 @@ impl Vm {
                     let r = self.call_value(
                         &f,
                         Value::Object(h),
-                        &[Value::Object(t), key_value(&key), desc],
+                        &[Value::Object(t.clone()), key_value(&key), desc],
                     )?;
-                    if !r.truthy() && throw {
-                        return Err(self.type_error(format!(
-                            "'defineProperty' on proxy: trap returned falsish for property '{}'",
-                            crate::props::key_text(&key)
-                        )));
+                    if !r.truthy() {
+                        if throw {
+                            return Err(self.type_error(format!(
+                                "'defineProperty' on proxy: trap returned falsish for property '{}'",
+                                crate::props::key_text(&key)
+                            )));
+                        }
+                        return Ok(false);
                     }
-                    Ok(r.truthy())
+                    let target_desc = self.op_get_own_property(&t, &key)?;
+                    let extensible = self.op_is_extensible(&t)?;
+                    let setting_config_false = d.configurable == Some(false);
+                    match &target_desc {
+                        None => {
+                            if !extensible || setting_config_false {
+                                return Err(self.proxy_invariant("defineProperty", &key));
+                            }
+                        }
+                        Some(td) => {
+                            if !compatible(extensible, &d, &target_desc) {
+                                return Err(self.proxy_invariant("defineProperty", &key));
+                            }
+                            if setting_config_false && td.configurable == Some(true) {
+                                return Err(self.proxy_invariant("defineProperty", &key));
+                            }
+                            if !td.is_accessor()
+                                && td.configurable == Some(false)
+                                && td.writable == Some(true)
+                                && d.writable == Some(false)
+                            {
+                                return Err(self.proxy_invariant("defineProperty", &key));
+                            }
+                        }
+                    }
+                    Ok(true)
                 }
                 None => self.op_define_own_property(&t, key, d, throw),
             };
@@ -350,14 +418,32 @@ impl Vm {
         self.op_define_own_property(r, key, d, false)
     }
 
+    fn proxy_invariant(&mut self, trap: &str, key: &str) -> Value {
+        self.type_error(format!(
+            "'{trap}' on proxy: trap result violates an invariant for property '{}'",
+            crate::props::key_text(key)
+        ))
+    }
+
     pub fn op_delete(&mut self, o: &Rc<Obj>, key: &str) -> Result<bool, Value> {
         if is_proxy(o) {
             let (t, h) = proxy_parts(self, o, "deleteProperty")?;
             return match trap(self, &h, "deleteProperty")? {
                 Some(f) => {
-                    let r =
-                        self.call_value(&f, Value::Object(h), &[Value::Object(t), key_value(key)])?;
-                    Ok(r.truthy())
+                    let r = self.call_value(
+                        &f,
+                        Value::Object(h),
+                        &[Value::Object(t.clone()), key_value(key)],
+                    )?;
+                    if !r.truthy() {
+                        return Ok(false);
+                    }
+                    if let Some(td) = self.op_get_own_property(&t, key)? {
+                        if td.configurable == Some(false) || !self.op_is_extensible(&t)? {
+                            return Err(self.proxy_invariant("deleteProperty", key));
+                        }
+                    }
+                    Ok(true)
                 }
                 None => self.op_delete(&t, key),
             };
@@ -700,4 +786,48 @@ fn proxy_revoke(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         }
     }
     Ok(Value::Undefined)
+}
+
+fn compatible(extensible: bool, desc: &PropDesc, current: &Option<PropDesc>) -> bool {
+    let Some(cur) = current else {
+        return extensible;
+    };
+    if cur.configurable != Some(false) {
+        return true;
+    }
+    if desc.configurable == Some(true) {
+        return false;
+    }
+    if let Some(e) = desc.enumerable {
+        if Some(e) != cur.enumerable {
+            return false;
+        }
+    }
+    let generic = !desc.is_accessor() && desc.value.is_none() && desc.writable.is_none();
+    if !generic && desc.is_accessor() != cur.is_accessor() {
+        return false;
+    }
+    if cur.is_accessor() {
+        let same = |a: &Option<Value>, b: &Option<Value>| match (a, b) {
+            (Some(x), Some(y)) => crate::props::same_value(x, y),
+            (Some(x), None) => x.is_undefined(),
+            _ => true,
+        };
+        if desc.get.is_some() && !same(&desc.get, &cur.get) {
+            return false;
+        }
+        if desc.set.is_some() && !same(&desc.set, &cur.set) {
+            return false;
+        }
+    } else if cur.writable == Some(false) {
+        if desc.writable == Some(true) {
+            return false;
+        }
+        if let (Some(v), Some(c)) = (&desc.value, &cur.value) {
+            if !crate::props::same_value(v, c) {
+                return false;
+            }
+        }
+    }
+    true
 }
