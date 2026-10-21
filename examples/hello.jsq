@@ -1,0 +1,2 @@
+const who = process.argv[2] ?? "world"
+console.log(`hello, ${who} ${squirt()}`)

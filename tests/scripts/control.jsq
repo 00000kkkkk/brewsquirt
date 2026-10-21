@@ -1,0 +1,69 @@
+let out = []
+for (let i = 0; i < 10; i++) {
+  if (i % 2 === 0) continue
+  if (i > 7) break
+  out.push(i)
+}
+console.log(out)
+let n = 0
+while (true) {
+  n++
+  if (n >= 5) break
+}
+let m = 0
+do {
+  m++
+} while (m < 3)
+console.log(n, m)
+for (const k in { a: 1, b: 2 }) console.log("key", k)
+for (const i in ["x", "y"]) console.log("idx", i, typeof i)
+for (const ch of "hey") console.log(ch)
+function grade(score) {
+  switch (true) {
+    case score >= 90:
+      return "A"
+    case score >= 80:
+      return "B"
+    default:
+      return "F"
+  }
+}
+console.log(grade(95), grade(85), grade(10))
+function fall(x) {
+  const r = []
+  switch (x) {
+    case 1:
+      r.push("one")
+    case 2:
+      r.push("two")
+      break
+    case 3: {
+      r.push("three")
+    }
+    default:
+      r.push("default")
+  }
+  return r
+}
+console.log(fall(1), fall(2), fall(3), fall(9))
+const val = 0
+console.log(val || "or", val ?? "nullish", val && "and", null ?? undefined ?? "deep")
+let a = null
+let b = 0
+let c = 1
+a ??= "set"
+b ||= "or-set"
+c &&= "and-set"
+console.log(a, b, c)
+console.log(true ? "yes" : "no", false ? 1 : null ? 2 : 3)
+let found = null
+for (const row of [[1, 2], [3, 4]]) {
+  for (const cell of row) {
+    if (cell === 3) {
+      found = cell
+      break
+    }
+  }
+  if (found) break
+}
+console.log(found)

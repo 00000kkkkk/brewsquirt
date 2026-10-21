@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create-release:
+    name: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          changelog: CHANGELOG.md
+          title: JavaSquirt $tag
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  upload-assets:
+    name: upload-assets (${{ matrix.target }})
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        with:
+          tool: cross
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: jsq,vrotdaem
+          target: ${{ matrix.target }}
+          archive: javasquirt-$tag-$target
+          include: LICENSE,README.md,CHANGELOG.md
+          tar: unix
+          zip: windows
+          checksum: sha256
+          locked: true
+          token: ${{ secrets.GITHUB_TOKEN }}

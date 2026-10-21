@@ -1,0 +1,12 @@
+const count = 200000
+const items = []
+
+for (let i = 0; i < count; i++) {
+  items.push({ id: i, value: i % 100, even: i % 2 === 0 })
+}
+
+const evens = items.filter((item) => item.even)
+const doubled = evens.map((item) => item.value * 2)
+const total = doubled.reduce((sum, value) => sum + value, 0)
+
+console.log(`items: ${items.length}, evens: ${evens.length}, total: ${total}`)

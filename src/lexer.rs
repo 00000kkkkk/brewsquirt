@@ -1,0 +1,414 @@
+use crate::token::{P, PUNCTUATORS, SyntaxError, TemplatePart, Tok, Token};
+use std::rc::Rc;
+
+pub fn tokenize(src: &str) -> Result<Vec<Token>, SyntaxError> {
+    let mut lexer = Lexer {
+        chars: src.chars().collect(),
+        pos: 0,
+        line: 1,
+        col: 1,
+    };
+    if lexer.chars.first() == Some(&'#') && lexer.chars.get(1) == Some(&'!') {
+        while let Some(c) = lexer.peek() {
+            if c == '\n' {
+                break;
+            }
+            lexer.bump();
+        }
+    }
+    let mut out = Vec::new();
+    lexer.lex_into(&mut out, false)?;
+    Ok(out)
+}
+
+pub fn is_id_start(c: char) -> bool {
+    c.is_alphabetic() || c == '_' || c == '$'
+}
+
+pub fn is_id_continue(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$' || c == '\u{200c}' || c == '\u{200d}'
+}
+
+struct Lexer {
+    chars: Vec<char>,
+    pos: usize,
+    line: u32,
+    col: u32,
+}
+
+impl Lexer {
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.pos).copied()
+    }
+
+    fn peek_at(&self, n: usize) -> Option<char> {
+        self.chars.get(self.pos + n).copied()
+    }
+
+    fn bump(&mut self) -> Option<char> {
+        let c = self.chars.get(self.pos).copied()?;
+        self.pos += 1;
+        if c == '\n' {
+            self.line += 1;
+            self.col = 1;
+        } else {
+            self.col += 1;
+        }
+        Some(c)
+    }
+
+    fn err(&self, msg: impl Into<String>) -> SyntaxError {
+        SyntaxError::new(msg, self.line, self.col)
+    }
+
+    fn lex_into(&mut self, out: &mut Vec<Token>, in_template: bool) -> Result<(), SyntaxError> {
+        let mut depth = 0usize;
+        let mut nl = true;
+        loop {
+            nl |= self.skip_trivia()?;
+            let (line, col) = (self.line, self.col);
+            let Some(c) = self.peek() else {
+                if in_template {
+                    return Err(self.err("Unterminated template literal"));
+                }
+                out.push(Token {
+                    tok: Tok::Eof,
+                    line,
+                    col,
+                    nl_before: true,
+                });
+                return Ok(());
+            };
+            if in_template {
+                if c == '{' {
+                    depth += 1;
+                } else if c == '}' {
+                    if depth == 0 {
+                        self.bump();
+                        out.push(Token {
+                            tok: Tok::Eof,
+                            line,
+                            col,
+                            nl_before: true,
+                        });
+                        return Ok(());
+                    }
+                    depth -= 1;
+                }
+            }
+            let tok = self.next_token(c)?;
+            out.push(Token {
+                tok,
+                line,
+                col,
+                nl_before: nl,
+            });
+            nl = false;
+        }
+    }
+
+    fn skip_trivia(&mut self) -> Result<bool, SyntaxError> {
+        let mut nl = false;
+        loop {
+            match self.peek() {
+                Some('\n') | Some('\u{2028}') | Some('\u{2029}') => {
+                    nl = true;
+                    self.bump();
+                }
+                Some(c) if c.is_whitespace() || c == '\u{feff}' => {
+                    self.bump();
+                }
+                Some('/') if self.peek_at(1) == Some('/') => {
+                    while let Some(c) = self.peek() {
+                        if c == '\n' {
+                            break;
+                        }
+                        self.bump();
+                    }
+                }
+                Some('/') if self.peek_at(1) == Some('*') => {
+                    let (line, col) = (self.line, self.col);
+                    self.bump();
+                    self.bump();
+                    loop {
+                        match self.bump() {
+                            None => {
+                                return Err(SyntaxError::new("Unterminated comment", line, col));
+                            }
+                            Some('*') if self.peek() == Some('/') => {
+                                self.bump();
+                                break;
+                            }
+                            Some('\n') => nl = true,
+                            _ => {}
+                        }
+                    }
+                }
+                _ => return Ok(nl),
+            }
+        }
+    }
+
+    fn next_token(&mut self, c: char) -> Result<Tok, SyntaxError> {
+        if c.is_ascii_digit() || (c == '.' && self.peek_at(1).is_some_and(|d| d.is_ascii_digit())) {
+            return self.number();
+        }
+        if c == '"' || c == '\'' {
+            return self.string(c);
+        }
+        if c == '`' {
+            return self.template();
+        }
+        if is_id_start(c) {
+            let mut s = String::new();
+            while let Some(c) = self.peek() {
+                if is_id_continue(c) {
+                    s.push(c);
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+            return Ok(Tok::Ident(s.into()));
+        }
+        if c == '\\' {
+            return Err(self.err("Unicode escapes in identifiers are not supported"));
+        }
+        for (text, p) in PUNCTUATORS {
+            if self.matches(text) {
+                if *p == P::QuestionDot && self.peek_at(2).is_some_and(|d| d.is_ascii_digit()) {
+                    self.bump();
+                    return Ok(Tok::Punct(P::Question));
+                }
+                for _ in 0..text.len() {
+                    self.bump();
+                }
+                return Ok(Tok::Punct(*p));
+            }
+        }
+        Err(self.err(format!("Invalid or unexpected token '{c}'")))
+    }
+
+    fn matches(&self, text: &str) -> bool {
+        text.chars()
+            .enumerate()
+            .all(|(i, ch)| self.peek_at(i) == Some(ch))
+    }
+
+    fn number(&mut self) -> Result<Tok, SyntaxError> {
+        if self.peek() == Some('0') {
+            let radix = match self.peek_at(1) {
+                Some('x') | Some('X') => 16,
+                Some('o') | Some('O') => 8,
+                Some('b') | Some('B') => 2,
+                _ => 0,
+            };
+            if radix != 0 {
+                self.bump();
+                self.bump();
+                let mut value = 0f64;
+                let mut any = false;
+                while let Some(c) = self.peek() {
+                    if c == '_' {
+                        self.bump();
+                        continue;
+                    }
+                    match c.to_digit(radix) {
+                        Some(d) => {
+                            value = value * radix as f64 + d as f64;
+                            any = true;
+                            self.bump();
+                        }
+                        None => break,
+                    }
+                }
+                if !any {
+                    return Err(self.err("Invalid or unexpected token"));
+                }
+                self.check_number_end()?;
+                return Ok(Tok::Num(value));
+            }
+        }
+        let mut s = String::new();
+        self.digits(&mut s);
+        if self.peek() == Some('.') {
+            s.push('.');
+            self.bump();
+            self.digits(&mut s);
+        }
+        if matches!(self.peek(), Some('e') | Some('E')) {
+            let sign = matches!(self.peek_at(1), Some('+') | Some('-'));
+            let digit_at = if sign { 2 } else { 1 };
+            if self.peek_at(digit_at).is_some_and(|d| d.is_ascii_digit()) {
+                s.push('e');
+                self.bump();
+                if sign {
+                    s.push(self.bump().unwrap_or('+'));
+                }
+                self.digits(&mut s);
+            }
+        }
+        self.check_number_end()?;
+        if s.starts_with('.') {
+            s.insert(0, '0');
+        }
+        if s.ends_with('.') {
+            s.push('0');
+        }
+        s.parse::<f64>()
+            .map(Tok::Num)
+            .map_err(|_| self.err("Invalid number literal"))
+    }
+
+    fn digits(&mut self, s: &mut String) {
+        while let Some(c) = self.peek() {
+            if c.is_ascii_digit() {
+                s.push(c);
+                self.bump();
+            } else if c == '_' && self.peek_at(1).is_some_and(|d| d.is_ascii_digit()) {
+                self.bump();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn check_number_end(&self) -> Result<(), SyntaxError> {
+        match self.peek() {
+            Some(c) if is_id_start(c) || c.is_ascii_digit() => {
+                Err(self.err("Invalid or unexpected token"))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn string(&mut self, quote: char) -> Result<Tok, SyntaxError> {
+        let (line, col) = (self.line, self.col);
+        self.bump();
+        let mut s = String::new();
+        loop {
+            match self.bump() {
+                None | Some('\n') => {
+                    return Err(SyntaxError::new("Unterminated string literal", line, col));
+                }
+                Some(c) if c == quote => break,
+                Some('\\') => self.escape(&mut s)?,
+                Some(c) => s.push(c),
+            }
+        }
+        Ok(Tok::Str(s.into()))
+    }
+
+    fn hex(&mut self, count: usize) -> Result<u32, SyntaxError> {
+        let mut v = 0u32;
+        for _ in 0..count {
+            let d = self
+                .bump()
+                .and_then(|c| c.to_digit(16))
+                .ok_or_else(|| self.err("Invalid hexadecimal escape sequence"))?;
+            v = v * 16 + d;
+        }
+        Ok(v)
+    }
+
+    fn unicode_escape(&mut self) -> Result<u32, SyntaxError> {
+        if self.peek() == Some('{') {
+            self.bump();
+            let mut v = 0u32;
+            let mut any = false;
+            loop {
+                match self.bump() {
+                    Some('}') if any => break,
+                    Some(c) if c.is_ascii_hexdigit() => {
+                        v = v
+                            .checked_mul(16)
+                            .and_then(|v| v.checked_add(c.to_digit(16).unwrap_or(0)))
+                            .filter(|v| *v <= 0x10ffff)
+                            .ok_or_else(|| self.err("Undefined Unicode code-point"))?;
+                        any = true;
+                    }
+                    _ => return Err(self.err("Invalid Unicode escape sequence")),
+                }
+            }
+            Ok(v)
+        } else {
+            self.hex(4)
+        }
+    }
+
+    fn escape(&mut self, s: &mut String) -> Result<(), SyntaxError> {
+        let c = self
+            .bump()
+            .ok_or_else(|| self.err("Unterminated string literal"))?;
+        match c {
+            'n' => s.push('\n'),
+            't' => s.push('\t'),
+            'r' => s.push('\r'),
+            'b' => s.push('\u{8}'),
+            'f' => s.push('\u{c}'),
+            'v' => s.push('\u{b}'),
+            '0' if !self.peek().is_some_and(|d| d.is_ascii_digit()) => s.push('\0'),
+            'x' => {
+                let v = self.hex(2)?;
+                s.push(char::from_u32(v).unwrap_or('\u{fffd}'));
+            }
+            'u' => {
+                let v = self.unicode_escape()?;
+                if (0xd800..0xdc00).contains(&v)
+                    && self.peek() == Some('\\')
+                    && self.peek_at(1) == Some('u')
+                {
+                    let save = (self.pos, self.line, self.col);
+                    self.bump();
+                    self.bump();
+                    let low = self.unicode_escape()?;
+                    if (0xdc00..0xe000).contains(&low) {
+                        let cp = 0x10000 + ((v - 0xd800) << 10) + (low - 0xdc00);
+                        s.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
+                        return Ok(());
+                    }
+                    (self.pos, self.line, self.col) = save;
+                }
+                s.push(char::from_u32(v).unwrap_or('\u{fffd}'));
+            }
+            '\r' => {
+                if self.peek() == Some('\n') {
+                    self.bump();
+                }
+            }
+            '\n' | '\u{2028}' | '\u{2029}' => {}
+            other => s.push(other),
+        }
+        Ok(())
+    }
+
+    fn template(&mut self) -> Result<Tok, SyntaxError> {
+        let (line, col) = (self.line, self.col);
+        self.bump();
+        let mut parts = Vec::new();
+        let mut cur = String::new();
+        loop {
+            match self.bump() {
+                None => return Err(SyntaxError::new("Unterminated template literal", line, col)),
+                Some('`') => break,
+                Some('\\') => self.escape(&mut cur)?,
+                Some('$') if self.peek() == Some('{') => {
+                    self.bump();
+                    parts.push(TemplatePart::Str(Rc::from(std::mem::take(&mut cur))));
+                    let mut toks = Vec::new();
+                    self.lex_into(&mut toks, true)?;
+                    parts.push(TemplatePart::Expr(toks));
+                }
+                Some('\r') => {
+                    if self.peek() == Some('\n') {
+                        self.bump();
+                    }
+                    cur.push('\n');
+                }
+                Some(c) => cur.push(c),
+            }
+        }
+        parts.push(TemplatePart::Str(cur.into()));
+        Ok(Tok::Template(parts))
+    }
+}

@@ -1,0 +1,115 @@
+class Point {
+  constructor(x, y) {
+    this.x = x
+    this.y = y
+  }
+  add(o) {
+    return new Point(this.x + o.x, this.y + o.y)
+  }
+  toString() {
+    return `(${this.x}, ${this.y})`
+  }
+  static from([x, y]) {
+    return new Point(x, y)
+  }
+}
+const p = new Point(1, 2).add(Point.from([3, 4]))
+console.log(p, String(p), `${p}`, p + "")
+class Animal {
+  legs = 4
+  constructor(name) {
+    this.name = name
+  }
+  speak() {
+    return `${this.name} makes a sound`
+  }
+  static kind() {
+    return "animal"
+  }
+}
+class Dog extends Animal {
+  tricks = []
+  constructor(name, breed) {
+    super(name)
+    this.breed = breed
+  }
+  speak() {
+    return super.speak() + " (woof)"
+  }
+  learn(t) {
+    this.tricks.push(t)
+    return this
+  }
+  static kind() {
+    return "dog, an " + super.kind()
+  }
+}
+class Puppy extends Dog {}
+const d = new Puppy("Rex", "lab").learn("sit")
+console.log(d, d.speak(), Puppy.kind())
+console.log(d instanceof Puppy, d instanceof Dog, d instanceof Animal, d instanceof Object, [] instanceof Object)
+console.log(Object.getPrototypeOf(d) === Puppy.prototype, d.constructor.name, Dog.name, typeof Dog)
+class Counter {
+  count = 0
+  increment = () => {
+    this.count++
+    return this.count
+  }
+}
+const counter = new Counter()
+const inc = counter.increment
+inc()
+inc()
+console.log(counter.count)
+try {
+  Dog("x")
+} catch (e) {
+  console.log(e.message)
+}
+class Shape {
+  area() {
+    return 0
+  }
+  describe() {
+    return `${this.constructor.name} with area ${this.area().toFixed(2)}`
+  }
+}
+class Circle extends Shape {
+  constructor(r) {
+    super()
+    this.r = r
+  }
+  area() {
+    return Math.PI * this.r ** 2
+  }
+}
+class Square extends Shape {
+  constructor(s) {
+    super()
+    this.s = s
+  }
+  area() {
+    return this.s ** 2
+  }
+}
+console.log([new Circle(1), new Square(2)].map((s) => s.describe()))
+const Anon = class {
+  hi() {
+    return "anon"
+  }
+}
+console.log(new Anon().hi(), Anon.name)
+function Legacy(v) {
+  this.v = v
+}
+Legacy.prototype.get = function () {
+  return this.v
+}
+console.log(new Legacy(42).get(), new Legacy(1) instanceof Legacy)
+class Config {
+  static defaults = { debug: false }
+  static create() {
+    return new this()
+  }
+}
+console.log(Config.defaults, Config.create() instanceof Config)

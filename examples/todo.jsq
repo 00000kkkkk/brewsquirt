@@ -1,0 +1,48 @@
+class TodoList {
+  items = []
+  nextId = 1
+
+  add(title, tags = []) {
+    const todo = { id: this.nextId++, title, tags, done: false }
+    this.items.push(todo)
+    return todo
+  }
+
+  complete(id) {
+    const todo = this.items.find((t) => t.id === id)
+    if (!todo) throw new RangeError(`no todo with id ${id}`)
+    todo.done = true
+    return todo
+  }
+
+  byTag() {
+    const groups = new Map()
+    for (const { tags, title } of this.items) {
+      for (const tag of tags) {
+        groups.set(tag, [...(groups.get(tag) ?? []), title])
+      }
+    }
+    return groups
+  }
+
+  pending() {
+    return this.items.filter((t) => !t.done).map((t) => t.title)
+  }
+}
+
+const list = new TodoList()
+list.add("write the lexer", ["core"])
+list.add("write the vm", ["core", "perf"])
+list.add("ship vrotdaem", ["tooling"])
+list.complete(1)
+
+console.log("pending:", list.pending())
+console.log("by tag:", list.byTag())
+
+try {
+  list.complete(42)
+} catch (e) {
+  console.log(`${e.name}: ${e.message}`)
+}
+
+console.log(JSON.stringify(list.items, null, 2))

@@ -1,0 +1,158 @@
+use clap::Parser;
+use javasquirt::Vm;
+use javasquirt::compiler::Mode;
+use javasquirt::inspect::inspect_plain;
+use std::io::{BufRead, Write};
+use std::path::PathBuf;
+use std::process::ExitCode;
+
+#[derive(Parser)]
+#[command(
+    name = "jsq",
+    version,
+    about = "JavaSquirt: JS semantics, Rust speed",
+    after_help = "Run without arguments to open the REPL."
+)]
+struct Cli {
+    #[arg(
+        short = 'e',
+        long = "eval",
+        value_name = "CODE",
+        conflicts_with = "file"
+    )]
+    eval: Option<String>,
+    #[arg(long, requires = "file")]
+    disasm: bool,
+    file: Option<PathBuf>,
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<String>,
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    let handle = std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || run(cli))
+        .expect("spawn interpreter thread");
+    handle.join().unwrap_or(ExitCode::FAILURE)
+}
+
+fn run(cli: Cli) -> ExitCode {
+    let mut argv = vec!["jsq".to_string()];
+    if let Some(f) = &cli.file {
+        argv.push(f.display().to_string());
+    }
+    argv.extend(cli.args.iter().cloned());
+    let mut vm = Vm::new(argv);
+
+    if let Some(code) = &cli.eval {
+        let r = vm.eval("<eval>", code, Mode::Repl);
+        return finish(
+            &mut vm,
+            r.map(|v| {
+                if !v.is_undefined() {
+                    println_value(&v)
+                } else {
+                    None
+                }
+            }),
+        );
+    }
+
+    if let Some(file) = &cli.file {
+        if cli.disasm {
+            let src = match std::fs::read_to_string(file) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("jsq: cannot read {}: {e}", file.display());
+                    return ExitCode::FAILURE;
+                }
+            };
+            let dir = file.parent().map(PathBuf::from).unwrap_or_default();
+            return match vm.compile(&src, &file.display().to_string(), dir, Mode::Module) {
+                Ok(proto) => {
+                    print!("{}", proto.disassemble());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("SyntaxError: {e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        let r = vm.run_file(file);
+        return finish(&mut vm, r.map(|_| None));
+    }
+
+    repl(&mut vm)
+}
+
+fn println_value(v: &javasquirt::Value) -> Option<String> {
+    Some(inspect_plain(v))
+}
+
+fn finish(vm: &mut Vm, r: Result<Option<String>, javasquirt::Value>) -> ExitCode {
+    match r {
+        Ok(text) => {
+            if let Some(t) = text {
+                vm.write_out(&t);
+                vm.write_out("\n");
+            }
+            vm.flush();
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            let msg = vm.format_uncaught(&e);
+            vm.flush();
+            eprintln!("{msg}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn repl(vm: &mut Vm) -> ExitCode {
+    println!(
+        "JavaSquirt {} \u{1f4a6} type .exit to leave",
+        javasquirt::VERSION
+    );
+    let stdin = std::io::stdin();
+    let mut buffer = String::new();
+    loop {
+        print!("{}", if buffer.is_empty() { "jsq> " } else { "...  " });
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        match stdin.lock().read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        let trimmed = line.trim();
+        if buffer.is_empty() && (trimmed == ".exit" || trimmed == ".quit") {
+            break;
+        }
+        buffer.push_str(&line);
+        let dir = std::env::current_dir().unwrap_or_default();
+        match vm.compile(&buffer, "<repl>", dir, Mode::Repl) {
+            Err(e) if e.is_eof() => continue,
+            Err(e) => {
+                vm.flush();
+                eprintln!("Uncaught SyntaxError: {}", e.message);
+            }
+            Ok(proto) => {
+                let r = vm.run_proto(proto);
+                vm.flush();
+                match r {
+                    Ok(v) => {
+                        if !v.is_undefined() {
+                            println!("{}", inspect_plain(&v));
+                        }
+                    }
+                    Err(e) => eprintln!("{}", vm.format_uncaught(&e)),
+                }
+            }
+        }
+        buffer.clear();
+    }
+    vm.flush();
+    ExitCode::SUCCESS
+}

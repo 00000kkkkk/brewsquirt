@@ -1,0 +1,17 @@
+5 2 nan zero false true false
+Map(4) { 'b' => 2, 'c' => 3, NaN => 'nan', 0 => 'zero' }
+[ 'b', 'c', NaN, 0 ] [ 2, 3, 'nan', 'zero' ] 4
+b 2
+c 3
+NaN nan
+0 zero
+each b 2
+each c 3
+each NaN nan
+each 0 zero
+obj undefined
+4 true false Set(4) { 1, 2, 3, 4 } [ 1, 2, 3, 4 ]
+[ 10, 30, 40 ]
+misp
+0 Map(0) {}
+{ value: 1, done: false } { value: 2, done: false } { value: undefined, done: true }

@@ -1,0 +1,37 @@
+const o = { a: 1, b: "two", c: [3], d: { e: { f: { g: 1 } } } }
+console.log(o)
+console.log(Object.keys(o), Object.values({ x: 1, y: 2 }), Object.entries({ x: 1 }))
+const k = "dyn"
+const p = { [k + "amic"]: true, method() { return "m" }, "quoted-key": 1, answer: "num" }
+console.log(p, p.method(), p["quoted-key"], p.answer)
+const { a, b: renamed, z = "default", ...others } = o
+console.log(a, renamed, z, Object.keys(others))
+const merged = { ...o, a: 100, extra: true }
+console.log(merged.a, merged.extra, merged.b)
+console.log("a" in o, "zz" in o, o.hasOwnProperty("b"), Object.hasOwn(o, "c"))
+delete o.a
+console.log(o.a, Object.keys(o))
+const frozen = Object.freeze({ v: 1 })
+try {
+  frozen.v = 2
+} catch (e) {
+  console.log(e.constructor.name)
+}
+console.log(Object.isFrozen(frozen), frozen.v)
+const proto = { greet() { return "hi " + this.name } }
+const child = Object.create(proto)
+child.name = "kid"
+console.log(child.greet(), Object.getPrototypeOf(child) === proto)
+console.log(Object.fromEntries([["a", 1], ["b", 2]]), Object.assign({ a: 1 }, { b: 2 }, { a: 3 }))
+const shorthand = 5
+console.log({ shorthand }, {}, { nested: {} }, [{}])
+let counter = { n: 0, inc() { this.n++; return this } }
+console.log(counter.inc().inc().n)
+console.log(o?.d?.e?.f?.g, o.missing?.deep.deeper, o.missing?.(), typeof o.d)
+const swap = [1, 2]
+let [s1, s2] = swap
+;[s1, s2] = [s2, s1]
+console.log(s1, s2)
+const target = {}
+;({ x: target.x, y: target["y"] } = { x: 1, y: 2 })
+console.log(target)

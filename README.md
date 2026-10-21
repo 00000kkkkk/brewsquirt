@@ -1,0 +1,258 @@
+# JavaSquirt
+
+[![CI](https://github.com/00000kkkkk/javasquirt/actions/workflows/ci.yml/badge.svg)](https://github.com/00000kkkkk/javasquirt/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-orange.svg)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0/)
+[![Rust edition](https://img.shields.io/badge/edition-2024-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/)
+
+> High-performance language with JS semantics and Rust speed.
+> Type `vrotdaem gluboko --force` to inject dependencies directly into your `nude_modules`.
+
+JavaSquirt is a small, fast language that looks and behaves like the JavaScript you already know,
+compiled to bytecode and executed by a stack VM written in Rust. It ships as two binaries:
+
+- **`jsq`**: the runtime. Runs `.jsq` files, evaluates one-liners, dumps bytecode, and gives you a REPL.
+- **`vrotdaem`**: the package manager. Manages `squirt.json` and installs dependencies into `nude_modules/`.
+
+No `node_modules` black hole, no 400 MB of transitive left-pads. Just your code and whatever you
+explicitly squirt into `nude_modules`.
+
+## Quick example
+
+```js
+class Runtime {
+  constructor(name, speed = 1) {
+    this.name = name
+    this.speed = speed
+  }
+
+  describe() {
+    return `${this.name} goes ${this.speed}x`
+  }
+}
+
+class Squirt extends Runtime {
+  constructor() {
+    super("JavaSquirt", 9000)
+  }
+
+  describe() {
+    return `${super.describe()} and never stops`
+  }
+}
+
+const runtimes = [new Runtime("interpreter"), new Runtime("tree-walker", 3), new Squirt()]
+const fast = runtimes.filter((r) => r.speed > 1)
+const lines = fast.map((r) => r.describe())
+const total = runtimes.reduce((sum, r) => sum + r.speed, 0)
+
+lines.forEach((line) => console.log(line))
+console.log(`combined speed: ${total}x`)
+```
+
+```console
+$ jsq speed.jsq
+tree-walker goes 3x
+JavaSquirt goes 9000x and never stops
+combined speed: 9004x
+```
+
+## Install
+
+### From source
+
+Requires Rust 1.85 or newer.
+
+```sh
+cargo install --git https://github.com/00000kkkkk/javasquirt
+```
+
+This installs both `jsq` and `vrotdaem` into `~/.cargo/bin`.
+
+### Release binaries
+
+Prebuilt archives for every tagged release are on the
+[Releases page](https://github.com/00000kkkkk/javasquirt/releases):
+
+| Platform            | Archive                                              |
+| ------------------- | ---------------------------------------------------- |
+| Linux x86_64        | `javasquirt-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`  |
+| Linux ARM64         | `javasquirt-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS Intel         | `javasquirt-vX.Y.Z-x86_64-apple-darwin.tar.gz`       |
+| macOS Apple Silicon | `javasquirt-vX.Y.Z-aarch64-apple-darwin.tar.gz`      |
+| Windows x86_64      | `javasquirt-vX.Y.Z-x86_64-pc-windows-msvc.zip`       |
+
+Each archive has a matching `.sha256` checksum file. Unpack it and put `jsq` and `vrotdaem` on your `PATH`.
+
+## Usage
+
+### `jsq`: the runtime
+
+| Command                         | What it does                                          |
+| ------------------------------- | ----------------------------------------------------- |
+| `jsq`                           | Start the REPL                                        |
+| `jsq app.jsq arg1 arg2`         | Run a file; extra arguments land in `process.argv`    |
+| `jsq -e "console.log(2 ** 10)"` | Evaluate a snippet                                    |
+| `jsq --disasm app.jsq`          | Dump the compiled bytecode instead of running it      |
+| `jsq --version`                 | Print the version                                     |
+
+### `vrotdaem`: the package manager
+
+| Command                          | What it does                                                    |
+| -------------------------------- | --------------------------------------------------------------- |
+| `vrotdaem init [--name <n>]`     | Create `squirt.json` in the current directory                   |
+| `vrotdaem add <name> <spec>`     | Add a dependency, `file:<path>` or `git:<url>[#ref]`            |
+| `vrotdaem remove <name>`         | Remove a dependency                                             |
+| `vrotdaem gluboko [--force]`     | Install all dependencies into `nude_modules/`                   |
+| `vrotdaem run [args...]`         | Run the manifest's `main` with the given arguments              |
+
+```sh
+vrotdaem init --name my-app
+vrotdaem add utils file:../utils
+vrotdaem add left-pad git:https://github.com/someone/left-pad#v1.0.0
+vrotdaem gluboko
+vrotdaem run
+```
+
+And the one command you came here for:
+
+```sh
+vrotdaem gluboko --force
+```
+
+`gluboko` installs every dependency from `squirt.json` into `nude_modules/`. With `--force` it wipes
+`nude_modules/` first and reinstalls everything from scratch, deep and clean.
+
+A manifest looks like this:
+
+```json
+{
+  "name": "my-app",
+  "version": "0.1.0",
+  "main": "main.jsq",
+  "dependencies": {
+    "utils": "file:../utils",
+    "left-pad": "git:https://github.com/someone/left-pad#v1.0.0"
+  }
+}
+```
+
+Installed packages are imported by bare name:
+
+```js
+import { pad } from "left-pad"
+import { readFile } from "squirt:fs"
+import helpers from "./helpers"
+```
+
+## Features
+
+JavaSquirt 0.1.0 implements a large, practical subset of modern JavaScript:
+
+- **Values**: `undefined`, `null`, booleans, numbers, strings, arrays, objects, functions, classes, `Map`, `Set`, `Error`
+- **Bindings**: block-scoped `let` and `const`, hoisted function declarations
+- **Functions**: arrow functions, default parameters, rest parameters, closures
+- **Spread and destructuring**: spread in calls, arrays and objects; object and array destructuring with defaults and rest in `let`, `const` and parameters
+- **Control flow**: `if`/`else`, `while`, `do`/`while`, `for`, `for...of`, `for...in`, `switch`, `break`, `continue`
+- **Errors**: `try`/`catch`/`finally`, `throw`, `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, with stack traces
+- **Classes**: constructors, methods, static methods, instance and static fields, `extends`, `super()`, `super.method()`, `new`, `instanceof`
+- **Operators**: arithmetic, `**`, bitwise and shifts including `>>>`, loose and strict equality, `&&`, `||`, `??`, optional chaining `?.`, ternary, `typeof`, `void`, `delete`, `in`, compound assignment including `&&=`, `||=`, `??=`, `++` and `--`
+- **Syntax**: template literals, optional semicolons with JS-style ASI, `//` and `/* */` comments
+- **Modules**: ES module `import` and `export` (named, default, namespace, renamed), relative and bare-name resolution, builtin `squirt:fs`
+- **Builtins**: `console`, `Math`, `Number`, `String`, `Array`, `Object`, `JSON`, `Map`, `Set`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `process.argv`, `process.exit`, `process.env`
+
+The full reference with examples lives in [docs/LANGUAGE.md](docs/LANGUAGE.md).
+
+## Architecture
+
+```text
+  source.jsq
+      |
+      v
+ +-----------+  tokens  +----------------------+   AST   +-----------------------+
+ |   Lexer   | -------> | Pratt parser         | ------> | Single-pass compiler  |
+ |           |          | + JS-style ASI       |         | scopes, upvalues      |
+ +-----------+          +----------------------+         +-----------------------+
+                                                                    |
+                                                                    | bytecode
+                                                                    v
+ +-------------------------------------------------------------------------------+
+ |                                  Stack VM                                     |
+ |   call frames | closures + upvalues | prototype chains | exception unwinding   |
+ +-------------------------------------------------------------------------------+
+          ^                                                       ^
+          |                                                       |
+ +--------------------------------+          +-------------------------------------+
+ | Builtins                       |          | Module loader                       |
+ | console, Math, JSON, Map, Set, |          | ./relative, nude_modules/<name>,    |
+ | Error, Object, Array, process  |          | squirt:fs                           |
+ +--------------------------------+          +-------------------------------------+
+```
+
+1. The **lexer** turns source text into tokens and records line breaks for ASI.
+2. The **Pratt parser** builds the AST, inserting semicolons the way JavaScript does.
+3. The **compiler** walks the AST once, resolves locals and upvalues, and emits compact bytecode.
+4. The **VM** executes bytecode on a value stack with closures, prototype-based objects and
+   `try`/`catch` unwinding. `jsq --disasm` shows exactly what it runs.
+
+## Project layout
+
+```text
+javasquirt/
+  src/
+    lexer.rs, token.rs        tokens and the lexer
+    parser.rs, ast.rs         Pratt parser and syntax tree
+    compiler.rs, bytecode.rs  single-pass compiler and instruction set
+    vm.rs, value.rs, object.rs  stack VM, values, objects and prototypes
+    builtins/                 console, Math, JSON, Map, Set, Error and friends
+    module.rs                 module resolution and loading
+    pm/                       vrotdaem internals
+    bin/jsq.rs                runtime CLI and REPL
+    bin/vrotdaem.rs           package manager CLI
+  tests/
+    scripts/                  <name>.jsq programs with <name>.out expected stdout
+  examples/                   runnable .jsq examples, executed in CI
+  benches/                    .jsq benchmarks, timed with hyperfine in CI
+  docs/LANGUAGE.md            language reference
+```
+
+## Development
+
+```sh
+cargo build
+cargo test --all-features
+cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+cargo run --bin jsq -- benches/fib.jsq
+cargo run --release --bin jsq -- --disasm benches/loop.jsq
+```
+
+Optional tools used in CI:
+
+```sh
+cargo deny check
+cargo llvm-cov --all-features
+typos
+```
+
+## Roadmap
+
+- [ ] `async`/`await`, Promises and an event loop
+- [ ] Generators
+- [ ] Getters and setters
+- [ ] Regular expressions
+- [ ] Symbols
+- [ ] Labeled statements
+- [ ] Private `#fields`
+- [ ] Tracing garbage collector
+- [ ] JIT compiler
+
+## Contributing
+
+Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the workflow, commit
+conventions and how to add tests. Please follow the [Code of Conduct](CODE_OF_CONDUCT.md), and
+report vulnerabilities as described in [SECURITY.md](SECURITY.md).
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).

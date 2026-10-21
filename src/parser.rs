@@ -1,0 +1,1819 @@
+use crate::ast::*;
+use crate::lexer::tokenize;
+use crate::number::number_to_string;
+use crate::token::{P, SyntaxError, TemplatePart, Tok, Token};
+use std::rc::Rc;
+
+type R<T> = Result<T, SyntaxError>;
+
+const RESERVED: &[&str] = &[
+    "break",
+    "case",
+    "catch",
+    "class",
+    "const",
+    "continue",
+    "debugger",
+    "default",
+    "delete",
+    "do",
+    "else",
+    "enum",
+    "export",
+    "extends",
+    "false",
+    "finally",
+    "for",
+    "function",
+    "if",
+    "import",
+    "in",
+    "instanceof",
+    "new",
+    "null",
+    "return",
+    "super",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "var",
+    "void",
+    "while",
+    "with",
+    "yield",
+    "let",
+    "await",
+];
+
+pub fn is_reserved(name: &str) -> bool {
+    RESERVED.contains(&name)
+}
+
+pub fn parse(src: &str) -> R<Vec<Stmt>> {
+    let toks = tokenize(src)?;
+    let mut parser = Parser {
+        toks,
+        pos: 0,
+        no_in: false,
+        fn_depth: 0,
+    };
+    parser.program()
+}
+
+enum BinKind {
+    Bin(BinOp),
+    Logical(LogicalOp),
+}
+
+struct Parser {
+    toks: Vec<Token>,
+    pos: usize,
+    no_in: bool,
+    fn_depth: u32,
+}
+
+impl Parser {
+    fn peek(&self) -> &Token {
+        &self.toks[self.pos]
+    }
+
+    fn peek_at(&self, n: usize) -> &Token {
+        &self.toks[(self.pos + n).min(self.toks.len() - 1)]
+    }
+
+    fn advance(&mut self) -> Token {
+        let t = self.toks[self.pos].clone();
+        if self.pos < self.toks.len() - 1 {
+            self.pos += 1;
+        }
+        t
+    }
+
+    fn is(&self, p: P) -> bool {
+        matches!(self.peek().tok, Tok::Punct(q) if q == p)
+    }
+
+    fn is_at(&self, n: usize, p: P) -> bool {
+        matches!(self.peek_at(n).tok, Tok::Punct(q) if q == p)
+    }
+
+    fn is_eof(&self) -> bool {
+        matches!(self.peek().tok, Tok::Eof)
+    }
+
+    fn eat(&mut self, p: P) -> bool {
+        if self.is(p) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect(&mut self, p: P) -> R<()> {
+        if self.eat(p) {
+            Ok(())
+        } else {
+            Err(self.unexpected())
+        }
+    }
+
+    fn is_kw(&self, kw: &str) -> bool {
+        matches!(&self.peek().tok, Tok::Ident(s) if &**s == kw)
+    }
+
+    fn is_kw_at(&self, n: usize, kw: &str) -> bool {
+        matches!(&self.peek_at(n).tok, Tok::Ident(s) if &**s == kw)
+    }
+
+    fn eat_kw(&mut self, kw: &str) -> bool {
+        if self.is_kw(kw) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect_kw(&mut self, kw: &str) -> R<()> {
+        if self.eat_kw(kw) {
+            Ok(())
+        } else {
+            Err(self.unexpected())
+        }
+    }
+
+    fn unexpected(&self) -> SyntaxError {
+        let t = self.peek();
+        match t.tok {
+            Tok::Eof => SyntaxError::new("Unexpected end of input", t.line, t.col),
+            _ => SyntaxError::new(
+                format!("Unexpected token '{}'", t.describe()),
+                t.line,
+                t.col,
+            ),
+        }
+    }
+
+    fn error(&self, msg: impl Into<String>) -> SyntaxError {
+        let t = self.peek();
+        SyntaxError::new(msg, t.line, t.col)
+    }
+
+    fn line(&self) -> u32 {
+        self.peek().line
+    }
+
+    fn word(&self) -> Option<Rc<str>> {
+        match &self.peek().tok {
+            Tok::Ident(s) => Some(s.clone()),
+            _ => None,
+        }
+    }
+
+    fn ident_name(&mut self) -> R<Rc<str>> {
+        match self.word() {
+            Some(s) => {
+                self.advance();
+                Ok(s)
+            }
+            None if self.is(P::Hash) => Err(self.error("Private fields are not supported yet")),
+            None => Err(self.unexpected()),
+        }
+    }
+
+    fn binding_ident(&mut self) -> R<Rc<str>> {
+        match self.word() {
+            Some(s) if is_reserved(&s) => {
+                Err(self.error(format!("Unexpected reserved word '{s}'")))
+            }
+            Some(s) => {
+                self.advance();
+                Ok(s)
+            }
+            None => Err(self.unexpected()),
+        }
+    }
+
+    fn string_lit(&mut self) -> R<Rc<str>> {
+        match &self.peek().tok {
+            Tok::Str(s) => {
+                let s = s.clone();
+                self.advance();
+                Ok(s)
+            }
+            _ => Err(self.unexpected()),
+        }
+    }
+
+    fn module_name(&mut self) -> R<Rc<str>> {
+        match &self.peek().tok {
+            Tok::Str(s) => {
+                let s = s.clone();
+                self.advance();
+                Ok(s)
+            }
+            _ => self.ident_name(),
+        }
+    }
+
+    fn semicolon(&mut self) -> R<()> {
+        if self.eat(P::Semi) || self.is(P::RBrace) || self.is_eof() || self.peek().nl_before {
+            Ok(())
+        } else {
+            Err(self.unexpected())
+        }
+    }
+
+    fn program(&mut self) -> R<Vec<Stmt>> {
+        let mut out = Vec::new();
+        while !self.is_eof() {
+            out.push(self.statement()?);
+        }
+        Ok(out)
+    }
+
+    fn block(&mut self) -> R<Vec<Stmt>> {
+        self.expect(P::LBrace)?;
+        let mut out = Vec::new();
+        while !self.eat(P::RBrace) {
+            if self.is_eof() {
+                return Err(self.unexpected());
+            }
+            out.push(self.statement()?);
+        }
+        Ok(out)
+    }
+
+    fn statement(&mut self) -> R<Stmt> {
+        let line = self.line();
+        let kind = self.statement_kind()?;
+        Ok(Stmt { kind, line })
+    }
+
+    fn statement_kind(&mut self) -> R<StmtKind> {
+        if self.is(P::LBrace) {
+            return Ok(StmtKind::Block(self.block()?));
+        }
+        if self.eat(P::Semi) {
+            return Ok(StmtKind::Empty);
+        }
+        let word = self.word();
+        match word.as_deref() {
+            Some("let") | Some("const") | Some("var")
+                if matches!(
+                    self.peek_at(1).tok,
+                    Tok::Ident(_) | Tok::Punct(P::LBracket) | Tok::Punct(P::LBrace)
+                ) =>
+            {
+                let s = self.var_decl()?;
+                self.semicolon()?;
+                Ok(s)
+            }
+            Some("function") => {
+                let line = self.line();
+                self.advance();
+                if self.is(P::Star) {
+                    return Err(self.error("Generators are not supported yet"));
+                }
+                let name = self.binding_ident()?;
+                let f = self.function_rest(Some(name), FuncKind::Normal, line)?;
+                Ok(StmtKind::Function(f))
+            }
+            Some("async") if self.is_kw_at(1, "function") => {
+                Err(self.error("async functions are not supported yet"))
+            }
+            Some("class") => Ok(StmtKind::Class(self.class(true)?)),
+            Some("if") => {
+                self.advance();
+                self.expect(P::LParen)?;
+                let test = self.expression()?;
+                self.expect(P::RParen)?;
+                let cons = self.statement()?;
+                let alt = if self.eat_kw("else") {
+                    Some(Box::new(self.statement()?))
+                } else {
+                    None
+                };
+                Ok(StmtKind::If(test, Box::new(cons), alt))
+            }
+            Some("while") => {
+                self.advance();
+                self.expect(P::LParen)?;
+                let test = self.expression()?;
+                self.expect(P::RParen)?;
+                let body = self.statement()?;
+                Ok(StmtKind::While(test, Box::new(body)))
+            }
+            Some("do") => {
+                self.advance();
+                let body = self.statement()?;
+                self.expect_kw("while")?;
+                self.expect(P::LParen)?;
+                let test = self.expression()?;
+                self.expect(P::RParen)?;
+                self.eat(P::Semi);
+                Ok(StmtKind::DoWhile(Box::new(body), test))
+            }
+            Some("for") => self.for_statement(),
+            Some("return") => {
+                if self.fn_depth == 0 {
+                    return Err(self.error("Illegal return statement"));
+                }
+                self.advance();
+                let value = if self.is(P::Semi)
+                    || self.is(P::RBrace)
+                    || self.is_eof()
+                    || self.peek().nl_before
+                {
+                    None
+                } else {
+                    Some(self.expression()?)
+                };
+                self.semicolon()?;
+                Ok(StmtKind::Return(value))
+            }
+            Some("break") => {
+                self.advance();
+                if matches!(self.peek().tok, Tok::Ident(_)) && !self.peek().nl_before {
+                    return Err(self.error("Labeled statements are not supported yet"));
+                }
+                self.semicolon()?;
+                Ok(StmtKind::Break)
+            }
+            Some("continue") => {
+                self.advance();
+                if matches!(self.peek().tok, Tok::Ident(_)) && !self.peek().nl_before {
+                    return Err(self.error("Labeled statements are not supported yet"));
+                }
+                self.semicolon()?;
+                Ok(StmtKind::Continue)
+            }
+            Some("throw") => {
+                self.advance();
+                if self.peek().nl_before {
+                    return Err(self.error("Illegal newline after throw"));
+                }
+                let e = self.expression()?;
+                self.semicolon()?;
+                Ok(StmtKind::Throw(e))
+            }
+            Some("try") => {
+                self.advance();
+                let block = self.block()?;
+                let mut param = None;
+                let mut handler = None;
+                if self.eat_kw("catch") {
+                    if self.eat(P::LParen) {
+                        param = Some(self.binding_pattern()?);
+                        self.expect(P::RParen)?;
+                    }
+                    handler = Some(self.block()?);
+                }
+                let finalizer = if self.eat_kw("finally") {
+                    Some(self.block()?)
+                } else {
+                    None
+                };
+                if handler.is_none() && finalizer.is_none() {
+                    return Err(self.error("Missing catch or finally after try"));
+                }
+                Ok(StmtKind::Try {
+                    block,
+                    param,
+                    handler,
+                    finalizer,
+                })
+            }
+            Some("switch") => {
+                self.advance();
+                self.expect(P::LParen)?;
+                let disc = self.expression()?;
+                self.expect(P::RParen)?;
+                self.expect(P::LBrace)?;
+                let mut cases = Vec::new();
+                let mut seen_default = false;
+                while !self.eat(P::RBrace) {
+                    let test = if self.eat_kw("case") {
+                        Some(self.expression()?)
+                    } else if self.eat_kw("default") {
+                        if seen_default {
+                            return Err(
+                                self.error("More than one default clause in switch statement")
+                            );
+                        }
+                        seen_default = true;
+                        None
+                    } else {
+                        return Err(self.unexpected());
+                    };
+                    self.expect(P::Colon)?;
+                    let mut body = Vec::new();
+                    while !self.is_kw("case") && !self.is_kw("default") && !self.is(P::RBrace) {
+                        if self.is_eof() {
+                            return Err(self.unexpected());
+                        }
+                        body.push(self.statement()?);
+                    }
+                    cases.push(SwitchCase { test, body });
+                }
+                Ok(StmtKind::Switch(disc, cases))
+            }
+            Some("import") if !self.is_at(1, P::LParen) && !self.is_at(1, P::Dot) => self.import(),
+            Some("export") => self.export(),
+            Some("debugger") => {
+                self.advance();
+                self.semicolon()?;
+                Ok(StmtKind::Empty)
+            }
+            Some("with") => Err(self.error("'with' is not supported")),
+            _ => {
+                let e = self.expression()?;
+                self.semicolon()?;
+                Ok(StmtKind::Expr(e))
+            }
+        }
+    }
+
+    fn var_decl(&mut self) -> R<StmtKind> {
+        let kind = if self.is_kw("const") {
+            DeclKind::Const
+        } else {
+            DeclKind::Let
+        };
+        self.advance();
+        let mut decls = Vec::new();
+        loop {
+            let pattern = self.binding_pattern()?;
+            let init = if self.eat(P::Eq) {
+                Some(self.assignment()?)
+            } else {
+                None
+            };
+            if init.is_none() {
+                if kind == DeclKind::Const {
+                    return Err(self.error("Missing initializer in const declaration"));
+                }
+                if !matches!(pattern, Pattern::Ident(_)) {
+                    return Err(self.error("Missing initializer in destructuring declaration"));
+                }
+            }
+            decls.push((pattern, init));
+            if !self.eat(P::Comma) {
+                break;
+            }
+        }
+        Ok(StmtKind::Decl(kind, decls))
+    }
+
+    fn for_statement(&mut self) -> R<StmtKind> {
+        self.advance();
+        if self.is_kw("await") {
+            return Err(self.error("for await is not supported yet"));
+        }
+        self.expect(P::LParen)?;
+        let init_line = self.line();
+        let init = if (self.is_kw("let") || self.is_kw("const") || self.is_kw("var"))
+            && matches!(
+                self.peek_at(1).tok,
+                Tok::Ident(_) | Tok::Punct(P::LBracket) | Tok::Punct(P::LBrace)
+            ) {
+            let kind = if self.is_kw("const") {
+                DeclKind::Const
+            } else {
+                DeclKind::Let
+            };
+            self.advance();
+            let pattern = self.binding_pattern()?;
+            if self.eat_kw("of") {
+                let iter = self.assignment()?;
+                self.expect(P::RParen)?;
+                let body = self.statement()?;
+                return Ok(StmtKind::ForOf {
+                    decl: Some(kind),
+                    pattern,
+                    iter,
+                    body: Box::new(body),
+                });
+            }
+            if self.eat_kw("in") {
+                let obj = self.expression()?;
+                self.expect(P::RParen)?;
+                let body = self.statement()?;
+                return Ok(StmtKind::ForIn {
+                    decl: Some(kind),
+                    pattern,
+                    obj,
+                    body: Box::new(body),
+                });
+            }
+            let saved = self.no_in;
+            self.no_in = true;
+            let mut decls = Vec::new();
+            let first = if self.eat(P::Eq) {
+                Some(self.assignment()?)
+            } else {
+                None
+            };
+            if first.is_none() && kind == DeclKind::Const {
+                return Err(self.error("Missing initializer in const declaration"));
+            }
+            decls.push((pattern, first));
+            while self.eat(P::Comma) {
+                let p = self.binding_pattern()?;
+                let i = if self.eat(P::Eq) {
+                    Some(self.assignment()?)
+                } else {
+                    None
+                };
+                decls.push((p, i));
+            }
+            self.no_in = saved;
+            self.expect(P::Semi)?;
+            Some(Box::new(Stmt {
+                kind: StmtKind::Decl(kind, decls),
+                line: init_line,
+            }))
+        } else if self.eat(P::Semi) {
+            None
+        } else {
+            let saved = self.no_in;
+            self.no_in = true;
+            let e = self.expression()?;
+            self.no_in = saved;
+            if self.is_kw("of") || self.is_kw("in") {
+                let is_of = self.is_kw("of");
+                self.advance();
+                let pattern = self.expr_to_pattern(e)?;
+                let rhs = if is_of {
+                    self.assignment()?
+                } else {
+                    self.expression()?
+                };
+                self.expect(P::RParen)?;
+                let body = Box::new(self.statement()?);
+                return Ok(if is_of {
+                    StmtKind::ForOf {
+                        decl: None,
+                        pattern,
+                        iter: rhs,
+                        body,
+                    }
+                } else {
+                    StmtKind::ForIn {
+                        decl: None,
+                        pattern,
+                        obj: rhs,
+                        body,
+                    }
+                });
+            }
+            self.expect(P::Semi)?;
+            Some(Box::new(Stmt {
+                kind: StmtKind::Expr(e),
+                line: init_line,
+            }))
+        };
+        let test = if self.is(P::Semi) {
+            None
+        } else {
+            Some(self.expression()?)
+        };
+        self.expect(P::Semi)?;
+        let update = if self.is(P::RParen) {
+            None
+        } else {
+            Some(self.expression()?)
+        };
+        self.expect(P::RParen)?;
+        let body = self.statement()?;
+        Ok(StmtKind::For {
+            init,
+            test,
+            update,
+            body: Box::new(body),
+        })
+    }
+
+    fn import(&mut self) -> R<StmtKind> {
+        self.advance();
+        if let Tok::Str(s) = &self.peek().tok {
+            let source = s.clone();
+            self.advance();
+            self.semicolon()?;
+            return Ok(StmtKind::Import(ImportDecl {
+                source,
+                default: None,
+                namespace: None,
+                named: Vec::new(),
+            }));
+        }
+        let mut default = None;
+        let mut namespace = None;
+        let mut named = Vec::new();
+        let mut need_more = true;
+        if matches!(self.peek().tok, Tok::Ident(_)) {
+            default = Some(self.binding_ident()?);
+            need_more = self.eat(P::Comma);
+        }
+        if need_more {
+            if self.eat(P::Star) {
+                self.expect_kw("as")?;
+                namespace = Some(self.binding_ident()?);
+            } else if self.eat(P::LBrace) {
+                while !self.eat(P::RBrace) {
+                    let imported = self.module_name()?;
+                    let local = if self.eat_kw("as") {
+                        self.binding_ident()?
+                    } else {
+                        if is_reserved(&imported) {
+                            return Err(
+                                self.error(format!("Unexpected reserved word '{imported}'"))
+                            );
+                        }
+                        imported.clone()
+                    };
+                    named.push((imported, local));
+                    if !self.eat(P::Comma) {
+                        self.expect(P::RBrace)?;
+                        break;
+                    }
+                }
+            } else {
+                return Err(self.unexpected());
+            }
+        }
+        self.expect_kw("from")?;
+        let source = self.string_lit()?;
+        self.semicolon()?;
+        Ok(StmtKind::Import(ImportDecl {
+            source,
+            default,
+            namespace,
+            named,
+        }))
+    }
+
+    fn export_names(&mut self) -> R<Vec<(Rc<str>, Rc<str>)>> {
+        let mut names = Vec::new();
+        while !self.eat(P::RBrace) {
+            let local = self.module_name()?;
+            let exported = if self.eat_kw("as") {
+                self.module_name()?
+            } else {
+                local.clone()
+            };
+            names.push((local, exported));
+            if !self.eat(P::Comma) {
+                self.expect(P::RBrace)?;
+                break;
+            }
+        }
+        Ok(names)
+    }
+
+    fn export(&mut self) -> R<StmtKind> {
+        self.advance();
+        if self.eat_kw("default") {
+            let line = self.line();
+            if self.is_kw("function") && matches!(self.peek_at(1).tok, Tok::Ident(_)) {
+                let s = self.statement()?;
+                return Ok(StmtKind::Export(ExportDecl::DefaultDecl(Box::new(s))));
+            }
+            if self.is_kw("class")
+                && matches!(&self.peek_at(1).tok, Tok::Ident(n) if &**n != "extends")
+            {
+                let c = self.class(true)?;
+                return Ok(StmtKind::Export(ExportDecl::DefaultDecl(Box::new(Stmt {
+                    kind: StmtKind::Class(c),
+                    line,
+                }))));
+            }
+            let e = self.assignment()?;
+            self.semicolon()?;
+            return Ok(StmtKind::Export(ExportDecl::Default(e)));
+        }
+        if self.eat(P::Star) {
+            if self.is_kw("as") {
+                return Err(self.error("export * as is not supported yet"));
+            }
+            self.expect_kw("from")?;
+            let source = self.string_lit()?;
+            self.semicolon()?;
+            return Ok(StmtKind::Export(ExportDecl::From {
+                source,
+                names: None,
+            }));
+        }
+        if self.eat(P::LBrace) {
+            let names = self.export_names()?;
+            if self.eat_kw("from") {
+                let source = self.string_lit()?;
+                self.semicolon()?;
+                return Ok(StmtKind::Export(ExportDecl::From {
+                    source,
+                    names: Some(names),
+                }));
+            }
+            self.semicolon()?;
+            return Ok(StmtKind::Export(ExportDecl::Names(names)));
+        }
+        let s = self.statement()?;
+        match s.kind {
+            StmtKind::Decl(..) | StmtKind::Function(_) | StmtKind::Class(_) => {
+                Ok(StmtKind::Export(ExportDecl::Decl(Box::new(s))))
+            }
+            _ => Err(SyntaxError::new("Unexpected export", s.line, 1)),
+        }
+    }
+
+    fn function_rest(
+        &mut self,
+        name: Option<Rc<str>>,
+        kind: FuncKind,
+        line: u32,
+    ) -> R<Rc<FuncDef>> {
+        let (params, rest) = self.params()?;
+        let body = self.function_body()?;
+        Ok(Rc::new(FuncDef {
+            name,
+            params,
+            rest,
+            body: FuncBody::Block(body),
+            kind,
+            line,
+        }))
+    }
+
+    fn function_body(&mut self) -> R<Vec<Stmt>> {
+        let saved = self.no_in;
+        self.no_in = false;
+        self.fn_depth += 1;
+        let body = self.block();
+        self.fn_depth -= 1;
+        self.no_in = saved;
+        body
+    }
+
+    fn params(&mut self) -> R<(Vec<Param>, Option<Pattern>)> {
+        self.expect(P::LParen)?;
+        let saved = self.no_in;
+        self.no_in = false;
+        let mut params = Vec::new();
+        let mut rest = None;
+        while !self.is(P::RParen) {
+            if self.eat(P::Ellipsis) {
+                rest = Some(self.binding_pattern()?);
+                break;
+            }
+            let pattern = self.binding_pattern()?;
+            let default = if self.eat(P::Eq) {
+                Some(self.assignment()?)
+            } else {
+                None
+            };
+            params.push(Param { pattern, default });
+            if !self.eat(P::Comma) {
+                break;
+            }
+        }
+        self.no_in = saved;
+        self.expect(P::RParen)?;
+        Ok((params, rest))
+    }
+
+    fn prop_key(&mut self) -> R<(PropKey, bool)> {
+        match &self.peek().tok {
+            Tok::Ident(s) => {
+                let s = s.clone();
+                self.advance();
+                Ok((PropKey::Named(s), true))
+            }
+            Tok::Str(s) => {
+                let s = s.clone();
+                self.advance();
+                Ok((PropKey::Named(s), false))
+            }
+            Tok::Num(n) => {
+                let s: Rc<str> = number_to_string(*n).into();
+                self.advance();
+                Ok((PropKey::Named(s), false))
+            }
+            Tok::Punct(P::LBracket) => {
+                self.advance();
+                let saved = self.no_in;
+                self.no_in = false;
+                let e = self.assignment()?;
+                self.no_in = saved;
+                self.expect(P::RBracket)?;
+                Ok((PropKey::Computed(e), false))
+            }
+            Tok::Punct(P::Hash) => Err(self.error("Private fields are not supported yet")),
+            _ => Err(self.unexpected()),
+        }
+    }
+
+    fn binding_pattern(&mut self) -> R<Pattern> {
+        if self.eat(P::LBracket) {
+            let mut elems = Vec::new();
+            let mut rest = None;
+            loop {
+                if self.eat(P::RBracket) {
+                    break;
+                }
+                if self.eat(P::Comma) {
+                    elems.push(None);
+                    continue;
+                }
+                if self.eat(P::Ellipsis) {
+                    rest = Some(Box::new(self.binding_pattern()?));
+                    self.expect(P::RBracket)?;
+                    break;
+                }
+                let pattern = self.binding_pattern()?;
+                let default = if self.eat(P::Eq) {
+                    Some(self.assignment()?)
+                } else {
+                    None
+                };
+                elems.push(Some(PatElem { pattern, default }));
+                if !self.eat(P::Comma) {
+                    self.expect(P::RBracket)?;
+                    break;
+                }
+            }
+            Ok(Pattern::Array { elems, rest })
+        } else if self.eat(P::LBrace) {
+            let mut props = Vec::new();
+            let mut rest = None;
+            loop {
+                if self.eat(P::RBrace) {
+                    break;
+                }
+                if self.eat(P::Ellipsis) {
+                    rest = Some(Box::new(Pattern::Ident(self.binding_ident()?)));
+                    self.eat(P::Comma);
+                    self.expect(P::RBrace)?;
+                    break;
+                }
+                let (key, is_ident) = self.prop_key()?;
+                let (value, default) = if self.eat(P::Colon) {
+                    let v = self.binding_pattern()?;
+                    let d = if self.eat(P::Eq) {
+                        Some(self.assignment()?)
+                    } else {
+                        None
+                    };
+                    (v, d)
+                } else {
+                    match &key {
+                        PropKey::Named(n) if is_ident => {
+                            if is_reserved(n) {
+                                return Err(self.error(format!("Unexpected reserved word '{n}'")));
+                            }
+                            let d = if self.eat(P::Eq) {
+                                Some(self.assignment()?)
+                            } else {
+                                None
+                            };
+                            (Pattern::Ident(n.clone()), d)
+                        }
+                        _ => return Err(self.unexpected()),
+                    }
+                };
+                props.push(ObjPatProp {
+                    key,
+                    value,
+                    default,
+                });
+                if !self.eat(P::Comma) {
+                    self.expect(P::RBrace)?;
+                    break;
+                }
+            }
+            Ok(Pattern::Object { props, rest })
+        } else {
+            Ok(Pattern::Ident(self.binding_ident()?))
+        }
+    }
+
+    fn class(&mut self, require_name: bool) -> R<Rc<ClassDef>> {
+        let line = self.line();
+        self.expect_kw("class")?;
+        let name = if matches!(self.peek().tok, Tok::Ident(_)) && !self.is_kw("extends") {
+            Some(self.binding_ident()?)
+        } else if require_name {
+            return Err(self.error("Class statements require a name"));
+        } else {
+            None
+        };
+        let superclass = if self.eat_kw("extends") {
+            Some(self.call_member()?)
+        } else {
+            None
+        };
+        self.expect(P::LBrace)?;
+        let mut constructor = None;
+        let mut members = Vec::new();
+        while !self.eat(P::RBrace) {
+            if self.is_eof() {
+                return Err(self.unexpected());
+            }
+            if self.eat(P::Semi) {
+                continue;
+            }
+            let mline = self.line();
+            let ends_name = |p: &Parser, n: usize| {
+                p.is_at(n, P::LParen)
+                    || p.is_at(n, P::Eq)
+                    || p.is_at(n, P::Semi)
+                    || p.is_at(n, P::RBrace)
+                    || p.peek_at(n).nl_before
+            };
+            let mut is_static = false;
+            if self.is_kw("static") && !ends_name(self, 1) {
+                self.advance();
+                is_static = true;
+                if self.is(P::LBrace) {
+                    return Err(self.error("Static blocks are not supported yet"));
+                }
+            }
+            if (self.is_kw("get") || self.is_kw("set")) && !ends_name(self, 1) {
+                return Err(self.error("Getters and setters are not supported yet"));
+            }
+            if self.is_kw("async") && !ends_name(self, 1) {
+                return Err(self.error("async methods are not supported yet"));
+            }
+            if self.is(P::Star) {
+                return Err(self.error("Generators are not supported yet"));
+            }
+            let (key, _) = self.prop_key()?;
+            if self.is(P::LParen) {
+                let is_ctor =
+                    !is_static && matches!(&key, PropKey::Named(n) if &**n == "constructor");
+                let kind = if is_ctor {
+                    if superclass.is_some() {
+                        FuncKind::DerivedConstructor
+                    } else {
+                        FuncKind::ClassConstructor
+                    }
+                } else if is_static {
+                    FuncKind::StaticMethod
+                } else {
+                    FuncKind::Method
+                };
+                let fname = match &key {
+                    PropKey::Named(n) => Some(n.clone()),
+                    PropKey::Computed(_) => None,
+                };
+                let f = self.function_rest(fname, kind, mline)?;
+                if is_ctor {
+                    if constructor.is_some() {
+                        return Err(SyntaxError::new(
+                            "A class may only have one constructor",
+                            mline,
+                            1,
+                        ));
+                    }
+                    constructor = Some(f);
+                } else {
+                    members.push(ClassMember::Method {
+                        key,
+                        func: f,
+                        is_static,
+                    });
+                }
+            } else {
+                let value = if self.eat(P::Eq) {
+                    self.fn_depth += 1;
+                    let v = self.assignment();
+                    self.fn_depth -= 1;
+                    Some(v?)
+                } else {
+                    None
+                };
+                self.semicolon()?;
+                members.push(ClassMember::Field {
+                    key,
+                    value,
+                    is_static,
+                });
+            }
+        }
+        Ok(Rc::new(ClassDef {
+            name,
+            superclass,
+            constructor,
+            members,
+            line,
+        }))
+    }
+
+    fn expression(&mut self) -> R<Expr> {
+        let line = self.line();
+        let first = self.assignment()?;
+        if self.is(P::Comma) {
+            let mut items = vec![first];
+            while self.eat(P::Comma) {
+                items.push(self.assignment()?);
+            }
+            return Ok(Expr {
+                kind: ExprKind::Seq(items),
+                line,
+            });
+        }
+        Ok(first)
+    }
+
+    fn is_arrow_ahead(&self) -> bool {
+        match &self.peek().tok {
+            Tok::Ident(n) if !is_reserved(n) => {
+                self.is_at(1, P::Arrow) && !self.peek_at(1).nl_before
+            }
+            Tok::Punct(P::LParen) => {
+                let mut depth = 0i32;
+                let mut i = self.pos;
+                loop {
+                    match &self.toks[i].tok {
+                        Tok::Punct(P::LParen) | Tok::Punct(P::LBracket) | Tok::Punct(P::LBrace) => {
+                            depth += 1
+                        }
+                        Tok::Punct(P::RParen) | Tok::Punct(P::RBracket) | Tok::Punct(P::RBrace) => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        Tok::Eof => return false,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                matches!(self.toks.get(i + 1), Some(t) if matches!(t.tok, Tok::Punct(P::Arrow)) && !t.nl_before)
+            }
+            _ => false,
+        }
+    }
+
+    fn arrow(&mut self) -> R<Expr> {
+        let line = self.line();
+        let (params, rest) = if self.is(P::LParen) {
+            self.params()?
+        } else {
+            let n = self.binding_ident()?;
+            (
+                vec![Param {
+                    pattern: Pattern::Ident(n),
+                    default: None,
+                }],
+                None,
+            )
+        };
+        self.expect(P::Arrow)?;
+        let body = if self.is(P::LBrace) {
+            FuncBody::Block(self.function_body()?)
+        } else {
+            self.fn_depth += 1;
+            let e = self.assignment();
+            self.fn_depth -= 1;
+            FuncBody::Expr(Box::new(e?))
+        };
+        Ok(Expr {
+            kind: ExprKind::Function(Rc::new(FuncDef {
+                name: None,
+                params,
+                rest,
+                body,
+                kind: FuncKind::Arrow,
+                line,
+            })),
+            line,
+        })
+    }
+
+    fn assign_op(&self) -> Option<Option<AssignOp>> {
+        let Tok::Punct(p) = self.peek().tok else {
+            return None;
+        };
+        let op = match p {
+            P::Eq => return Some(None),
+            P::PlusEq => AssignOp::Bin(BinOp::Add),
+            P::MinusEq => AssignOp::Bin(BinOp::Sub),
+            P::StarEq => AssignOp::Bin(BinOp::Mul),
+            P::SlashEq => AssignOp::Bin(BinOp::Div),
+            P::PercentEq => AssignOp::Bin(BinOp::Mod),
+            P::StarStarEq => AssignOp::Bin(BinOp::Pow),
+            P::AmpEq => AssignOp::Bin(BinOp::BitAnd),
+            P::PipeEq => AssignOp::Bin(BinOp::BitOr),
+            P::CaretEq => AssignOp::Bin(BinOp::BitXor),
+            P::ShlEq => AssignOp::Bin(BinOp::Shl),
+            P::ShrEq => AssignOp::Bin(BinOp::Shr),
+            P::UShrEq => AssignOp::Bin(BinOp::UShr),
+            P::AmpAmpEq => AssignOp::Logical(LogicalOp::And),
+            P::PipePipeEq => AssignOp::Logical(LogicalOp::Or),
+            P::NullishEq => AssignOp::Logical(LogicalOp::Nullish),
+            _ => return None,
+        };
+        Some(Some(op))
+    }
+
+    fn assignment(&mut self) -> R<Expr> {
+        if self.is_arrow_ahead() {
+            return self.arrow();
+        }
+        if self.is_kw("async")
+            && (self.is_at(1, P::LParen) || matches!(self.peek_at(1).tok, Tok::Ident(_)))
+            && !self.peek_at(1).nl_before
+        {
+            let save = self.pos;
+            self.advance();
+            if self.is_arrow_ahead() {
+                return Err(self.error("async arrow functions are not supported yet"));
+            }
+            self.pos = save;
+        }
+        if self.is_kw("yield") {
+            return Err(self.error("Generators are not supported yet"));
+        }
+        let line = self.line();
+        let lhs = self.conditional()?;
+        if let Some(op) = self.assign_op() {
+            let target = match (&lhs.kind, op) {
+                (ExprKind::Ident(_), _)
+                | (
+                    ExprKind::Member {
+                        optional: false, ..
+                    },
+                    _,
+                )
+                | (
+                    ExprKind::Index {
+                        optional: false, ..
+                    },
+                    _,
+                ) => AssignTarget::Simple(Box::new(lhs)),
+                (ExprKind::Array(_), None) | (ExprKind::Object(_), None) => {
+                    AssignTarget::Pattern(self.expr_to_pattern(lhs)?)
+                }
+                _ => return Err(self.error("Invalid left-hand side in assignment")),
+            };
+            self.advance();
+            let value = self.assignment()?;
+            return Ok(Expr {
+                kind: ExprKind::Assign {
+                    op,
+                    target,
+                    value: Box::new(value),
+                },
+                line,
+            });
+        }
+        Ok(lhs)
+    }
+
+    fn expr_to_pattern(&self, e: Expr) -> R<Pattern> {
+        let line = e.line;
+        match e.kind {
+            ExprKind::Ident(n) => {
+                if is_reserved(&n) {
+                    return Err(SyntaxError::new(
+                        "Invalid destructuring assignment target",
+                        line,
+                        1,
+                    ));
+                }
+                Ok(Pattern::Ident(n))
+            }
+            ExprKind::Member {
+                optional: false, ..
+            }
+            | ExprKind::Index {
+                optional: false, ..
+            } => Ok(Pattern::Target(Box::new(e))),
+            ExprKind::Array(elems) => {
+                let n = elems.len();
+                let mut out = Vec::new();
+                let mut rest = None;
+                for (i, el) in elems.into_iter().enumerate() {
+                    match el {
+                        ArrayElem::Hole => out.push(None),
+                        ArrayElem::Spread(x) => {
+                            if i != n - 1 {
+                                return Err(SyntaxError::new(
+                                    "Rest element must be last element",
+                                    line,
+                                    1,
+                                ));
+                            }
+                            rest = Some(Box::new(self.expr_to_pattern(x)?));
+                        }
+                        ArrayElem::Expr(x) => out.push(Some(self.elem_to_pattern(x)?)),
+                    }
+                }
+                Ok(Pattern::Array { elems: out, rest })
+            }
+            ExprKind::Object(props) => {
+                let mut out = Vec::new();
+                let mut rest = None;
+                for p in props {
+                    match p {
+                        PropDef::KeyValue(key, v) => {
+                            let el = self.elem_to_pattern(v)?;
+                            out.push(ObjPatProp {
+                                key,
+                                value: el.pattern,
+                                default: el.default,
+                            });
+                        }
+                        PropDef::Shorthand(n) => out.push(ObjPatProp {
+                            key: PropKey::Named(n.clone()),
+                            value: Pattern::Ident(n),
+                            default: None,
+                        }),
+                        PropDef::ShorthandDefault(n, d) => out.push(ObjPatProp {
+                            key: PropKey::Named(n.clone()),
+                            value: Pattern::Ident(n),
+                            default: Some(d),
+                        }),
+                        PropDef::Spread(x) => rest = Some(Box::new(self.expr_to_pattern(x)?)),
+                        PropDef::Method(..) => {
+                            return Err(SyntaxError::new(
+                                "Invalid destructuring assignment target",
+                                line,
+                                1,
+                            ));
+                        }
+                    }
+                }
+                Ok(Pattern::Object { props: out, rest })
+            }
+            _ => Err(SyntaxError::new(
+                "Invalid destructuring assignment target",
+                line,
+                1,
+            )),
+        }
+    }
+
+    fn elem_to_pattern(&self, e: Expr) -> R<PatElem> {
+        if let ExprKind::Assign {
+            op: None,
+            target,
+            value,
+        } = e.kind
+        {
+            let pattern = match target {
+                AssignTarget::Simple(t) => self.expr_to_pattern(*t)?,
+                AssignTarget::Pattern(p) => p,
+            };
+            Ok(PatElem {
+                pattern,
+                default: Some(*value),
+            })
+        } else {
+            Ok(PatElem {
+                pattern: self.expr_to_pattern(e)?,
+                default: None,
+            })
+        }
+    }
+
+    fn conditional(&mut self) -> R<Expr> {
+        let line = self.line();
+        let test = self.binary(0)?;
+        if self.eat(P::Question) {
+            let saved = self.no_in;
+            self.no_in = false;
+            let cons = self.assignment()?;
+            self.no_in = saved;
+            self.expect(P::Colon)?;
+            let alt = self.assignment()?;
+            return Ok(Expr {
+                kind: ExprKind::Cond(Box::new(test), Box::new(cons), Box::new(alt)),
+                line,
+            });
+        }
+        Ok(test)
+    }
+
+    fn binop_info(&self) -> Option<(u8, BinKind)> {
+        match &self.peek().tok {
+            Tok::Punct(p) => Some(match p {
+                P::Nullish => (1, BinKind::Logical(LogicalOp::Nullish)),
+                P::PipePipe => (2, BinKind::Logical(LogicalOp::Or)),
+                P::AmpAmp => (3, BinKind::Logical(LogicalOp::And)),
+                P::Pipe => (4, BinKind::Bin(BinOp::BitOr)),
+                P::Caret => (5, BinKind::Bin(BinOp::BitXor)),
+                P::Amp => (6, BinKind::Bin(BinOp::BitAnd)),
+                P::EqEq => (7, BinKind::Bin(BinOp::Eq)),
+                P::NotEq => (7, BinKind::Bin(BinOp::Ne)),
+                P::EqEqEq => (7, BinKind::Bin(BinOp::StrictEq)),
+                P::NotEqEq => (7, BinKind::Bin(BinOp::StrictNe)),
+                P::Lt => (8, BinKind::Bin(BinOp::Lt)),
+                P::Gt => (8, BinKind::Bin(BinOp::Gt)),
+                P::Le => (8, BinKind::Bin(BinOp::Le)),
+                P::Ge => (8, BinKind::Bin(BinOp::Ge)),
+                P::Shl => (9, BinKind::Bin(BinOp::Shl)),
+                P::Shr => (9, BinKind::Bin(BinOp::Shr)),
+                P::UShr => (9, BinKind::Bin(BinOp::UShr)),
+                P::Plus => (10, BinKind::Bin(BinOp::Add)),
+                P::Minus => (10, BinKind::Bin(BinOp::Sub)),
+                P::Star => (11, BinKind::Bin(BinOp::Mul)),
+                P::Slash => (11, BinKind::Bin(BinOp::Div)),
+                P::Percent => (11, BinKind::Bin(BinOp::Mod)),
+                P::StarStar => (12, BinKind::Bin(BinOp::Pow)),
+                _ => return None,
+            }),
+            Tok::Ident(s) if &**s == "instanceof" => Some((8, BinKind::Bin(BinOp::InstanceOf))),
+            Tok::Ident(s) if &**s == "in" && !self.no_in => Some((8, BinKind::Bin(BinOp::In))),
+            _ => None,
+        }
+    }
+
+    fn binary(&mut self, min: u8) -> R<Expr> {
+        let mut left = self.unary()?;
+        while let Some((prec, op)) = self.binop_info() {
+            if prec < min {
+                break;
+            }
+            let line = self.line();
+            self.advance();
+            let right = if matches!(op, BinKind::Bin(BinOp::Pow)) {
+                self.binary(prec)?
+            } else {
+                self.binary(prec + 1)?
+            };
+            let kind = match op {
+                BinKind::Bin(b) => ExprKind::Binary(b, Box::new(left), Box::new(right)),
+                BinKind::Logical(l) => ExprKind::Logical(l, Box::new(left), Box::new(right)),
+            };
+            left = Expr { kind, line };
+        }
+        Ok(left)
+    }
+
+    fn check_update_target(&self, e: &Expr) -> R<()> {
+        match e.kind {
+            ExprKind::Ident(_)
+            | ExprKind::Member {
+                optional: false, ..
+            }
+            | ExprKind::Index {
+                optional: false, ..
+            } => Ok(()),
+            _ => Err(SyntaxError::new(
+                "Invalid left-hand side expression in update operation",
+                e.line,
+                1,
+            )),
+        }
+    }
+
+    fn unary(&mut self) -> R<Expr> {
+        let line = self.line();
+        let op = match &self.peek().tok {
+            Tok::Punct(P::Bang) => UnaryOp::Not,
+            Tok::Punct(P::Minus) => UnaryOp::Neg,
+            Tok::Punct(P::Plus) => UnaryOp::Plus,
+            Tok::Punct(P::Tilde) => UnaryOp::BitNot,
+            Tok::Ident(s) if &**s == "typeof" => UnaryOp::Typeof,
+            Tok::Ident(s) if &**s == "void" => UnaryOp::Void,
+            Tok::Ident(s) if &**s == "delete" => UnaryOp::Delete,
+            Tok::Ident(s) if &**s == "await" => {
+                return Err(self.error("await is not supported yet"));
+            }
+            Tok::Punct(P::PlusPlus) | Tok::Punct(P::MinusMinus) => {
+                let inc = self.is(P::PlusPlus);
+                self.advance();
+                let target = self.unary()?;
+                self.check_update_target(&target)?;
+                return Ok(Expr {
+                    kind: ExprKind::Update {
+                        inc,
+                        prefix: true,
+                        target: Box::new(target),
+                    },
+                    line,
+                });
+            }
+            _ => return self.postfix(),
+        };
+        self.advance();
+        let operand = self.unary()?;
+        if op == UnaryOp::Neg {
+            if let ExprKind::Number(n) = operand.kind {
+                return Ok(Expr {
+                    kind: ExprKind::Number(-n),
+                    line,
+                });
+            }
+        }
+        Ok(Expr {
+            kind: ExprKind::Unary(op, Box::new(operand)),
+            line,
+        })
+    }
+
+    fn postfix(&mut self) -> R<Expr> {
+        let e = self.call_member()?;
+        if (self.is(P::PlusPlus) || self.is(P::MinusMinus)) && !self.peek().nl_before {
+            self.check_update_target(&e)?;
+            let inc = self.is(P::PlusPlus);
+            let line = self.line();
+            self.advance();
+            return Ok(Expr {
+                kind: ExprKind::Update {
+                    inc,
+                    prefix: false,
+                    target: Box::new(e),
+                },
+                line,
+            });
+        }
+        Ok(e)
+    }
+
+    fn arguments(&mut self) -> R<Vec<Arg>> {
+        self.expect(P::LParen)?;
+        let saved = self.no_in;
+        self.no_in = false;
+        let mut args = Vec::new();
+        while !self.is(P::RParen) {
+            if self.eat(P::Ellipsis) {
+                args.push(Arg::Spread(self.assignment()?));
+            } else {
+                args.push(Arg::Expr(self.assignment()?));
+            }
+            if !self.eat(P::Comma) {
+                break;
+            }
+        }
+        self.no_in = saved;
+        self.expect(P::RParen)?;
+        Ok(args)
+    }
+
+    fn index_expr(&mut self) -> R<Expr> {
+        let saved = self.no_in;
+        self.no_in = false;
+        let e = self.expression();
+        self.no_in = saved;
+        let e = e?;
+        self.expect(P::RBracket)?;
+        Ok(e)
+    }
+
+    fn call_member(&mut self) -> R<Expr> {
+        let mut e = if self.is_kw("new") {
+            self.new_expr()?
+        } else {
+            self.primary()?
+        };
+        let mut chain = false;
+        loop {
+            let line = self.line();
+            if self.eat(P::Dot) {
+                let name = self.ident_name()?;
+                e = Expr {
+                    kind: ExprKind::Member {
+                        obj: Box::new(e),
+                        name,
+                        optional: false,
+                    },
+                    line,
+                };
+            } else if self.eat(P::QuestionDot) {
+                chain = true;
+                if self.is(P::LParen) {
+                    let args = self.arguments()?;
+                    e = Expr {
+                        kind: ExprKind::Call {
+                            callee: Box::new(e),
+                            args,
+                            optional: true,
+                        },
+                        line,
+                    };
+                } else if self.eat(P::LBracket) {
+                    let index = self.index_expr()?;
+                    e = Expr {
+                        kind: ExprKind::Index {
+                            obj: Box::new(e),
+                            index: Box::new(index),
+                            optional: true,
+                        },
+                        line,
+                    };
+                } else {
+                    let name = self.ident_name()?;
+                    e = Expr {
+                        kind: ExprKind::Member {
+                            obj: Box::new(e),
+                            name,
+                            optional: true,
+                        },
+                        line,
+                    };
+                }
+            } else if self.eat(P::LBracket) {
+                let index = self.index_expr()?;
+                e = Expr {
+                    kind: ExprKind::Index {
+                        obj: Box::new(e),
+                        index: Box::new(index),
+                        optional: false,
+                    },
+                    line,
+                };
+            } else if self.is(P::LParen) {
+                let args = self.arguments()?;
+                e = Expr {
+                    kind: ExprKind::Call {
+                        callee: Box::new(e),
+                        args,
+                        optional: false,
+                    },
+                    line,
+                };
+            } else if matches!(self.peek().tok, Tok::Template(_)) && !self.peek().nl_before {
+                return Err(self.error("Tagged templates are not supported yet"));
+            } else {
+                break;
+            }
+        }
+        if chain {
+            let line = e.line;
+            e = Expr {
+                kind: ExprKind::OptChain(Box::new(e)),
+                line,
+            };
+        }
+        Ok(e)
+    }
+
+    fn new_expr(&mut self) -> R<Expr> {
+        let line = self.line();
+        self.advance();
+        if self.is(P::Dot) {
+            return Err(self.error("new.target is not supported yet"));
+        }
+        let mut callee = if self.is_kw("new") {
+            self.new_expr()?
+        } else {
+            self.primary()?
+        };
+        loop {
+            let mline = self.line();
+            if self.eat(P::Dot) {
+                let name = self.ident_name()?;
+                callee = Expr {
+                    kind: ExprKind::Member {
+                        obj: Box::new(callee),
+                        name,
+                        optional: false,
+                    },
+                    line: mline,
+                };
+            } else if self.eat(P::LBracket) {
+                let index = self.index_expr()?;
+                callee = Expr {
+                    kind: ExprKind::Index {
+                        obj: Box::new(callee),
+                        index: Box::new(index),
+                        optional: false,
+                    },
+                    line: mline,
+                };
+            } else {
+                break;
+            }
+        }
+        let args = if self.is(P::LParen) {
+            self.arguments()?
+        } else {
+            Vec::new()
+        };
+        Ok(Expr {
+            kind: ExprKind::New {
+                callee: Box::new(callee),
+                args,
+            },
+            line,
+        })
+    }
+
+    fn template(&mut self, parts: Vec<TemplatePart>, line: u32) -> R<Expr> {
+        let mut quasis = Vec::new();
+        let mut exprs = Vec::new();
+        for part in parts {
+            match part {
+                TemplatePart::Str(s) => quasis.push(s),
+                TemplatePart::Expr(toks) => {
+                    let mut sub = Parser {
+                        toks,
+                        pos: 0,
+                        no_in: false,
+                        fn_depth: self.fn_depth,
+                    };
+                    if sub.is_eof() {
+                        return Err(sub.error("Unexpected token '}'"));
+                    }
+                    let e = sub.expression()?;
+                    if !sub.is_eof() {
+                        return Err(sub.unexpected());
+                    }
+                    exprs.push(e);
+                }
+            }
+        }
+        Ok(Expr {
+            kind: ExprKind::Template(quasis, exprs),
+            line,
+        })
+    }
+
+    fn primary(&mut self) -> R<Expr> {
+        let line = self.line();
+        let kind = match &self.peek().tok {
+            Tok::Num(n) => {
+                let n = *n;
+                self.advance();
+                ExprKind::Number(n)
+            }
+            Tok::Str(s) => {
+                let s = s.clone();
+                self.advance();
+                ExprKind::Str(s)
+            }
+            Tok::Template(_) => {
+                let Tok::Template(parts) = self.advance().tok else {
+                    unreachable!()
+                };
+                return self.template(parts, line);
+            }
+            Tok::Punct(P::LParen) => {
+                self.advance();
+                let saved = self.no_in;
+                self.no_in = false;
+                let e = self.expression();
+                self.no_in = saved;
+                let e = e?;
+                self.expect(P::RParen)?;
+                return Ok(e);
+            }
+            Tok::Punct(P::LBracket) => {
+                self.advance();
+                let saved = self.no_in;
+                self.no_in = false;
+                let mut elems = Vec::new();
+                loop {
+                    if self.eat(P::RBracket) {
+                        break;
+                    }
+                    if self.eat(P::Comma) {
+                        elems.push(ArrayElem::Hole);
+                        continue;
+                    }
+                    if self.eat(P::Ellipsis) {
+                        elems.push(ArrayElem::Spread(self.assignment()?));
+                    } else {
+                        elems.push(ArrayElem::Expr(self.assignment()?));
+                    }
+                    if !self.eat(P::Comma) {
+                        self.expect(P::RBracket)?;
+                        break;
+                    }
+                }
+                self.no_in = saved;
+                ExprKind::Array(elems)
+            }
+            Tok::Punct(P::LBrace) => {
+                self.advance();
+                let saved = self.no_in;
+                self.no_in = false;
+                let props = self.object_props()?;
+                self.no_in = saved;
+                ExprKind::Object(props)
+            }
+            Tok::Punct(P::Hash) => return Err(self.error("Private fields are not supported yet")),
+            Tok::Ident(name) => {
+                let name = name.clone();
+                match &*name {
+                    "true" => {
+                        self.advance();
+                        ExprKind::Bool(true)
+                    }
+                    "false" => {
+                        self.advance();
+                        ExprKind::Bool(false)
+                    }
+                    "null" => {
+                        self.advance();
+                        ExprKind::Null
+                    }
+                    "this" => {
+                        self.advance();
+                        ExprKind::This
+                    }
+                    "function" => {
+                        self.advance();
+                        if self.is(P::Star) {
+                            return Err(self.error("Generators are not supported yet"));
+                        }
+                        let fname = if matches!(self.peek().tok, Tok::Ident(_)) {
+                            Some(self.binding_ident()?)
+                        } else {
+                            None
+                        };
+                        ExprKind::Function(self.function_rest(fname, FuncKind::Normal, line)?)
+                    }
+                    "class" => ExprKind::Class(self.class(false)?),
+                    "super" => {
+                        self.advance();
+                        if self.is(P::LParen) {
+                            ExprKind::SuperCall(self.arguments()?)
+                        } else if self.eat(P::Dot) {
+                            ExprKind::SuperMember(self.ident_name()?)
+                        } else {
+                            return Err(self.error("'super' keyword unexpected here"));
+                        }
+                    }
+                    "async" if self.is_kw_at(1, "function") => {
+                        return Err(self.error("async functions are not supported yet"));
+                    }
+                    "import" => return Err(self.error("Dynamic import is not supported yet")),
+                    n if is_reserved(n) => return Err(self.unexpected()),
+                    _ => {
+                        self.advance();
+                        ExprKind::Ident(name)
+                    }
+                }
+            }
+            _ => return Err(self.unexpected()),
+        };
+        Ok(Expr { kind, line })
+    }
+
+    fn object_props(&mut self) -> R<Vec<PropDef>> {
+        let mut props = Vec::new();
+        while !self.eat(P::RBrace) {
+            if self.is_eof() {
+                return Err(self.unexpected());
+            }
+            if self.eat(P::Ellipsis) {
+                props.push(PropDef::Spread(self.assignment()?));
+            } else {
+                let line = self.line();
+                let plain_next = |p: &Parser| {
+                    p.is_at(1, P::LParen)
+                        || p.is_at(1, P::Colon)
+                        || p.is_at(1, P::Comma)
+                        || p.is_at(1, P::RBrace)
+                        || p.is_at(1, P::Eq)
+                };
+                if (self.is_kw("get") || self.is_kw("set")) && !plain_next(self) {
+                    return Err(self.error("Getters and setters are not supported yet"));
+                }
+                if self.is_kw("async") && !plain_next(self) {
+                    return Err(self.error("async methods are not supported yet"));
+                }
+                if self.is(P::Star) {
+                    return Err(self.error("Generators are not supported yet"));
+                }
+                let (key, is_ident) = self.prop_key()?;
+                if self.is(P::LParen) {
+                    let name = match &key {
+                        PropKey::Named(n) => Some(n.clone()),
+                        PropKey::Computed(_) => None,
+                    };
+                    let f = self.function_rest(name, FuncKind::Method, line)?;
+                    props.push(PropDef::Method(key, f));
+                } else if self.eat(P::Colon) {
+                    props.push(PropDef::KeyValue(key, self.assignment()?));
+                } else if is_ident {
+                    let PropKey::Named(n) = key else {
+                        unreachable!()
+                    };
+                    if self.eat(P::Eq) {
+                        props.push(PropDef::ShorthandDefault(n, self.assignment()?));
+                    } else {
+                        if is_reserved(&n) {
+                            return Err(self.error(format!("Unexpected reserved word '{n}'")));
+                        }
+                        props.push(PropDef::Shorthand(n));
+                    }
+                } else {
+                    return Err(self.unexpected());
+                }
+            }
+            if !self.eat(P::Comma) {
+                self.expect(P::RBrace)?;
+                break;
+            }
+        }
+        Ok(props)
+    }
+}

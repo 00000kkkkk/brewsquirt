@@ -1,0 +1,16 @@
+{ a: 1, b: 'two', c: [ 3 ], d: { e: { f: [Object] } } }
+[ 'a', 'b', 'c', 'd' ] [ 1, 2 ] [ [ 'x', 1 ] ]
+{ dynamic: true, method: [Function: method], 'quoted-key': 1, answer: 'num' } m 1 num
+1 two default [ 'c', 'd' ]
+100 true two
+true false true true
+undefined [ 'b', 'c', 'd' ]
+TypeError
+true 1
+hi kid true
+{ a: 1, b: 2 } { a: 3, b: 2 }
+{ shorthand: 5 } {} { nested: {} } [ {} ]
+2
+1 undefined undefined object
+2 1
+{ x: 1, y: 2 }

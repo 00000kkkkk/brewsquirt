@@ -1,0 +1,10 @@
+undefined number string object object object function function
+true false true false true false true true  true false
+true false true false true true undefined
+1 2 2 5
+9007199254740992 9007199254740992 9007199254740991 true 0.30000000000000004
+1,2,3 1,2,3
+number true number
+{ the: 2, cat: 1, and: 1, hat: 1 }
+[ [ 0, 1, 2 ], [ 3, 4, 5 ], [ 6, 7, 8 ] ] [ 3, 12, 21 ]
+1 2 Fizz 4 Buzz Fizz 7 8 Fizz Buzz 11 Fizz 13 14 FizzBuzz

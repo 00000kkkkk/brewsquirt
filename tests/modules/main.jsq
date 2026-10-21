@@ -1,0 +1,14 @@
+import Vec, { square, TAU } from "./lib/math"
+import * as lib from "./lib"
+import { loads } from "./lib/index.jsq"
+import { exists, writeFile, readFile, remove } from "squirt:fs"
+
+console.log(square(4), TAU.toFixed(3), new Vec(3, 4).len())
+console.log(lib.sq(3), lib.visible, lib.square === square, loads, lib.default)
+
+const tmp = "squirt-module-test.txt"
+writeFile(tmp, "deep")
+console.log(exists(tmp), readFile(tmp))
+remove(tmp)
+console.log(exists(tmp))
+

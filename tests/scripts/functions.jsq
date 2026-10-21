@@ -1,0 +1,70 @@
+function add(a, b = 10, ...rest) {
+  return a + b + rest.length
+}
+console.log(add(1), add(1, 2), add(1, 2, 3, 4), add.length, add.name)
+const arrow = (x) => x * 2
+const block = (x) => {
+  return x + 1
+}
+const noArgs = () => "none"
+console.log(arrow(4), block(4), noArgs(), (() => ({ obj: true }))())
+function counter() {
+  let count = 0
+  return { inc: () => ++count, dec: () => --count, get: () => count }
+}
+const c = counter()
+c.inc()
+c.inc()
+c.dec()
+console.log(c.get())
+const fns = []
+for (let i = 0; i < 3; i++) fns.push(() => i)
+console.log(fns.map((f) => f()))
+const lazy = []
+for (const w of ["a", "b"]) lazy.push(() => w)
+console.log(lazy.map((f) => f()))
+console.log(hoisted())
+function hoisted() {
+  return "hoisted works"
+}
+const fact = function self(n) {
+  return n <= 1 ? 1 : n * self(n - 1)
+}
+console.log(fact(10))
+function outer() {
+  const v = "outer"
+  function inner() {
+    return v
+  }
+  return inner
+}
+console.log(outer()())
+function sum(...nums) {
+  return nums.reduce((s, n) => s + n, 0)
+}
+console.log(sum(...[1, 2, 3], 4))
+function destruct({ a, b = 2 }, [c, d] = [3, 4]) {
+  return a + b + c + d
+}
+console.log(destruct({ a: 1 }), destruct({ a: 1, b: 1 }, [1, 1]))
+const bound = function () {
+  return this.v
+}.bind({ v: "bound" })
+console.log(bound(), Math.max.apply(null, [1, 5, 2]), Array.prototype.join.call([1, 2], "+"))
+const compose = (...fs) => (x) => fs.reduceRight((acc, f) => f(acc), x)
+console.log(compose((x) => x + 1, (x) => x * 2)(5))
+function makeAdder(n) {
+  return function (x) {
+    return x + n
+  }
+}
+console.log([1, 2, 3].map(makeAdder(10)))
+console.log(typeof add, typeof arrow, add instanceof Function, (function () {}).name, arrow.name)
+const memo = (() => {
+  const cache = new Map()
+  return (n) => {
+    if (!cache.has(n)) cache.set(n, n * n)
+    return cache.get(n)
+  }
+})()
+console.log(memo(9), memo(9))

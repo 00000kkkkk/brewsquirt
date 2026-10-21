@@ -1,0 +1,13 @@
+console.log(undefined, null, true, 42, -0, "top-level string")
+console.log(["a", "it's", 'say "hi"'])
+console.log({ a: [1, { b: { c: { d: 1 } } }] })
+console.log([function named() {}, () => {}, class Foo {}, Math.max])
+console.log(new Map([[{ k: 1 }, [1, 2]]]), new Set(), new Map())
+console.log({ "key with space": 1, valid_id: 2, $dollar: 3, "1abc": 4 })
+const circ = { name: "c" }
+circ.me = circ
+console.log(circ)
+console.log([[]], [{}], [[[[1]]]], Array.from({ length: 3 }))
+console.log(Object.create(null))
+console.log("%s is %d years", "Squirt", 3, "extra")
+console.log(new Error("shown").message)

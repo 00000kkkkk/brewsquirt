@@ -1,0 +1,11 @@
+target/
+nude_modules/
+*.profraw
+*.profdata
+lcov.info
+bench.md
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

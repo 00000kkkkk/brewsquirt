@@ -1,0 +1,71 @@
+"area: lexer":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/lexer.rs
+          - src/lexer/**
+          - src/token.rs
+
+"area: parser":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/parser.rs
+          - src/parser/**
+          - src/ast.rs
+
+"area: compiler":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/compiler.rs
+          - src/compiler/**
+          - src/bytecode.rs
+
+"area: vm":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/vm.rs
+          - src/vm/**
+          - src/value.rs
+          - src/object.rs
+
+"area: runtime":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/builtins/**
+
+"area: modules":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/module.rs
+          - src/module/**
+
+"area: cli":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/bin/**
+
+"area: vrotdaem":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/pm/**
+          - src/bin/vrotdaem.rs
+
+docs:
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.md"
+          - docs/**
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/**
+
+tests:
+  - changed-files:
+      - any-glob-to-any-file:
+          - tests/**
+
+examples:
+  - changed-files:
+      - any-glob-to-any-file:
+          - examples/**

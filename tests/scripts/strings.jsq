@@ -1,0 +1,14 @@
+const s = "Hello, JavaSquirt"
+console.log(s.length, s[0], s.at(-1), s.charAt(4), s.charCodeAt(0), s.indexOf("Java"), s.lastIndexOf("l"), s.includes("Squirt"))
+console.log(s.slice(7), s.slice(-6, -1), s.substring(5, 0), s.substr(7, 4), s.toUpperCase(), s.toLowerCase())
+console.log(s.startsWith("Hell"), s.endsWith("rt"), s.split(", "), "a,b,,c".split(","), "abc".split(""), "x".split("", 0))
+console.log("  pad  ".trim() + "|", "  pad  ".trimStart() + "|", "  pad  ".trimEnd() + "|")
+console.log("5".padStart(3, "0"), "ab".padEnd(5, "-+"), "ha".repeat(3), "a-b-c".replace("-", "+"), "a-b-c".replaceAll("-", "+"))
+console.log("abc".replace("b", (m) => m.toUpperCase()), "x".concat("y", 1, null), "b".localeCompare("a"))
+console.log(String(123), String(null), String([1, [2, 3]]), String({}), `${1}${"a"}${null}`)
+console.log("é".length, "💦".length, [..."💦a"].length, String.fromCharCode(72, 105), "abc" < "abd", "B" < "a")
+const name = "squirt"
+console.log(`tpl ${name.toUpperCase()} ${1 + 1} ${`nested ${name}`}`)
+console.log(`line1
+line2`)
+console.log("esc: \t|\x41|B|\u{1F4A6}|\\")

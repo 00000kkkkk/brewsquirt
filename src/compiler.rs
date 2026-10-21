@@ -1,0 +1,2084 @@
+use crate::ast::*;
+use crate::bytecode::*;
+use crate::token::SyntaxError;
+use crate::value::Value;
+use rustc_hash::FxHashMap;
+use std::rc::Rc;
+
+type R<T> = Result<T, SyntaxError>;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode {
+    Module,
+    Repl,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BindMode {
+    Init,
+    Assign,
+}
+
+enum Var {
+    Local(u32, bool),
+    Upval(u32, bool),
+    Global,
+}
+
+enum ExportEntry {
+    Local(Rc<str>, Rc<str>),
+    All(Rc<str>),
+    Named(Rc<str>, Rc<str>, Rc<str>),
+}
+
+struct Local {
+    name: Rc<str>,
+    depth: u32,
+    captured: bool,
+    is_const: bool,
+}
+
+struct LoopCtx {
+    break_jumps: Vec<usize>,
+    continue_jumps: Vec<usize>,
+    break_locals: usize,
+    continue_locals: usize,
+    try_depth: usize,
+    is_switch: bool,
+}
+
+#[derive(Clone)]
+struct TryCtx {
+    has_handler: bool,
+    finally: Option<Rc<Vec<Stmt>>>,
+}
+
+struct FnState {
+    name: Rc<str>,
+    kind: ProtoKind,
+    is_static: bool,
+    line: u32,
+    code: Vec<Op>,
+    lines: Vec<u32>,
+    consts: Vec<Value>,
+    const_strs: FxHashMap<Rc<str>, u32>,
+    functions: Vec<Rc<FunctionProto>>,
+    upvalues: Vec<UpvalDesc>,
+    locals: Vec<Local>,
+    depth: u32,
+    loops: Vec<LoopCtx>,
+    tries: Vec<TryCtx>,
+    num_params: u32,
+    arity: u32,
+    has_rest: bool,
+    fields: Option<Rc<Vec<ClassMember>>>,
+}
+
+impl FnState {
+    fn new(name: Rc<str>, kind: ProtoKind, line: u32, is_static: bool) -> Self {
+        FnState {
+            name,
+            kind,
+            is_static,
+            line,
+            code: Vec::new(),
+            lines: Vec::new(),
+            consts: Vec::new(),
+            const_strs: FxHashMap::default(),
+            functions: Vec::new(),
+            upvalues: Vec::new(),
+            locals: Vec::new(),
+            depth: 0,
+            loops: Vec::new(),
+            tries: Vec::new(),
+            num_params: 0,
+            arity: 0,
+            has_rest: false,
+            fields: None,
+        }
+    }
+}
+
+pub struct Compiler {
+    states: Vec<FnState>,
+    module: Rc<ModuleInfo>,
+    mode: Mode,
+    line: u32,
+    chain: Vec<usize>,
+    exports: Vec<ExportEntry>,
+    hidden: u32,
+    self_bind: Option<Rc<str>>,
+    repl_consts: Vec<Rc<str>>,
+}
+
+pub fn compile_module(stmts: &[Stmt], module: Rc<ModuleInfo>, mode: Mode) -> R<Rc<FunctionProto>> {
+    let mut c = Compiler {
+        states: Vec::new(),
+        module,
+        mode,
+        line: 1,
+        chain: Vec::new(),
+        exports: Vec::new(),
+        hidden: 0,
+        self_bind: None,
+        repl_consts: Vec::new(),
+    };
+    c.states
+        .push(FnState::new("<main>".into(), ProtoKind::Module, 1, false));
+    c.begin_scope();
+    c.add_local("this".into(), true);
+    let refs: Vec<&Stmt> = stmts.iter().collect();
+    c.hoist_list(&refs, true)?;
+    let last = stmts.len().wrapping_sub(1);
+    for (i, s) in stmts.iter().enumerate() {
+        if mode == Mode::Repl && i == last {
+            if let StmtKind::Expr(e) = &s.kind {
+                c.line = s.line;
+                c.expr(e)?;
+                c.emit(Op::Return);
+                continue;
+            }
+        }
+        c.stmt(s)?;
+    }
+    if mode == Mode::Repl {
+        c.emit(Op::Undefined);
+        c.emit(Op::Return);
+        let st = c.states.pop().expect("module state");
+        return Ok(Rc::new(c.finish(st)));
+    }
+    c.emit(Op::NewObject);
+    let exports = std::mem::take(&mut c.exports);
+    for entry in &exports {
+        match entry {
+            ExportEntry::Local(local, exported) => {
+                c.load_var(local);
+                let k = c.str_const(exported);
+                c.emit(Op::InitProp(k));
+            }
+            ExportEntry::All(hidden) => {
+                c.load_var(hidden);
+                c.emit(Op::ExportAll);
+            }
+            ExportEntry::Named(hidden, imported, exported) => {
+                c.load_var(hidden);
+                let i = c.str_const(imported);
+                c.emit(Op::GetProp(i));
+                let k = c.str_const(exported);
+                c.emit(Op::InitProp(k));
+            }
+        }
+    }
+    c.emit(Op::Return);
+    let st = c.states.pop().expect("module state");
+    Ok(Rc::new(c.finish(st)))
+}
+
+fn expr_text(e: &Expr) -> Option<String> {
+    match &e.kind {
+        ExprKind::Ident(n) => Some(n.to_string()),
+        ExprKind::This => Some("this".to_string()),
+        ExprKind::Member { obj, name, .. } => Some(format!("{}.{}", expr_text(obj)?, name)),
+        ExprKind::Index { obj, .. } => Some(format!("{}[...]", expr_text(obj)?)),
+        ExprKind::Call { callee, .. } => Some(format!("{}(...)", expr_text(callee)?)),
+        ExprKind::SuperMember(n) => Some(format!("super.{n}")),
+        ExprKind::OptChain(inner) => expr_text(inner),
+        _ => None,
+    }
+}
+
+fn bin_op(op: BinOp) -> Op {
+    match op {
+        BinOp::Add => Op::Add,
+        BinOp::Sub => Op::Sub,
+        BinOp::Mul => Op::Mul,
+        BinOp::Div => Op::Div,
+        BinOp::Mod => Op::Mod,
+        BinOp::Pow => Op::Pow,
+        BinOp::Eq => Op::Eq,
+        BinOp::Ne => Op::Ne,
+        BinOp::StrictEq => Op::StrictEq,
+        BinOp::StrictNe => Op::StrictNe,
+        BinOp::Lt => Op::Lt,
+        BinOp::Gt => Op::Gt,
+        BinOp::Le => Op::Le,
+        BinOp::Ge => Op::Ge,
+        BinOp::BitAnd => Op::BitAnd,
+        BinOp::BitOr => Op::BitOr,
+        BinOp::BitXor => Op::BitXor,
+        BinOp::Shl => Op::Shl,
+        BinOp::Shr => Op::Shr,
+        BinOp::UShr => Op::UShr,
+        BinOp::In => Op::In,
+        BinOp::InstanceOf => Op::InstanceOf,
+    }
+}
+
+fn logical_jump(op: LogicalOp) -> Op {
+    match op {
+        LogicalOp::And => Op::JumpIfFalseKeep(0),
+        LogicalOp::Or => Op::JumpIfTrueKeep(0),
+        LogicalOp::Nullish => Op::JumpIfNotNullishKeep(0),
+    }
+}
+
+impl Compiler {
+    fn err(&self, msg: impl Into<String>) -> SyntaxError {
+        SyntaxError::new(msg, self.line, 1)
+    }
+
+    fn st(&mut self) -> &mut FnState {
+        self.states.last_mut().expect("function state")
+    }
+
+    fn st_ref(&self) -> &FnState {
+        self.states.last().expect("function state")
+    }
+
+    fn finish(&self, st: FnState) -> FunctionProto {
+        FunctionProto {
+            name: st.name,
+            kind: st.kind,
+            num_params: st.num_params,
+            arity: st.arity,
+            has_rest: st.has_rest,
+            code: st.code,
+            lines: st.lines,
+            consts: st.consts,
+            functions: st.functions,
+            upvalues: st.upvalues,
+            module: self.module.clone(),
+            line: st.line,
+        }
+    }
+
+    fn emit(&mut self, op: Op) -> usize {
+        let line = self.line;
+        let st = self.st();
+        st.code.push(op);
+        st.lines.push(line);
+        st.code.len() - 1
+    }
+
+    fn here(&self) -> u32 {
+        self.st_ref().code.len() as u32
+    }
+
+    fn patch_to(&mut self, at: usize, t: u32) {
+        let op = &mut self.st().code[at];
+        *op = match *op {
+            Op::Jump(_) => Op::Jump(t),
+            Op::JumpIfFalse(_) => Op::JumpIfFalse(t),
+            Op::JumpIfTrue(_) => Op::JumpIfTrue(t),
+            Op::JumpIfFalseKeep(_) => Op::JumpIfFalseKeep(t),
+            Op::JumpIfTrueKeep(_) => Op::JumpIfTrueKeep(t),
+            Op::JumpIfNotNullishKeep(_) => Op::JumpIfNotNullishKeep(t),
+            Op::JumpIfNullish(_) => Op::JumpIfNullish(t),
+            Op::JumpIfNullishCall(_) => Op::JumpIfNullishCall(t),
+            Op::JumpIfNotUndef(_) => Op::JumpIfNotUndef(t),
+            Op::IterNext(_) => Op::IterNext(t),
+            Op::TryBegin(_, s) => Op::TryBegin(t, s),
+            other => other,
+        };
+    }
+
+    fn patch(&mut self, at: usize) {
+        let t = self.here();
+        self.patch_to(at, t);
+    }
+
+    fn constant(&mut self, v: Value) -> u32 {
+        let st = self.st();
+        st.consts.push(v);
+        (st.consts.len() - 1) as u32
+    }
+
+    fn str_const(&mut self, s: &Rc<str>) -> u32 {
+        if let Some(&i) = self.st_ref().const_strs.get(s) {
+            return i;
+        }
+        let i = self.constant(Value::Str(s.clone()));
+        self.st().const_strs.insert(s.clone(), i);
+        i
+    }
+
+    fn hidden_name(&mut self, prefix: &str) -> Rc<str> {
+        self.hidden += 1;
+        format!("%{prefix}{}", self.hidden).into()
+    }
+
+    fn locals_len(&self) -> usize {
+        self.st_ref().locals.len()
+    }
+
+    fn add_local(&mut self, name: Rc<str>, is_const: bool) -> u32 {
+        let st = self.st();
+        let depth = st.depth;
+        st.locals.push(Local {
+            name,
+            depth,
+            captured: false,
+            is_const,
+        });
+        (st.locals.len() - 1) as u32
+    }
+
+    fn begin_scope(&mut self) {
+        self.st().depth += 1;
+    }
+
+    fn scope_cut(&mut self) -> Option<usize> {
+        let st = self.st();
+        st.depth -= 1;
+        let d = st.depth;
+        let mut n = st.locals.len();
+        while n > 0 && st.locals[n - 1].depth > d {
+            n -= 1;
+        }
+        if n < st.locals.len() {
+            st.locals.truncate(n);
+            Some(n)
+        } else {
+            None
+        }
+    }
+
+    fn end_scope(&mut self) {
+        if let Some(n) = self.scope_cut() {
+            self.emit(Op::PopTo(n as u32));
+        }
+    }
+
+    fn is_repl_top(&self) -> bool {
+        self.mode == Mode::Repl && self.states.len() == 1 && self.st_ref().depth == 1
+    }
+
+    fn resolve_local(&self, si: usize, name: &str) -> Option<(u32, bool)> {
+        let st = &self.states[si];
+        st.locals
+            .iter()
+            .rposition(|l| &*l.name == name)
+            .map(|i| (i as u32, st.locals[i].is_const))
+    }
+
+    fn add_upvalue(&mut self, si: usize, is_local: bool, index: u32) -> u32 {
+        let ups = &mut self.states[si].upvalues;
+        if let Some(i) = ups
+            .iter()
+            .position(|u| u.is_local == is_local && u.index == index)
+        {
+            return i as u32;
+        }
+        ups.push(UpvalDesc { is_local, index });
+        (ups.len() - 1) as u32
+    }
+
+    fn resolve_upvalue(&mut self, si: usize, name: &str) -> Option<(u32, bool)> {
+        if si == 0 {
+            return None;
+        }
+        if let Some((slot, c)) = self.resolve_local(si - 1, name) {
+            self.states[si - 1].locals[slot as usize].captured = true;
+            return Some((self.add_upvalue(si, true, slot), c));
+        }
+        if let Some((idx, c)) = self.resolve_upvalue(si - 1, name) {
+            return Some((self.add_upvalue(si, false, idx), c));
+        }
+        None
+    }
+
+    fn resolve(&mut self, name: &str) -> Var {
+        let si = self.states.len() - 1;
+        if let Some((s, c)) = self.resolve_local(si, name) {
+            return Var::Local(s, c);
+        }
+        if let Some((i, c)) = self.resolve_upvalue(si, name) {
+            return Var::Upval(i, c);
+        }
+        Var::Global
+    }
+
+    fn load_var(&mut self, name: &Rc<str>) {
+        match self.resolve(name) {
+            Var::Local(s, _) => {
+                self.emit(Op::GetLocal(s));
+            }
+            Var::Upval(i, _) => {
+                self.emit(Op::GetUpval(i));
+            }
+            Var::Global => {
+                if &**name == "undefined" {
+                    self.emit(Op::Undefined);
+                } else {
+                    let k = self.str_const(name);
+                    self.emit(Op::GetGlobal(k));
+                }
+            }
+        }
+    }
+
+    fn store_var(&mut self, name: &Rc<str>, init: bool) {
+        match self.resolve(name) {
+            Var::Local(s, c) => {
+                if c && !init {
+                    let k = self.str_const(name);
+                    self.emit(Op::ThrowConstAssign(k));
+                } else {
+                    self.emit(Op::SetLocal(s));
+                }
+            }
+            Var::Upval(i, c) => {
+                if c && !init {
+                    let k = self.str_const(name);
+                    self.emit(Op::ThrowConstAssign(k));
+                } else {
+                    self.emit(Op::SetUpval(i));
+                }
+            }
+            Var::Global => {
+                let k = self.str_const(name);
+                if init && self.is_repl_top() {
+                    let c = self.repl_consts.contains(name);
+                    self.emit(Op::DefineGlobal(k, c));
+                } else {
+                    self.emit(Op::SetGlobal(k));
+                }
+            }
+        }
+    }
+
+    fn collect_decls<'a>(
+        &mut self,
+        s: &'a Stmt,
+        top: bool,
+        names: &mut Vec<(Rc<str>, bool)>,
+        funcs: &mut Vec<&'a Rc<FuncDef>>,
+        imports: &mut Vec<&'a ImportDecl>,
+    ) -> R<()> {
+        match &s.kind {
+            StmtKind::Decl(kind, decls) => {
+                for (p, _) in decls {
+                    let mut v = Vec::new();
+                    p.bound_names(&mut v);
+                    for n in v {
+                        names.push((n, *kind == DeclKind::Const));
+                    }
+                }
+            }
+            StmtKind::Function(f) => {
+                if let Some(n) = &f.name {
+                    names.push((n.clone(), false));
+                }
+                funcs.push(f);
+            }
+            StmtKind::Class(c) => {
+                if let Some(n) = &c.name {
+                    names.push((n.clone(), false));
+                }
+            }
+            StmtKind::Import(i) => {
+                if !top {
+                    return Err(SyntaxError::new(
+                        "Cannot use import statement outside the module top level",
+                        s.line,
+                        1,
+                    ));
+                }
+                if let Some(n) = &i.default {
+                    names.push((n.clone(), true));
+                }
+                if let Some(n) = &i.namespace {
+                    names.push((n.clone(), true));
+                }
+                for (_, local) in &i.named {
+                    names.push((local.clone(), true));
+                }
+                imports.push(i);
+            }
+            StmtKind::Export(e) => {
+                if !top {
+                    return Err(SyntaxError::new("Unexpected token 'export'", s.line, 1));
+                }
+                match e {
+                    ExportDecl::Decl(inner) => {
+                        let before = names.len();
+                        self.collect_decls(inner, top, names, funcs, imports)?;
+                        for (n, _) in names[before..].iter() {
+                            self.exports.push(ExportEntry::Local(n.clone(), n.clone()));
+                        }
+                    }
+                    ExportDecl::DefaultDecl(inner) => {
+                        let before = names.len();
+                        self.collect_decls(inner, top, names, funcs, imports)?;
+                        if let Some((n, _)) = names.get(before) {
+                            self.exports
+                                .push(ExportEntry::Local(n.clone(), "default".into()));
+                        }
+                    }
+                    ExportDecl::Default(_) => {
+                        names.push(("%default".into(), false));
+                        self.exports
+                            .push(ExportEntry::Local("%default".into(), "default".into()));
+                    }
+                    ExportDecl::Names(list) => {
+                        for (local, exported) in list {
+                            self.exports
+                                .push(ExportEntry::Local(local.clone(), exported.clone()));
+                        }
+                    }
+                    ExportDecl::From { .. } => {}
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn hoist(&mut self, stmts: &[Stmt]) -> R<()> {
+        let refs: Vec<&Stmt> = stmts.iter().collect();
+        self.hoist_list(&refs, false)
+    }
+
+    fn hoist_list(&mut self, stmts: &[&Stmt], top: bool) -> R<()> {
+        let mut names = Vec::new();
+        let mut funcs = Vec::new();
+        let mut imports = Vec::new();
+        let mut reexports = Vec::new();
+        for s in stmts {
+            self.collect_decls(s, top, &mut names, &mut funcs, &mut imports)?;
+            if let StmtKind::Export(ExportDecl::From {
+                source,
+                names: list,
+            }) = &s.kind
+            {
+                reexports.push((source.clone(), list.clone()));
+            }
+        }
+        let depth = self.st_ref().depth;
+        for (i, (n, _)) in names.iter().enumerate() {
+            let dup_new = names[..i].iter().any(|(m, _)| m == n);
+            let dup_old = self
+                .st_ref()
+                .locals
+                .iter()
+                .any(|l| l.depth == depth && &l.name == n);
+            if dup_new || dup_old {
+                return Err(self.err(format!("Identifier '{n}' has already been declared")));
+            }
+        }
+        let repl = self.is_repl_top();
+        for (n, c) in &names {
+            self.emit(Op::Undefined);
+            if repl {
+                if *c {
+                    self.repl_consts.push(n.clone());
+                } else {
+                    self.repl_consts.retain(|m| m != n);
+                }
+                let k = self.str_const(n);
+                self.emit(Op::DefineGlobal(k, *c));
+                self.emit(Op::Pop);
+            } else {
+                self.add_local(n.clone(), *c);
+            }
+        }
+        for imp in imports {
+            let src = self.str_const(&imp.source);
+            self.emit(Op::Import(src));
+            if let Some(ns) = &imp.namespace {
+                self.store_var(ns, true);
+            }
+            if let Some(d) = &imp.default {
+                self.emit(Op::Dup);
+                let k = self.str_const(&"default".into());
+                self.emit(Op::GetProp(k));
+                self.store_var(d, true);
+                self.emit(Op::Pop);
+            }
+            for (imported, local) in &imp.named {
+                self.emit(Op::Dup);
+                let k = self.str_const(imported);
+                self.emit(Op::GetProp(k));
+                self.store_var(local, true);
+                self.emit(Op::Pop);
+            }
+            self.emit(Op::Pop);
+        }
+        for (source, list) in reexports {
+            let hidden = self.hidden_name("reexport");
+            let src = self.str_const(&source);
+            self.emit(Op::Import(src));
+            self.add_local(hidden.clone(), true);
+            match list {
+                None => self.exports.push(ExportEntry::All(hidden)),
+                Some(list) => {
+                    for (imported, exported) in list {
+                        self.exports
+                            .push(ExportEntry::Named(hidden.clone(), imported, exported));
+                    }
+                }
+            }
+        }
+        for f in funcs {
+            let idx = self.function(f, None, None)?;
+            self.emit(Op::Closure(idx));
+            if let Some(n) = &f.name {
+                self.store_var(n, true);
+            }
+            self.emit(Op::Pop);
+        }
+        Ok(())
+    }
+
+    fn block(&mut self, stmts: &[Stmt]) -> R<()> {
+        self.begin_scope();
+        self.hoist(stmts)?;
+        for s in stmts {
+            self.stmt(s)?;
+        }
+        self.end_scope();
+        Ok(())
+    }
+
+    fn sub_stmt(&mut self, s: &Stmt) -> R<()> {
+        match &s.kind {
+            StmtKind::Decl(..) | StmtKind::Class(_) | StmtKind::Function(_) => {
+                Err(SyntaxError::new(
+                    "Lexical declaration cannot appear in a single-statement context",
+                    s.line,
+                    1,
+                ))
+            }
+            _ => self.stmt(s),
+        }
+    }
+
+    fn stmt(&mut self, s: &Stmt) -> R<()> {
+        self.line = s.line;
+        match &s.kind {
+            StmtKind::Expr(e) => {
+                self.expr_discard(e)?;
+            }
+            StmtKind::Decl(_, decls) => {
+                for (pattern, init) in decls {
+                    match init {
+                        Some(e) => {
+                            let name = match pattern {
+                                Pattern::Ident(n) => Some(n.clone()),
+                                _ => None,
+                            };
+                            self.expr_named(e, name.as_ref())?;
+                        }
+                        None => {
+                            self.emit(Op::Undefined);
+                        }
+                    }
+                    self.bind_pattern(pattern, BindMode::Init)?;
+                }
+            }
+            StmtKind::Function(_) | StmtKind::Import(_) | StmtKind::Empty => {}
+            StmtKind::Class(c) => {
+                self.class(c, None)?;
+                if let Some(n) = &c.name {
+                    self.store_var(n, true);
+                }
+                self.emit(Op::Pop);
+            }
+            StmtKind::Return(e) => self.return_stmt(e.as_ref())?,
+            StmtKind::If(test, cons, alt) => {
+                self.expr(test)?;
+                let j = self.emit(Op::JumpIfFalse(0));
+                self.sub_stmt(cons)?;
+                if let Some(alt) = alt {
+                    let k = self.emit(Op::Jump(0));
+                    self.patch(j);
+                    self.sub_stmt(alt)?;
+                    self.patch(k);
+                } else {
+                    self.patch(j);
+                }
+            }
+            StmtKind::Block(stmts) => self.block(stmts)?,
+            StmtKind::While(test, body) => {
+                let start = self.here();
+                self.expr(test)?;
+                let exit = self.emit(Op::JumpIfFalse(0));
+                self.push_loop(false);
+                self.sub_stmt(body)?;
+                let ctx = self.st().loops.pop().expect("loop");
+                for j in ctx.continue_jumps {
+                    self.patch_to(j, start);
+                }
+                self.emit(Op::Jump(start));
+                self.patch(exit);
+                for j in ctx.break_jumps {
+                    self.patch(j);
+                }
+            }
+            StmtKind::DoWhile(body, test) => {
+                let start = self.here();
+                self.push_loop(false);
+                self.sub_stmt(body)?;
+                let ctx = self.st().loops.pop().expect("loop");
+                for j in ctx.continue_jumps {
+                    self.patch(j);
+                }
+                self.expr(test)?;
+                self.emit(Op::JumpIfTrue(start));
+                for j in ctx.break_jumps {
+                    self.patch(j);
+                }
+            }
+            StmtKind::For {
+                init,
+                test,
+                update,
+                body,
+            } => {
+                self.begin_scope();
+                let mut loop_base = None;
+                if let Some(init) = init {
+                    match &init.kind {
+                        StmtKind::Decl(..) => {
+                            let base = self.locals_len();
+                            self.hoist(std::slice::from_ref(init.as_ref()))?;
+                            self.stmt(init)?;
+                            if self.locals_len() > base {
+                                loop_base = Some(base);
+                            }
+                        }
+                        StmtKind::Expr(e) => {
+                            self.expr(e)?;
+                            self.emit(Op::Pop);
+                        }
+                        _ => return Err(self.err("Invalid for loop initializer")),
+                    }
+                }
+                let start = self.here();
+                let exit = match test {
+                    Some(t) => {
+                        self.expr(t)?;
+                        Some(self.emit(Op::JumpIfFalse(0)))
+                    }
+                    None => None,
+                };
+                self.push_loop(false);
+                self.sub_stmt(body)?;
+                let ctx = self.st().loops.pop().expect("loop");
+                for j in ctx.continue_jumps {
+                    self.patch(j);
+                }
+                if let Some(b) = loop_base {
+                    if self.st_ref().locals[b..].iter().any(|l| l.captured) {
+                        self.emit(Op::CloseUpvalues(b as u32));
+                    }
+                }
+                if let Some(u) = update {
+                    self.expr_discard(u)?;
+                }
+                self.emit(Op::Jump(start));
+                if let Some(exit) = exit {
+                    self.patch(exit);
+                }
+                for j in ctx.break_jumps {
+                    self.patch(j);
+                }
+                self.end_scope();
+            }
+            StmtKind::ForOf {
+                decl,
+                pattern,
+                iter,
+                body,
+            } => self.for_each(*decl, pattern, iter, body, false)?,
+            StmtKind::ForIn {
+                decl,
+                pattern,
+                obj,
+                body,
+            } => self.for_each(*decl, pattern, obj, body, true)?,
+            StmtKind::Break => {
+                let Some(ctx) = self.st_ref().loops.last() else {
+                    return Err(self.err("Illegal break statement"));
+                };
+                let (target, try_depth) = (ctx.break_locals, ctx.try_depth);
+                self.unwind_tries(try_depth)?;
+                if self.locals_len() > target {
+                    self.emit(Op::PopTo(target as u32));
+                }
+                let j = self.emit(Op::Jump(0));
+                self.st()
+                    .loops
+                    .last_mut()
+                    .expect("loop")
+                    .break_jumps
+                    .push(j);
+            }
+            StmtKind::Continue => {
+                let Some(idx) = self.st_ref().loops.iter().rposition(|l| !l.is_switch) else {
+                    return Err(
+                        self.err("Illegal continue statement: no surrounding iteration statement")
+                    );
+                };
+                let ctx = &self.st_ref().loops[idx];
+                let (target, try_depth) = (ctx.continue_locals, ctx.try_depth);
+                self.unwind_tries(try_depth)?;
+                if self.locals_len() > target {
+                    self.emit(Op::PopTo(target as u32));
+                }
+                let j = self.emit(Op::Jump(0));
+                self.st().loops[idx].continue_jumps.push(j);
+            }
+            StmtKind::Throw(e) => {
+                self.expr(e)?;
+                self.emit(Op::Throw);
+            }
+            StmtKind::Try {
+                block,
+                param,
+                handler,
+                finalizer,
+            } => self.try_stmt(block, param.as_ref(), handler.as_ref(), finalizer.as_ref())?,
+            StmtKind::Switch(disc, cases) => self.switch(disc, cases)?,
+            StmtKind::Export(e) => match e {
+                ExportDecl::Decl(inner) | ExportDecl::DefaultDecl(inner) => self.stmt(inner)?,
+                ExportDecl::Default(expr) => {
+                    self.expr_named(expr, Some(&"default".into()))?;
+                    self.store_var(&"%default".into(), true);
+                    self.emit(Op::Pop);
+                }
+                ExportDecl::Names(_) | ExportDecl::From { .. } => {}
+            },
+        }
+        Ok(())
+    }
+
+    fn push_loop(&mut self, is_switch: bool) {
+        let n = self.locals_len();
+        let try_depth = self.st_ref().tries.len();
+        self.st().loops.push(LoopCtx {
+            break_jumps: Vec::new(),
+            continue_jumps: Vec::new(),
+            break_locals: n,
+            continue_locals: n,
+            try_depth,
+            is_switch,
+        });
+    }
+
+    fn for_each(
+        &mut self,
+        decl: Option<DeclKind>,
+        pattern: &Pattern,
+        source: &Expr,
+        body: &Stmt,
+        keys: bool,
+    ) -> R<()> {
+        self.begin_scope();
+        self.expr(source)?;
+        self.emit(if keys { Op::ForInIter } else { Op::GetIter });
+        let iter_name = self.hidden_name("iter");
+        let iter_slot = self.add_local(iter_name, true);
+        let start = self.here();
+        self.begin_scope();
+        if let Some(kind) = decl {
+            let mut names = Vec::new();
+            pattern.bound_names(&mut names);
+            for n in names {
+                self.emit(Op::Undefined);
+                self.add_local(n, kind == DeclKind::Const);
+            }
+        }
+        self.emit(Op::GetLocal(iter_slot));
+        let next = self.emit(Op::IterNext(0));
+        self.bind_pattern(
+            pattern,
+            if decl.is_some() {
+                BindMode::Init
+            } else {
+                BindMode::Assign
+            },
+        )?;
+        let try_depth = self.st_ref().tries.len();
+        let continue_locals = iter_slot as usize + 1;
+        self.st().loops.push(LoopCtx {
+            break_jumps: Vec::new(),
+            continue_jumps: Vec::new(),
+            break_locals: iter_slot as usize,
+            continue_locals,
+            try_depth,
+            is_switch: false,
+        });
+        self.sub_stmt(body)?;
+        let ctx = self.st().loops.pop().expect("loop");
+        for j in ctx.continue_jumps {
+            self.patch_to(j, start);
+        }
+        self.end_scope();
+        self.emit(Op::Jump(start));
+        self.patch(next);
+        self.end_scope();
+        for j in ctx.break_jumps {
+            self.patch(j);
+        }
+        Ok(())
+    }
+
+    fn unwind_tries(&mut self, to_depth: usize) -> R<()> {
+        let tries: Vec<TryCtx> = self.st_ref().tries[to_depth..].to_vec();
+        for (i, t) in tries.iter().enumerate().rev() {
+            if t.has_handler {
+                self.emit(Op::TryEnd);
+            }
+            if let Some(f) = &t.finally {
+                let saved = self.st().tries.split_off(to_depth + i);
+                let r = self.block(f);
+                self.st().tries.extend(saved);
+                r?;
+            }
+        }
+        Ok(())
+    }
+
+    fn return_stmt(&mut self, e: Option<&Expr>) -> R<()> {
+        match e {
+            Some(e) => self.expr(e)?,
+            None => {
+                self.emit(Op::Undefined);
+            }
+        }
+        if self.st_ref().tries.iter().any(|t| t.finally.is_some()) {
+            let name = self.hidden_name("ret");
+            let slot = self.add_local(name, true);
+            self.unwind_tries(0)?;
+            self.emit(Op::GetLocal(slot));
+            self.st().locals.pop();
+        } else {
+            let n = self.st_ref().tries.iter().filter(|t| t.has_handler).count();
+            for _ in 0..n {
+                self.emit(Op::TryEnd);
+            }
+        }
+        self.emit(Op::Return);
+        Ok(())
+    }
+
+    fn try_stmt(
+        &mut self,
+        block: &[Stmt],
+        param: Option<&Pattern>,
+        handler: Option<&Vec<Stmt>>,
+        finalizer: Option<&Vec<Stmt>>,
+    ) -> R<()> {
+        let finally = finalizer.map(|f| Rc::new(f.clone()));
+        let base = self.locals_len() as u32;
+        let tb = self.emit(Op::TryBegin(0, base));
+        self.st().tries.push(TryCtx {
+            has_handler: true,
+            finally: finally.clone(),
+        });
+        let r = self.block(block);
+        self.st().tries.pop();
+        r?;
+        self.emit(Op::TryEnd);
+        let mut normal = vec![self.emit(Op::Jump(0))];
+        if let Some(h) = handler {
+            self.patch(tb);
+            self.begin_scope();
+            let exc_name = match param {
+                Some(Pattern::Ident(n)) => n.clone(),
+                _ => self.hidden_name("exc"),
+            };
+            let exc_slot = self.add_local(exc_name, false);
+            if let Some(p) = param {
+                if !matches!(p, Pattern::Ident(_)) {
+                    let mut names = Vec::new();
+                    p.bound_names(&mut names);
+                    for n in names {
+                        self.emit(Op::Undefined);
+                        self.add_local(n, false);
+                    }
+                    self.emit(Op::GetLocal(exc_slot));
+                    self.bind_pattern(p, BindMode::Init)?;
+                }
+            }
+            let tb2 = if finally.is_some() {
+                Some(self.emit(Op::TryBegin(0, base)))
+            } else {
+                None
+            };
+            self.st().tries.push(TryCtx {
+                has_handler: finally.is_some(),
+                finally: finally.clone(),
+            });
+            let r = (|| {
+                self.hoist(h)?;
+                for s in h {
+                    self.stmt(s)?;
+                }
+                Ok(())
+            })();
+            self.st().tries.pop();
+            r?;
+            if finally.is_some() {
+                self.emit(Op::TryEnd);
+            }
+            self.end_scope();
+            normal.push(self.emit(Op::Jump(0)));
+            if let Some(tb2) = tb2 {
+                self.patch(tb2);
+            }
+        } else {
+            self.patch(tb);
+        }
+        if let Some(f) = finalizer {
+            self.begin_scope();
+            let exc = self.hidden_name("exc");
+            let slot = self.add_local(exc, true);
+            self.block(f)?;
+            self.emit(Op::GetLocal(slot));
+            self.emit(Op::Throw);
+            self.scope_cut();
+            for j in normal {
+                self.patch(j);
+            }
+            self.block(f)?;
+        } else {
+            for j in normal {
+                self.patch(j);
+            }
+        }
+        Ok(())
+    }
+
+    fn switch(&mut self, disc: &Expr, cases: &[SwitchCase]) -> R<()> {
+        self.begin_scope();
+        self.expr(disc)?;
+        let name = self.hidden_name("disc");
+        let d = self.add_local(name, true);
+        let all: Vec<&Stmt> = cases.iter().flat_map(|c| c.body.iter()).collect();
+        self.hoist_list(&all, false)?;
+        let mut tests = Vec::new();
+        for (i, c) in cases.iter().enumerate() {
+            if let Some(t) = &c.test {
+                self.emit(Op::GetLocal(d));
+                self.expr(t)?;
+                self.emit(Op::StrictEq);
+                tests.push((i, self.emit(Op::JumpIfTrue(0))));
+            }
+        }
+        let default_jump = self.emit(Op::Jump(0));
+        self.push_loop(true);
+        self.st().loops.last_mut().expect("switch").break_locals = d as usize;
+        let mut has_default = false;
+        for (i, c) in cases.iter().enumerate() {
+            for (ci, j) in &tests {
+                if *ci == i {
+                    self.patch(*j);
+                }
+            }
+            if c.test.is_none() {
+                has_default = true;
+                self.patch(default_jump);
+            }
+            for s in &c.body {
+                self.stmt(s)?;
+            }
+        }
+        if !has_default {
+            self.patch(default_jump);
+        }
+        let ctx = self.st().loops.pop().expect("switch");
+        self.end_scope();
+        for j in ctx.break_jumps {
+            self.patch(j);
+        }
+        Ok(())
+    }
+
+    fn bind_pattern(&mut self, p: &Pattern, mode: BindMode) -> R<()> {
+        match p {
+            Pattern::Ident(n) => {
+                self.store_var(n, mode == BindMode::Init);
+                self.emit(Op::Pop);
+            }
+            Pattern::Target(e) => match &e.kind {
+                ExprKind::Member { obj, name, .. } => {
+                    self.expr(obj)?;
+                    self.emit(Op::Swap);
+                    let k = self.str_const(name);
+                    self.emit(Op::SetProp(k));
+                    self.emit(Op::Pop);
+                }
+                ExprKind::Index { obj, index, .. } => {
+                    self.expr(obj)?;
+                    self.expr(index)?;
+                    self.emit(Op::Rot3);
+                    self.emit(Op::Rot3);
+                    self.emit(Op::SetIndex);
+                    self.emit(Op::Pop);
+                }
+                _ => return Err(self.err("Invalid destructuring assignment target")),
+            },
+            Pattern::Object { props, rest } => {
+                for prop in props {
+                    self.emit(Op::Dup);
+                    match &prop.key {
+                        PropKey::Named(k) => {
+                            let k = self.str_const(k);
+                            self.emit(Op::GetProp(k));
+                        }
+                        PropKey::Computed(e) => {
+                            self.expr(e)?;
+                            self.emit(Op::GetIndex);
+                        }
+                    }
+                    if let Some(d) = &prop.default {
+                        let j = self.emit(Op::JumpIfNotUndef(0));
+                        let name = match &prop.value {
+                            Pattern::Ident(n) => Some(n.clone()),
+                            _ => None,
+                        };
+                        self.expr_named(d, name.as_ref())?;
+                        self.patch(j);
+                    }
+                    self.bind_pattern(&prop.value, mode)?;
+                }
+                if let Some(r) = rest {
+                    self.emit(Op::Dup);
+                    let mut n = 0;
+                    for prop in props {
+                        if let PropKey::Named(k) = &prop.key {
+                            let k = self.str_const(k);
+                            self.emit(Op::Const(k));
+                            n += 1;
+                        }
+                    }
+                    self.emit(Op::ObjRest(n));
+                    self.bind_pattern(r, mode)?;
+                }
+                self.emit(Op::Pop);
+            }
+            Pattern::Array { elems, rest } => {
+                self.emit(Op::GetIter);
+                for el in elems {
+                    self.emit(Op::Dup);
+                    self.emit(Op::IterNextOrUndef);
+                    match el {
+                        None => {
+                            self.emit(Op::Pop);
+                        }
+                        Some(PatElem { pattern, default }) => {
+                            if let Some(d) = default {
+                                let j = self.emit(Op::JumpIfNotUndef(0));
+                                let name = match pattern {
+                                    Pattern::Ident(n) => Some(n.clone()),
+                                    _ => None,
+                                };
+                                self.expr_named(d, name.as_ref())?;
+                                self.patch(j);
+                            }
+                            self.bind_pattern(pattern, mode)?;
+                        }
+                    }
+                }
+                if let Some(r) = rest {
+                    self.emit(Op::Dup);
+                    self.emit(Op::IterRest);
+                    self.bind_pattern(r, mode)?;
+                }
+                self.emit(Op::Pop);
+            }
+        }
+        Ok(())
+    }
+
+    fn function(
+        &mut self,
+        f: &FuncDef,
+        name_hint: Option<Rc<str>>,
+        fields: Option<Rc<Vec<ClassMember>>>,
+    ) -> R<u32> {
+        let kind = match f.kind {
+            FuncKind::Normal => ProtoKind::Normal,
+            FuncKind::Arrow => ProtoKind::Arrow,
+            FuncKind::Method | FuncKind::StaticMethod => ProtoKind::Method,
+            FuncKind::ClassConstructor => ProtoKind::ClassConstructor,
+            FuncKind::DerivedConstructor => ProtoKind::DerivedConstructor,
+        };
+        let name = f.name.clone().or(name_hint).unwrap_or_else(|| "".into());
+        let self_name = self.self_bind.take();
+        let saved_line = self.line;
+        self.line = f.line;
+        let mut st = FnState::new(name, kind, f.line, f.kind == FuncKind::StaticMethod);
+        st.fields = fields;
+        self.states.push(st);
+        let r = self.function_body(f, kind, self_name);
+        let st = self.states.pop().expect("function state");
+        self.line = saved_line;
+        r?;
+        let proto = Rc::new(self.finish(st));
+        let parent = self.st();
+        parent.functions.push(proto);
+        Ok((parent.functions.len() - 1) as u32)
+    }
+
+    fn function_body(&mut self, f: &FuncDef, kind: ProtoKind, self_name: Option<Rc<str>>) -> R<()> {
+        self.begin_scope();
+        if kind == ProtoKind::Arrow {
+            self.add_local("".into(), true);
+        } else {
+            self.add_local("this".into(), true);
+        }
+        let mut pattern_params = Vec::new();
+        for (i, p) in f.params.iter().enumerate() {
+            match &p.pattern {
+                Pattern::Ident(n) => {
+                    if self.resolve_local(self.states.len() - 1, n).is_some() && &**n != "this" {
+                        return Err(self.err(format!("Duplicate parameter name '{n}'")));
+                    }
+                    self.add_local(n.clone(), false);
+                }
+                _ => {
+                    let h = self.hidden_name("param");
+                    self.add_local(h, false);
+                    pattern_params.push((i + 1) as u32);
+                }
+            }
+        }
+        let arity = f
+            .params
+            .iter()
+            .position(|p| p.default.is_some())
+            .unwrap_or(f.params.len());
+        {
+            let st = self.st();
+            st.num_params = f.params.len() as u32;
+            st.arity = arity as u32;
+            st.has_rest = f.rest.is_some();
+        }
+        let mut rest_pattern = None;
+        if let Some(r) = &f.rest {
+            match r {
+                Pattern::Ident(n) => {
+                    self.add_local(n.clone(), false);
+                }
+                _ => {
+                    let h = self.hidden_name("rest");
+                    let slot = self.add_local(h, false);
+                    rest_pattern = Some((slot, r));
+                }
+            }
+        }
+        for (i, p) in f.params.iter().enumerate() {
+            if let Some(d) = &p.default {
+                let slot = (i + 1) as u32;
+                self.emit(Op::GetLocal(slot));
+                let j = self.emit(Op::JumpIfNotUndef(0));
+                let name = match &p.pattern {
+                    Pattern::Ident(n) => Some(n.clone()),
+                    _ => None,
+                };
+                self.expr_named(d, name.as_ref())?;
+                self.patch(j);
+                self.emit(Op::SetLocal(slot));
+                self.emit(Op::Pop);
+            }
+        }
+        let mut names = Vec::new();
+        for &slot in &pattern_params {
+            f.params[(slot - 1) as usize]
+                .pattern
+                .bound_names(&mut names);
+        }
+        if let Some((_, r)) = rest_pattern {
+            r.bound_names(&mut names);
+        }
+        for n in &names {
+            self.emit(Op::Undefined);
+            self.add_local(n.clone(), false);
+        }
+        for &slot in &pattern_params {
+            self.emit(Op::GetLocal(slot));
+            self.bind_pattern(&f.params[(slot - 1) as usize].pattern, BindMode::Init)?;
+        }
+        if let Some((slot, r)) = rest_pattern {
+            self.emit(Op::GetLocal(slot));
+            self.bind_pattern(r, BindMode::Init)?;
+        }
+        if let Some(n) = self_name {
+            if self.resolve_local(self.states.len() - 1, &n).is_none() {
+                self.emit(Op::GetCallee);
+                self.add_local(n, false);
+            }
+        }
+        if kind == ProtoKind::ClassConstructor {
+            self.emit_field_inits()?;
+        }
+        match &f.body {
+            FuncBody::Block(stmts) => {
+                self.hoist(stmts)?;
+                for s in stmts {
+                    self.stmt(s)?;
+                }
+                self.emit(Op::Undefined);
+                self.emit(Op::Return);
+            }
+            FuncBody::Expr(e) => {
+                self.expr(e)?;
+                self.emit(Op::Return);
+            }
+        }
+        Ok(())
+    }
+
+    fn method_state(&self) -> Option<&FnState> {
+        self.states
+            .iter()
+            .rev()
+            .find(|s| s.kind != ProtoKind::Arrow)
+    }
+
+    fn emit_field_inits(&mut self) -> R<()> {
+        let Some(fields) = self.method_state().and_then(|s| s.fields.clone()) else {
+            return Ok(());
+        };
+        for m in fields.iter() {
+            if let ClassMember::Field {
+                key,
+                value,
+                is_static: false,
+            } = m
+            {
+                self.load_var(&"this".into());
+                match key {
+                    PropKey::Named(k) => {
+                        match value {
+                            Some(v) => self.expr_named(v, Some(k))?,
+                            None => {
+                                self.emit(Op::Undefined);
+                            }
+                        }
+                        let k = self.str_const(k);
+                        self.emit(Op::SetProp(k));
+                    }
+                    PropKey::Computed(e) => {
+                        self.expr(e)?;
+                        match value {
+                            Some(v) => self.expr(v)?,
+                            None => {
+                                self.emit(Op::Undefined);
+                            }
+                        }
+                        self.emit(Op::SetIndex);
+                    }
+                }
+                self.emit(Op::Pop);
+            }
+        }
+        Ok(())
+    }
+
+    fn class(&mut self, c: &ClassDef, name_hint: Option<&Rc<str>>) -> R<()> {
+        let saved_line = self.line;
+        self.line = c.line;
+        let name: Rc<str> = c
+            .name
+            .clone()
+            .or_else(|| name_hint.cloned())
+            .unwrap_or_else(|| "".into());
+        let has_super = c.superclass.is_some();
+        if let Some(sup) = &c.superclass {
+            self.expr(sup)?;
+        }
+        let ctor = match &c.constructor {
+            Some(f) => f.clone(),
+            None => {
+                let body = if has_super {
+                    vec![Stmt {
+                        kind: StmtKind::Expr(Expr {
+                            kind: ExprKind::SuperCall(vec![Arg::Spread(Expr {
+                                kind: ExprKind::Ident("args".into()),
+                                line: c.line,
+                            })]),
+                            line: c.line,
+                        }),
+                        line: c.line,
+                    }]
+                } else {
+                    Vec::new()
+                };
+                Rc::new(FuncDef {
+                    name: Some(name.clone()),
+                    params: Vec::new(),
+                    rest: if has_super {
+                        Some(Pattern::Ident("args".into()))
+                    } else {
+                        None
+                    },
+                    body: FuncBody::Block(body),
+                    kind: if has_super {
+                        FuncKind::DerivedConstructor
+                    } else {
+                        FuncKind::ClassConstructor
+                    },
+                    line: c.line,
+                })
+            }
+        };
+        let fields: Vec<ClassMember> = c
+            .members
+            .iter()
+            .filter(|m| {
+                matches!(
+                    m,
+                    ClassMember::Field {
+                        is_static: false,
+                        ..
+                    }
+                )
+            })
+            .cloned()
+            .collect();
+        let fields = if fields.is_empty() {
+            None
+        } else {
+            Some(Rc::new(fields))
+        };
+        let mut ctor_def = (*ctor).clone();
+        ctor_def.name = Some(name.clone());
+        let idx = self.function(&ctor_def, Some(name.clone()), fields)?;
+        self.emit(Op::Closure(idx));
+        let k = self.str_const(&name);
+        self.emit(Op::MakeClass(k, has_super));
+        for m in &c.members {
+            if let ClassMember::Method {
+                key,
+                func,
+                is_static,
+            } = m
+            {
+                match key {
+                    PropKey::Named(n) => {
+                        let idx = self.function(func, Some(n.clone()), None)?;
+                        self.emit(Op::Closure(idx));
+                        let k = self.str_const(n);
+                        self.emit(Op::DefineMethod(k, *is_static));
+                    }
+                    PropKey::Computed(e) => {
+                        self.expr(e)?;
+                        let idx = self.function(func, None, None)?;
+                        self.emit(Op::Closure(idx));
+                        self.emit(Op::DefineMethodComputed(*is_static));
+                    }
+                }
+            }
+        }
+        for m in &c.members {
+            if let ClassMember::Field {
+                key,
+                value,
+                is_static: true,
+            } = m
+            {
+                self.emit(Op::Dup);
+                match key {
+                    PropKey::Named(n) => {
+                        match value {
+                            Some(v) => self.expr_named(v, Some(n))?,
+                            None => {
+                                self.emit(Op::Undefined);
+                            }
+                        }
+                        let k = self.str_const(n);
+                        self.emit(Op::SetProp(k));
+                    }
+                    PropKey::Computed(e) => {
+                        self.expr(e)?;
+                        match value {
+                            Some(v) => self.expr(v)?,
+                            None => {
+                                self.emit(Op::Undefined);
+                            }
+                        }
+                        self.emit(Op::SetIndex);
+                    }
+                }
+                self.emit(Op::Pop);
+            }
+        }
+        self.line = saved_line;
+        Ok(())
+    }
+
+    fn has_spread(args: &[Arg]) -> bool {
+        args.iter().any(|a| matches!(a, Arg::Spread(_)))
+    }
+
+    fn args_array(&mut self, args: &[Arg]) -> R<()> {
+        self.emit(Op::NewArray(0));
+        for a in args {
+            match a {
+                Arg::Expr(e) => {
+                    self.expr(e)?;
+                    self.emit(Op::ArrayPush);
+                }
+                Arg::Spread(e) => {
+                    self.expr(e)?;
+                    self.emit(Op::ArraySpread);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn plain_args(&mut self, args: &[Arg]) -> R<u32> {
+        for a in args {
+            if let Arg::Expr(e) = a {
+                self.expr(e)?;
+            }
+        }
+        Ok(args.len() as u32)
+    }
+
+    fn name_const(&mut self, e: &Expr) -> u32 {
+        match expr_text(e) {
+            Some(t) => {
+                let t: Rc<str> = t.into();
+                self.str_const(&t)
+            }
+            None => NO_NAME,
+        }
+    }
+
+    fn super_info(&self, call: bool) -> R<bool> {
+        let Some(st) = self.method_state() else {
+            return Err(self.err("'super' keyword unexpected here"));
+        };
+        let ok = if call {
+            st.kind == ProtoKind::DerivedConstructor
+        } else {
+            matches!(
+                st.kind,
+                ProtoKind::Method | ProtoKind::ClassConstructor | ProtoKind::DerivedConstructor
+            )
+        };
+        if !ok {
+            return Err(self.err("'super' keyword unexpected here"));
+        }
+        Ok(st.is_static)
+    }
+
+    fn call(&mut self, callee: &Expr, args: &[Arg], optional: bool) -> R<()> {
+        let name = self.name_const(callee);
+        match &callee.kind {
+            ExprKind::Member {
+                obj,
+                name: m,
+                optional: mopt,
+            } => {
+                self.expr(obj)?;
+                if *mopt {
+                    let j = self.emit(Op::JumpIfNullish(0));
+                    self.chain.push(j);
+                }
+                let k = self.str_const(m);
+                self.emit(Op::GetMethod(k));
+            }
+            ExprKind::Index {
+                obj,
+                index,
+                optional: iopt,
+            } => {
+                self.expr(obj)?;
+                if *iopt {
+                    let j = self.emit(Op::JumpIfNullish(0));
+                    self.chain.push(j);
+                }
+                self.expr(index)?;
+                self.emit(Op::GetIndexMethod);
+            }
+            ExprKind::SuperMember(m) => {
+                let is_static = self.super_info(false)?;
+                self.load_var(&"this".into());
+                let k = self.str_const(m);
+                self.emit(Op::SuperGetMethod(k, is_static));
+            }
+            _ => {
+                self.expr(callee)?;
+                self.emit(Op::Undefined);
+            }
+        }
+        if optional {
+            let j = self.emit(Op::JumpIfNullishCall(0));
+            self.chain.push(j);
+        }
+        if Self::has_spread(args) {
+            self.args_array(args)?;
+            self.emit(Op::CallSpread(name));
+        } else {
+            let n = self.plain_args(args)?;
+            self.emit(Op::Call(n, name));
+        }
+        Ok(())
+    }
+
+    fn expr(&mut self, e: &Expr) -> R<()> {
+        self.expr_named(e, None)
+    }
+
+    fn expr_discard(&mut self, e: &Expr) -> R<()> {
+        if let ExprKind::Update {
+            inc,
+            prefix: false,
+            target,
+        } = &e.kind
+        {
+            let as_prefix = Expr {
+                kind: ExprKind::Update {
+                    inc: *inc,
+                    prefix: true,
+                    target: target.clone(),
+                },
+                line: e.line,
+            };
+            self.expr(&as_prefix)?;
+        } else {
+            self.expr(e)?;
+        }
+        self.emit(Op::Pop);
+        Ok(())
+    }
+
+    fn expr_named(&mut self, e: &Expr, name: Option<&Rc<str>>) -> R<()> {
+        let saved_line = self.line;
+        self.line = e.line;
+        let r = self.expr_inner(e, name);
+        self.line = saved_line;
+        r
+    }
+
+    fn expr_inner(&mut self, e: &Expr, name: Option<&Rc<str>>) -> R<()> {
+        match &e.kind {
+            ExprKind::Number(n) => {
+                let k = self.constant(Value::Number(*n));
+                self.emit(Op::Const(k));
+            }
+            ExprKind::Str(s) => {
+                let k = self.str_const(s);
+                self.emit(Op::Const(k));
+            }
+            ExprKind::Template(quasis, exprs) => {
+                let mut n = 0;
+                for (i, q) in quasis.iter().enumerate() {
+                    if !q.is_empty() {
+                        let k = self.str_const(q);
+                        self.emit(Op::Const(k));
+                        n += 1;
+                    }
+                    if let Some(x) = exprs.get(i) {
+                        self.expr(x)?;
+                        n += 1;
+                    }
+                }
+                if n == 0 {
+                    let k = self.str_const(&"".into());
+                    self.emit(Op::Const(k));
+                } else {
+                    self.emit(Op::Template(n));
+                }
+            }
+            ExprKind::Bool(true) => {
+                self.emit(Op::True);
+            }
+            ExprKind::Bool(false) => {
+                self.emit(Op::False);
+            }
+            ExprKind::Null => {
+                self.emit(Op::Null);
+            }
+            ExprKind::This => self.load_var(&"this".into()),
+            ExprKind::Ident(n) => self.load_var(n),
+            ExprKind::Array(elems) => {
+                let simple = elems.iter().all(|e| matches!(e, ArrayElem::Expr(_)));
+                if simple {
+                    for el in elems {
+                        if let ArrayElem::Expr(x) = el {
+                            self.expr(x)?;
+                        }
+                    }
+                    self.emit(Op::NewArray(elems.len() as u32));
+                } else {
+                    self.emit(Op::NewArray(0));
+                    for el in elems {
+                        match el {
+                            ArrayElem::Expr(x) => {
+                                self.expr(x)?;
+                                self.emit(Op::ArrayPush);
+                            }
+                            ArrayElem::Spread(x) => {
+                                self.expr(x)?;
+                                self.emit(Op::ArraySpread);
+                            }
+                            ArrayElem::Hole => {
+                                self.emit(Op::ArrayHole);
+                            }
+                        }
+                    }
+                }
+            }
+            ExprKind::Object(props) => {
+                self.emit(Op::NewObject);
+                for p in props {
+                    match p {
+                        PropDef::KeyValue(PropKey::Named(k), v) => {
+                            self.expr_named(v, Some(k))?;
+                            let k = self.str_const(k);
+                            self.emit(Op::InitProp(k));
+                        }
+                        PropDef::KeyValue(PropKey::Computed(ke), v) => {
+                            self.expr(ke)?;
+                            self.expr(v)?;
+                            self.emit(Op::InitIndex);
+                        }
+                        PropDef::Shorthand(n) => {
+                            self.load_var(n);
+                            let k = self.str_const(n);
+                            self.emit(Op::InitProp(k));
+                        }
+                        PropDef::ShorthandDefault(..) => {
+                            return Err(self.err("Invalid shorthand property initializer"));
+                        }
+                        PropDef::Spread(x) => {
+                            self.expr(x)?;
+                            self.emit(Op::ObjSpread);
+                        }
+                        PropDef::Method(PropKey::Named(k), f) => {
+                            let idx = self.function(f, Some(k.clone()), None)?;
+                            self.emit(Op::Closure(idx));
+                            let k = self.str_const(k);
+                            self.emit(Op::InitProp(k));
+                        }
+                        PropDef::Method(PropKey::Computed(ke), f) => {
+                            self.expr(ke)?;
+                            let idx = self.function(f, None, None)?;
+                            self.emit(Op::Closure(idx));
+                            self.emit(Op::InitIndex);
+                        }
+                    }
+                }
+            }
+            ExprKind::Function(f) => {
+                if f.kind == FuncKind::Normal {
+                    self.self_bind = f.name.clone();
+                }
+                let idx = self.function(f, name.cloned(), None)?;
+                self.emit(Op::Closure(idx));
+            }
+            ExprKind::Class(c) => self.class(c, name)?,
+            ExprKind::Unary(op, x) => match op {
+                UnaryOp::Typeof => {
+                    if let ExprKind::Ident(n) = &x.kind {
+                        if matches!(self.resolve(n), Var::Global) {
+                            let k = self.str_const(n);
+                            self.emit(Op::TypeofGlobal(k));
+                            return Ok(());
+                        }
+                    }
+                    self.expr(x)?;
+                    self.emit(Op::Typeof);
+                }
+                UnaryOp::Delete => match &x.kind {
+                    ExprKind::Member { obj, name, .. } => {
+                        self.expr(obj)?;
+                        let k = self.str_const(name);
+                        self.emit(Op::DeleteProp(k));
+                    }
+                    ExprKind::Index { obj, index, .. } => {
+                        self.expr(obj)?;
+                        self.expr(index)?;
+                        self.emit(Op::DeleteIndex);
+                    }
+                    _ => {
+                        self.expr(x)?;
+                        self.emit(Op::Pop);
+                        self.emit(Op::True);
+                    }
+                },
+                UnaryOp::Void => {
+                    self.expr(x)?;
+                    self.emit(Op::Pop);
+                    self.emit(Op::Undefined);
+                }
+                UnaryOp::Not => {
+                    self.expr(x)?;
+                    self.emit(Op::Not);
+                }
+                UnaryOp::Neg => {
+                    self.expr(x)?;
+                    self.emit(Op::Neg);
+                }
+                UnaryOp::Plus => {
+                    self.expr(x)?;
+                    self.emit(Op::ToNumber);
+                }
+                UnaryOp::BitNot => {
+                    self.expr(x)?;
+                    self.emit(Op::BitNot);
+                }
+            },
+            ExprKind::Update {
+                inc,
+                prefix,
+                target,
+            } => {
+                let step = if *inc { Op::Inc } else { Op::Dec };
+                match &target.kind {
+                    ExprKind::Ident(n) => {
+                        self.load_var(n);
+                        if *prefix {
+                            self.emit(step);
+                            self.store_var(n, false);
+                        } else {
+                            self.emit(Op::ToNumber);
+                            self.emit(Op::Dup);
+                            self.emit(step);
+                            self.store_var(n, false);
+                            self.emit(Op::Pop);
+                        }
+                    }
+                    ExprKind::Member { obj, name, .. } => {
+                        self.expr(obj)?;
+                        self.emit(Op::Dup);
+                        let k = self.str_const(name);
+                        self.emit(Op::GetProp(k));
+                        if *prefix {
+                            self.emit(step);
+                            self.emit(Op::SetProp(k));
+                        } else {
+                            self.emit(Op::ToNumber);
+                            self.emit(Op::Dup);
+                            self.emit(Op::Rot3);
+                            self.emit(step);
+                            self.emit(Op::SetProp(k));
+                            self.emit(Op::Pop);
+                        }
+                    }
+                    ExprKind::Index { obj, index, .. } => {
+                        self.expr(obj)?;
+                        self.expr(index)?;
+                        self.emit(Op::Dup2);
+                        self.emit(Op::GetIndex);
+                        if *prefix {
+                            self.emit(step);
+                            self.emit(Op::SetIndex);
+                        } else {
+                            self.emit(Op::ToNumber);
+                            self.emit(Op::Dup);
+                            self.emit(Op::Rot4);
+                            self.emit(step);
+                            self.emit(Op::SetIndex);
+                            self.emit(Op::Pop);
+                        }
+                    }
+                    _ => {
+                        return Err(
+                            self.err("Invalid left-hand side expression in update operation")
+                        );
+                    }
+                }
+            }
+            ExprKind::Binary(op, a, b) => {
+                self.expr(a)?;
+                self.expr(b)?;
+                self.emit(bin_op(*op));
+            }
+            ExprKind::Logical(op, a, b) => {
+                self.expr(a)?;
+                let j = self.emit(logical_jump(*op));
+                self.expr(b)?;
+                self.patch(j);
+            }
+            ExprKind::Assign { op, target, value } => self.assign(*op, target, value)?,
+            ExprKind::Cond(t, c, a) => {
+                self.expr(t)?;
+                let j = self.emit(Op::JumpIfFalse(0));
+                self.expr_named(c, name)?;
+                let k = self.emit(Op::Jump(0));
+                self.patch(j);
+                self.expr_named(a, name)?;
+                self.patch(k);
+            }
+            ExprKind::Member {
+                obj,
+                name: m,
+                optional,
+            } => {
+                self.expr(obj)?;
+                if *optional {
+                    let j = self.emit(Op::JumpIfNullish(0));
+                    self.chain.push(j);
+                }
+                let k = self.str_const(m);
+                self.emit(Op::GetProp(k));
+            }
+            ExprKind::Index {
+                obj,
+                index,
+                optional,
+            } => {
+                self.expr(obj)?;
+                if *optional {
+                    let j = self.emit(Op::JumpIfNullish(0));
+                    self.chain.push(j);
+                }
+                self.expr(index)?;
+                self.emit(Op::GetIndex);
+            }
+            ExprKind::Call {
+                callee,
+                args,
+                optional,
+            } => self.call(callee, args, *optional)?,
+            ExprKind::New { callee, args } => {
+                let name = self.name_const(callee);
+                self.expr(callee)?;
+                if Self::has_spread(args) {
+                    self.args_array(args)?;
+                    self.emit(Op::NewSpread(name));
+                } else {
+                    let n = self.plain_args(args)?;
+                    self.emit(Op::New(n, name));
+                }
+            }
+            ExprKind::SuperCall(args) => {
+                self.super_info(true)?;
+                self.load_var(&"this".into());
+                if Self::has_spread(args) {
+                    self.args_array(args)?;
+                    self.emit(Op::SuperCall(u32::MAX));
+                } else {
+                    let n = self.plain_args(args)?;
+                    self.emit(Op::SuperCall(n));
+                }
+                self.emit_field_inits()?;
+            }
+            ExprKind::SuperMember(m) => {
+                let is_static = self.super_info(false)?;
+                self.load_var(&"this".into());
+                let k = self.str_const(m);
+                self.emit(Op::SuperGet(k, is_static));
+            }
+            ExprKind::OptChain(inner) => {
+                let saved = std::mem::take(&mut self.chain);
+                let r = self.expr(inner);
+                let jumps = std::mem::replace(&mut self.chain, saved);
+                r?;
+                for j in jumps {
+                    self.patch(j);
+                }
+            }
+            ExprKind::Seq(items) => {
+                for (i, x) in items.iter().enumerate() {
+                    self.expr(x)?;
+                    if i + 1 < items.len() {
+                        self.emit(Op::Pop);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn assign(&mut self, op: Option<AssignOp>, target: &AssignTarget, value: &Expr) -> R<()> {
+        match target {
+            AssignTarget::Pattern(p) => {
+                self.expr(value)?;
+                self.emit(Op::Dup);
+                self.bind_pattern(p, BindMode::Assign)?;
+            }
+            AssignTarget::Simple(t) => match &t.kind {
+                ExprKind::Ident(n) => match op {
+                    None => {
+                        self.expr_named(value, Some(n))?;
+                        self.store_var(n, false);
+                    }
+                    Some(AssignOp::Bin(b)) => {
+                        self.load_var(n);
+                        self.expr(value)?;
+                        self.emit(bin_op(b));
+                        self.store_var(n, false);
+                    }
+                    Some(AssignOp::Logical(l)) => {
+                        self.load_var(n);
+                        let j = self.emit(logical_jump(l));
+                        self.expr_named(value, Some(n))?;
+                        self.store_var(n, false);
+                        self.patch(j);
+                    }
+                },
+                ExprKind::Member { obj, name, .. } => {
+                    let k = self.str_const(name);
+                    self.expr(obj)?;
+                    match op {
+                        None => {
+                            self.expr(value)?;
+                            self.emit(Op::SetProp(k));
+                        }
+                        Some(AssignOp::Bin(b)) => {
+                            self.emit(Op::Dup);
+                            self.emit(Op::GetProp(k));
+                            self.expr(value)?;
+                            self.emit(bin_op(b));
+                            self.emit(Op::SetProp(k));
+                        }
+                        Some(AssignOp::Logical(l)) => {
+                            self.emit(Op::Dup);
+                            self.emit(Op::GetProp(k));
+                            let j = self.emit(logical_jump(l));
+                            self.expr(value)?;
+                            self.emit(Op::SetProp(k));
+                            let end = self.emit(Op::Jump(0));
+                            self.patch(j);
+                            self.emit(Op::Swap);
+                            self.emit(Op::Pop);
+                            self.patch(end);
+                        }
+                    }
+                }
+                ExprKind::Index { obj, index, .. } => {
+                    self.expr(obj)?;
+                    self.expr(index)?;
+                    match op {
+                        None => {
+                            self.expr(value)?;
+                            self.emit(Op::SetIndex);
+                        }
+                        Some(AssignOp::Bin(b)) => {
+                            self.emit(Op::Dup2);
+                            self.emit(Op::GetIndex);
+                            self.expr(value)?;
+                            self.emit(bin_op(b));
+                            self.emit(Op::SetIndex);
+                        }
+                        Some(AssignOp::Logical(l)) => {
+                            self.emit(Op::Dup2);
+                            self.emit(Op::GetIndex);
+                            let j = self.emit(logical_jump(l));
+                            self.expr(value)?;
+                            self.emit(Op::SetIndex);
+                            let end = self.emit(Op::Jump(0));
+                            self.patch(j);
+                            self.emit(Op::Rot3);
+                            self.emit(Op::Pop);
+                            self.emit(Op::Pop);
+                            self.patch(end);
+                        }
+                    }
+                }
+                _ => return Err(self.err("Invalid left-hand side in assignment")),
+            },
+        }
+        Ok(())
+    }
+}

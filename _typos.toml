@@ -1,0 +1,22 @@
+[files]
+extend-exclude = ["LICENSE", "target", "Cargo.lock", "nude_modules"]
+
+[default.extend-words]
+vrotdaem = "vrotdaem"
+gluboko = "gluboko"
+nude = "nude"
+jsq = "jsq"
+squirt = "squirt"
+javasquirt = "javasquirt"
+upvalue = "upvalue"
+upvalues = "upvalues"
+disasm = "disasm"
+
+[default.extend-identifiers]
+vrotdaem = "vrotdaem"
+gluboko = "gluboko"
+nude_modules = "nude_modules"
+jsq = "jsq"
+squirt = "squirt"
+JavaSquirt = "JavaSquirt"
+javasquirt = "javasquirt"

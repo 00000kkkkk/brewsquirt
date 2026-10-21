@@ -1,0 +1,15 @@
+11 3 5 1 add
+8 5 none { obj: true }
+1
+[ 0, 1, 2 ]
+[ 'a', 'b' ]
+hoisted works
+3628800
+outer
+10
+10 4
+bound 5 1+2
+11
+[ 11, 12, 13 ]
+function function true  arrow
+81 81

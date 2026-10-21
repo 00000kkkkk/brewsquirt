@@ -1,0 +1,24 @@
+const a = [3, 1, 4, 1, 5, 9, 2, 6]
+console.log(a.length, a.indexOf(1), a.lastIndexOf(1), a.includes(9), a.at(-2), a.slice(2, 5), a.join("-"))
+console.log(a.map((x) => x * 2), a.filter((x) => x % 2 === 0), a.reduce((s, x) => s + x, 0), a.reduceRight((s, x) => s + x))
+console.log(a.find((x) => x > 4), a.findIndex((x) => x > 4), a.findLast((x) => x < 3), a.some((x) => x > 8), a.every((x) => x > 0))
+console.log([...a].sort(), [...a].sort((x, y) => y - x), ["b", "a", "c"].sort(), [10, 9, 100].sort())
+const b = [1, 2, 3]
+b.push(4, 5)
+console.log(b.pop(), b.shift(), b.unshift(0), b)
+console.log(b.splice(1, 2, "x", "y", "z"), b)
+console.log([1, [2, [3, [4]]]].flat(), [1, [2, [3, [4]]]].flat(Infinity), [1, 2].flatMap((x) => [x, x * 10]))
+console.log(new Array(3).fill(7), Array.from("abc"), Array.from({ length: 4 }, (_, i) => i * i), Array.of(1, 2), Array.isArray([]))
+console.log([1, 2, 3].reverse(), [1, 2].concat([3], 4, [[5]]), [..."hi"], [1, 2, 3].toReversed(), [3, 1, 2].toSorted())
+const arr = [1, 2, 3]
+arr.length = 1
+console.log(arr)
+for (const [i, v] of ["x", "y"].entries()) console.log(i, v)
+console.log([...[7, 8].keys()], [...[7, 8].values()])
+const nested = [[1, 2], [3, 4]]
+console.log(nested.map(([p, q]) => p + q))
+let total = 0
+;[1, 2, 3].forEach((v, i) => {
+  total += v * i
+})
+console.log(total, [].length, [undefined, null].join("-"))

@@ -1,0 +1,43 @@
+class Shape {
+  constructor(name) {
+    this.name = name
+  }
+
+  area() {
+    return 0
+  }
+
+  describe() {
+    return `${this.name}: ${this.area().toFixed(2)}`
+  }
+}
+
+class Circle extends Shape {
+  constructor(radius) {
+    super("circle")
+    this.radius = radius
+  }
+
+  area() {
+    return Math.PI * this.radius ** 2
+  }
+}
+
+class Rect extends Shape {
+  constructor(w, h) {
+    super("rect")
+    this.w = w
+    this.h = h
+  }
+
+  area() {
+    return this.w * this.h
+  }
+}
+
+const shapes = [new Circle(1), new Rect(2, 3), new Circle(0.5)]
+shapes.sort((a, b) => b.area() - a.area())
+for (const shape of shapes) console.log(shape.describe())
+
+const total = shapes.reduce((sum, s) => sum + s.area(), 0)
+console.log(`total area ${total.toFixed(3)} across ${shapes.length} shapes`)

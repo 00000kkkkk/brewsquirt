@@ -1,0 +1,33 @@
+[package]
+name = "javasquirt"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "High-performance language with JS semantics and Rust speed"
+license = "Apache-2.0"
+repository = "https://github.com/00000kkkkk/javasquirt"
+homepage = "https://github.com/00000kkkkk/javasquirt"
+readme = "README.md"
+keywords = ["language", "interpreter", "javascript", "bytecode", "vm"]
+categories = ["compilers", "command-line-utilities"]
+exclude = [".github/", "benches/", "tests/"]
+
+[[bin]]
+name = "jsq"
+path = "src/bin/jsq.rs"
+
+[[bin]]
+name = "vrotdaem"
+path = "src/bin/vrotdaem.rs"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+indexmap = { version = "2.14", features = ["serde"] }
+rustc-hash = "2.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true

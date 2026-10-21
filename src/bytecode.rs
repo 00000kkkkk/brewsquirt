@@ -1,0 +1,244 @@
+use crate::inspect::inspect_plain;
+use crate::value::Value;
+use std::fmt::Write;
+use std::path::PathBuf;
+use std::rc::Rc;
+
+pub const NO_NAME: u32 = u32::MAX;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Op {
+    Const(u32),
+    Undefined,
+    Null,
+    True,
+    False,
+    Pop,
+    Dup,
+    Dup2,
+    Swap,
+    Rot3,
+    Rot4,
+    GetLocal(u32),
+    SetLocal(u32),
+    GetUpval(u32),
+    SetUpval(u32),
+    GetGlobal(u32),
+    SetGlobal(u32),
+    DefineGlobal(u32, bool),
+    TypeofGlobal(u32),
+    GetProp(u32),
+    SetProp(u32),
+    GetIndex,
+    SetIndex,
+    DeleteProp(u32),
+    DeleteIndex,
+    GetMethod(u32),
+    GetIndexMethod,
+    SuperGet(u32, bool),
+    SuperGetMethod(u32, bool),
+    SuperCall(u32),
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Pow,
+    Neg,
+    ToNumber,
+    Not,
+    BitNot,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    UShr,
+    Eq,
+    Ne,
+    StrictEq,
+    StrictNe,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+    In,
+    InstanceOf,
+    Typeof,
+    Inc,
+    Dec,
+    Jump(u32),
+    JumpIfFalse(u32),
+    JumpIfTrue(u32),
+    JumpIfFalseKeep(u32),
+    JumpIfTrueKeep(u32),
+    JumpIfNotNullishKeep(u32),
+    JumpIfNullish(u32),
+    JumpIfNullishCall(u32),
+    JumpIfNotUndef(u32),
+    Call(u32, u32),
+    CallSpread(u32),
+    New(u32, u32),
+    NewSpread(u32),
+    Return,
+    Closure(u32),
+    PopTo(u32),
+    CloseUpvalues(u32),
+    Collapse(u32),
+    NewArray(u32),
+    ArrayPush,
+    ArraySpread,
+    ArrayHole,
+    NewObject,
+    InitProp(u32),
+    InitIndex,
+    ObjSpread,
+    ObjRest(u32),
+    MakeClass(u32, bool),
+    DefineMethod(u32, bool),
+    DefineMethodComputed(bool),
+    GetIter,
+    ForInIter,
+    IterNext(u32),
+    IterNextOrUndef,
+    IterRest,
+    Template(u32),
+    Throw,
+    TryBegin(u32, u32),
+    TryEnd,
+    ThrowConstAssign(u32),
+    Import(u32),
+    ExportAll,
+    GetCallee,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProtoKind {
+    Normal,
+    Arrow,
+    Method,
+    ClassConstructor,
+    DerivedConstructor,
+    Module,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct UpvalDesc {
+    pub is_local: bool,
+    pub index: u32,
+}
+
+#[derive(Debug)]
+pub struct ModuleInfo {
+    pub name: Rc<str>,
+    pub dir: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct FunctionProto {
+    pub name: Rc<str>,
+    pub kind: ProtoKind,
+    pub num_params: u32,
+    pub arity: u32,
+    pub has_rest: bool,
+    pub code: Vec<Op>,
+    pub lines: Vec<u32>,
+    pub consts: Vec<Value>,
+    pub functions: Vec<Rc<FunctionProto>>,
+    pub upvalues: Vec<UpvalDesc>,
+    pub module: Rc<ModuleInfo>,
+    pub line: u32,
+}
+
+impl FunctionProto {
+    pub fn is_constructor(&self) -> bool {
+        matches!(
+            self.kind,
+            ProtoKind::Normal | ProtoKind::ClassConstructor | ProtoKind::DerivedConstructor
+        )
+    }
+
+    pub fn is_class(&self) -> bool {
+        matches!(
+            self.kind,
+            ProtoKind::ClassConstructor | ProtoKind::DerivedConstructor
+        )
+    }
+
+    pub fn line_at(&self, ip: usize) -> u32 {
+        self.lines
+            .get(ip.saturating_sub(1))
+            .copied()
+            .unwrap_or(self.line)
+    }
+
+    pub fn disassemble(&self) -> String {
+        let mut out = String::new();
+        self.disassemble_into(&mut out);
+        out
+    }
+
+    fn const_text(&self, i: u32) -> String {
+        self.consts
+            .get(i as usize)
+            .map(inspect_plain)
+            .unwrap_or_default()
+    }
+
+    fn disassemble_into(&self, out: &mut String) {
+        let name = if self.name.is_empty() {
+            "<anonymous>"
+        } else {
+            &self.name
+        };
+        let _ = writeln!(
+            out,
+            "== {name} ({:?}, params {}, rest {}, upvalues {}) ==",
+            self.kind,
+            self.num_params,
+            self.has_rest,
+            self.upvalues.len()
+        );
+        let mut last_line = 0;
+        for (i, op) in self.code.iter().enumerate() {
+            let line = self.lines[i];
+            let line_text = if line == last_line {
+                "   |".to_string()
+            } else {
+                format!("{line:4}")
+            };
+            last_line = line;
+            let detail = match op {
+                Op::Const(c)
+                | Op::GetGlobal(c)
+                | Op::SetGlobal(c)
+                | Op::DefineGlobal(c, _)
+                | Op::TypeofGlobal(c)
+                | Op::GetProp(c)
+                | Op::SetProp(c)
+                | Op::DeleteProp(c)
+                | Op::GetMethod(c)
+                | Op::InitProp(c)
+                | Op::Import(c)
+                | Op::ThrowConstAssign(c)
+                | Op::SuperGet(c, _)
+                | Op::SuperGetMethod(c, _)
+                | Op::DefineMethod(c, _)
+                | Op::MakeClass(c, _) => format!("  {}", self.const_text(*c)),
+                Op::Closure(f) => format!(
+                    "  <fn {}>",
+                    self.functions
+                        .get(*f as usize)
+                        .map(|p| p.name.to_string())
+                        .unwrap_or_default()
+                ),
+                _ => String::new(),
+            };
+            let _ = writeln!(out, "{i:05} {line_text}  {op:?}{detail}");
+        }
+        for f in &self.functions {
+            out.push('\n');
+            f.disassemble_into(out);
+        }
+    }
+}

@@ -1,0 +1,8 @@
+export * from "./math.jsq"
+export { square as sq } from "./math"
+
+const hidden = "visible"
+let loads = 0
+loads++
+
+export { hidden as visible, loads }

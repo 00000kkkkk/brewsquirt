@@ -1,0 +1,17 @@
+type TypeError: Cannot read properties of null (reading 'prop')
+ref ReferenceError: notDefined is not defined
+range RangeError: Invalid array length
+custom Error: custom failure
+value { code: 42 }
+fine
+ValidationError invalid email email true true ValidationError: invalid email
+[ 'try', 'finally' ]
+inner finally
+caught inner
+[ 0, 'f0', 'f1', 2, 'f2' ]
+rethrown 2
+RangeError r true true [object Error]
+Assignment to constant variable.
+Cannot read properties of undefined (reading 'x')
+SyntaxError
+true

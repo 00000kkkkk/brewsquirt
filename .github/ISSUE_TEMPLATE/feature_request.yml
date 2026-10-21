@@ -1,0 +1,50 @@
+name: Feature request
+description: Suggest a language feature, builtin, or tooling improvement
+labels:
+  - enhancement
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the roadmap in the README and existing issues before opening a request.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Language syntax or semantics
+        - Builtins and standard library
+        - Modules
+        - Performance
+        - jsq CLI or REPL
+        - vrotdaem package manager
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the feature. A short `.jsq` example of the desired usage helps a lot.
+      render: javascript
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to open a pull request for this

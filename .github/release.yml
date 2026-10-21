@@ -1,0 +1,42 @@
+changelog:
+  exclude:
+    labels:
+      - skip-release-notes
+  categories:
+    - title: Breaking changes
+      labels:
+        - breaking-change
+    - title: Features
+      labels:
+        - enhancement
+        - feature
+    - title: Bug fixes
+      labels:
+        - bug
+    - title: Performance
+      labels:
+        - performance
+    - title: Language and runtime
+      labels:
+        - "area: lexer"
+        - "area: parser"
+        - "area: compiler"
+        - "area: vm"
+        - "area: runtime"
+        - "area: modules"
+    - title: Tooling
+      labels:
+        - "area: cli"
+        - "area: vrotdaem"
+    - title: Documentation
+      labels:
+        - docs
+    - title: Dependencies
+      labels:
+        - dependencies
+    - title: CI and infrastructure
+      labels:
+        - ci
+    - title: Other changes
+      labels:
+        - "*"

@@ -1,0 +1,10 @@
+Point { x: 4, y: 6 } (4, 6) (4, 6) (4, 6)
+Puppy { legs: 4, name: 'Rex', tricks: [ 'sit' ], breed: 'lab' } Rex makes a sound (woof) dog, an animal
+true true true true true
+true Puppy Dog function
+2
+Class constructor Dog cannot be invoked without 'new'
+[ 'Circle with area 3.14', 'Square with area 4.00' ]
+anon Anon
+42 true
+{ debug: false } true

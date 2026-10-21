@@ -1,0 +1,73 @@
+name: Bug report
+description: Something in jsq or vrotdaem does not behave as it should
+labels:
+  - bug
+  - triage
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please search existing issues first, and report security problems privately through the Security tab instead.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - jsq runtime
+        - vrotdaem package manager
+        - Lexer or parser
+        - Compiler or bytecode
+        - VM
+        - Builtins
+        - Modules
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `jsq --version`, or the commit hash if built from source
+      placeholder: jsq 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: The smallest `.jsq` program or command sequence that triggers the bug
+      render: javascript
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected, ideally what Node.js prints for the same program
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Full output, including the error message and stack trace
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that helps, such as `jsq --disasm` output or your `squirt.json`

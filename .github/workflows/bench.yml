@@ -1,0 +1,56 @@
+name: Bench
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: bench
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: hyperfine
+      - run: cargo build --release --locked
+      - name: Run benchmarks
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(benches/*.jsq)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No benchmarks found" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          commands=()
+          for file in "${files[@]}"; do
+            commands+=("./target/release/jsq $file")
+          done
+          hyperfine --warmup 2 --runs 10 --shell=none --export-markdown bench.md "${commands[@]}"
+          {
+            echo "## Benchmarks"
+            echo
+            echo "Commit: \`${GITHUB_SHA}\`"
+            echo
+            cat bench.md
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bench
+          path: bench.md
+          if-no-files-found: ignore

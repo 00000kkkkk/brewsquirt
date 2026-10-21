@@ -1,0 +1,21 @@
+{"name":"squirt","tags":["fast","wet"],"nested":{"n":1,"ok":true,"none":null}}
+{
+  "name": "squirt",
+  "tags": [
+    "fast",
+    "wet"
+  ],
+  "nested": {
+    "n": 1,
+    "ok": true,
+    "none": null
+  }
+}
+[1,"two",null,null,null,null,null]
+"q\"uote\n" 42 null undefined
+{ a: [ 1, 2, { b: 'c' } ], d: true, e: null, f: 150 } c 150
+3 str true
+{"custom":1}
+{ x: 10, y: 20 }
+{"a":1}
+TypeError

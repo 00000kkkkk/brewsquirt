@@ -1,0 +1,94 @@
+function risky(kind) {
+  if (kind === "type") null.prop
+  if (kind === "ref") notDefined
+  if (kind === "range") new Array(-1)
+  if (kind === "custom") throw new Error("custom failure", { cause: "why" })
+  if (kind === "value") throw { code: 42 }
+  return "fine"
+}
+for (const kind of ["type", "ref", "range", "custom", "value", "none"]) {
+  try {
+    console.log(risky(kind))
+  } catch (e) {
+    console.log(kind, e instanceof Error ? `${e.name}: ${e.message}` : e)
+  }
+}
+class ValidationError extends Error {
+  constructor(field) {
+    super(`invalid ${field}`)
+    this.name = "ValidationError"
+    this.field = field
+  }
+}
+try {
+  throw new ValidationError("email")
+} catch (e) {
+  console.log(e.name, e.message, e.field, e instanceof ValidationError, e instanceof Error, String(e))
+}
+function withFinally() {
+  const log = []
+  try {
+    log.push("try")
+    return log
+  } finally {
+    log.push("finally")
+  }
+}
+console.log(withFinally())
+function nested() {
+  try {
+    try {
+      throw new TypeError("inner")
+    } finally {
+      console.log("inner finally")
+    }
+  } catch (e) {
+    return "caught " + e.message
+  }
+}
+console.log(nested())
+function loopFinally() {
+  const r = []
+  for (let i = 0; i < 3; i++) {
+    try {
+      if (i === 1) continue
+      r.push(i)
+    } finally {
+      r.push("f" + i)
+    }
+  }
+  return r
+}
+console.log(loopFinally())
+try {
+  try {
+    throw 1
+  } catch (e) {
+    throw e + 1
+  }
+} catch (e) {
+  console.log("rethrown", e)
+}
+const e = new RangeError("r")
+console.log(e.name, e.message, e instanceof RangeError, e instanceof Error, Object.prototype.toString.call(e))
+try {
+  const q = 1
+  q = 2
+} catch (err) {
+  console.log(err.message)
+}
+try {
+  undefined.x()
+} catch (err) {
+  console.log(err.message)
+}
+try {
+  JSON.parse("{bad")
+} catch (err) {
+  console.log(err.name)
+}
+try {
+  null()
+} catch (err) {
+  console.log(err.constructor === TypeError)
+}

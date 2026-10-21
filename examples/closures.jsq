@@ -1,0 +1,36 @@
+const memoize = (fn) => {
+  const cache = new Map()
+  return (n) => {
+    if (!cache.has(n)) cache.set(n, fn(n))
+    return cache.get(n)
+  }
+}
+
+const fib = memoize((n) => (n < 2 ? n : fib(n - 1) + fib(n - 2)))
+console.log(Array.from({ length: 15 }, (_, i) => fib(i)).join(" "))
+
+function counter(start = 0, step = 1) {
+  let value = start
+  return {
+    next: () => (value += step),
+    reset: () => {
+      value = start
+    },
+    current: () => value,
+  }
+}
+
+const c = counter(10, 5)
+c.next()
+c.next()
+console.log("counter:", c.current())
+c.reset()
+console.log("after reset:", c.current())
+
+const pipeline = (...steps) => (input) => steps.reduce((acc, step) => step(acc), input)
+const shout = pipeline(
+  (s) => s.trim(),
+  (s) => s.toUpperCase(),
+  (s) => `${s}${squirt(2)}`,
+)
+console.log(shout("   javasquirt goes deep   "))

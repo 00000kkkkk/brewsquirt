@@ -1,0 +1,18 @@
+const data = { name: "squirt", tags: ["fast", "wet"], nested: { n: 1, ok: true, none: null }, skip: undefined, fn() {} }
+console.log(JSON.stringify(data))
+console.log(JSON.stringify(data, null, 2))
+console.log(JSON.stringify([1, "two", null, undefined, () => 1, NaN, Infinity]))
+console.log(JSON.stringify("q\"uote\n"), JSON.stringify(42), JSON.stringify(null), JSON.stringify(undefined))
+const parsed = JSON.parse('{"a":[1,2,{"b":"c"}],"d":true,"e":null,"f":1.5e2}')
+console.log(parsed, parsed.a[2].b, parsed.f)
+console.log(JSON.parse("[1,2,3]").length, JSON.parse('"str"'), JSON.parse("true"))
+console.log(JSON.stringify({ toJSON() { return { custom: 1 } } }))
+console.log(JSON.parse('{"x":1,"y":2}', (k, v) => (typeof v === "number" ? v * 10 : v)))
+console.log(JSON.stringify({ a: 1, b: 2 }, (k, v) => (k === "b" ? undefined : v)))
+const cyc = {}
+cyc.self = cyc
+try {
+  JSON.stringify(cyc)
+} catch (e) {
+  console.log(e.name)
+}

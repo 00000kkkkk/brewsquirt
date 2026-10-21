@@ -1,0 +1,50 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0] - 2026-10-21
+
+### Added
+
+- `jsq` runtime with a REPL, file execution with arguments, `-e` snippet evaluation,
+  `--disasm` bytecode dump and `--version`.
+- `vrotdaem` package manager with `init`, `add`, `remove`, `gluboko` (with `--force` reinstall)
+  and `run`, driven by `squirt.json` and installing into `nude_modules/`.
+- Dependency specs `file:<path>` and `git:<url>[#ref]`.
+- Compilation pipeline: lexer, Pratt parser with JavaScript-style automatic semicolon insertion,
+  single-pass compiler to bytecode, and a stack VM with closures, upvalues and prototype-based objects.
+- Value types: `undefined`, `null`, boolean, number, string, array, object, function, class,
+  `Map`, `Set` and `Error`.
+- Block-scoped `let` and `const`, hoisted function declarations, arrow functions, default and
+  rest parameters.
+- Spread in calls, array literals and object literals.
+- Object and array destructuring with defaults and rest in `let`, `const` and parameters.
+- Control flow: `if`/`else`, `while`, `do`/`while`, `for`, `for...of`, `for...in`, `switch`,
+  `break` and `continue`.
+- Exceptions: `try`/`catch`/`finally`, `throw`, and `Error`, `TypeError`, `RangeError`,
+  `ReferenceError` and `SyntaxError` with stack traces.
+- Classes with constructors, methods, static methods, instance and static fields, `extends`,
+  `super()`, `super.method()`, `new` and `instanceof`.
+- Operators: arithmetic and `**`, bitwise and shift operators including `>>>`, relational,
+  loose and strict equality, `&&`, `||`, `??`, optional chaining, ternary, `typeof`, `void`,
+  `delete`, `in`, compound assignment including `&&=`, `||=` and `??=`, `++` and `--`.
+- Template literals, optional semicolons, line and block comments.
+- ES modules: named, default and namespace imports, renamed imports and exports,
+  `export const`/`let`/`function`/`class` and `export default`.
+- Module resolution for relative paths (optional `.jsq` extension, `index.jsq` in directories),
+  bare names from `nude_modules/` and the builtin `squirt:fs` module (`readFile`, `writeFile`,
+  `appendFile`, `exists`, `remove`).
+- Builtins: `console.log`/`info`/`warn`/`error`, `Math`, `Number`, `String`, `Array`, `Object`,
+  `JSON.stringify`/`parse`, `Map`, `Set`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`,
+  `process.argv`, `process.exit` and `process.env`.
+- Language reference in `docs/LANGUAGE.md`.
+- Continuous integration on Linux, macOS and Windows, MSRV check, cargo-deny, CodeQL, coverage,
+  benchmarks, and release archives for five targets.
+
+[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/00000kkkkk/javasquirt/releases/tag/v0.1.0
