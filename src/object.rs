@@ -7,8 +7,107 @@ use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-pub type PropMap = IndexMap<Rc<str>, Value, FxBuildHasher>;
 pub type NativeFn = fn(&mut Vm, Value, &[Value]) -> Result<Value, Value>;
+
+const INDEX_AT: usize = 12;
+
+#[derive(Default)]
+pub struct PropMap {
+    entries: Vec<(Rc<str>, Value)>,
+    index: Option<Box<rustc_hash::FxHashMap<Rc<str>, u32>>>,
+}
+
+impl PropMap {
+    fn find(&self, key: &str) -> Option<usize> {
+        if let Some(ix) = &self.index {
+            return ix.get(key).map(|&i| i as usize);
+        }
+        self.entries.iter().position(|(k, _)| **k == *key)
+    }
+
+    fn reindex(&mut self) {
+        if self.entries.len() > INDEX_AT {
+            let mut ix = rustc_hash::FxHashMap::default();
+            ix.reserve(self.entries.len());
+            for (i, (k, _)) in self.entries.iter().enumerate() {
+                ix.insert(k.clone(), i as u32);
+            }
+            self.index = Some(Box::new(ix));
+        } else {
+            self.index = None;
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.find(key).map(|i| &self.entries[i].1)
+    }
+
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
+        self.find(key).map(|i| &mut self.entries[i].1)
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.find(key).is_some()
+    }
+
+    pub fn insert(&mut self, key: Rc<str>, v: Value) -> Option<Value> {
+        if let Some(i) = self.find(&key) {
+            return Some(std::mem::replace(&mut self.entries[i].1, v));
+        }
+        let i = self.entries.len() as u32;
+        match &mut self.index {
+            Some(ix) => {
+                ix.insert(key.clone(), i);
+                self.entries.push((key, v));
+            }
+            None => {
+                self.entries.push((key, v));
+                if self.entries.len() > INDEX_AT {
+                    self.reindex();
+                }
+            }
+        }
+        None
+    }
+
+    pub fn shift_remove(&mut self, key: &str) -> Option<Value> {
+        let i = self.find(key)?;
+        let (_, v) = self.entries.remove(i);
+        if self.index.is_some() {
+            self.reindex();
+        }
+        Some(v)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&Rc<str>, &Value)> {
+        self.entries.iter().map(|(k, v)| (k, v))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &Rc<str>> {
+        self.entries.iter().map(|(k, _)| k)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &Value> {
+        self.entries.iter().map(|(_, v)| v)
+    }
+
+    pub fn into_values(self) -> impl Iterator<Item = Value> {
+        self.entries.into_iter().map(|(_, v)| v)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.index = None;
+    }
+}
 
 pub struct Obj {
     pub kind: ObjKind,
@@ -22,15 +121,15 @@ pub enum ObjKind {
     Ordinary,
     Array(RefCell<Vec<Value>>),
     Function(Rc<Closure>),
-    Native(Native),
-    Bound(Bound),
+    Native(Box<Native>),
+    Bound(Box<Bound>),
     Error,
-    Map(RefCell<IndexMap<MapKey, Value, FxBuildHasher>>),
-    Set(RefCell<IndexSet<MapKey, FxBuildHasher>>),
-    Iter(RefCell<IterState>),
-    Accessor(Accessor),
-    Promise(RefCell<PromiseData>),
-    Coroutine(Coroutine),
+    Map(Box<RefCell<IndexMap<MapKey, Value, FxBuildHasher>>>),
+    Set(Box<RefCell<IndexSet<MapKey, FxBuildHasher>>>),
+    Iter(Box<RefCell<IterState>>),
+    Accessor(Box<Accessor>),
+    Promise(Box<RefCell<PromiseData>>),
+    Coroutine(Box<Coroutine>),
     RegExp(RegExpObj),
 }
 

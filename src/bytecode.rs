@@ -117,6 +117,24 @@ pub enum Op {
     DefineAccessor(u32, bool, bool),
     DefineAccessorComputed(bool, bool),
     NewRegex(u32, u32),
+    CmpJump(Cmp, u32),
+    IncLocal(u32),
+    DecLocal(u32),
+    StoreLocal(u32),
+    StoreUpval(u32),
+    StoreProp(u32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cmp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    StrictEq,
+    StrictNe,
+    Eq,
+    Ne,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +175,7 @@ pub struct FunctionProto {
     pub upvalues: Vec<UpvalDesc>,
     pub module: Rc<ModuleInfo>,
     pub line: u32,
+    pub global_cache: Box<[std::cell::Cell<u32>]>,
 }
 
 impl FunctionProto {
@@ -233,6 +252,7 @@ impl FunctionProto {
                 | Op::DeleteProp(c)
                 | Op::GetMethod(c)
                 | Op::InitProp(c)
+                | Op::StoreProp(c)
                 | Op::Import(c)
                 | Op::ThrowConstAssign(c)
                 | Op::SuperGet(c, _)

@@ -6,6 +6,9 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser)]
 #[command(
     name = "jsq",

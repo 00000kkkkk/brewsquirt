@@ -1,0 +1,23 @@
+class Vec2 {
+  constructor(x, y) {
+    this.x = x
+    this.y = y
+  }
+
+  add(o) {
+    return new Vec2(this.x + o.x, this.y + o.y)
+  }
+
+  len() {
+    return Math.sqrt(this.x * this.x + this.y * this.y)
+  }
+}
+
+let acc = new Vec2(0, 0)
+const step = new Vec2(1, 2)
+let total = 0
+for (let i = 0; i < 300000; i++) {
+  acc = acc.add(step)
+  total += acc.len()
+}
+console.log(Math.round(total))

@@ -98,7 +98,7 @@ pub fn install(vm: &mut Vm) {
         "Promise",
         1,
         promise_ctor,
-        Some(|| ObjKind::Promise(RefCell::new(PromiseData::default()))),
+        Some(|| ObjKind::Promise(Box::new(RefCell::new(PromiseData::default())))),
         &pp,
     );
     method(vm, &promise, "resolve", 1, promise_resolve_static);

@@ -1,0 +1,8 @@
+const parts = []
+for (let i = 0; i < 200000; i++) parts.push(String.fromCharCode(97 + (i % 26)))
+const s = parts.join("")
+const words = s.match(/[a-z]{1,5}/g)
+const counts = new Map()
+for (const w of words) counts.set(w, (counts.get(w) ?? 0) + 1)
+const csv = words.slice(0, 50000).map((w, i) => `${i},${w.toUpperCase()}`).join("\n")
+console.log(s.length, words.length, counts.size, csv.split("\n").length)

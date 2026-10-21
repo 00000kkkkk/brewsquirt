@@ -74,18 +74,18 @@ impl Vm {
                 is_generator: true,
             };
             return Ok(Value::Object(Obj::new(
-                ObjKind::Coroutine(co),
+                ObjKind::Coroutine(Box::new(co)),
                 Some(self.realm.generator_proto.clone()),
             )));
         }
         let promise = self.new_promise();
         let co = Obj::new(
-            ObjKind::Coroutine(Coroutine {
+            ObjKind::Coroutine(Box::new(Coroutine {
                 saved: RefCell::new(Some(saved)),
                 state: Cell::new(CoState::Suspended),
                 promise: Some(promise.clone()),
                 is_generator: false,
-            }),
+            })),
             None,
         );
         self.async_step(&co, Value::Undefined, ResumeMode::Next);
@@ -244,7 +244,7 @@ impl Vm {
 
     pub fn new_promise(&self) -> Rc<Obj> {
         Obj::new(
-            ObjKind::Promise(RefCell::new(PromiseData::default())),
+            ObjKind::Promise(Box::new(RefCell::new(PromiseData::default()))),
             Some(self.realm.promise_proto.clone()),
         )
     }
@@ -381,11 +381,11 @@ impl Vm {
     pub fn resolving_functions(&self, p: &Rc<Obj>) -> (Value, Value) {
         let make = |target: &Value| {
             Value::Object(Obj::new(
-                ObjKind::Bound(Bound {
+                ObjKind::Bound(Box::new(Bound {
                     target: target.clone(),
                     this: Value::Object(p.clone()),
                     args: Vec::new(),
-                }),
+                })),
                 Some(self.realm.function_proto.clone()),
             ))
         };

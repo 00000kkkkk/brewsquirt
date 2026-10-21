@@ -395,7 +395,7 @@ fn fn_bind(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         args: args.iter().skip(1).cloned().collect(),
     };
     Ok(Value::Object(Obj::new(
-        ObjKind::Bound(bound),
+        ObjKind::Bound(Box::new(bound)),
         Some(vm.realm.function_proto.clone()),
     )))
 }

@@ -29,7 +29,7 @@ pub fn install(vm: &mut Vm) {
         "Map",
         0,
         map_ctor,
-        Some(|| ObjKind::Map(RefCell::new(Default::default()))),
+        Some(|| ObjKind::Map(Box::new(RefCell::new(Default::default())))),
         &mp,
     );
     vm.define_global("Map", Value::Object(map));
@@ -53,7 +53,7 @@ pub fn install(vm: &mut Vm) {
         "Set",
         0,
         set_ctor,
-        Some(|| ObjKind::Set(RefCell::new(Default::default()))),
+        Some(|| ObjKind::Set(Box::new(RefCell::new(Default::default())))),
         &sp,
     );
     vm.define_global("Set", Value::Object(set));

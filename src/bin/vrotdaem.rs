@@ -5,6 +5,9 @@ use javasquirt::pm;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser)]
 #[command(
     name = "vrotdaem",

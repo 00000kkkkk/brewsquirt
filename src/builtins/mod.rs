@@ -26,12 +26,12 @@ pub fn arg(args: &[Value], i: usize) -> Value {
 
 pub fn native_fn(vm: &Vm, name: &str, arity: u32, func: NativeFn) -> Value {
     Value::Object(Obj::new(
-        ObjKind::Native(Native {
+        ObjKind::Native(Box::new(Native {
             name: name.into(),
             arity,
             func,
             ctor: None,
-        }),
+        })),
         Some(vm.realm.function_proto.clone()),
     ))
 }
@@ -49,12 +49,12 @@ pub fn make_ctor(
     prototype: &Rc<Obj>,
 ) -> Rc<Obj> {
     let c = Obj::new(
-        ObjKind::Native(Native {
+        ObjKind::Native(Box::new(Native {
             name: name.into(),
             arity,
             func,
             ctor,
-        }),
+        })),
         Some(vm.realm.function_proto.clone()),
     );
     c.set_own("prototype", Value::Object(prototype.clone()));

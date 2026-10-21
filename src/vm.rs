@@ -1,13 +1,12 @@
 use crate::builtins;
-use crate::bytecode::{FunctionProto, ModuleInfo, NO_NAME, Op, ProtoKind};
+use crate::bytecode::{Cmp, FunctionProto, ModuleInfo, NO_NAME, Op, ProtoKind};
 use crate::compiler::{Mode, compile_module};
 use crate::event_loop::{Job, ResumeMode, Signal, Step, Timer};
 use crate::inspect::{inspect_plain, inspect_top};
 use crate::module;
 use crate::number::{js_pow, to_int32, to_uint32};
 use crate::object::{
-    Accessor, Closure, ITER_KEY, IterState, MapKey, Obj, ObjKind, UpCell, Upvalue, array_index,
-    is_symbol_key,
+    Closure, ITER_KEY, IterState, MapKey, Obj, ObjKind, UpCell, Upvalue, array_index, is_symbol_key,
 };
 use crate::parser;
 use crate::token::SyntaxError;
@@ -97,6 +96,48 @@ impl Realm {
     }
 }
 
+#[derive(Default)]
+pub struct Globals {
+    index: FxHashMap<Rc<str>, u32>,
+    values: Vec<Value>,
+}
+
+impl Globals {
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.index.get(name).map(|&i| &self.values[i as usize])
+    }
+
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut Value> {
+        match self.index.get(name) {
+            Some(&i) => Some(&mut self.values[i as usize]),
+            None => None,
+        }
+    }
+
+    pub fn slot(&self, name: &str) -> Option<u32> {
+        self.index.get(name).copied()
+    }
+
+    pub fn insert(&mut self, name: Rc<str>, v: Value) -> u32 {
+        if let Some(&i) = self.index.get(&name) {
+            self.values[i as usize] = v;
+            return i;
+        }
+        let i = self.values.len() as u32;
+        self.values.push(v);
+        self.index.insert(name, i);
+        i
+    }
+
+    pub fn at(&self, slot: u32) -> &Value {
+        &self.values[slot as usize]
+    }
+
+    pub fn at_mut(&mut self, slot: u32) -> &mut Value {
+        &mut self.values[slot as usize]
+    }
+}
+
 pub(crate) struct Frame {
     pub(crate) closure: Rc<Closure>,
     pub(crate) ip: usize,
@@ -116,7 +157,8 @@ pub struct Vm {
     pub(crate) frames: Vec<Frame>,
     pub(crate) handlers: Vec<Handler>,
     pub(crate) open_upvalues: Vec<Rc<UpCell>>,
-    pub globals: FxHashMap<Rc<str>, Value>,
+    pub globals: Globals,
+    arg_buf: Vec<Value>,
     pub realm: Realm,
     modules: FxHashMap<PathBuf, Value>,
     loading: Vec<PathBuf>,
@@ -163,7 +205,8 @@ impl Vm {
             frames: Vec::with_capacity(64),
             handlers: Vec::new(),
             open_upvalues: Vec::new(),
-            globals: FxHashMap::default(),
+            globals: Globals::default(),
+            arg_buf: Vec::new(),
             realm: Realm::new(),
             modules: FxHashMap::default(),
             loading: Vec::new(),
@@ -415,7 +458,7 @@ impl Vm {
 
     pub fn new_iter(&self, state: IterState) -> Value {
         Value::Object(Obj::new(
-            ObjKind::Iter(RefCell::new(state)),
+            ObjKind::Iter(Box::new(RefCell::new(state))),
             Some(self.realm.iter_proto.clone()),
         ))
     }
@@ -666,7 +709,10 @@ impl Vm {
                 }
             }
             ObjKind::Function(c) => {
-                if !o.has_own(key) {
+                if let Some(v) = o.get_own(key) {
+                    return v;
+                }
+                {
                     match key {
                         "prototype" if c.proto.is_constructor() => {
                             let p = self.new_object();
@@ -681,7 +727,10 @@ impl Vm {
                 }
             }
             ObjKind::Native(n) => {
-                if !o.has_own(key) {
+                if let Some(v) = o.get_own(key) {
+                    return v;
+                }
+                {
                     match key {
                         "name" => return Value::Str(n.name.clone()),
                         "length" => return Value::Number(n.arity as f64),
@@ -751,11 +800,11 @@ impl Vm {
 
     pub fn define_accessor(&mut self, target: &Rc<Obj>, key: Rc<str>, f: Value, setter: bool) {
         self.accessors_used = true;
-        let existing = target.props.borrow().get(&*key).cloned();
+        let existing = target.props.borrow().get(&key).cloned();
         let acc_obj = match existing {
             Some(Value::Object(a)) if a.is_accessor() => a,
             _ => {
-                let a = Obj::new(ObjKind::Accessor(Accessor::default()), None);
+                let a = Obj::new(ObjKind::Accessor(Box::default()), None);
                 target.set_own(key, Value::Object(a.clone()));
                 a
             }
@@ -1278,6 +1327,7 @@ impl Vm {
     pub fn run(&mut self, stop: usize) -> Result<Value, Value> {
         let mut fi = self.frames.len() - 1;
         let mut cl = self.frames[fi].closure.clone();
+        let mut proto = cl.proto.clone();
         let mut ip = self.frames[fi].ip;
         let mut base = self.frames[fi].base;
 
@@ -1286,6 +1336,7 @@ impl Vm {
                 fi = self.frames.len() - 1;
                 let f = &self.frames[fi];
                 cl = f.closure.clone();
+                proto = cl.proto.clone();
                 ip = f.ip;
                 base = f.base;
             }};
@@ -1324,7 +1375,7 @@ impl Vm {
         }
         macro_rules! name {
             ($k:expr) => {
-                match &cl.proto.consts[$k as usize] {
+                match &proto.consts[$k as usize] {
                     Value::Str(s) => s.clone(),
                     _ => Rc::from(""),
                 }
@@ -1333,15 +1384,16 @@ impl Vm {
         macro_rules! num_op {
             ($f:expr) => {{
                 let b = pop!();
-                let a = pop!();
-                let r = match (&a, &b) {
-                    (Value::Number(x), Value::Number(y)) => $f(*x, *y),
-                    _ => {
-                        let (x, y) = tri!(self.num_pair(&a, &b));
-                        $f(x, y)
+                if let (Some(Value::Number(x)), Value::Number(y)) = (self.stack.last(), &b) {
+                    let r = $f(*x, *y);
+                    if let Some(top) = self.stack.last_mut() {
+                        *top = Value::Number(r);
                     }
-                };
-                self.stack.push(Value::Number(r));
+                    continue;
+                }
+                let a = pop!();
+                let (x, y) = tri!(self.num_pair(&a, &b));
+                self.stack.push(Value::Number($f(x, y)));
             }};
         }
         macro_rules! int_op {
@@ -1358,23 +1410,27 @@ impl Vm {
         macro_rules! cmp_op {
             ($num:expr, $ord:expr) => {{
                 let b = pop!();
+                if let (Some(Value::Number(x)), Value::Number(y)) = (self.stack.last(), &b) {
+                    let r = $num(*x, *y);
+                    if let Some(top) = self.stack.last_mut() {
+                        *top = Value::Bool(r);
+                    }
+                    continue;
+                }
                 let a = pop!();
-                let r = match (&a, &b) {
-                    (Value::Number(x), Value::Number(y)) => $num(*x, *y),
-                    _ => match tri!(self.compare(&a, &b)) {
-                        Some(o) => $ord(o),
-                        None => false,
-                    },
+                let r = match tri!(self.compare(&a, &b)) {
+                    Some(o) => $ord(o),
+                    None => false,
                 };
                 self.stack.push(Value::Bool(r));
             }};
         }
 
         loop {
-            let op = cl.proto.code[ip];
+            let op = proto.code[ip];
             ip += 1;
             match op {
-                Op::Const(i) => self.stack.push(cl.proto.consts[i as usize].clone()),
+                Op::Const(i) => self.stack.push(proto.consts[i as usize].clone()),
                 Op::Undefined => self.stack.push(Value::Undefined),
                 Op::Null => self.stack.push(Value::Null),
                 Op::True => self.stack.push(Value::Bool(true)),
@@ -1431,10 +1487,17 @@ impl Vm {
                     }
                 }
                 Op::GetGlobal(k) => {
+                    let cached = proto.global_cache[k as usize].get();
+                    if cached != u32::MAX {
+                        let v = self.globals.at(cached).clone();
+                        self.stack.push(v);
+                        continue;
+                    }
                     let n = name!(k);
-                    match self.globals.get(&n) {
-                        Some(v) => {
-                            let v = v.clone();
+                    match self.globals.slot(&n) {
+                        Some(slot) => {
+                            proto.global_cache[k as usize].set(slot);
+                            let v = self.globals.at(slot).clone();
                             self.stack.push(v);
                         }
                         None => throw!(self.make_error_at(
@@ -1456,8 +1519,11 @@ impl Vm {
                             ip
                         ));
                     }
-                    match self.globals.get_mut(&n) {
-                        Some(slot) => *slot = v,
+                    match self.globals.slot(&n) {
+                        Some(slot) => {
+                            proto.global_cache[k as usize].set(slot);
+                            *self.globals.at_mut(slot) = v;
+                        }
                         None => throw!(self.make_error_at(
                             ErrorKind::ReferenceError,
                             format!("{n} is not defined"),
@@ -1491,7 +1557,7 @@ impl Vm {
                     let obj = pop!();
                     let v = match &obj {
                         Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => {
-                            let key = &cl.proto.consts[k as usize];
+                            let key = &proto.consts[k as usize];
                             let Value::Str(key) = key else { unreachable!() };
                             let v = o.get_chain(key).unwrap_or_default();
                             if matches!(&v, Value::Object(a) if a.is_accessor()) {
@@ -1613,6 +1679,13 @@ impl Vm {
                 }
                 Op::Add => {
                     let b = pop!();
+                    if let (Some(Value::Number(x)), Value::Number(y)) = (self.stack.last(), &b) {
+                        let r = x + y;
+                        if let Some(top) = self.stack.last_mut() {
+                            *top = Value::Number(r);
+                        }
+                        continue;
+                    }
                     let a = pop!();
                     let r = match (&a, &b) {
                         (Value::Number(x), Value::Number(y)) => Value::Number(x + y),
@@ -1793,7 +1866,8 @@ impl Vm {
                             continue;
                         }
                     }
-                    let args = self.stack.split_off(ci + 2);
+                    let mut args = std::mem::take(&mut self.arg_buf);
+                    args.extend(self.stack.drain(ci + 2..));
                     let this = pop!();
                     let f = pop!();
                     if !f.is_callable() {
@@ -1804,7 +1878,12 @@ impl Vm {
                         };
                         throw!(self.type_error(format!("{desc} is not a function")));
                     }
-                    let r = tri!(self.call_value(&f, this, &args));
+                    let r = self.call_value(&f, this, &args);
+                    args.clear();
+                    if self.arg_buf.capacity() < args.capacity() {
+                        self.arg_buf = args;
+                    }
+                    let r = tri!(r);
                     self.stack.push(r);
                 }
                 Op::CallSpread(name) => {
@@ -2123,6 +2202,81 @@ impl Vm {
                         Signal::Yield
                     });
                     return Ok(v);
+                }
+                Op::CmpJump(cmp, t) => {
+                    let b = pop!();
+                    let a = pop!();
+                    let ok = match (&a, &b) {
+                        (Value::Number(x), Value::Number(y)) => match cmp {
+                            Cmp::Lt => x < y,
+                            Cmp::Le => x <= y,
+                            Cmp::Gt => x > y,
+                            Cmp::Ge => x >= y,
+                            Cmp::StrictEq | Cmp::Eq => x == y,
+                            Cmp::StrictNe | Cmp::Ne => x != y,
+                        },
+                        _ => match cmp {
+                            Cmp::StrictEq => a.strict_eq(&b),
+                            Cmp::StrictNe => !a.strict_eq(&b),
+                            Cmp::Eq => tri!(self.loose_eq(&a, &b)),
+                            Cmp::Ne => !tri!(self.loose_eq(&a, &b)),
+                            _ => match tri!(self.compare(&a, &b)) {
+                                Some(o) => match cmp {
+                                    Cmp::Lt => o.is_lt(),
+                                    Cmp::Le => o.is_le(),
+                                    Cmp::Gt => o.is_gt(),
+                                    _ => o.is_ge(),
+                                },
+                                None => false,
+                            },
+                        },
+                    };
+                    if !ok {
+                        ip = t as usize;
+                    }
+                }
+                Op::IncLocal(s) | Op::DecLocal(s) => {
+                    let slot = base + s as usize;
+                    let delta = if matches!(op, Op::IncLocal(_)) {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    if let Value::Number(n) = &mut self.stack[slot] {
+                        *n += delta;
+                    } else {
+                        let v = self.stack[slot].clone();
+                        let n = tri!(self.to_number(&v));
+                        self.stack[slot] = Value::Number(n + delta);
+                    }
+                }
+                Op::StoreLocal(s) => {
+                    let v = pop!();
+                    self.stack[base + s as usize] = v;
+                }
+                Op::StoreUpval(i) => {
+                    let v = pop!();
+                    let mut u = cl.upvalues[i as usize].borrow_mut();
+                    match &mut *u {
+                        Upvalue::Open(idx) => self.stack[*idx] = v,
+                        Upvalue::Closed(c) => *c = v,
+                    }
+                }
+                Op::StoreProp(k) => {
+                    let val = pop!();
+                    let obj = pop!();
+                    match &obj {
+                        Value::Object(o)
+                            if matches!(o.kind, ObjKind::Ordinary)
+                                && !o.frozen.get()
+                                && !self.accessors_used =>
+                        {
+                            o.props.borrow_mut().insert(name!(k), val);
+                        }
+                        _ => {
+                            tri!(self.set_prop(&obj, name!(k), val));
+                        }
+                    }
                 }
                 Op::NewRegex(src, flags) => {
                     let source = name!(src);

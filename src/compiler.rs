@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::bytecode::Cmp;
 use crate::bytecode::*;
 use crate::token::SyntaxError;
 use crate::value::Value;
@@ -244,6 +245,7 @@ impl Compiler {
     }
 
     fn finish(&self, st: FnState) -> FunctionProto {
+        let cache_len = st.consts.len();
         FunctionProto {
             name: st.name,
             kind: st.kind,
@@ -259,6 +261,9 @@ impl Compiler {
             upvalues: st.upvalues,
             module: self.module.clone(),
             line: st.line,
+            global_cache: (0..cache_len)
+                .map(|_| std::cell::Cell::new(u32::MAX))
+                .collect(),
         }
     }
 
@@ -288,6 +293,7 @@ impl Compiler {
             Op::JumpIfNotUndef(_) => Op::JumpIfNotUndef(t),
             Op::IterNext(_) => Op::IterNext(t),
             Op::TryBegin(_, s) => Op::TryBegin(t, s),
+            Op::CmpJump(c, _) => Op::CmpJump(c, t),
             other => other,
         };
     }
@@ -696,8 +702,7 @@ impl Compiler {
             }
             StmtKind::Return(e) => self.return_stmt(e.as_ref())?,
             StmtKind::If(test, cons, alt) => {
-                self.expr(test)?;
-                let j = self.emit(Op::JumpIfFalse(0));
+                let j = self.jump_if_false(test)?;
                 self.sub_stmt(cons)?;
                 if let Some(alt) = alt {
                     let k = self.emit(Op::Jump(0));
@@ -711,8 +716,7 @@ impl Compiler {
             StmtKind::Block(stmts) => self.block(stmts)?,
             StmtKind::While(test, body) => {
                 let start = self.here();
-                self.expr(test)?;
-                let exit = self.emit(Op::JumpIfFalse(0));
+                let exit = self.jump_if_false(test)?;
                 self.push_loop(false);
                 self.sub_stmt(body)?;
                 let ctx = self.st().loops.pop().expect("loop");
@@ -766,10 +770,7 @@ impl Compiler {
                 }
                 let start = self.here();
                 let exit = match test {
-                    Some(t) => {
-                        self.expr(t)?;
-                        Some(self.emit(Op::JumpIfFalse(0)))
-                    }
+                    Some(t) => Some(self.jump_if_false(t)?),
                     None => None,
                 };
                 self.push_loop(false);
@@ -1749,26 +1750,119 @@ impl Compiler {
         self.expr_named(e, None)
     }
 
-    fn expr_discard(&mut self, e: &Expr) -> R<()> {
-        if let ExprKind::Update {
-            inc,
-            prefix: false,
-            target,
-        } = &e.kind
-        {
-            let as_prefix = Expr {
-                kind: ExprKind::Update {
-                    inc: *inc,
-                    prefix: true,
-                    target: target.clone(),
-                },
-                line: e.line,
+    fn jump_if_false(&mut self, test: &Expr) -> R<usize> {
+        let saved_line = self.line;
+        self.line = test.line;
+        let r = self.jump_if_false_inner(test);
+        self.line = saved_line;
+        r
+    }
+
+    fn jump_if_false_inner(&mut self, test: &Expr) -> R<usize> {
+        if let ExprKind::Binary(op, a, b) = &test.kind {
+            let cmp = match op {
+                BinOp::Lt => Some(Cmp::Lt),
+                BinOp::Le => Some(Cmp::Le),
+                BinOp::Gt => Some(Cmp::Gt),
+                BinOp::Ge => Some(Cmp::Ge),
+                BinOp::StrictEq => Some(Cmp::StrictEq),
+                BinOp::StrictNe => Some(Cmp::StrictNe),
+                BinOp::Eq => Some(Cmp::Eq),
+                BinOp::Ne => Some(Cmp::Ne),
+                _ => None,
             };
-            self.expr(&as_prefix)?;
-        } else {
-            self.expr(e)?;
+            if let Some(cmp) = cmp {
+                self.expr(a)?;
+                self.expr(b)?;
+                return Ok(self.emit(Op::CmpJump(cmp, 0)));
+            }
         }
-        self.emit(Op::Pop);
+        if let ExprKind::Unary(UnaryOp::Not, x) = &test.kind {
+            self.expr(x)?;
+            return Ok(self.emit(Op::JumpIfTrue(0)));
+        }
+        self.expr(test)?;
+        Ok(self.emit(Op::JumpIfFalse(0)))
+    }
+
+    fn store_discard(&mut self, name: &Rc<str>) {
+        match self.resolve(name) {
+            Var::Local(s, false) => {
+                self.emit(Op::StoreLocal(s));
+            }
+            Var::Upval(i, false) => {
+                self.emit(Op::StoreUpval(i));
+            }
+            _ => {
+                self.store_var(name, false);
+                self.emit(Op::Pop);
+            }
+        }
+    }
+
+    fn expr_discard(&mut self, e: &Expr) -> R<()> {
+        let saved_line = self.line;
+        self.line = e.line;
+        let r = self.expr_discard_inner(e);
+        self.line = saved_line;
+        r
+    }
+
+    fn expr_discard_inner(&mut self, e: &Expr) -> R<()> {
+        match &e.kind {
+            ExprKind::Update { inc, target, .. } => {
+                if let ExprKind::Ident(n) = &target.kind {
+                    if let Var::Local(s, false) = self.resolve(n) {
+                        self.emit(if *inc {
+                            Op::IncLocal(s)
+                        } else {
+                            Op::DecLocal(s)
+                        });
+                        return Ok(());
+                    }
+                }
+                let as_prefix = Expr {
+                    kind: ExprKind::Update {
+                        inc: *inc,
+                        prefix: true,
+                        target: target.clone(),
+                    },
+                    line: e.line,
+                };
+                self.expr(&as_prefix)?;
+                self.emit(Op::Pop);
+            }
+            ExprKind::Assign {
+                op,
+                target: AssignTarget::Simple(t),
+                value,
+            } => match (&t.kind, op) {
+                (ExprKind::Ident(n), None) => {
+                    self.expr_named(value, Some(n))?;
+                    self.store_discard(n);
+                }
+                (ExprKind::Ident(n), Some(AssignOp::Bin(b))) => {
+                    self.load_var(n);
+                    self.expr(value)?;
+                    self.emit(bin_op(*b));
+                    self.store_discard(n);
+                }
+                (ExprKind::Member { obj, name, .. }, None) => {
+                    let k = self.str_const(name);
+                    self.expr(obj)?;
+                    self.expr(value)?;
+                    self.emit(Op::StoreProp(k));
+                }
+                _ => {
+                    self.expr(e)?;
+                    self.emit(Op::Pop);
+                }
+            },
+            _ => {
+                self.expr(e)?;
+                self.emit(Op::Pop);
+            }
+        }
         Ok(())
     }
 
@@ -2048,8 +2142,7 @@ impl Compiler {
             }
             ExprKind::Assign { op, target, value } => self.assign(*op, target, value)?,
             ExprKind::Cond(t, c, a) => {
-                self.expr(t)?;
-                let j = self.emit(Op::JumpIfFalse(0));
+                let j = self.jump_if_false(t)?;
                 self.expr_named(c, name)?;
                 let k = self.emit(Op::Jump(0));
                 self.patch(j);
