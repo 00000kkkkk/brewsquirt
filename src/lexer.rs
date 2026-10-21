@@ -309,6 +309,9 @@ impl Lexer {
                 let mut any = false;
                 while let Some(c) = self.peek() {
                     if c == '_' {
+                        if !any || !self.peek_at(1).is_some_and(|d| d.is_digit(radix)) {
+                            return Err(self.err("Numeric separators are not allowed here"));
+                        }
                         self.bump();
                         continue;
                     }
@@ -335,7 +338,15 @@ impl Lexer {
             }
         }
         let mut s = String::new();
+        let leading_zero = self.peek() == Some('0');
         self.digits(&mut s);
+        if leading_zero && s.len() > 1 {
+            return Err(self.err(if s.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
+                "Octal literals are not allowed in strict mode."
+            } else {
+                "Decimals with leading zeros are not allowed in strict mode."
+            }));
+        }
         if self.peek() == Some('n') && !s.is_empty() {
             self.bump();
             self.check_number_end()?;
@@ -371,11 +382,13 @@ impl Lexer {
     }
 
     fn digits(&mut self, s: &mut String) {
+        let mut any = false;
         while let Some(c) = self.peek() {
             if c.is_ascii_digit() {
                 s.push(c);
                 self.bump();
-            } else if c == '_' && self.peek_at(1).is_some_and(|d| d.is_ascii_digit()) {
+                any = true;
+            } else if c == '_' && any && self.peek_at(1).is_some_and(|d| d.is_ascii_digit()) {
                 self.bump();
             } else {
                 break;

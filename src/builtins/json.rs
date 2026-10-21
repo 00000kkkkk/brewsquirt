@@ -87,7 +87,7 @@ impl Ser<'_> {
     ) -> Result<bool, Value> {
         match v {
             Value::BigInt(_) => Err(vm.type_error("Do not know how to serialize a BigInt")),
-            Value::Undefined | Value::Symbol(_) => Ok(false),
+            Value::Undefined | Value::Uninit | Value::Symbol(_) => Ok(false),
             Value::Null => {
                 out.push_str("null");
                 Ok(true)

@@ -15,6 +15,7 @@ pub enum Value {
     Object(Rc<Obj>),
     Symbol(Rc<Symbol>),
     BigInt(Rc<num_bigint::BigInt>),
+    Uninit,
 }
 
 impl fmt::Debug for Value {
@@ -62,7 +63,7 @@ impl From<Rc<Obj>> for Value {
 impl Value {
     pub fn truthy(&self) -> bool {
         match self {
-            Value::Undefined | Value::Null => false,
+            Value::Undefined | Value::Uninit | Value::Null => false,
             Value::Bool(b) => *b,
             Value::Number(n) => *n != 0.0 && !n.is_nan(),
             Value::Str(s) => !s.is_empty(),
@@ -106,7 +107,7 @@ impl Value {
 
     pub fn type_of(&self) -> &'static str {
         match self {
-            Value::Undefined => "undefined",
+            Value::Undefined | Value::Uninit => "undefined",
             Value::Null => "object",
             Value::Bool(_) => "boolean",
             Value::Number(_) => "number",
@@ -145,7 +146,7 @@ impl Value {
 
     pub fn to_primitive_string(&self) -> Option<Rc<str>> {
         Some(match self {
-            Value::Undefined => "undefined".into(),
+            Value::Undefined | Value::Uninit => "undefined".into(),
             Value::Null => "null".into(),
             Value::Bool(b) => if *b { "true" } else { "false" }.into(),
             Value::Number(n) => number_to_string(*n).into(),
@@ -157,7 +158,7 @@ impl Value {
 
     pub fn to_primitive_number(&self) -> Option<f64> {
         Some(match self {
-            Value::Undefined => f64::NAN,
+            Value::Undefined | Value::Uninit => f64::NAN,
             Value::Null => 0.0,
             Value::Bool(b) => {
                 if *b {

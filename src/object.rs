@@ -897,7 +897,7 @@ pub enum MapKey {
 impl MapKey {
     pub fn from_value(v: &Value) -> MapKey {
         match v {
-            Value::Undefined => MapKey::Undefined,
+            Value::Undefined | Value::Uninit => MapKey::Undefined,
             Value::Null => MapKey::Null,
             Value::Bool(b) => MapKey::Bool(*b),
             Value::Number(n) => {

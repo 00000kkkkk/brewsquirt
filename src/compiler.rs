@@ -23,6 +23,8 @@ enum BindMode {
 enum Var {
     Local(u32, bool),
     Upval(u32, bool),
+    LocalTdz(u32, bool),
+    UpvalTdz(u32, bool),
     Global,
 }
 
@@ -37,6 +39,8 @@ struct Local {
     depth: u32,
     captured: bool,
     is_const: bool,
+    tdz: bool,
+    sticky: bool,
 }
 
 struct LoopCtx {
@@ -125,6 +129,7 @@ pub struct Compiler {
     hidden: u32,
     self_bind: Option<Rc<str>>,
     repl_consts: Vec<Rc<str>>,
+    var_scope_next: bool,
     pending_labels: Vec<Rc<str>>,
     import_aliases: Vec<(Rc<str>, Rc<str>, Rc<str>)>,
     export_names: Vec<(Rc<str>, Rc<str>)>,
@@ -222,6 +227,7 @@ pub fn compile_module(stmts: &[Stmt], module: Rc<ModuleInfo>, mode: Mode) -> R<R
         hidden: 0,
         self_bind: None,
         repl_consts: Vec::new(),
+        var_scope_next: false,
         pending_labels: Vec::new(),
         import_aliases: Vec::new(),
         export_names: Vec::new(),
@@ -441,8 +447,48 @@ impl Compiler {
             depth,
             captured: false,
             is_const,
+            tdz: false,
+            sticky: false,
         });
         (st.locals.len() - 1) as u32
+    }
+
+    fn add_lexical(&mut self, name: Rc<str>, is_const: bool) -> u32 {
+        let slot = self.add_local(name, is_const);
+        self.st().locals[slot as usize].tdz = true;
+        slot
+    }
+
+    fn mark_init(&mut self, name: &str) {
+        let st = self.st();
+        if let Some(l) = st.locals.iter_mut().rev().find(|l| &*l.name == name) {
+            if !l.sticky {
+                l.tdz = false;
+            }
+        }
+    }
+
+    fn mark_init_pattern(&mut self, p: &Pattern) {
+        let mut names = Vec::new();
+        p.bound_names(&mut names);
+        for n in &names {
+            self.mark_init(n);
+        }
+    }
+
+    fn local_tdz(&self, si: usize, slot: u32) -> bool {
+        self.states[si].locals[slot as usize].tdz
+    }
+
+    fn upvalue_tdz(&self, si: usize, name: &str) -> bool {
+        let mut i = si;
+        while i > 0 {
+            i -= 1;
+            if let Some((slot, _)) = self.resolve_local(i, name) {
+                return self.local_tdz(i, slot);
+            }
+        }
+        false
     }
 
     fn begin_scope(&mut self) {
@@ -512,9 +558,15 @@ impl Compiler {
     fn resolve(&mut self, name: &str) -> Var {
         let si = self.states.len() - 1;
         if let Some((s, c)) = self.resolve_local(si, name) {
+            if self.local_tdz(si, s) {
+                return Var::LocalTdz(s, c);
+            }
             return Var::Local(s, c);
         }
         if let Some((i, c)) = self.resolve_upvalue(si, name) {
+            if self.upvalue_tdz(si, name) {
+                return Var::UpvalTdz(i, c);
+            }
             return Var::Upval(i, c);
         }
         Var::Global
@@ -527,6 +579,14 @@ impl Compiler {
             }
             Var::Upval(i, _) => {
                 self.emit(Op::GetUpval(i));
+            }
+            Var::LocalTdz(s, _) => {
+                let k = self.str_const(name);
+                self.emit(Op::GetLocalChecked(s, k));
+            }
+            Var::UpvalTdz(i, _) => {
+                let k = self.str_const(name);
+                self.emit(Op::GetUpvalChecked(i, k));
             }
             Var::Global if self.alias(name).is_some() => {
                 let (h, key) = self.alias(name).expect("alias");
@@ -562,6 +622,34 @@ impl Compiler {
                     self.emit(Op::ThrowConstAssign(k));
                 } else {
                     self.emit(Op::SetUpval(i));
+                    self.export_hook(name);
+                }
+            }
+            Var::LocalTdz(s, c) => {
+                let k = self.str_const(name);
+                if init {
+                    self.emit(Op::SetLocal(s));
+                    self.export_hook(name);
+                } else if c {
+                    self.emit(Op::GetLocalChecked(s, k));
+                    self.emit(Op::Pop);
+                    self.emit(Op::ThrowConstAssign(k));
+                } else {
+                    self.emit(Op::SetLocalChecked(s, k));
+                    self.export_hook(name);
+                }
+            }
+            Var::UpvalTdz(i, c) => {
+                let k = self.str_const(name);
+                if init {
+                    self.emit(Op::SetUpval(i));
+                    self.export_hook(name);
+                } else if c {
+                    self.emit(Op::GetUpvalChecked(i, k));
+                    self.emit(Op::Pop);
+                    self.emit(Op::ThrowConstAssign(k));
+                } else {
+                    self.emit(Op::SetUpvalChecked(i, k));
                     self.export_hook(name);
                 }
             }
@@ -724,6 +812,20 @@ impl Compiler {
                 reexports.push((source.clone(), list.clone()));
             }
         }
+        let var_scope = top || std::mem::take(&mut self.var_scope_next);
+        let mut var_names = Vec::new();
+        for s in stmts {
+            collect_var_names(s, &mut var_names);
+        }
+        for (n, _) in &names {
+            let is_fn = funcs.iter().any(|f| f.name.as_ref() == Some(n));
+            if var_scope && is_fn {
+                continue;
+            }
+            if var_names.contains(n) {
+                return Err(self.err(format!("Identifier '{n}' has already been declared")));
+            }
+        }
         let depth = self.st_ref().depth;
         let mut fresh = Vec::new();
         for (i, (n, c)) in names.iter().enumerate() {
@@ -750,7 +852,18 @@ impl Compiler {
         }
         let names = fresh;
         let repl = self.is_repl_top();
+        let import_names: Vec<Rc<str>> =
+            imports.iter().filter_map(|i| i.namespace.clone()).collect();
         for (n, c) in &names {
+            let lexical = !repl
+                && !funcs.iter().any(|f| f.name.as_ref() == Some(n))
+                && !n.starts_with("%import")
+                && !import_names.contains(n);
+            if lexical {
+                self.emit(Op::Uninit);
+                self.add_lexical(n.clone(), *c);
+                continue;
+            }
             self.emit(Op::Undefined);
             if repl {
                 if *c {
@@ -931,6 +1044,7 @@ impl Compiler {
                         }
                     }
                     self.bind_pattern(pattern, BindMode::Init)?;
+                    self.mark_init_pattern(pattern);
                 }
             }
             StmtKind::Function(_) | StmtKind::Import(_) | StmtKind::Empty => {}
@@ -938,6 +1052,7 @@ impl Compiler {
                 self.class(c, None)?;
                 if let Some(n) = &c.name {
                     self.store_var(n, true);
+                    self.mark_init(n);
                 }
                 self.emit(Op::Pop);
             }
@@ -1527,7 +1642,12 @@ impl Compiler {
         let name = self.hidden_name("disc");
         let d = self.add_local(name, true);
         let all: Vec<&Stmt> = cases.iter().flat_map(|c| c.body.iter()).collect();
+        let before = self.locals_len();
         self.hoist_list(&all, false)?;
+        let after = self.locals_len();
+        for l in &mut self.st().locals[before..after] {
+            l.sticky = true;
+        }
         let mut tests = Vec::new();
         for (i, c) in cases.iter().enumerate() {
             if let Some(t) = &c.test {
@@ -1800,6 +1920,7 @@ impl Compiler {
         match &f.body {
             FuncBody::Block(stmts) => {
                 self.declare_vars(stmts);
+                self.var_scope_next = true;
                 self.hoist(stmts)?;
                 for s in stmts {
                     self.stmt(s)?;
@@ -1941,14 +2062,15 @@ impl Compiler {
         self.emit(Op::MakeClass(k, has_super));
         if let Some(n) = &c.name {
             match self.resolve(n) {
-                Var::Local(s, _) => {
+                Var::Local(s, _) | Var::LocalTdz(s, _) => {
                     self.emit(Op::SetLocal(s));
                 }
-                Var::Upval(i, _) => {
+                Var::Upval(i, _) | Var::UpvalTdz(i, _) => {
                     self.emit(Op::SetUpval(i));
                 }
                 Var::Global => {}
             }
+            self.mark_init(n);
         }
         for m in &c.members {
             if let ClassMember::Method {

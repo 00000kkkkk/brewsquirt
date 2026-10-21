@@ -210,7 +210,7 @@ fn object_to_locale_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 
 fn object_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     let builtin = match &this {
-        Value::Undefined => return Ok("[object Undefined]".into()),
+        Value::Undefined | Value::Uninit => return Ok("[object Undefined]".into()),
         Value::Null => return Ok("[object Null]".into()),
         Value::Bool(_) => "Boolean",
         Value::Number(_) => "Number",

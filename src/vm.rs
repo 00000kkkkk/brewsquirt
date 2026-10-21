@@ -424,6 +424,17 @@ impl Vm {
         }
     }
 
+    fn tdz_error(&mut self, proto: &FunctionProto, k: u32) -> Value {
+        let name = match proto.consts.get(k as usize) {
+            Some(Value::Str(s)) => s.to_string(),
+            _ => String::new(),
+        };
+        self.make_error(
+            ErrorKind::ReferenceError,
+            format!("Cannot access '{name}' before initialization"),
+        )
+    }
+
     pub fn global_this(&self) -> Value {
         self.globals.get("globalThis").cloned().unwrap_or_default()
     }
@@ -1511,7 +1522,7 @@ impl Vm {
                 let raw = self.realm.boolean_proto.get_chain(key).unwrap_or_default();
                 self.resolve_accessor(raw, v)
             }
-            Value::Undefined | Value::Null => Err(self.type_error(format!(
+            Value::Undefined | Value::Uninit | Value::Null => Err(self.type_error(format!(
                 "Cannot read properties of {} (reading '{}')",
                 inspect_plain(v),
                 key
@@ -2700,6 +2711,48 @@ impl Vm {
                     self.flush_builder(base + s as usize);
                     let v = self.stack[base + s as usize].clone();
                     self.stack.push(v);
+                }
+                Op::Uninit => self.stack.push(Value::Uninit),
+                Op::GetLocalChecked(s, k) => {
+                    self.flush_builder(base + s as usize);
+                    let v = self.stack[base + s as usize].clone();
+                    if matches!(v, Value::Uninit) {
+                        throw!(self.tdz_error(&proto, k));
+                    }
+                    self.stack.push(v);
+                }
+                Op::SetLocalChecked(s, k) => {
+                    if matches!(self.stack[base + s as usize], Value::Uninit) {
+                        throw!(self.tdz_error(&proto, k));
+                    }
+                    self.drop_builder(base + s as usize);
+                    let v = peek!();
+                    self.stack[base + s as usize] = v;
+                }
+                Op::GetUpvalChecked(i, k) => {
+                    let v = match &*cl.upvalues[i as usize].borrow() {
+                        Upvalue::Open(idx) => self.stack[*idx].clone(),
+                        Upvalue::Closed(v) => v.clone(),
+                    };
+                    if matches!(v, Value::Uninit) {
+                        throw!(self.tdz_error(&proto, k));
+                    }
+                    self.stack.push(v);
+                }
+                Op::SetUpvalChecked(i, k) => {
+                    let uninit = match &*cl.upvalues[i as usize].borrow() {
+                        Upvalue::Open(idx) => matches!(self.stack[*idx], Value::Uninit),
+                        Upvalue::Closed(v) => matches!(v, Value::Uninit),
+                    };
+                    if uninit {
+                        throw!(self.tdz_error(&proto, k));
+                    }
+                    let v = peek!();
+                    let mut u = cl.upvalues[i as usize].borrow_mut();
+                    match &mut *u {
+                        Upvalue::Open(idx) => self.stack[*idx] = v,
+                        Upvalue::Closed(c) => *c = v,
+                    }
                 }
                 Op::SetLocal(s) => {
                     self.drop_builder(base + s as usize);

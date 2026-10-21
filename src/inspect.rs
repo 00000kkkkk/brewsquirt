@@ -231,7 +231,7 @@ fn format_number(n: f64) -> String {
 
 fn format_value(ctx: &mut Ctx, v: &Value, rt: usize, top: bool) -> String {
     match v {
-        Value::Undefined => "undefined".to_string(),
+        Value::Undefined | Value::Uninit => "undefined".to_string(),
         Value::Null => "null".to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Number(n) => format_number(*n),
