@@ -4,6 +4,7 @@ mod json;
 mod number;
 mod object;
 mod promise;
+mod regexp;
 mod string;
 mod symbol;
 mod system;
@@ -16,6 +17,7 @@ use std::rc::Rc;
 
 pub use json::{json_parse, json_stringify};
 pub use promise::run_prelude;
+pub use regexp::make_regexp;
 pub use symbol::{iter_result, symbol_text};
 
 pub fn arg(args: &[Value], i: usize) -> Value {
@@ -90,6 +92,7 @@ pub fn install(vm: &mut Vm) {
     json::install(vm);
     collections::install(vm);
     promise::install(vm);
+    regexp::install(vm);
     symbol::install(vm);
     system::install(vm);
 }

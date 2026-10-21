@@ -61,6 +61,8 @@ pub fn parse(src: &str) -> R<Vec<Stmt>> {
         fn_depth: 0,
         in_async: false,
         in_generator: false,
+        class_ids: Vec::new(),
+        next_class_id: 0,
     };
     parser.program()
 }
@@ -77,6 +79,8 @@ struct Parser {
     fn_depth: u32,
     in_async: bool,
     in_generator: bool,
+    class_ids: Vec<u32>,
+    next_class_id: u32,
 }
 
 impl Parser {
@@ -178,13 +182,27 @@ impl Parser {
         }
     }
 
+    fn private_name(&mut self) -> R<Rc<str>> {
+        let Some(&id) = self.class_ids.last() else {
+            return Err(self.error("Private field must be declared in an enclosing class"));
+        };
+        self.advance();
+        match self.word() {
+            Some(name) if !self.peek().nl_before => {
+                self.advance();
+                Ok(format!("\u{0}#{name}@{id}").into())
+            }
+            _ => Err(self.unexpected()),
+        }
+    }
+
     fn ident_name(&mut self) -> R<Rc<str>> {
         match self.word() {
             Some(s) => {
                 self.advance();
                 Ok(s)
             }
-            None if self.is(P::Hash) => Err(self.error("Private fields are not supported yet")),
+            None if self.is(P::Hash) => self.private_name(),
             None => Err(self.unexpected()),
         }
     }
@@ -854,7 +872,7 @@ impl Parser {
                 self.expect(P::RBracket)?;
                 Ok((PropKey::Computed(e), false))
             }
-            Tok::Punct(P::Hash) => Err(self.error("Private fields are not supported yet")),
+            Tok::Punct(P::Hash) => Ok((PropKey::Named(self.private_name()?), false)),
             _ => Err(self.unexpected()),
         }
     }
@@ -958,6 +976,21 @@ impl Parser {
         } else {
             None
         };
+        self.next_class_id += 1;
+        self.class_ids.push(self.next_class_id);
+        let parsed = self.class_body(superclass.is_some());
+        self.class_ids.pop();
+        let (constructor, members) = parsed?;
+        Ok(Rc::new(ClassDef {
+            name,
+            superclass,
+            constructor,
+            members,
+            line,
+        }))
+    }
+
+    fn class_body(&mut self, has_super: bool) -> R<(Option<Rc<FuncDef>>, Vec<ClassMember>)> {
         self.expect(P::LBrace)?;
         let mut constructor = None;
         let mut members = Vec::new();
@@ -1029,7 +1062,7 @@ impl Parser {
                 let is_ctor =
                     !is_static && matches!(&key, PropKey::Named(n) if &**n == "constructor");
                 let kind = if is_ctor {
-                    if superclass.is_some() {
+                    if has_super {
                         FuncKind::DerivedConstructor
                     } else {
                         FuncKind::ClassConstructor
@@ -1087,13 +1120,7 @@ impl Parser {
                 });
             }
         }
-        Ok(Rc::new(ClassDef {
-            name,
-            superclass,
-            constructor,
-            members,
-            line,
-        }))
+        Ok((constructor, members))
     }
 
     fn expression(&mut self) -> R<Expr> {
@@ -1751,6 +1778,8 @@ impl Parser {
                         fn_depth: self.fn_depth,
                         in_async: self.in_async,
                         in_generator: self.in_generator,
+                        class_ids: self.class_ids.clone(),
+                        next_class_id: self.next_class_id,
                     };
                     if sub.is_eof() {
                         return Err(sub.error("Unexpected token '}'"));
@@ -1781,6 +1810,11 @@ impl Parser {
                 let s = s.clone();
                 self.advance();
                 ExprKind::Str(s)
+            }
+            Tok::Regex(p, f) => {
+                let (p, f) = (p.clone(), f.clone());
+                self.advance();
+                ExprKind::Regex(p, f)
             }
             Tok::Template(_) => {
                 let Tok::Template(parts) = self.advance().tok else {
@@ -1832,7 +1866,7 @@ impl Parser {
                 self.no_in = saved;
                 ExprKind::Object(props)
             }
-            Tok::Punct(P::Hash) => return Err(self.error("Private fields are not supported yet")),
+            Tok::Punct(P::Hash) => ExprKind::Str(self.private_name()?),
             Tok::Ident(name) => {
                 let name = name.clone();
                 match &*name {

@@ -1790,6 +1790,14 @@ impl Compiler {
                 let k = self.str_const(s);
                 self.emit(Op::Const(k));
             }
+            ExprKind::Regex(pattern, flags) => {
+                if let Err(msg) = crate::regexp::compile(pattern, flags) {
+                    return Err(self.err(msg));
+                }
+                let p = self.str_const(pattern);
+                let f = self.str_const(flags);
+                self.emit(Op::NewRegex(p, f));
+            }
             ExprKind::Template(quasis, exprs) => {
                 let mut n = 0;
                 for (i, q) in quasis.iter().enumerate() {

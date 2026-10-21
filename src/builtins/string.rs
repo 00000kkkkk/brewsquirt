@@ -1,4 +1,4 @@
-use super::{arg, expect_fn, make_ctor, method, relative_index, to_integer};
+use super::{arg, make_ctor, method, relative_index, to_integer};
 use crate::value::{
     Value, char_at16, code_unit_at, index_of16, last_index_of16, len16, slice16, units16,
 };
@@ -31,6 +31,9 @@ pub fn install(vm: &mut Vm) {
         ("trimEnd", 0, trim_end),
         ("split", 2, split),
         ("replace", 2, replace),
+        ("match", 1, match_fn),
+        ("matchAll", 1, match_all),
+        ("search", 1, search),
         ("replaceAll", 2, replace_all),
         ("repeat", 1, repeat),
         ("padStart", 2, pad_start),
@@ -275,9 +278,11 @@ fn split(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         Value::Undefined => usize::MAX,
         v => crate::number::to_uint32(vm.to_number(&v)?) as usize,
     };
+    if let Some((_, data)) = super::regexp::as_regexp(&arg(args, 0)) {
+        return super::regexp::string_split_regexp(vm, s, &data, limit);
+    }
     let parts: Vec<Value> = match arg(args, 0) {
         Value::Undefined => vec![Value::Str(s.clone())],
-        Value::Object(_) => return Err(vm.type_error("Regular expressions are not supported yet")),
         sep => {
             let sep = vm.to_string(&sep)?;
             if sep.is_empty() {
@@ -313,19 +318,45 @@ fn replacement(
         return Ok(vm.to_string(&r)?.to_string());
     }
     let template = vm.to_string(rep)?;
-    Ok(template.replace("$&", matched))
+    let (before, after) = match whole.find(matched) {
+        Some(_) => {
+            let b = crate::regexp::byte_index(whole, offset);
+            (&whole[..b], &whole[(b + matched.len()).min(whole.len())..])
+        }
+        None => ("", ""),
+    };
+    Ok(super::regexp::expand_template(
+        &template,
+        matched,
+        before,
+        after,
+        &[Value::Str(matched.into())],
+        &Value::Undefined,
+    ))
+}
+
+fn match_fn(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let s = this_str(vm, &this)?;
+    super::regexp::string_match(vm, s, &arg(args, 0))
+}
+
+fn match_all(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let s = this_str(vm, &this)?;
+    super::regexp::string_match_all(vm, s, &arg(args, 0))
+}
+
+fn search(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let s = this_str(vm, &this)?;
+    super::regexp::string_search(vm, s, &arg(args, 0))
 }
 
 fn replace_impl(vm: &mut Vm, this: Value, args: &[Value], all: bool) -> R {
     let s = this_str(vm, &this)?;
-    if arg(args, 0).is_object() {
-        return Err(vm.type_error("Regular expressions are not supported yet"));
+    let rep = arg(args, 1);
+    if let Some((o, data)) = super::regexp::as_regexp(&arg(args, 0)) {
+        return super::regexp::string_replace_regexp(vm, s, &o, &data, &rep, all);
     }
     let pat = str_arg(vm, args, 0)?;
-    let rep = arg(args, 1);
-    if rep.is_object() && !rep.is_callable() {
-        expect_fn(vm, &rep)?;
-    }
     let mut out = String::new();
     let mut last = 0;
     if pat.is_empty() {

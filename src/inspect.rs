@@ -227,6 +227,7 @@ fn props_items(
         .props
         .borrow()
         .iter()
+        .filter(|(k, _)| !crate::object::is_private_key(k))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     props.sort_by_key(|(k, _)| crate::object::is_symbol_key(k));
@@ -351,6 +352,7 @@ fn format_object(
             }
         }
         ObjKind::Accessor(_) => "[Getter/Setter]".to_string(),
+        ObjKind::RegExp(r) => format!("/{}/{}", r.data.source, r.data.flags),
         ObjKind::Promise(p) => {
             if depth > MAX_DEPTH {
                 return "[Promise]".to_string();

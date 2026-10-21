@@ -116,6 +116,7 @@ pub enum Op {
     InitAccessorComputed(bool),
     DefineAccessor(u32, bool, bool),
     DefineAccessorComputed(bool, bool),
+    NewRegex(u32, u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,6 +241,9 @@ impl FunctionProto {
                 | Op::InitAccessor(c, _)
                 | Op::DefineAccessor(c, _, _)
                 | Op::MakeClass(c, _) => format!("  {}", self.const_text(*c)),
+                Op::NewRegex(src, flags) => {
+                    format!("  /{}/{}", self.const_text(*src), self.const_text(*flags))
+                }
                 Op::Closure(f) => format!(
                     "  <fn {}>",
                     self.functions

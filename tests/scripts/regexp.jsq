@@ -1,0 +1,43 @@
+const re = /(\d{4})-(\d{2})-(\d{2})/
+const m = "release 2026-10-21 shipped".match(re)
+console.log(m[0], m[1], m.index, m.input.length, m.length)
+console.log(re.test("no date"), re.source, re.flags, String(re), re)
+
+const named = /(?<year>\d{4})-(?<month>\d{2})/u.exec("on 2026-10")
+console.log(named.groups.year, named.groups.month, named.index)
+
+console.log("a1b22c333".match(/\d+/g), "abc".match(/x/g), "aaa".match(/a/))
+console.log("John Smith".replace(/(\w+)\s(\w+)/, "$2, $1"))
+console.log("2026-10-21".replace(/-/g, "/"), "aaa".replace(/a/, "b"), "x-y-z".replaceAll(/-/g, "+"))
+console.log("price: 10 and 20".replace(/\d+/g, (n) => `$${n * 2}`))
+console.log("swap ab".replace(/(?<first>a)(?<second>b)/, "$<second>$<first>"), "$$ $& $` $'".length)
+console.log("x".replace(/x/, "[$&] [$`] [$'] [$$]"))
+console.log("a, b;c  d".split(/[,;\s]+/), "a1b2c".split(/(\d)/), "abc".split(/(?:)/), "".split(/,/))
+console.log("one two three".split(/\s/, 2), "hello world".search(/o/), "hello".search(/z/))
+
+const g = /o/g
+const s = "foo boo"
+const seen = []
+let hit
+while ((hit = g.exec(s)) !== null) seen.push(`${hit[0]}@${hit.index}:${g.lastIndex}`)
+console.log(seen, g.lastIndex)
+
+const sticky = /foo/y
+console.log(sticky.test("foofoo"), sticky.lastIndex, sticky.test("foofoo"), sticky.lastIndex, sticky.test("foofoo"))
+
+console.log([..."a1b2c3".matchAll(/[a-z](\d)/g)].map((x) => `${x[0]}:${x[1]}:${x.index}`))
+console.log(/^hello$/im.test("say\nHELLO\nthere"), /a.c/.test("a\nc"), /a.c/s.test("a\nc"))
+console.log(/(a)|(b)/.exec("b"), /\bcat\b/.test("a cat sat"), /colou?r/.test("color"))
+console.log(new RegExp("h(.)llo", "g").exec("hello")[1], RegExp("x+").test("xxx"), new RegExp(/ab/g).flags)
+console.log(/[\]\-\\]/.test("-"), /\//.test("a/b"), /[^]/.test("\n"), /\u{1F4A6}/u.test("💦"), /a{2,3}/.test("aa"))
+console.log(/(\w)\1/.test("hello"), /(?<=\$)\d+/.exec("cost $42")[0], /\d+(?!px)/.exec("12px 34em")[0])
+console.log("ÄÖÜ".replace(/ö/i, "o"), "Tab\there".replace(/\t/, "->"), "line1\nline2".match(/^line\d$/gm))
+try {
+  new RegExp("(unclosed")
+} catch (e) {
+  console.log(e.name)
+}
+const camel = "background-color-value".replace(/-([a-z])/g, (_, c) => c.toUpperCase())
+console.log(camel, "  trim me  ".replace(/^\s+|\s+$/g, "") + "|")
+const emails = "ann@x.io, bob@y.dev".match(/[\w.]+@[\w.]+/g)
+console.log(emails, typeof /x/, /x/ instanceof RegExp, Object.prototype.toString.call(/x/))

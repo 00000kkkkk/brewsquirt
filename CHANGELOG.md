@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-21
+
+### Added
+
+- Regular expressions: `/pattern/flags` literals and `new RegExp(pattern, flags)` with the `d`,
+  `g`, `i`, `m`, `s`, `u`, `v` and `y` flags, capture groups, named groups, backreferences,
+  lookahead and lookbehind.
+- `RegExp.prototype.exec`, `test`, `toString`, `lastIndex`, `source`, `flags` and the flag
+  properties.
+- Regex-aware `String.prototype.match`, `matchAll`, `search`, `replace`, `replaceAll` and `split`,
+  including `$1`, `$<name>`, `$&`, `` $` ``, `$'` and `$$` in replacement strings and replacer
+  functions.
+- Private class members: `#fields`, `#methods`, static private members, private accessors and
+  `#field in obj` brand checks.
+- A cycle collector. Unreachable cycles of objects, closures, classes, maps and generators are
+  reclaimed automatically; `JSQ_GC_THRESHOLD` tunes how often it runs.
+
+### Fixed
+
+- Programs that build cyclic structures in a loop no longer grow memory without bound.
+
 ## [0.2.0] - 2026-10-21
 
 ### Added
@@ -75,6 +96,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Continuous integration on Linux, macOS and Windows, MSRV check, cargo-deny, CodeQL, coverage,
   benchmarks, and release archives for five targets.
 
-[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/00000kkkkk/javasquirt/releases/tag/v0.1.0

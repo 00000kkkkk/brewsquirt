@@ -1,6 +1,6 @@
 # JavaSquirt Language Reference
 
-This document describes JavaSquirt 0.2.0. JavaSquirt follows JavaScript semantics: for every
+This document describes JavaSquirt 0.3.0. JavaSquirt follows JavaScript semantics: for every
 supported feature, a program should print the same output under `jsq` as under Node.js. Features
 that are not implemented yet are listed in [Not yet supported](#not-yet-supported).
 
@@ -16,11 +16,14 @@ that are not implemented yet are listed in [Not yet supported](#not-yet-supporte
 - [Control flow](#control-flow)
 - [Errors and exceptions](#errors-and-exceptions)
 - [Classes](#classes)
+- [Private members](#private-members)
 - [Getters and setters](#getters-and-setters)
 - [Async functions and promises](#async-functions-and-promises)
 - [Generators and iterators](#generators-and-iterators)
+- [Regular expressions](#regular-expressions)
 - [Modules](#modules)
 - [Builtins](#builtins)
+- [Memory management](#memory-management)
 - [CLI reference](#cli-reference)
 - [Not yet supported](#not-yet-supported)
 
@@ -747,6 +750,54 @@ Rules:
 - Methods live on the prototype and are shared by all instances.
 - `instanceof` checks whether the constructor's prototype is on the object's prototype chain.
 
+## Private members
+
+Names starting with `#` are private to the class body that declares them: fields, methods,
+accessors and their `static` variants. They are invisible to `Object.keys`, `JSON.stringify`,
+spread and `console.log`. `#name in obj` checks whether an object carries the private member.
+
+```js
+class Account {
+  #balance = 0
+  static #opened = 0
+
+  constructor(owner) {
+    this.owner = owner
+    Account.#opened++
+  }
+
+  #log(msg) {
+    return `${this.owner}: ${msg}`
+  }
+
+  deposit(n) {
+    this.#balance += n
+    return this.#log(`+${n}`)
+  }
+
+  get balance() {
+    return this.#balance
+  }
+
+  static opened() {
+    return Account.#opened
+  }
+
+  static isAccount(x) {
+    return #balance in x
+  }
+}
+
+const acc = new Account("ann")
+console.log(acc.deposit(5), acc.balance, Account.opened())
+console.log(acc, Account.isAccount(acc), Account.isAccount({}))
+```
+
+```text
+ann: +5 5 1
+Account { owner: 'ann' } true false
+```
+
 ## Getters and setters
 
 `get` and `set` define accessor properties in classes (instance and `static`) and in object
@@ -892,6 +943,58 @@ console.log(Math.max(...new Range(1, 9)))
 `Symbol(description)` creates a unique key. `Symbol.for(key)` returns a shared symbol from the
 global registry. Symbol-keyed properties are skipped by `Object.keys`, `for...in` and
 `JSON.stringify`.
+
+## Regular expressions
+
+Regex literals `/pattern/flags` and `new RegExp(pattern, flags)` follow JavaScript syntax:
+character classes, quantifiers (greedy and lazy), anchors, alternation, capture groups, named
+groups `(?<name>...)`, backreferences `\1` and `\k<name>`, lookahead `(?=...)`, `(?!...)` and
+lookbehind `(?<=...)`, `(?<!...)`. Flags: `g` global, `i` ignore case, `m` multiline, `s` dot
+matches newlines, `u` and `v` unicode, `y` sticky, `d` indices. Positions such as `index` and
+`lastIndex` count UTF-16 code units, exactly like JavaScript.
+
+```js
+const date = /(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})/
+const m = "shipped 2026-10-21".match(date)
+console.log(m.index, m.groups.year, m[3])
+
+console.log("a1b22c333".match(/\d+/g))
+console.log("John Smith".replace(/(\w+) (\w+)/, "$2, $1"))
+console.log("background-color".replace(/-(\w)/g, (_, c) => c.toUpperCase()))
+console.log("a, b;c".split(/[,;]\s*/), "hello".search(/l+/))
+
+const word = /\w+/g
+let hit
+while ((hit = word.exec("go deep")) !== null) console.log(hit[0], word.lastIndex)
+
+console.log([..."x1y2".matchAll(/([a-z])(\d)/g)].map((r) => r[1] + r[2]))
+```
+
+```text
+8 2026 21
+[ '1', '22', '333' ]
+Smith, John
+backgroundColor
+[ 'a', 'b', 'c' ] 2
+go 2
+deep 7
+[ 'x1', 'y2' ]
+```
+
+| Method                              | Result                                                    |
+| ----------------------------------- | --------------------------------------------------------- |
+| `re.test(s)`                        | `true` if the pattern matches                             |
+| `re.exec(s)`                        | A match array with `index`, `input` and `groups`, or `null` |
+| `s.match(re)`                       | First match, or every matched string with `g`             |
+| `s.matchAll(re)`                    | An iterator of match arrays, requires `g`                 |
+| `s.replace(re, rep)`                | Replaces the first match, or every match with `g`         |
+| `s.replaceAll(re, rep)`             | Replaces every match, requires `g`                        |
+| `s.split(re, limit?)`               | Splits on matches; capture groups are included            |
+| `s.search(re)`                      | Index of the first match, or `-1`                         |
+
+Replacement strings understand `$1` to `$99`, `$<name>`, `$&` (the match), `` $` `` (text before),
+`$'` (text after) and `$$`. A replacer function receives the match, every group, the offset, the
+whole string and, when the pattern has named groups, the groups object.
 
 ## Modules
 
@@ -1060,6 +1163,17 @@ if (process.argv.includes("--fail")) {
 }
 ```
 
+## Memory management
+
+Values are reference counted, so most garbage is freed the moment it becomes unreachable. Cycles,
+such as an object that stores a closure capturing that same object, a class and its prototype, or
+two objects pointing at each other, are reclaimed by a cycle collector that runs automatically
+as the program allocates. It needs no annotations and never frees anything still reachable from
+running code.
+
+The `JSQ_GC_THRESHOLD` environment variable sets the minimum number of allocations between
+collections (default 200000). Small values are useful for stress testing.
+
 ## CLI reference
 
 ### `jsq`
@@ -1119,9 +1233,8 @@ Dependency specs:
 
 These are on the roadmap and currently produce a `SyntaxError` or are absent:
 
-- Regular expression literals and `RegExp`
 - Async generators and `for await`
-- Private `#fields` and methods
 - `Date` beyond `Date.now()`
+- `WeakMap`, `WeakSet` and `WeakRef`
 - Tracing garbage collection
 - JIT compilation

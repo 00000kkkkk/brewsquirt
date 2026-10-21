@@ -147,7 +147,7 @@ import helpers from "./helpers"
 
 ## Features
 
-JavaSquirt 0.2.0 implements a large, practical subset of modern JavaScript:
+JavaSquirt 0.3.0 implements a large, practical subset of modern JavaScript:
 
 - **Values**: `undefined`, `null`, booleans, numbers, strings, arrays, objects, functions, classes, `Map`, `Set`, `Error`
 - **Bindings**: block-scoped `let` and `const`, hoisted function declarations
@@ -155,12 +155,15 @@ JavaSquirt 0.2.0 implements a large, practical subset of modern JavaScript:
 - **Spread and destructuring**: spread in calls, arrays and objects; object and array destructuring with defaults and rest in `let`, `const` and parameters
 - **Control flow**: `if`/`else`, `while`, `do`/`while`, `for`, `for...of`, `for...in`, `switch`, `break`, `continue`
 - **Errors**: `try`/`catch`/`finally`, `throw`, `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, with stack traces
-- **Classes**: constructors, methods, static methods, instance and static fields, `extends`, `super()`, `super.method()`, `new`, `instanceof`
+- **Classes**: constructors, methods, static methods, instance and static fields, `extends`, `super()`, `super.method()`, `new`, `instanceof`, private `#members`
 - **Operators**: arithmetic, `**`, bitwise and shifts including `>>>`, loose and strict equality, `&&`, `||`, `??`, optional chaining `?.`, ternary, `typeof`, `void`, `delete`, `in`, compound assignment including `&&=`, `||=`, `??=`, `++` and `--`
 - **Syntax**: template literals, optional semicolons with JS-style ASI, `//` and `/* */` comments
 - **Async**: `async`/`await` (including top-level `await`), `Promise` with `all`, `allSettled`, `race`, `any`, an event loop with microtasks, `setTimeout`, `setInterval`, `queueMicrotask` and `sleep`
 - **Generators and iterators**: `function*`, `yield`, `yield*`, `Symbol.iterator` and the iterator protocol for `for...of`, spread and destructuring
 - **Accessors and labels**: `get`/`set` in classes and object literals, `break label` and `continue label`
+- **Regular expressions**: `/pattern/flags` literals and `RegExp` with groups, named groups, backreferences and lookaround, plus `match`, `matchAll`, `replace`, `split` and `search`
+- **Private members**: `#fields`, `#methods`, static private members and `#field in obj`
+- **Memory**: reference counting plus a cycle collector, so cyclic garbage is reclaimed
 - **Modules**: ES module `import` and `export` (named, default, namespace, renamed), relative and bare-name resolution, builtin `squirt:fs`
 - **Builtins**: `console`, `Math`, `Number`, `String`, `Array`, `Object`, `JSON`, `Map`, `Set`, `Symbol`, `Promise`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `process.argv`, `process.exit`, `process.env`
 
@@ -245,10 +248,11 @@ typos
 - [x] Getters and setters
 - [x] Symbols and the iterator protocol
 - [x] Labeled statements
-- [ ] Regular expressions
+- [x] Regular expressions
+- [x] Private `#fields`
+- [x] Cycle collector
 - [ ] Async generators and `for await`
-- [ ] Private `#fields`
-- [ ] Tracing garbage collector
+- [ ] `Date`
 - [ ] JIT compiler
 
 ## Contributing

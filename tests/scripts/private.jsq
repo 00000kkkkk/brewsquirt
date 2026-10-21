@@ -1,0 +1,62 @@
+class Counter {
+  #count = 0
+  static #instances = 0
+  #step
+
+  constructor(step = 1) {
+    this.#step = step
+    Counter.#instances++
+  }
+
+  #bump() {
+    this.#count += this.#step
+    return this
+  }
+
+  increment() {
+    return this.#bump()
+  }
+
+  get value() {
+    return this.#count
+  }
+
+  static get instances() {
+    return Counter.#instances
+  }
+
+  static isCounter(x) {
+    return #count in x
+  }
+
+  equals(other) {
+    return this.#count === other.#count
+  }
+}
+
+const a = new Counter()
+const b = new Counter(5)
+a.increment().increment()
+b.increment()
+console.log(a.value, b.value, Counter.instances, a.equals(b))
+console.log(a, Object.keys(a), JSON.stringify(a), a.count)
+console.log(Counter.isCounter(a), Counter.isCounter({}))
+
+class Secret {
+  #value
+  constructor(v) {
+    this.#value = v
+  }
+  reveal() {
+    return `${this.#value}`.toUpperCase()
+  }
+}
+class LoudSecret extends Secret {
+  #value = "child"
+  both() {
+    return [this.reveal(), this.#value]
+  }
+}
+console.log(new LoudSecret("parent").both())
+const copy = { ...a }
+console.log(Object.keys(copy).length, "value" in a)

@@ -1,0 +1,325 @@
+use rustc_hash::FxHashMap;
+use std::cell::RefCell;
+use std::rc::Rc;
+
+pub struct RegexData {
+    pub source: Rc<str>,
+    pub flags: Rc<str>,
+    pub re: fancy_regex::Regex,
+    pub global: bool,
+    pub sticky: bool,
+    pub names: Vec<Option<Rc<str>>>,
+}
+
+pub struct Match {
+    pub start: usize,
+    pub end: usize,
+    pub groups: Vec<Option<(usize, usize)>>,
+}
+
+type Cache = FxHashMap<(Rc<str>, Rc<str>), Rc<RegexData>>;
+
+thread_local! {
+    static CACHE: RefCell<Cache> = RefCell::new(FxHashMap::default());
+}
+
+fn hex_digits(chars: &[char], i: usize, n: usize) -> Option<u32> {
+    if i + n > chars.len() {
+        return None;
+    }
+    let mut v = 0u32;
+    for c in &chars[i..i + n] {
+        v = v * 16 + c.to_digit(16)?;
+    }
+    Some(v)
+}
+
+fn push_code_point(out: &mut String, cp: u32) {
+    out.push_str(&format!("\\x{{{cp:X}}}"));
+}
+
+fn is_quantifier(chars: &[char], i: usize) -> Option<usize> {
+    let mut j = i + 1;
+    let start = j;
+    while j < chars.len() && chars[j].is_ascii_digit() {
+        j += 1;
+    }
+    if j == start {
+        return None;
+    }
+    if j < chars.len() && chars[j] == ',' {
+        j += 1;
+        while j < chars.len() && chars[j].is_ascii_digit() {
+            j += 1;
+        }
+    }
+    if j < chars.len() && chars[j] == '}' {
+        Some(j)
+    } else {
+        None
+    }
+}
+
+pub fn translate(source: &str, flags: &str) -> Result<String, String> {
+    let chars: Vec<char> = source.chars().collect();
+    let mut out = String::new();
+    let mut inline = String::new();
+    if flags.contains('i') {
+        inline.push('i');
+    }
+    if flags.contains('m') {
+        inline.push('m');
+    }
+    if flags.contains('s') {
+        inline.push('s');
+    }
+    if !inline.is_empty() {
+        out.push_str(&format!("(?{inline})"));
+    }
+    let dot_all = flags.contains('s');
+    let mut in_class = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '\\' => {
+                i += 1;
+                let Some(&e) = chars.get(i) else {
+                    return Err("\\ at end of pattern".to_string());
+                };
+                match e {
+                    'd' if !in_class => out.push_str("[0-9]"),
+                    'D' if !in_class => out.push_str("[^0-9]"),
+                    'w' if !in_class => out.push_str("[A-Za-z0-9_]"),
+                    'W' if !in_class => out.push_str("[^A-Za-z0-9_]"),
+                    'd' => out.push_str("0-9"),
+                    'w' => out.push_str("A-Za-z0-9_"),
+                    'b' if in_class => out.push_str("\\x08"),
+                    's' | 'S' | 'b' | 'B' | 'n' | 'r' | 't' | 'f' | 'v' | 'D' | 'W' => {
+                        out.push('\\');
+                        out.push(e);
+                    }
+                    '0' if !chars.get(i + 1).is_some_and(|d| d.is_ascii_digit()) => {
+                        out.push_str("\\x00")
+                    }
+                    '1'..='9' if !in_class => {
+                        out.push('\\');
+                        out.push(e);
+                        while chars.get(i + 1).is_some_and(|d| d.is_ascii_digit()) {
+                            i += 1;
+                            out.push(chars[i]);
+                        }
+                    }
+                    'k' if chars.get(i + 1) == Some(&'<') => out.push_str("\\k"),
+                    'x' => match hex_digits(&chars, i + 1, 2) {
+                        Some(v) => {
+                            push_code_point(&mut out, v);
+                            i += 2;
+                        }
+                        None => out.push('x'),
+                    },
+                    'u' => {
+                        if chars.get(i + 1) == Some(&'{') {
+                            let end = chars[i + 1..]
+                                .iter()
+                                .position(|&ch| ch == '}')
+                                .ok_or("Invalid Unicode escape")?;
+                            let hex: String = chars[i + 2..i + 1 + end].iter().collect();
+                            let v = u32::from_str_radix(&hex, 16)
+                                .map_err(|_| "Invalid Unicode escape".to_string())?;
+                            push_code_point(&mut out, v);
+                            i += 1 + end;
+                        } else if let Some(v) = hex_digits(&chars, i + 1, 4) {
+                            i += 4;
+                            let mut cp = v;
+                            if (0xd800..0xdc00).contains(&v)
+                                && chars.get(i + 1) == Some(&'\\')
+                                && chars.get(i + 2) == Some(&'u')
+                            {
+                                if let Some(low) = hex_digits(&chars, i + 3, 4) {
+                                    if (0xdc00..0xe000).contains(&low) {
+                                        cp = 0x10000 + ((v - 0xd800) << 10) + (low - 0xdc00);
+                                        i += 6;
+                                    }
+                                }
+                            }
+                            if (0xd800..0xe000).contains(&cp) {
+                                cp = 0xfffd;
+                            }
+                            push_code_point(&mut out, cp);
+                        } else {
+                            out.push('u');
+                        }
+                    }
+                    'c' => match chars.get(i + 1) {
+                        Some(l) if l.is_ascii_alphabetic() => {
+                            push_code_point(&mut out, (*l as u32) % 32);
+                            i += 1;
+                        }
+                        _ => out.push_str("\\\\c"),
+                    },
+                    'p' | 'P' => {
+                        out.push('\\');
+                        out.push(e);
+                    }
+                    '/' => out.push('/'),
+                    '-' => out.push_str("\\-"),
+                    e if e.is_ascii_alphanumeric() => out.push(e),
+                    e => {
+                        out.push('\\');
+                        out.push(e);
+                    }
+                }
+            }
+            '[' if !in_class => {
+                if chars.get(i + 1) == Some(&']') {
+                    out.push_str("(?:[^\\x00-\\x{10FFFF}])");
+                    i += 2;
+                    continue;
+                }
+                if chars.get(i + 1) == Some(&'^') && chars.get(i + 2) == Some(&']') {
+                    out.push_str("(?s:.)");
+                    i += 3;
+                    continue;
+                }
+                in_class = true;
+                out.push('[');
+                if chars.get(i + 1) == Some(&'^') {
+                    out.push('^');
+                    i += 1;
+                }
+                if chars.get(i + 1) == Some(&']') {
+                    out.push_str("\\]");
+                    i += 1;
+                }
+            }
+            '[' => out.push_str("\\["),
+            ']' if in_class => {
+                in_class = false;
+                out.push(']');
+            }
+            '&' | '~' if in_class => {
+                out.push('\\');
+                out.push(c);
+            }
+            '.' if !in_class => {
+                if dot_all {
+                    out.push_str("(?s:.)");
+                } else {
+                    out.push_str("[^\\n\\r\\x{2028}\\x{2029}]");
+                }
+            }
+            '{' if !in_class => match is_quantifier(&chars, i) {
+                Some(end) => {
+                    let q: String = chars[i..=end].iter().collect();
+                    out.push_str(&q);
+                    i = end;
+                }
+                None => out.push_str("\\{"),
+            },
+            '}' if !in_class => out.push_str("\\}"),
+            _ => out.push(c),
+        }
+        i += 1;
+    }
+    if in_class {
+        return Err("Unterminated character class".to_string());
+    }
+    Ok(out)
+}
+
+pub fn compile(source: &str, flags: &str) -> Result<Rc<RegexData>, String> {
+    let key: (Rc<str>, Rc<str>) = (source.into(), flags.into());
+    if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return Ok(hit);
+    }
+    if let Some(bad) = flags.chars().find(|c| !"dgimsuyv".contains(*c)) {
+        return Err(format!(
+            "Invalid flags supplied to RegExp constructor '{bad}'"
+        ));
+    }
+    let translated = translate(source, flags)
+        .map_err(|e| format!("Invalid regular expression: /{source}/{flags}: {e}"))?;
+    let re = fancy_regex::RegexBuilder::new(&translated)
+        .backtrack_limit(10_000_000)
+        .build()
+        .map_err(|e| format!("Invalid regular expression: /{source}/{flags}: {e}"))?;
+    let names = re.capture_names().map(|n| n.map(Rc::from)).collect();
+    let data = Rc::new(RegexData {
+        source: key.0.clone(),
+        flags: key.1.clone(),
+        re,
+        global: flags.contains('g'),
+        sticky: flags.contains('y'),
+        names,
+    });
+    CACHE.with(|c| c.borrow_mut().insert(key, data.clone()));
+    Ok(data)
+}
+
+impl RegexData {
+    pub fn group_count(&self) -> usize {
+        self.names.len()
+    }
+
+    pub fn has_names(&self) -> bool {
+        self.names.iter().any(|n| n.is_some())
+    }
+
+    pub fn find_at(&self, text: &str, pos: usize) -> Result<Option<Match>, String> {
+        self.find_from(text, pos, self.sticky)
+    }
+
+    pub fn find_from(&self, text: &str, pos: usize, sticky: bool) -> Result<Option<Match>, String> {
+        if pos > text.len() {
+            return Ok(None);
+        }
+        let caps = self
+            .re
+            .captures_from_pos(text, pos)
+            .map_err(|e| format!("RegExp execution failed: {e}"))?;
+        let Some(caps) = caps else {
+            return Ok(None);
+        };
+        let whole = caps.get(0).expect("group 0");
+        if sticky && whole.start() != pos {
+            return Ok(None);
+        }
+        let groups = (0..self.group_count())
+            .map(|i| caps.get(i).map(|m| (m.start(), m.end())))
+            .collect();
+        Ok(Some(Match {
+            start: whole.start(),
+            end: whole.end(),
+            groups,
+        }))
+    }
+}
+
+pub fn utf16_index(s: &str, byte: usize) -> usize {
+    if s.is_ascii() {
+        return byte;
+    }
+    s[..byte.min(s.len())].encode_utf16().count()
+}
+
+pub fn byte_index(s: &str, unit: usize) -> usize {
+    if s.is_ascii() {
+        return unit.min(s.len());
+    }
+    let mut count = 0;
+    for (b, ch) in s.char_indices() {
+        if count >= unit {
+            return b;
+        }
+        count += ch.len_utf16();
+    }
+    s.len()
+}
+
+pub fn next_char_boundary(s: &str, byte: usize) -> usize {
+    match s[byte..].chars().next() {
+        Some(c) => byte + c.len_utf8(),
+        None => byte + 1,
+    }
+}

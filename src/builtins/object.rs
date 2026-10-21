@@ -139,6 +139,7 @@ fn object_to_string(_vm: &mut Vm, this: Value, _args: &[Value]) -> R {
             ObjKind::Set(_) => "Set",
             ObjKind::Iter(_) => "Iterator",
             ObjKind::Promise(_) => "Promise",
+            ObjKind::RegExp(_) => "RegExp",
             ObjKind::Coroutine(_) => "Generator",
             ObjKind::Accessor(_) | ObjKind::Ordinary => "Object",
         },

@@ -15,6 +15,7 @@ pub struct Obj {
     pub props: RefCell<PropMap>,
     pub proto: RefCell<Option<Rc<Obj>>>,
     pub frozen: Cell<bool>,
+    pub(crate) gc_slot: Cell<u32>,
 }
 
 pub enum ObjKind {
@@ -30,6 +31,12 @@ pub enum ObjKind {
     Accessor(Accessor),
     Promise(RefCell<PromiseData>),
     Coroutine(Coroutine),
+    RegExp(RegExpObj),
+}
+
+pub struct RegExpObj {
+    pub data: Rc<crate::regexp::RegexData>,
+    pub last_index: Cell<f64>,
 }
 
 pub struct Symbol {
@@ -43,6 +50,10 @@ pub const ASYNC_ITER_KEY: &str = "\u{0}@@asyncIterator:Symbol.asyncIterator";
 
 pub fn is_symbol_key(k: &str) -> bool {
     k.starts_with(SYMBOL_PREFIX)
+}
+
+pub fn is_private_key(k: &str) -> bool {
+    k.starts_with("\u{0}#")
 }
 
 pub fn symbol_key_description(k: &str) -> &str {
@@ -99,7 +110,7 @@ pub struct SavedFrame {
     pub ip: usize,
     pub stack: Vec<Value>,
     pub handlers: Vec<(usize, usize)>,
-    pub upvalues: Vec<(Rc<RefCell<Upvalue>>, usize)>,
+    pub upvalues: Vec<(Rc<UpCell>, usize)>,
     pub started: bool,
 }
 
@@ -111,9 +122,32 @@ pub struct Coroutine {
 }
 
 pub struct Closure {
+    pub(crate) gc_slot: Cell<u32>,
     pub proto: Rc<FunctionProto>,
-    pub upvalues: Box<[Rc<RefCell<Upvalue>>]>,
+    pub upvalues: Box<[Rc<UpCell>]>,
     pub home: RefCell<Option<Rc<Obj>>>,
+}
+
+pub struct UpCell {
+    pub value: RefCell<Upvalue>,
+    pub(crate) gc_slot: Cell<u32>,
+}
+
+impl UpCell {
+    pub fn new(u: Upvalue) -> Rc<UpCell> {
+        Rc::new(UpCell {
+            value: RefCell::new(u),
+            gc_slot: Cell::new(u32::MAX),
+        })
+    }
+
+    pub fn borrow(&self) -> std::cell::Ref<'_, Upvalue> {
+        self.value.borrow()
+    }
+
+    pub fn borrow_mut(&self) -> std::cell::RefMut<'_, Upvalue> {
+        self.value.borrow_mut()
+    }
 }
 
 pub enum Upvalue {
@@ -238,12 +272,15 @@ impl Hash for MapKey {
 
 impl Obj {
     pub fn new(kind: ObjKind, proto: Option<Rc<Obj>>) -> Rc<Obj> {
-        Rc::new(Obj {
+        let o = Rc::new(Obj {
             kind,
             props: RefCell::new(PropMap::default()),
             proto: RefCell::new(proto),
             frozen: Cell::new(false),
-        })
+            gc_slot: Cell::new(u32::MAX),
+        });
+        crate::gc::register(&o);
+        o
     }
 
     pub fn is_callable(&self) -> bool {

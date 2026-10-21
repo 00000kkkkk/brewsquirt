@@ -13,6 +13,7 @@ upvalues = "upvalues"
 disasm = "disasm"
 abd = "abd"
 anull = "anull"
+ba = "ba"
 
 [default.extend-identifiers]
 vrotdaem = "vrotdaem"

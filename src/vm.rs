@@ -6,7 +6,7 @@ use crate::inspect::{inspect_plain, inspect_top};
 use crate::module;
 use crate::number::{js_pow, to_int32, to_uint32};
 use crate::object::{
-    Accessor, Closure, ITER_KEY, IterState, MapKey, Obj, ObjKind, Upvalue, array_index,
+    Accessor, Closure, ITER_KEY, IterState, MapKey, Obj, ObjKind, UpCell, Upvalue, array_index,
     is_symbol_key,
 };
 use crate::parser;
@@ -65,6 +65,7 @@ pub struct Realm {
     pub generator_proto: Rc<Obj>,
     pub promise_proto: Rc<Obj>,
     pub symbol_proto: Rc<Obj>,
+    pub regexp_proto: Rc<Obj>,
     pub error_protos: Vec<Rc<Obj>>,
 }
 
@@ -89,6 +90,7 @@ impl Realm {
             generator_proto: mk(),
             promise_proto: mk(),
             symbol_proto: mk(),
+            regexp_proto: mk(),
             error_protos,
             object_proto,
         }
@@ -113,7 +115,7 @@ pub struct Vm {
     pub stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
     pub(crate) handlers: Vec<Handler>,
-    pub(crate) open_upvalues: Vec<Rc<RefCell<Upvalue>>>,
+    pub(crate) open_upvalues: Vec<Rc<UpCell>>,
     pub globals: FxHashMap<Rc<str>, Value>,
     pub realm: Realm,
     modules: FxHashMap<PathBuf, Value>,
@@ -188,6 +190,7 @@ impl Vm {
             promise_resolve_fn: Value::Undefined,
             promise_reject_fn: Value::Undefined,
         };
+        crate::gc::configure_from_env();
         builtins::install(&mut vm);
         builtins::run_prelude(&mut vm);
         vm
@@ -237,6 +240,7 @@ impl Vm {
 
     pub fn run_proto(&mut self, proto: Rc<FunctionProto>) -> Result<Value, Value> {
         let closure = Rc::new(Closure {
+            gc_slot: std::cell::Cell::new(u32::MAX),
             proto,
             upvalues: Box::new([]),
             home: RefCell::new(None),
@@ -416,7 +420,7 @@ impl Vm {
         ))
     }
 
-    pub(crate) fn capture_upvalue(&mut self, idx: usize) -> Rc<RefCell<Upvalue>> {
+    pub(crate) fn capture_upvalue(&mut self, idx: usize) -> Rc<UpCell> {
         let mut i = self.open_upvalues.len();
         while i > 0 {
             let ui = match &*self.open_upvalues[i - 1].borrow() {
@@ -431,7 +435,7 @@ impl Vm {
             }
             i -= 1;
         }
-        let u = Rc::new(RefCell::new(Upvalue::Open(idx)));
+        let u = UpCell::new(Upvalue::Open(idx));
         self.open_upvalues.insert(i, u.clone());
         u
     }
@@ -694,6 +698,23 @@ impl Vm {
             ObjKind::Set(s) if key == "size" => {
                 return Value::Number(s.borrow().len() as f64);
             }
+            ObjKind::RegExp(r) => {
+                let d = &r.data;
+                let flag = |c: char| Value::Bool(d.flags.contains(c));
+                match key {
+                    "lastIndex" => return Value::Number(r.last_index.get()),
+                    "source" => return Value::Str(d.source.clone()),
+                    "flags" => return Value::Str(d.flags.clone()),
+                    "global" => return flag('g'),
+                    "ignoreCase" => return flag('i'),
+                    "multiline" => return flag('m'),
+                    "sticky" => return flag('y'),
+                    "unicode" => return flag('u'),
+                    "dotAll" => return flag('s'),
+                    "hasIndices" => return flag('d'),
+                    _ => {}
+                }
+            }
             _ => {}
         }
         o.get_chain(key).unwrap_or_default()
@@ -797,6 +818,13 @@ impl Vm {
                             "Cannot set property {key} of {} which has only a getter",
                             inspect_plain(target)
                         )));
+                    }
+                }
+                if let ObjKind::RegExp(r) = &o.kind {
+                    if &*key == "lastIndex" {
+                        let n = self.to_number(&val)?;
+                        r.last_index.set(n);
+                        return Ok(());
                     }
                 }
                 if let ObjKind::Array(a) = &o.kind {
@@ -1738,6 +1766,10 @@ impl Vm {
                     }
                 }
                 Op::Call(argc, name) => {
+                    if crate::gc::due() {
+                        self.frames[fi].ip = ip;
+                        crate::gc::collect();
+                    }
                     let argc = argc as usize;
                     let ci = self.stack.len() - argc - 2;
                     self.frames[fi].ip = ip;
@@ -1860,6 +1892,10 @@ impl Vm {
                     reload!();
                 }
                 Op::Closure(i) => {
+                    if crate::gc::due() {
+                        self.frames[fi].ip = ip;
+                        crate::gc::collect();
+                    }
                     let p = cl.proto.functions[i as usize].clone();
                     let mut ups = Vec::with_capacity(p.upvalues.len());
                     for u in &p.upvalues {
@@ -1875,6 +1911,7 @@ impl Vm {
                         None
                     };
                     let c = Rc::new(Closure {
+                        gc_slot: std::cell::Cell::new(u32::MAX),
                         proto: p,
                         upvalues: ups.into_boxed_slice(),
                         home: RefCell::new(home),
@@ -1930,6 +1967,10 @@ impl Vm {
                     }
                 }
                 Op::NewObject => {
+                    if crate::gc::due() {
+                        self.frames[fi].ip = ip;
+                        crate::gc::collect();
+                    }
                     let o = self.new_object();
                     self.stack.push(Value::Object(o));
                 }
@@ -2083,6 +2124,12 @@ impl Vm {
                     });
                     return Ok(v);
                 }
+                Op::NewRegex(src, flags) => {
+                    let source = name!(src);
+                    let flags = name!(flags);
+                    let re = tri!(builtins::make_regexp(self, &source, &flags));
+                    self.stack.push(re);
+                }
                 Op::InitAccessor(k, setter) => {
                     let f = pop!();
                     if let Some(Value::Object(o)) = self.stack.last() {
@@ -2160,7 +2207,7 @@ impl Vm {
                     }
                 }
                 for (k, x) in o.props.borrow().iter() {
-                    if include_symbols || !is_symbol_key(k) {
+                    if (include_symbols && !crate::object::is_private_key(k)) || !is_symbol_key(k) {
                         out.push((k.clone(), x.clone()));
                     }
                 }

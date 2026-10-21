@@ -10,6 +10,7 @@ pub struct Expr {
 pub enum ExprKind {
     Number(f64),
     Str(Rc<str>),
+    Regex(Rc<str>, Rc<str>),
     Template(Vec<Rc<str>>, Vec<Expr>),
     Bool(bool),
     Null,

@@ -21,6 +21,35 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, SyntaxError> {
     Ok(out)
 }
 
+fn regex_allowed(prev: Option<&Tok>) -> bool {
+    match prev {
+        None => true,
+        Some(Tok::Num(_)) | Some(Tok::Str(_)) | Some(Tok::Template(_)) | Some(Tok::Regex(..)) => {
+            false
+        }
+        Some(Tok::Ident(name)) => matches!(
+            &**name,
+            "return"
+                | "typeof"
+                | "instanceof"
+                | "in"
+                | "of"
+                | "new"
+                | "delete"
+                | "void"
+                | "throw"
+                | "case"
+                | "do"
+                | "else"
+                | "yield"
+                | "await"
+                | "extends"
+        ),
+        Some(Tok::Punct(p)) => !matches!(p, P::RParen | P::RBracket | P::PlusPlus | P::MinusMinus),
+        Some(Tok::Eof) => true,
+    }
+}
+
 pub fn is_id_start(c: char) -> bool {
     c.is_alphabetic() || c == '_' || c == '$'
 }
@@ -96,7 +125,12 @@ impl Lexer {
                     depth -= 1;
                 }
             }
-            let tok = self.next_token(c)?;
+            let regex_ok = regex_allowed(out.last().map(|t| &t.tok));
+            let tok = if c == '/' && regex_ok {
+                self.regex()?
+            } else {
+                self.next_token(c)?
+            };
             out.push(Token {
                 tok,
                 line,
@@ -380,6 +414,69 @@ impl Lexer {
             other => s.push(other),
         }
         Ok(())
+    }
+
+    fn regex(&mut self) -> Result<Tok, SyntaxError> {
+        let (line, col) = (self.line, self.col);
+        self.bump();
+        let mut body = String::new();
+        let mut in_class = false;
+        loop {
+            match self.bump() {
+                None | Some('\n') => {
+                    return Err(SyntaxError::new(
+                        "Invalid regular expression: missing /",
+                        line,
+                        col,
+                    ));
+                }
+                Some('\\') => {
+                    body.push('\\');
+                    match self.bump() {
+                        None | Some('\n') => {
+                            return Err(SyntaxError::new(
+                                "Invalid regular expression: missing /",
+                                line,
+                                col,
+                            ));
+                        }
+                        Some(c) => body.push(c),
+                    }
+                }
+                Some('[') => {
+                    in_class = true;
+                    body.push('[');
+                }
+                Some(']') => {
+                    in_class = false;
+                    body.push(']');
+                }
+                Some('/') if !in_class => break,
+                Some(c) => body.push(c),
+            }
+        }
+        let mut flags = String::new();
+        while let Some(c) = self.peek() {
+            if is_id_continue(c) {
+                flags.push(c);
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        let valid = flags.chars().all(|c| "dgimsuyv".contains(c))
+            && flags
+                .chars()
+                .enumerate()
+                .all(|(i, c)| !flags[i + 1..].contains(c));
+        if !valid {
+            return Err(SyntaxError::new(
+                format!("Invalid regular expression flags '{flags}'"),
+                line,
+                col,
+            ));
+        }
+        Ok(Tok::Regex(body.into(), flags.into()))
     }
 
     fn template(&mut self) -> Result<Tok, SyntaxError> {
