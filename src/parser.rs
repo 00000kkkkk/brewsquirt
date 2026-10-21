@@ -81,7 +81,7 @@ struct Parser {
     fn_depth: u32,
     in_async: bool,
     in_generator: bool,
-    class_ids: Vec<u32>,
+    class_ids: Vec<(u32, Rc<Vec<Rc<str>>>)>,
     next_class_id: u32,
     args_used: Vec<bool>,
     span_start: Option<u32>,
@@ -197,17 +197,66 @@ impl Parser {
     }
 
     fn private_name(&mut self) -> R<Rc<str>> {
-        let Some(&id) = self.class_ids.last() else {
+        if self.class_ids.is_empty() {
             return Err(self.error("Private field must be declared in an enclosing class"));
+        }
+        let hash_end = self.peek().end;
+        self.advance();
+        let adjacent = self.peek().start == hash_end;
+        let name = match self.word() {
+            Some(name) if adjacent => name,
+            _ => return Err(self.unexpected()),
         };
         self.advance();
-        match self.word() {
-            Some(name) if !self.peek().nl_before => {
-                self.advance();
-                Ok(format!("\u{0}#{name}@{id}").into())
+        for (id, names) in self.class_ids.iter().rev() {
+            if names.iter().any(|n| *n == name) {
+                return Ok(format!("\u{0}#{name}@{id}").into());
             }
-            _ => Err(self.unexpected()),
         }
+        Err(self.error(format!(
+            "Private field '#{name}' must be declared in an enclosing class"
+        )))
+    }
+
+    fn prescan_private(&self) -> Vec<Rc<str>> {
+        let mut out: Vec<Rc<str>> = Vec::new();
+        let mut depth = 0i32;
+        let mut i = self.pos;
+        while let Some(t) = self.toks.get(i) {
+            match &t.tok {
+                Tok::Eof => break,
+                Tok::Punct(P::LBrace) | Tok::Punct(P::LParen) | Tok::Punct(P::LBracket) => {
+                    depth += 1
+                }
+                Tok::Punct(P::RBrace) | Tok::Punct(P::RParen) | Tok::Punct(P::RBracket) => {
+                    depth -= 1;
+                    if depth <= 0 {
+                        break;
+                    }
+                }
+                Tok::Punct(P::Hash) if depth == 1 && i > 0 => {
+                    if let Some(Tok::Ident(n)) = self.toks.get(i + 1).map(|x| &x.tok) {
+                        let prev = &self.toks[i - 1];
+                        let decl = t.nl_before
+                            || matches!(
+                                prev.tok,
+                                Tok::Punct(P::LBrace)
+                                    | Tok::Punct(P::Semi)
+                                    | Tok::Punct(P::RBrace)
+                                    | Tok::Punct(P::Star)
+                            )
+                            || matches!(&prev.tok, Tok::Ident(w) if !prev.escaped
+                                && matches!(&**w, "static" | "get" | "set" | "async"));
+                        if decl && !out.contains(n) {
+                            out.push(n.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        out
     }
 
     fn ident_name(&mut self) -> R<Rc<str>> {
@@ -1018,10 +1067,12 @@ impl Parser {
             None
         };
         self.next_class_id += 1;
-        self.class_ids.push(self.next_class_id);
+        let declared = self.prescan_private();
+        self.class_ids.push((self.next_class_id, Rc::new(declared)));
         let parsed = self.class_body(superclass.is_some());
         self.class_ids.pop();
         let (constructor, members) = parsed?;
+        check_class_members(&members, line)?;
         Ok(Rc::new(ClassDef {
             name,
             superclass,
@@ -2182,4 +2233,79 @@ impl Parser {
         }
         Ok(props)
     }
+}
+
+fn private_text(key: &PropKey) -> Option<&str> {
+    match key {
+        PropKey::Named(n) if n.starts_with("\u{0}#") => {
+            let body = &n[2..];
+            Some(body.rsplit_once('@').map_or(body, |(a, _)| a))
+        }
+        _ => None,
+    }
+}
+
+fn check_class_members(members: &[ClassMember], line: u32) -> R<()> {
+    let mut seen: Vec<(String, u8, bool)> = Vec::new();
+    for m in members {
+        let (key, kind, is_static, is_field) = match m {
+            ClassMember::Method { key, is_static, .. } => (key, 0u8, *is_static, false),
+            ClassMember::Field { key, is_static, .. } => (key, 0u8, *is_static, true),
+            ClassMember::Accessor {
+                key,
+                is_static,
+                setter,
+                ..
+            } => (key, if *setter { 2u8 } else { 1u8 }, *is_static, false),
+            ClassMember::StaticBlock(_) => continue,
+        };
+        if let Some(name) = private_text(key) {
+            if name == "constructor" {
+                return Err(SyntaxError::new(
+                    "Classes may not have a private field named '#constructor'",
+                    line,
+                    1,
+                ));
+            }
+            let clash = seen
+                .iter()
+                .filter(|(n, _, _)| n == name)
+                .any(|(_, k, s)| !(kind != 0 && *k != 0 && *k != kind && *s == is_static))
+                || seen.iter().filter(|(n, _, _)| n == name).count() > 1;
+            if clash {
+                return Err(SyntaxError::new(
+                    format!("Identifier '#{name}' has already been declared"),
+                    line,
+                    1,
+                ));
+            }
+            seen.push((name.to_string(), kind, is_static));
+            continue;
+        }
+        let PropKey::Named(n) = key else {
+            continue;
+        };
+        if is_field && (&**n == "constructor" || (is_static && &**n == "prototype")) {
+            return Err(SyntaxError::new(
+                format!("Classes may not have a field named '{n}'"),
+                line,
+                1,
+            ));
+        }
+        if !is_field && is_static && &**n == "prototype" {
+            return Err(SyntaxError::new(
+                "Classes may not have a static property named 'prototype'",
+                line,
+                1,
+            ));
+        }
+        if kind != 0 && !is_static && &**n == "constructor" {
+            return Err(SyntaxError::new(
+                "Class constructor may not be an accessor",
+                line,
+                1,
+            ));
+        }
+    }
+    Ok(())
 }

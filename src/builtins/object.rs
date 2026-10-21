@@ -227,6 +227,7 @@ fn object_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
             ObjKind::Primitive(Value::Str(_)) => "String",
             ObjKind::Primitive(Value::Number(_)) => "Number",
             ObjKind::Primitive(Value::Bool(_)) => "Boolean",
+            ObjKind::Ordinary if o.flags.get() & crate::object::ARGUMENTS != 0 => "Arguments",
             ObjKind::Proxy(p) => {
                 let t = p.target.borrow().clone();
                 match t {
@@ -693,7 +694,15 @@ fn function_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         body
     );
     let dir = std::env::current_dir().unwrap_or_default();
-    let proto = match vm.compile(&src, "<anonymous>", dir, crate::compiler::Mode::Repl) {
+    let trimmed = body.trim_start();
+    let sloppy = !(trimmed.starts_with("\"use strict\"") || trimmed.starts_with("'use strict'"));
+    let proto = match vm.compile_unit(
+        &src,
+        "<anonymous>",
+        dir,
+        crate::compiler::Mode::Repl,
+        sloppy,
+    ) {
         Ok(p) => p,
         Err(e) => return Err(vm.syntax_error_value(&e, "<anonymous>")),
     };

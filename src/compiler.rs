@@ -360,6 +360,7 @@ impl Compiler {
             uses_arguments: st.uses_arguments,
             is_async: st.is_async,
             is_generator: st.is_generator,
+            sloppy: self.module.sloppy && st.kind != ProtoKind::Arrow,
             code: st.code,
             lines: st.lines,
             consts: st.consts,
@@ -1821,61 +1822,79 @@ impl Compiler {
         Ok((parent.functions.len() - 1) as u32)
     }
 
-    fn function_body(&mut self, f: &FuncDef, kind: ProtoKind, self_name: Option<Rc<str>>) -> R<()> {
-        self.begin_scope();
-        if kind == ProtoKind::Arrow {
-            self.add_local("".into(), true);
-        } else {
-            self.add_local("this".into(), true);
-        }
-        let mut pattern_params = Vec::new();
-        for (i, p) in f.params.iter().enumerate() {
-            match &p.pattern {
-                Pattern::Ident(n) => {
-                    if self.resolve_local(self.states.len() - 1, n).is_some() && &**n != "this" {
-                        return Err(self.err(format!("Duplicate parameter name '{n}'")));
-                    }
-                    self.add_local(n.clone(), false);
-                }
-                _ => {
-                    let h = self.hidden_name("param");
-                    self.add_local(h, false);
-                    pattern_params.push((i + 1) as u32);
-                }
-            }
-        }
+    fn param_counts(&mut self, f: &FuncDef) {
         let arity = f
             .params
             .iter()
             .position(|p| p.default.is_some())
             .unwrap_or(f.params.len());
-        {
-            let st = self.st();
-            st.num_params = f.params.len() as u32;
-            st.arity = arity as u32;
-            st.has_rest = f.rest.is_some();
-        }
-        let mut rest_pattern = None;
-        if let Some(r) = &f.rest {
-            match r {
-                Pattern::Ident(n) => {
-                    self.add_local(n.clone(), false);
-                }
-                _ => {
-                    let h = self.hidden_name("rest");
-                    let slot = self.add_local(h, false);
-                    rest_pattern = Some((slot, r));
-                }
-            }
-        }
+        let st = self.st();
+        st.num_params = f.params.len() as u32;
+        st.arity = arity as u32;
+        st.has_rest = f.rest.is_some();
+    }
+
+    fn arguments_local(&mut self, f: &FuncDef) {
         if f.uses_arguments && f.kind != FuncKind::Arrow {
             self.add_local("arguments".into(), false);
             self.st().uses_arguments = true;
         }
+    }
+
+    fn simple_params(&mut self, f: &FuncDef) -> R<()> {
+        for p in &f.params {
+            if let Pattern::Ident(n) = &p.pattern {
+                if self.resolve_local(self.states.len() - 1, n).is_some() && &**n != "this" {
+                    return Err(self.err(format!("Duplicate parameter name '{n}'")));
+                }
+                self.add_local(n.clone(), false);
+            }
+        }
+        self.param_counts(f);
+        if let Some(Pattern::Ident(n)) = &f.rest {
+            if self.resolve_local(self.states.len() - 1, n).is_some() {
+                return Err(self.err(format!("Duplicate parameter name '{n}'")));
+            }
+            self.add_local(n.clone(), false);
+        }
+        self.arguments_local(f);
+        Ok(())
+    }
+
+    fn complex_params(&mut self, f: &FuncDef) -> R<()> {
+        let mut raw = Vec::with_capacity(f.params.len());
+        for _ in &f.params {
+            let h = self.hidden_name("param");
+            raw.push(self.add_local(h, false));
+        }
+        self.param_counts(f);
+        let rest_raw = match &f.rest {
+            Some(_) => {
+                let h = self.hidden_name("rest");
+                Some(self.add_local(h, false))
+            }
+            None => None,
+        };
+        self.arguments_local(f);
+        let mut names = Vec::new();
+        for p in &f.params {
+            p.pattern.bound_names(&mut names);
+        }
+        if let Some(r) = &f.rest {
+            r.bound_names(&mut names);
+        }
+        for (i, n) in names.iter().enumerate() {
+            if names[..i].contains(n) {
+                return Err(self.err(format!("Duplicate parameter name '{n}'")));
+            }
+        }
+        for n in &names {
+            self.emit(Op::Uninit);
+            self.add_lexical(n.clone(), false);
+        }
         for (i, p) in f.params.iter().enumerate() {
+            self.emit(Op::GetLocal(raw[i]));
             if let Some(d) = &p.default {
-                let slot = (i + 1) as u32;
-                self.emit(Op::GetLocal(slot));
                 let j = self.emit(Op::JumpIfNotUndef(0));
                 let name = match &p.pattern {
                     Pattern::Ident(n) => Some(n.clone()),
@@ -1883,30 +1902,41 @@ impl Compiler {
                 };
                 self.expr_named(d, name.as_ref())?;
                 self.patch(j);
-                self.emit(Op::SetLocal(slot));
-                self.emit(Op::Pop);
             }
+            self.bind_pattern(&p.pattern, BindMode::Init)?;
+            self.mark_init_pattern(&p.pattern);
         }
-        let mut names = Vec::new();
-        for &slot in &pattern_params {
-            f.params[(slot - 1) as usize]
-                .pattern
-                .bound_names(&mut names);
-        }
-        if let Some((_, r)) = rest_pattern {
-            r.bound_names(&mut names);
-        }
-        for n in &names {
-            self.emit(Op::Undefined);
-            self.add_local(n.clone(), false);
-        }
-        for &slot in &pattern_params {
-            self.emit(Op::GetLocal(slot));
-            self.bind_pattern(&f.params[(slot - 1) as usize].pattern, BindMode::Init)?;
-        }
-        if let Some((slot, r)) = rest_pattern {
+        if let (Some(r), Some(slot)) = (&f.rest, rest_raw) {
             self.emit(Op::GetLocal(slot));
             self.bind_pattern(r, BindMode::Init)?;
+            self.mark_init_pattern(r);
+        }
+        Ok(())
+    }
+
+    fn function_body(&mut self, f: &FuncDef, kind: ProtoKind, self_name: Option<Rc<str>>) -> R<()> {
+        self.begin_scope();
+        if kind == ProtoKind::Arrow {
+            self.add_local("".into(), true);
+        } else {
+            self.add_local("this".into(), true);
+        }
+        let simple = f
+            .params
+            .iter()
+            .all(|p| p.default.is_none() && matches!(p.pattern, Pattern::Ident(_)))
+            && f.rest
+                .as_ref()
+                .is_none_or(|r| matches!(r, Pattern::Ident(_)));
+        if simple {
+            self.simple_params(f)?;
+        } else {
+            self.complex_params(f)?;
+        }
+        if f.is_generator {
+            self.emit(Op::Undefined);
+            self.emit_yield()?;
+            self.emit(Op::Pop);
         }
         if let Some(n) = self_name {
             if self.resolve_local(self.states.len() - 1, &n).is_none() {

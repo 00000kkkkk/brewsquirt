@@ -65,6 +65,28 @@ pub fn install(vm: &mut Vm) {
     }
 
     let fp = vm.realm.function_proto.clone();
+    let thrower = native_fn(vm, "", 0, throw_type_error);
+    if let Value::Object(t) = &thrower {
+        t.set_with_attrs(
+            "name",
+            "".into(),
+            crate::object::NON_ENUM | crate::object::READ_ONLY | crate::object::NON_CONFIG,
+        );
+        t.set_with_attrs(
+            "length",
+            Value::Number(0.0),
+            crate::object::NON_ENUM | crate::object::READ_ONLY | crate::object::NON_CONFIG,
+        );
+        t.flags.set(t.flags.get() | crate::object::NOT_EXTENSIBLE);
+    }
+    vm.thrower = thrower.clone();
+    for name in ["caller", "arguments"] {
+        fp.set_with_attrs(
+            name,
+            raw_accessor(thrower.clone(), thrower.clone()),
+            NON_ENUM,
+        );
+    }
     fp.set_with_attrs("name", "".into(), NON_ENUM | crate::object::READ_ONLY);
     fp.set_with_attrs(
         "length",
@@ -161,6 +183,12 @@ fn regexp_prop<const I: usize>(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     Err(vm.type_error(format!(
         "RegExp.prototype.{name} getter called on non-RegExp object"
     )))
+}
+
+fn throw_type_error(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    Err(vm.type_error(
+        "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them",
+    ))
 }
 
 fn symbol_description(vm: &mut Vm, this: Value, _args: &[Value]) -> R {

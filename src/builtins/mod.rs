@@ -4,7 +4,7 @@ mod collections;
 mod date;
 mod extras;
 pub mod intl;
-mod intrinsics;
+pub mod intrinsics;
 mod json;
 pub mod node;
 pub mod reflect;

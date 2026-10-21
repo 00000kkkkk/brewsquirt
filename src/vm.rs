@@ -265,6 +265,7 @@ pub struct Vm {
     pub iter_value_fn: Value,
     pub default_has_instance: Value,
     pub proto_accessor: Value,
+    pub(crate) thrower: Value,
     pub(crate) array_species: Value,
     pub(crate) binary_ctors: Vec<Value>,
     pub(crate) pristine: Option<Box<Pristine>>,
@@ -337,6 +338,7 @@ impl Vm {
             iter_value_fn: Value::Undefined,
             default_has_instance: Value::Undefined,
             proto_accessor: Value::Undefined,
+            thrower: Value::Undefined,
             array_species: Value::Undefined,
             binary_ctors: Vec::new(),
             pristine: None,
@@ -375,6 +377,17 @@ impl Vm {
         dir: PathBuf,
         mode: Mode,
     ) -> Result<Rc<FunctionProto>, SyntaxError> {
+        self.compile_unit(src, name, dir, mode, false)
+    }
+
+    pub fn compile_unit(
+        &self,
+        src: &str,
+        name: &str,
+        dir: PathBuf,
+        mode: Mode,
+        sloppy: bool,
+    ) -> Result<Rc<FunctionProto>, SyntaxError> {
         let ast = parser::parse(src)?;
         compile_module(
             &ast,
@@ -382,6 +395,7 @@ impl Vm {
                 name: name.into(),
                 dir,
                 source: src.into(),
+                sloppy,
             }),
             mode,
         )
@@ -433,6 +447,26 @@ impl Vm {
             ErrorKind::ReferenceError,
             format!("Cannot access '{name}' before initialization"),
         )
+    }
+
+    pub fn new_arguments(&mut self, items: Vec<Value>) -> Value {
+        let o = Obj::new(ObjKind::Ordinary, Some(self.realm.object_proto.clone()));
+        let len = items.len();
+        for (i, v) in items.into_iter().enumerate() {
+            o.set_own(i.to_string(), v);
+        }
+        o.set_with_attrs("length", Value::Number(len as f64), crate::object::NON_ENUM);
+        if let Some(f) = self.realm.array_proto.get_own(ITER_KEY) {
+            o.set_with_attrs(ITER_KEY, f, crate::object::NON_ENUM);
+        }
+        let t = self.thrower.clone();
+        o.set_with_attrs(
+            "callee",
+            crate::builtins::intrinsics::raw_accessor(t.clone(), t),
+            crate::object::NON_ENUM | crate::object::NON_CONFIG,
+        );
+        o.flags.set(crate::object::ARGUMENTS);
+        Value::Object(o)
     }
 
     pub fn global_this(&self) -> Value {
@@ -937,6 +971,16 @@ impl Vm {
         let p = &c.proto;
         let np = p.num_params as usize;
         let ci = self.stack.len() - argc - 2;
+        if p.sloppy && !construct {
+            match &self.stack[ci + 1] {
+                Value::Undefined | Value::Null => self.stack[ci + 1] = self.global_this(),
+                Value::Object(_) => {}
+                v => {
+                    let w = self.wrap_primitive(v.clone());
+                    self.stack[ci + 1] = Value::Object(w);
+                }
+            }
+        }
         let all_args = p
             .uses_arguments
             .then(|| self.stack[ci + 2..ci + 2 + argc].to_vec());
@@ -957,7 +1001,7 @@ impl Vm {
             self.stack.truncate(ci + 2 + np);
         }
         if let Some(all) = all_args {
-            let arr = self.new_array(all);
+            let arr = self.new_arguments(all);
             self.stack.push(arr);
         }
         self.frames.push(Frame {
@@ -1304,6 +1348,20 @@ impl Vm {
                 }
                 {
                     match key {
+                        "prototype" if c.proto.is_generator => {
+                            let base = if c.proto.is_async {
+                                self.realm.async_generator_proto.clone()
+                            } else {
+                                self.realm.generator_proto.clone()
+                            };
+                            let p = Obj::new(ObjKind::Ordinary, Some(base));
+                            o.set_with_attrs(
+                                "prototype",
+                                Value::Object(p.clone()),
+                                crate::object::NON_ENUM | crate::object::NON_CONFIG,
+                            );
+                            return Value::Object(p);
+                        }
                         "prototype" if c.proto.is_constructor() => {
                             let p = self.new_object();
                             p.set_hidden("constructor", Value::Object(o.clone()));

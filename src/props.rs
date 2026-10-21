@@ -164,7 +164,7 @@ impl Vm {
                     "length" if gone & LENGTH_DELETED == 0 => {
                         Some((Value::Number(c.proto.arity as f64), NON_ENUM | READ_ONLY))
                     }
-                    "prototype" if c.proto.is_constructor() => {
+                    "prototype" if c.proto.is_constructor() || c.proto.is_generator => {
                         let v = self.get_obj(o, "prototype");
                         Some((v, NON_ENUM | NON_CONFIG))
                     }

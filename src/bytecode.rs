@@ -184,6 +184,7 @@ pub struct ModuleInfo {
     pub name: Rc<str>,
     pub dir: PathBuf,
     pub source: Rc<str>,
+    pub sloppy: bool,
 }
 
 #[derive(Debug)]
@@ -196,6 +197,7 @@ pub struct FunctionProto {
     pub uses_arguments: bool,
     pub is_async: bool,
     pub is_generator: bool,
+    pub sloppy: bool,
     pub code: Vec<Op>,
     pub lines: Vec<u32>,
     pub consts: Vec<Value>,

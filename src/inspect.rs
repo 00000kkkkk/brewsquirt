@@ -900,6 +900,38 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
                 inner,
             )
         }
+        ObjKind::Ordinary if o.flags.get() & crate::object::ARGUMENTS != 0 => {
+            let len = match o.get_own("length") {
+                Some(Value::Number(n)) if n >= 0.0 => n as usize,
+                _ => 0,
+            };
+            if len == 0 {
+                return "[Arguments] []".to_string();
+            }
+            if rt > MAX_DEPTH {
+                return "[Arguments]".to_string();
+            }
+            let inner = enter(ctx, ptr, rt);
+            let output: Vec<String> = (0..len.min(MAX_ITEMS))
+                .map(|i| {
+                    let v = o.get_own(&i.to_string()).unwrap_or_default();
+                    child(ctx, &v, inner)
+                })
+                .collect();
+            let mut base = "[Arguments]".to_string();
+            leave(ctx, ptr, &mut base);
+            reduce(
+                ctx,
+                output,
+                Shape {
+                    base,
+                    open: "[".to_string(),
+                    close: "]",
+                    array: Some((len > MAX_ITEMS, false)),
+                },
+                inner,
+            )
+        }
         ObjKind::Ordinary => {
             let cname = class_name(o);
             let tag = match o.get_chain(crate::object::TO_STRING_TAG_KEY) {

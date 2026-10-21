@@ -22,6 +22,7 @@ pub const HAS_HOLES: u8 = 8;
 pub const NAME_DELETED: u8 = 16;
 pub const LENGTH_DELETED: u8 = 32;
 pub const DETACHED: u8 = 64;
+pub const ARGUMENTS: u8 = 128;
 
 #[derive(Default)]
 struct PropExtra {
