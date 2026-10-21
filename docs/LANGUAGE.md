@@ -1,6 +1,6 @@
 # JavaSquirt Language Reference
 
-This document describes JavaSquirt 0.1.0. JavaSquirt follows JavaScript semantics: for every
+This document describes JavaSquirt 0.2.0. JavaSquirt follows JavaScript semantics: for every
 supported feature, a program should print the same output under `jsq` as under Node.js. Features
 that are not implemented yet are listed in [Not yet supported](#not-yet-supported).
 
@@ -16,6 +16,9 @@ that are not implemented yet are listed in [Not yet supported](#not-yet-supporte
 - [Control flow](#control-flow)
 - [Errors and exceptions](#errors-and-exceptions)
 - [Classes](#classes)
+- [Getters and setters](#getters-and-setters)
+- [Async functions and promises](#async-functions-and-promises)
+- [Generators and iterators](#generators-and-iterators)
 - [Modules](#modules)
 - [Builtins](#builtins)
 - [CLI reference](#cli-reference)
@@ -592,6 +595,31 @@ console.log(odd.join(","))
 1,3,5,7
 ```
 
+### Labeled statements
+
+A label names a loop or a block. `break label` leaves the labeled statement, `continue label`
+starts the next iteration of the labeled loop.
+
+```js
+outer: for (let i = 0; i < 3; i++) {
+  for (let j = 0; j < 3; j++) {
+    if (j === 1) continue outer
+    if (i === 2) break outer
+    console.log(i, j)
+  }
+}
+
+check: {
+  if (Date.now() > 0) break check
+  console.log("never printed")
+}
+```
+
+```text
+0 0
+1 0
+```
+
 ## Errors and exceptions
 
 ### `throw`, `try`, `catch`, `finally`
@@ -718,6 +746,152 @@ Rules:
 - `super.method()` calls the parent prototype's method with the current `this`.
 - Methods live on the prototype and are shared by all instances.
 - `instanceof` checks whether the constructor's prototype is on the object's prototype chain.
+
+## Getters and setters
+
+`get` and `set` define accessor properties in classes (instance and `static`) and in object
+literals. Reading the property calls the getter, assigning calls the setter. A property with only
+a getter throws a `TypeError` when assigned.
+
+```js
+class Temperature {
+  constructor(c) {
+    this.c = c
+  }
+  get fahrenheit() {
+    return this.c * 1.8 + 32
+  }
+  set fahrenheit(f) {
+    this.c = (f - 32) / 1.8
+  }
+}
+
+const t = new Temperature(100)
+t.fahrenheit = 212
+console.log(t.fahrenheit, t.c)
+
+const user = {
+  first: "Java",
+  last: "Squirt",
+  get full() {
+    return `${this.first} ${this.last}`
+  },
+}
+console.log(user.full, user)
+```
+
+```text
+212 100
+Java Squirt { first: 'Java', last: 'Squirt', full: [Getter] }
+```
+
+`Object.defineProperty(obj, key, { get, set })` defines accessors at runtime, and
+`super.prop` inside a class accessor reads the parent's accessor.
+
+## Async functions and promises
+
+`async` functions always return a `Promise`. Inside them, `await` suspends the function until the
+awaited value settles, without blocking anything else. `await` also works at the top level of a
+module.
+
+```js
+const wait = (ms, value) => new Promise((resolve) => setTimeout(() => resolve(value), ms))
+
+async function load(id) {
+  await wait(5)
+  if (id < 0) throw new RangeError(`bad id ${id}`)
+  return { id }
+}
+
+try {
+  await load(-1)
+} catch (e) {
+  console.log(e.name)
+}
+
+const results = await Promise.all([load(1), load(2), 3])
+console.log(results)
+console.log(await Promise.race([wait(50, "slow"), wait(1, "fast")]))
+```
+
+```text
+RangeError
+[ { id: 1 }, { id: 2 }, 3 ]
+fast
+```
+
+The event loop follows JavaScript ordering: synchronous code first, then every queued microtask
+(promise reactions, `queueMicrotask`), then timers in order of their due time.
+
+| API                                    | Description                                            |
+| -------------------------------------- | ------------------------------------------------------ |
+| `new Promise((resolve, reject) => {})` | Create a promise                                       |
+| `p.then(onFulfilled, onRejected)`      | Chain a reaction                                       |
+| `p.catch(onRejected)`, `p.finally(fn)` | Handle rejection, run cleanup                          |
+| `Promise.resolve(v)`, `Promise.reject(e)` | Settled promises                                    |
+| `Promise.all`, `allSettled`, `race`, `any` | Combine promises                                   |
+| `Promise.withResolvers()`              | `{ promise, resolve, reject }`                         |
+| `setTimeout(fn, ms, ...args)`          | Run once after `ms`, returns an id                     |
+| `setInterval(fn, ms, ...args)`         | Run every `ms`, returns an id                          |
+| `clearTimeout(id)`, `clearInterval(id)` | Cancel a timer                                        |
+| `queueMicrotask(fn)`                   | Run `fn` after the current job                         |
+| `sleep(ms)`                            | A promise that resolves after `ms`                     |
+
+A rejected promise that nobody handles stops the program with `Uncaught (in promise)` and a
+non-zero exit code.
+
+## Generators and iterators
+
+`function*` declares a generator. Calling it returns a generator object; each `next(value)` runs
+the body until the next `yield`. `yield*` delegates to another iterable.
+
+```js
+function* count(from, to) {
+  for (let i = from; i <= to; i++) yield i
+}
+
+function* all() {
+  yield* count(1, 3)
+  yield* ["a", "b"]
+}
+
+console.log([...all()])
+
+const talk = (function* () {
+  const name = yield "who?"
+  return `hi ${name}`
+})()
+console.log(talk.next().value, talk.next("squirt"))
+```
+
+```text
+[ 1, 2, 3, 'a', 'b' ]
+who? { value: 'hi squirt', done: true }
+```
+
+Any object with a `[Symbol.iterator]()` method is iterable: `for...of`, spread, array
+destructuring, `Array.from`, `new Map(...)` and `new Set(...)` all use the iterator protocol.
+
+```js
+class Range {
+  constructor(from, to) {
+    this.from = from
+    this.to = to
+  }
+  *[Symbol.iterator]() {
+    for (let i = this.from; i <= this.to; i++) yield i
+  }
+}
+console.log(Math.max(...new Range(1, 9)))
+```
+
+```text
+9
+```
+
+`Symbol(description)` creates a unique key. `Symbol.for(key)` returns a shared symbol from the
+global registry. Symbol-keyed properties are skipped by `Object.keys`, `for...in` and
+`JSON.stringify`.
 
 ## Modules
 
@@ -945,12 +1119,9 @@ Dependency specs:
 
 These are on the roadmap and currently produce a `SyntaxError` or are absent:
 
-- `async`/`await`, Promises and an event loop
-- Generators and `yield`
-- Getters and setters
 - Regular expression literals and `RegExp`
-- Symbols and the iterator protocol
-- Labeled statements
+- Async generators and `for await`
 - Private `#fields` and methods
+- `Date` beyond `Date.now()`
 - Tracing garbage collection
 - JIT compilation

@@ -186,7 +186,35 @@ fn format_value(
             }
         }
         Value::Object(o) => format_object(o, depth, seen, circ, top),
+        Value::Symbol(sym) => crate::builtins::symbol_text(sym),
     }
+}
+
+fn format_prop(
+    k: &str,
+    v: &Value,
+    depth: usize,
+    seen: &mut Vec<*const Obj>,
+    circ: &mut Vec<*const Obj>,
+) -> String {
+    let key = if crate::object::is_symbol_key(k) {
+        format!("Symbol({})", crate::object::symbol_key_description(k))
+    } else {
+        format_key(k)
+    };
+    if let Value::Object(a) = v {
+        if let ObjKind::Accessor(acc) = &a.kind {
+            let g = !acc.get.borrow().is_undefined();
+            let st = !acc.set.borrow().is_undefined();
+            let text = match (g, st) {
+                (true, true) => "[Getter/Setter]",
+                (true, false) => "[Getter]",
+                _ => "[Setter]",
+            };
+            return format!("{key}: {text}");
+        }
+    }
+    format!("{key}: {}", format_value(v, depth + 1, seen, circ, false))
 }
 
 fn props_items(
@@ -195,21 +223,16 @@ fn props_items(
     seen: &mut Vec<*const Obj>,
     circ: &mut Vec<*const Obj>,
 ) -> Vec<String> {
-    let props: Vec<(Rc<str>, Value)> = o
+    let mut props: Vec<(Rc<str>, Value)> = o
         .props
         .borrow()
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    props.sort_by_key(|(k, _)| crate::object::is_symbol_key(k));
     props
         .iter()
-        .map(|(k, v)| {
-            format!(
-                "{}: {}",
-                format_key(k),
-                format_value(v, depth + 1, seen, circ, false)
-            )
-        })
+        .map(|(k, v)| format_prop(k, v, depth, seen, circ))
         .collect()
 }
 
@@ -320,6 +343,34 @@ fn format_object(
             wrap(&format!("Set({}) {{ ", vals.len()), items, " }")
         }
         ObjKind::Iter(_) => "Object [Iterator] {}".to_string(),
+        ObjKind::Coroutine(c) => {
+            if c.is_generator {
+                "Object [Generator] {}".to_string()
+            } else {
+                "Object [AsyncFunction] {}".to_string()
+            }
+        }
+        ObjKind::Accessor(_) => "[Getter/Setter]".to_string(),
+        ObjKind::Promise(p) => {
+            if depth > MAX_DEPTH {
+                return "[Promise]".to_string();
+            }
+            seen.push(ptr);
+            let inner = match &p.borrow().state {
+                crate::object::PromiseState::Pending => "<pending>".to_string(),
+                crate::object::PromiseState::Fulfilled(v) => {
+                    format_value(v, depth + 1, seen, circ, false)
+                }
+                crate::object::PromiseState::Rejected(e) => {
+                    format!(
+                        "<rejected> {}",
+                        format_value(e, depth + 1, seen, circ, false)
+                    )
+                }
+            };
+            seen.pop();
+            format!("Promise {{ {inner} }}")
+        }
         ObjKind::Ordinary => {
             let cname = class_name(o);
             if depth > MAX_DEPTH {

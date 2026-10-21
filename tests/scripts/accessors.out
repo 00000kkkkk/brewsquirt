@@ -1,0 +1,18 @@
+212 100 C
+0 32
+TypeError
+32F
+Java Squirt
+Deep Inject Deep Inject
+{ first: 'Deep', last: 'Inject', full: [Getter/Setter] }
+{"first":"Deep","last":"Inject","full":"Deep Inject"} [ 'first', 'last', 'full' ] [ [ 'x', 1 ] ]
+Deep Inject Deep Inject
+42 42 2 true
+pair 0 0
+pair 1 0
+in block
+n 6
+symbol Symbol(tag) tag false hidden [ 'visible' ]
+{ visible: 1, Symbol(tag): 'hidden' } Symbol(tag) true
+Cannot convert a Symbol value to a string
+sym key undefined

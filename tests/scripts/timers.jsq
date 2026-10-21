@@ -1,0 +1,14 @@
+let ticks = 0
+const id = setInterval(() => {
+  ticks++
+  console.log("tick", ticks)
+  if (ticks === 3) clearInterval(id)
+}, 5)
+setTimeout(() => console.log("after", ticks), 250)
+const cancelled = setTimeout(() => console.log("never"), 1)
+clearTimeout(cancelled)
+setTimeout((a, b) => console.log("args", a, b), 2, "x", "y")
+const started = performance.now()
+sleep(80).then(() => console.log("slept", performance.now() - started >= 79))
+Promise.resolve().then(() => console.log("micro first"))
+console.log("sync first")

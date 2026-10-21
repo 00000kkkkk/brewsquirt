@@ -260,7 +260,7 @@ fn set_entries(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 }
 
 fn iter_next(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let next = vm.iter_next(&this);
+    let next = vm.iter_next(&this)?;
     let o = vm.new_object();
     let done = next.is_none();
     o.set_own("value", next.unwrap_or_default());

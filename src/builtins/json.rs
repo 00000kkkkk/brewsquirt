@@ -63,7 +63,7 @@ impl Ser<'_> {
             }
         }
         match &v {
-            Value::Undefined => Ok(false),
+            Value::Undefined | Value::Symbol(_) => Ok(false),
             Value::Null => {
                 out.push_str("null");
                 Ok(true)
@@ -133,12 +133,15 @@ impl Ser<'_> {
                 .props
                 .borrow()
                 .iter()
+                .filter(|(k, _)| !crate::object::is_symbol_key(k))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
         };
         out.push('{');
         let mut first = true;
+        let receiver = Value::Object(o.clone());
         for (k, v) in entries {
+            let v = vm.resolve_accessor(v, &receiver)?;
             let mut piece = String::new();
             if !self.write(vm, &v, depth + 1, &mut piece)? {
                 continue;

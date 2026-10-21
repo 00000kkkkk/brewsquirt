@@ -1,0 +1,20 @@
+sync before
+start
+sync after
+end of script
+microtask
+async method
+arrow 42
+chain caught chain 2
+repo [ 1, 2 ] [ 'a', 'b' ]
+timeout 0
+order [ 't1', 't2' ]
+got { id: 1, name: 'user1' }
+caught RangeError bad id -1
+all [ 'user2', 'user3', 42, 'w' ]
+settled [ 'fulfilled', 'rejected' ]
+race fast
+any any-ok
+AggregateError [ 1, 2 ]
+main done
+finally

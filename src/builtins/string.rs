@@ -64,6 +64,9 @@ fn string_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     if args.is_empty() {
         return Ok("".into());
     }
+    if let Value::Symbol(s) = &args[0] {
+        return Ok(super::symbol_text(s).into());
+    }
     Ok(Value::Str(vm.to_string(&args[0])?))
 }
 

@@ -59,6 +59,8 @@ pub fn parse(src: &str) -> R<Vec<Stmt>> {
         pos: 0,
         no_in: false,
         fn_depth: 0,
+        in_async: false,
+        in_generator: false,
     };
     parser.program()
 }
@@ -73,6 +75,8 @@ struct Parser {
     pos: usize,
     no_in: bool,
     fn_depth: u32,
+    in_async: bool,
+    in_generator: bool,
 }
 
 impl Parser {
@@ -276,15 +280,22 @@ impl Parser {
             Some("function") => {
                 let line = self.line();
                 self.advance();
-                if self.is(P::Star) {
-                    return Err(self.error("Generators are not supported yet"));
-                }
+                let is_generator = self.eat(P::Star);
                 let name = self.binding_ident()?;
-                let f = self.function_rest(Some(name), FuncKind::Normal, line)?;
+                let f =
+                    self.function_full(Some(name), FuncKind::Normal, line, false, is_generator)?;
                 Ok(StmtKind::Function(f))
             }
-            Some("async") if self.is_kw_at(1, "function") => {
-                Err(self.error("async functions are not supported yet"))
+            Some("async") if self.is_kw_at(1, "function") && !self.peek_at(1).nl_before => {
+                let line = self.line();
+                self.advance();
+                self.advance();
+                if self.is(P::Star) {
+                    return Err(self.error("async generators are not supported yet"));
+                }
+                let name = self.binding_ident()?;
+                let f = self.function_full(Some(name), FuncKind::Normal, line, true, false)?;
+                Ok(StmtKind::Function(f))
             }
             Some("class") => Ok(StmtKind::Class(self.class(true)?)),
             Some("if") => {
@@ -338,19 +349,15 @@ impl Parser {
             }
             Some("break") => {
                 self.advance();
-                if matches!(self.peek().tok, Tok::Ident(_)) && !self.peek().nl_before {
-                    return Err(self.error("Labeled statements are not supported yet"));
-                }
+                let label = self.jump_label()?;
                 self.semicolon()?;
-                Ok(StmtKind::Break)
+                Ok(StmtKind::Break(label))
             }
             Some("continue") => {
                 self.advance();
-                if matches!(self.peek().tok, Tok::Ident(_)) && !self.peek().nl_before {
-                    return Err(self.error("Labeled statements are not supported yet"));
-                }
+                let label = self.jump_label()?;
                 self.semicolon()?;
-                Ok(StmtKind::Continue)
+                Ok(StmtKind::Continue(label))
             }
             Some("throw") => {
                 self.advance();
@@ -430,6 +437,13 @@ impl Parser {
                 Ok(StmtKind::Empty)
             }
             Some("with") => Err(self.error("'with' is not supported")),
+            Some(w) if !is_reserved(w) && self.is_at(1, P::Colon) => {
+                let label: Rc<str> = w.into();
+                self.advance();
+                self.advance();
+                let body = self.statement()?;
+                Ok(StmtKind::Labeled(label, Box::new(body)))
+            }
             _ => {
                 let e = self.expression()?;
                 self.semicolon()?;
@@ -730,20 +744,49 @@ impl Parser {
         }
     }
 
+    fn jump_label(&mut self) -> R<Option<Rc<str>>> {
+        match self.word() {
+            Some(w) if !self.peek().nl_before && !is_reserved(&w) => {
+                self.advance();
+                Ok(Some(w))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn function_rest(
         &mut self,
         name: Option<Rc<str>>,
         kind: FuncKind,
         line: u32,
     ) -> R<Rc<FuncDef>> {
-        let (params, rest) = self.params()?;
-        let body = self.function_body()?;
+        self.function_full(name, kind, line, false, false)
+    }
+
+    fn function_full(
+        &mut self,
+        name: Option<Rc<str>>,
+        kind: FuncKind,
+        line: u32,
+        is_async: bool,
+        is_generator: bool,
+    ) -> R<Rc<FuncDef>> {
+        let saved = (self.in_async, self.in_generator);
+        self.in_async = is_async;
+        self.in_generator = is_generator;
+        let parsed = self
+            .params()
+            .and_then(|(params, rest)| Ok((params, rest, self.function_body()?)));
+        (self.in_async, self.in_generator) = saved;
+        let (params, rest, body) = parsed?;
         Ok(Rc::new(FuncDef {
             name,
             params,
             rest,
             body: FuncBody::Block(body),
             kind,
+            is_async,
+            is_generator,
             line,
         }))
     }
@@ -941,16 +984,47 @@ impl Parser {
                     return Err(self.error("Static blocks are not supported yet"));
                 }
             }
-            if (self.is_kw("get") || self.is_kw("set")) && !ends_name(self, 1) {
-                return Err(self.error("Getters and setters are not supported yet"));
-            }
+            let mut is_async = false;
+            let mut is_generator = false;
+            let mut accessor = None;
             if self.is_kw("async") && !ends_name(self, 1) {
-                return Err(self.error("async methods are not supported yet"));
+                self.advance();
+                is_async = true;
             }
-            if self.is(P::Star) {
-                return Err(self.error("Generators are not supported yet"));
+            if self.eat(P::Star) {
+                is_generator = true;
+            }
+            if is_async && is_generator {
+                return Err(self.error("async generators are not supported yet"));
+            }
+            if !is_async
+                && !is_generator
+                && (self.is_kw("get") || self.is_kw("set"))
+                && !ends_name(self, 1)
+            {
+                accessor = Some(self.is_kw("set"));
+                self.advance();
             }
             let (key, _) = self.prop_key()?;
+            if let Some(setter) = accessor {
+                let fname = match &key {
+                    PropKey::Named(n) => Some(n.clone()),
+                    PropKey::Computed(_) => None,
+                };
+                let kind = if is_static {
+                    FuncKind::StaticMethod
+                } else {
+                    FuncKind::Method
+                };
+                let f = self.function_rest(fname, kind, mline)?;
+                members.push(ClassMember::Accessor {
+                    key,
+                    func: f,
+                    is_static,
+                    setter,
+                });
+                continue;
+            }
             if self.is(P::LParen) {
                 let is_ctor =
                     !is_static && matches!(&key, PropKey::Named(n) if &**n == "constructor");
@@ -969,7 +1043,14 @@ impl Parser {
                     PropKey::Named(n) => Some(n.clone()),
                     PropKey::Computed(_) => None,
                 };
-                let f = self.function_rest(fname, kind, mline)?;
+                if is_ctor && (is_async || is_generator) {
+                    return Err(SyntaxError::new(
+                        "Class constructor may not be async or a generator",
+                        mline,
+                        1,
+                    ));
+                }
+                let f = self.function_full(fname, kind, mline, is_async, is_generator)?;
                 if is_ctor {
                     if constructor.is_some() {
                         return Err(SyntaxError::new(
@@ -987,6 +1068,9 @@ impl Parser {
                     });
                 }
             } else {
+                if is_async || is_generator {
+                    return Err(self.unexpected());
+                }
                 let value = if self.eat(P::Eq) {
                     self.fn_depth += 1;
                     let v = self.assignment();
@@ -1058,8 +1142,30 @@ impl Parser {
         }
     }
 
-    fn arrow(&mut self) -> R<Expr> {
+    fn arrow(&mut self, is_async: bool) -> R<Expr> {
         let line = self.line();
+        let saved = (self.in_async, self.in_generator);
+        self.in_async = is_async;
+        self.in_generator = false;
+        let parsed = self.arrow_parts();
+        (self.in_async, self.in_generator) = saved;
+        let (params, rest, body) = parsed?;
+        Ok(Expr {
+            kind: ExprKind::Function(Rc::new(FuncDef {
+                name: None,
+                params,
+                rest,
+                body,
+                kind: FuncKind::Arrow,
+                is_async,
+                is_generator: false,
+                line,
+            })),
+            line,
+        })
+    }
+
+    fn arrow_parts(&mut self) -> R<(Vec<Param>, Option<Pattern>, FuncBody)> {
         let (params, rest) = if self.is(P::LParen) {
             self.params()?
         } else {
@@ -1081,15 +1187,28 @@ impl Parser {
             self.fn_depth -= 1;
             FuncBody::Expr(Box::new(e?))
         };
+        Ok((params, rest, body))
+    }
+
+    fn yield_expr(&mut self) -> R<Expr> {
+        let line = self.line();
+        self.advance();
+        let delegate = !self.peek().nl_before && self.eat(P::Star);
+        let ends = self.peek().nl_before
+            || self.is_eof()
+            || self.is(P::RParen)
+            || self.is(P::RBracket)
+            || self.is(P::RBrace)
+            || self.is(P::Comma)
+            || self.is(P::Semi)
+            || self.is(P::Colon);
+        let arg = if !delegate && ends {
+            None
+        } else {
+            Some(Box::new(self.assignment()?))
+        };
         Ok(Expr {
-            kind: ExprKind::Function(Rc::new(FuncDef {
-                name: None,
-                params,
-                rest,
-                body,
-                kind: FuncKind::Arrow,
-                line,
-            })),
+            kind: ExprKind::Yield { arg, delegate },
             line,
         })
     }
@@ -1122,7 +1241,7 @@ impl Parser {
 
     fn assignment(&mut self) -> R<Expr> {
         if self.is_arrow_ahead() {
-            return self.arrow();
+            return self.arrow(false);
         }
         if self.is_kw("async")
             && (self.is_at(1, P::LParen) || matches!(self.peek_at(1).tok, Tok::Ident(_)))
@@ -1131,12 +1250,15 @@ impl Parser {
             let save = self.pos;
             self.advance();
             if self.is_arrow_ahead() {
-                return Err(self.error("async arrow functions are not supported yet"));
+                return self.arrow(true);
             }
             self.pos = save;
         }
         if self.is_kw("yield") {
-            return Err(self.error("Generators are not supported yet"));
+            if self.in_generator {
+                return self.yield_expr();
+            }
+            return Err(self.error("yield is only valid in generator functions"));
         }
         let line = self.line();
         let lhs = self.conditional()?;
@@ -1239,7 +1361,7 @@ impl Parser {
                             default: Some(d),
                         }),
                         PropDef::Spread(x) => rest = Some(Box::new(self.expr_to_pattern(x)?)),
-                        PropDef::Method(..) => {
+                        PropDef::Method(..) | PropDef::Getter(..) | PropDef::Setter(..) => {
                             return Err(SyntaxError::new(
                                 "Invalid destructuring assignment target",
                                 line,
@@ -1383,7 +1505,17 @@ impl Parser {
             Tok::Ident(s) if &**s == "void" => UnaryOp::Void,
             Tok::Ident(s) if &**s == "delete" => UnaryOp::Delete,
             Tok::Ident(s) if &**s == "await" => {
-                return Err(self.error("await is not supported yet"));
+                if !self.in_async && self.fn_depth > 0 {
+                    return Err(self.error(
+                        "await is only valid in async functions and the top level of modules",
+                    ));
+                }
+                self.advance();
+                let operand = self.unary()?;
+                return Ok(Expr {
+                    kind: ExprKind::Await(Box::new(operand)),
+                    line,
+                });
             }
             Tok::Punct(P::PlusPlus) | Tok::Punct(P::MinusMinus) => {
                 let inc = self.is(P::PlusPlus);
@@ -1617,6 +1749,8 @@ impl Parser {
                         pos: 0,
                         no_in: false,
                         fn_depth: self.fn_depth,
+                        in_async: self.in_async,
+                        in_generator: self.in_generator,
                     };
                     if sub.is_eof() {
                         return Err(sub.error("Unexpected token '}'"));
@@ -1720,15 +1854,19 @@ impl Parser {
                     }
                     "function" => {
                         self.advance();
-                        if self.is(P::Star) {
-                            return Err(self.error("Generators are not supported yet"));
-                        }
+                        let is_generator = self.eat(P::Star);
                         let fname = if matches!(self.peek().tok, Tok::Ident(_)) {
                             Some(self.binding_ident()?)
                         } else {
                             None
                         };
-                        ExprKind::Function(self.function_rest(fname, FuncKind::Normal, line)?)
+                        ExprKind::Function(self.function_full(
+                            fname,
+                            FuncKind::Normal,
+                            line,
+                            false,
+                            is_generator,
+                        )?)
                     }
                     "class" => ExprKind::Class(self.class(false)?),
                     "super" => {
@@ -1741,8 +1879,24 @@ impl Parser {
                             return Err(self.error("'super' keyword unexpected here"));
                         }
                     }
-                    "async" if self.is_kw_at(1, "function") => {
-                        return Err(self.error("async functions are not supported yet"));
+                    "async" if self.is_kw_at(1, "function") && !self.peek_at(1).nl_before => {
+                        self.advance();
+                        self.advance();
+                        if self.is(P::Star) {
+                            return Err(self.error("async generators are not supported yet"));
+                        }
+                        let fname = if matches!(self.peek().tok, Tok::Ident(_)) {
+                            Some(self.binding_ident()?)
+                        } else {
+                            None
+                        };
+                        ExprKind::Function(self.function_full(
+                            fname,
+                            FuncKind::Normal,
+                            line,
+                            true,
+                            false,
+                        )?)
                     }
                     "import" => return Err(self.error("Dynamic import is not supported yet")),
                     n if is_reserved(n) => return Err(self.unexpected()),
@@ -1774,23 +1928,45 @@ impl Parser {
                         || p.is_at(1, P::RBrace)
                         || p.is_at(1, P::Eq)
                 };
-                if (self.is_kw("get") || self.is_kw("set")) && !plain_next(self) {
-                    return Err(self.error("Getters and setters are not supported yet"));
-                }
+                let mut is_async = false;
+                let mut is_generator = false;
+                let mut accessor = None;
                 if self.is_kw("async") && !plain_next(self) {
-                    return Err(self.error("async methods are not supported yet"));
+                    self.advance();
+                    is_async = true;
                 }
-                if self.is(P::Star) {
-                    return Err(self.error("Generators are not supported yet"));
+                if self.eat(P::Star) {
+                    is_generator = true;
+                }
+                if is_async && is_generator {
+                    return Err(self.error("async generators are not supported yet"));
+                }
+                if !is_async
+                    && !is_generator
+                    && (self.is_kw("get") || self.is_kw("set"))
+                    && !plain_next(self)
+                {
+                    accessor = Some(self.is_kw("set"));
+                    self.advance();
                 }
                 let (key, is_ident) = self.prop_key()?;
-                if self.is(P::LParen) {
-                    let name = match &key {
-                        PropKey::Named(n) => Some(n.clone()),
-                        PropKey::Computed(_) => None,
-                    };
+                let name = match &key {
+                    PropKey::Named(n) => Some(n.clone()),
+                    PropKey::Computed(_) => None,
+                };
+                if let Some(setter) = accessor {
                     let f = self.function_rest(name, FuncKind::Method, line)?;
+                    props.push(if setter {
+                        PropDef::Setter(key, f)
+                    } else {
+                        PropDef::Getter(key, f)
+                    });
+                } else if self.is(P::LParen) {
+                    let f =
+                        self.function_full(name, FuncKind::Method, line, is_async, is_generator)?;
                     props.push(PropDef::Method(key, f));
+                } else if is_async || is_generator {
+                    return Err(self.unexpected());
                 } else if self.eat(P::Colon) {
                     props.push(PropDef::KeyValue(key, self.assignment()?));
                 } else if is_ident {

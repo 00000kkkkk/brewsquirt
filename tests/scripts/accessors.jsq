@@ -1,0 +1,97 @@
+class Temperature {
+  constructor(celsius) {
+    this._c = celsius
+  }
+  get fahrenheit() {
+    return this._c * 1.8 + 32
+  }
+  set fahrenheit(f) {
+    this._c = (f - 32) / 1.8
+  }
+  get celsius() {
+    return this._c
+  }
+  static get unit() {
+    return "C"
+  }
+}
+const t = new Temperature(100)
+console.log(t.fahrenheit, t.celsius, Temperature.unit)
+t.fahrenheit = 32
+console.log(t.celsius, t.fahrenheit)
+try {
+  t.celsius = 5
+} catch (e) {
+  console.log(e.constructor.name)
+}
+
+class Hot extends Temperature {
+  get fahrenheit() {
+    return `${super.fahrenheit}F`
+  }
+}
+console.log(new Hot(0).fahrenheit)
+
+const user = {
+  first: "Java",
+  last: "Squirt",
+  get full() {
+    return `${this.first} ${this.last}`
+  },
+  set full(v) {
+    ;[this.first, this.last] = v.split(" ")
+  },
+}
+console.log(user.full)
+user.full = "Deep Inject"
+console.log(user.first, user.last, user.full)
+console.log(user)
+console.log(JSON.stringify(user), Object.keys(user), Object.entries({ get x() { return 1 } }))
+const copy = { ...user }
+console.log(copy.full, Object.getOwnPropertyDescriptor(copy, "full").value)
+
+const counter = {}
+let reads = 0
+Object.defineProperty(counter, "value", {
+  get() {
+    reads++
+    return 42
+  },
+})
+console.log(counter.value, counter.value, reads, "value" in counter)
+
+outer: for (let i = 0; i < 3; i++) {
+  for (let j = 0; j < 3; j++) {
+    if (j === 1) continue outer
+    if (i === 2) break outer
+    console.log("pair", i, j)
+  }
+}
+
+block: {
+  console.log("in block")
+  if (user.first) break block
+  console.log("never")
+}
+
+let n = 0
+loop: while (true) {
+  do {
+    n++
+    if (n > 5) break loop
+  } while (n % 2)
+}
+console.log("n", n)
+
+const s = Symbol("tag")
+const s2 = Symbol("tag")
+const holder = { [s]: "hidden", visible: 1 }
+console.log(typeof s, s.toString(), s.description, s === s2, holder[s], Object.keys(holder))
+console.log(holder, String(s), Symbol.for("k") === Symbol.for("k"))
+try {
+  `${s}`
+} catch (e) {
+  console.log(e.message)
+}
+const m = new Map([[s, "sym key"]])
+console.log(m.get(s), m.get(s2))

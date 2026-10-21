@@ -3,7 +3,9 @@ mod collections;
 mod json;
 mod number;
 mod object;
+mod promise;
 mod string;
+mod symbol;
 mod system;
 
 use crate::inspect::inspect_plain;
@@ -13,6 +15,8 @@ use crate::vm::Vm;
 use std::rc::Rc;
 
 pub use json::{json_parse, json_stringify};
+pub use promise::run_prelude;
+pub use symbol::{iter_result, symbol_text};
 
 pub fn arg(args: &[Value], i: usize) -> Value {
     args.get(i).cloned().unwrap_or_default()
@@ -85,6 +89,8 @@ pub fn install(vm: &mut Vm) {
     number::install(vm);
     json::install(vm);
     collections::install(vm);
+    promise::install(vm);
+    symbol::install(vm);
     system::install(vm);
 }
 

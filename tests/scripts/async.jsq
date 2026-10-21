@@ -1,0 +1,77 @@
+const log = []
+const wait = (ms, v) => new Promise((resolve) => setTimeout(() => resolve(v), ms))
+
+async function fetchUser(id) {
+  await wait(5)
+  if (id < 0) throw new RangeError(`bad id ${id}`)
+  return { id, name: `user${id}` }
+}
+
+async function main() {
+  console.log("start")
+  const user = await fetchUser(1)
+  console.log("got", user)
+  try {
+    await fetchUser(-1)
+  } catch (e) {
+    console.log("caught", e.name, e.message)
+  }
+  const all = await Promise.all([fetchUser(2), fetchUser(3), 42, wait(1, "w")])
+  console.log("all", all.map((u) => u?.name ?? u))
+  const settled = await Promise.allSettled([fetchUser(4), fetchUser(-4)])
+  console.log("settled", settled.map((r) => r.status))
+  const first = await Promise.race([wait(20, "slow"), wait(2, "fast")])
+  console.log("race", first)
+  const any = await Promise.any([Promise.reject(new Error("x")), wait(3, "any-ok")])
+  console.log("any", any)
+  try {
+    await Promise.any([Promise.reject(1), Promise.reject(2)])
+  } catch (e) {
+    console.log(e.name, e.errors)
+  }
+  return "main done"
+}
+
+console.log("sync before")
+main().then((v) => console.log(v)).finally(() => console.log("finally"))
+console.log("sync after")
+
+Promise.resolve(1)
+  .then((v) => v + 1)
+  .then((v) => {
+    throw new Error("chain " + v)
+  })
+  .catch((e) => console.log("chain caught", e.message))
+
+queueMicrotask(() => console.log("microtask"))
+setTimeout(() => console.log("timeout 0"), 0)
+console.log("end of script")
+
+const order = []
+setTimeout(() => order.push("t2"), 2)
+setTimeout(() => order.push("t1"), 1)
+setTimeout(() => console.log("order", order), 3)
+
+const arrow = async (x) => (await x) * 2
+arrow(Promise.resolve(21)).then((v) => console.log("arrow", v))
+
+const obj = {
+  async method() {
+    return this.value
+  },
+  value: "async method",
+}
+obj.method().then(console.log)
+
+class Repo {
+  constructor() {
+    this.items = []
+  }
+  async add(x) {
+    await null
+    this.items.push(x)
+    return this.items.length
+  }
+}
+const repo = new Repo()
+Promise.all([repo.add("a"), repo.add("b")]).then((n) => console.log("repo", n, repo.items))

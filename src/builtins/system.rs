@@ -1,4 +1,4 @@
-use super::{arg, method, native_fn, to_integer};
+use super::{arg, expect_fn, method, native_fn, to_integer};
 use crate::inspect::{inspect_plain, inspect_top};
 use crate::value::Value;
 use crate::vm::{ErrorKind, Vm};
@@ -46,6 +46,65 @@ pub fn install(vm: &mut Vm) {
 
     let gt = native_fn(vm, "squirt", 0, squirt);
     vm.define_global("squirt", gt);
+
+    let timers: &[(&str, u32, crate::object::NativeFn)] = &[
+        ("setTimeout", 2, set_timeout),
+        ("setInterval", 2, set_interval),
+        ("clearTimeout", 1, clear_timer),
+        ("clearInterval", 1, clear_timer),
+        ("queueMicrotask", 1, queue_microtask),
+        ("sleep", 1, sleep),
+    ];
+    for (name, arity, f) in timers {
+        let v = native_fn(vm, name, *arity, *f);
+        vm.define_global(name, v);
+    }
+}
+
+fn timer(vm: &mut Vm, args: &[Value], repeat: bool) -> R {
+    let f = arg(args, 0);
+    expect_fn(vm, &f)?;
+    let ms = match arg(args, 1) {
+        Value::Undefined => 0.0,
+        v => vm.to_number(&v)?,
+    };
+    let rest = args.iter().skip(2).cloned().collect();
+    Ok(Value::Number(vm.add_timer(f, ms, rest, repeat) as f64))
+}
+
+fn set_timeout(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    timer(vm, args, false)
+}
+
+fn set_interval(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    timer(vm, args, true)
+}
+
+fn clear_timer(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    if let Value::Number(n) = arg(args, 0) {
+        if n >= 0.0 {
+            vm.clear_timer(n as u64);
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+fn queue_microtask(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let f = arg(args, 0);
+    expect_fn(vm, &f)?;
+    vm.queue_microtask(f, Vec::new());
+    Ok(Value::Undefined)
+}
+
+fn sleep(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let ms = match arg(args, 0) {
+        Value::Undefined => 0.0,
+        v => vm.to_number(&v)?,
+    };
+    let p = vm.new_promise();
+    let (resolve, _) = vm.resolving_functions(&p);
+    vm.add_timer(resolve, ms, Vec::new(), false);
+    Ok(Value::Object(p))
 }
 
 pub fn format_args(vm: &mut Vm, args: &[Value]) -> Result<String, Value> {

@@ -1,0 +1,11 @@
+[ 1, 2, 3, 4, 5 ]
+[ 0, 1, 1, 2, 3, 5, 8, 13, 21, 34 ]
+{ value: 'who?', done: false } { value: 'hi squirt', done: false } { value: 'squirt is wet', done: true } { value: undefined, done: true }
+[ 0, 1, 2, 3, 4, 'a', 'b' ]
+1 caught boom true
+1 { value: 99, done: true } { value: undefined, done: true }
+[ 1, 2, 3, 4 ]
+[ 1, 2, 3, 4 ] 4
+10 11 [ 12, 13, 14, 15 ]
+[ 100, 200, 300 ]
+function true

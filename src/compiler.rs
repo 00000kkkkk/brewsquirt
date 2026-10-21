@@ -45,6 +45,8 @@ struct LoopCtx {
     continue_locals: usize,
     try_depth: usize,
     is_switch: bool,
+    is_block: bool,
+    labels: Vec<Rc<str>>,
 }
 
 #[derive(Clone)]
@@ -71,6 +73,8 @@ struct FnState {
     num_params: u32,
     arity: u32,
     has_rest: bool,
+    is_async: bool,
+    is_generator: bool,
     fields: Option<Rc<Vec<ClassMember>>>,
 }
 
@@ -94,6 +98,8 @@ impl FnState {
             num_params: 0,
             arity: 0,
             has_rest: false,
+            is_async: false,
+            is_generator: false,
             fields: None,
         }
     }
@@ -109,6 +115,7 @@ pub struct Compiler {
     hidden: u32,
     self_bind: Option<Rc<str>>,
     repl_consts: Vec<Rc<str>>,
+    pending_labels: Vec<Rc<str>>,
 }
 
 pub fn compile_module(stmts: &[Stmt], module: Rc<ModuleInfo>, mode: Mode) -> R<Rc<FunctionProto>> {
@@ -122,6 +129,7 @@ pub fn compile_module(stmts: &[Stmt], module: Rc<ModuleInfo>, mode: Mode) -> R<R
         hidden: 0,
         self_bind: None,
         repl_consts: Vec::new(),
+        pending_labels: Vec::new(),
     };
     c.states
         .push(FnState::new("<main>".into(), ProtoKind::Module, 1, false));
@@ -242,6 +250,8 @@ impl Compiler {
             num_params: st.num_params,
             arity: st.arity,
             has_rest: st.has_rest,
+            is_async: st.is_async,
+            is_generator: st.is_generator,
             code: st.code,
             lines: st.lines,
             consts: st.consts,
@@ -797,28 +807,61 @@ impl Compiler {
                 obj,
                 body,
             } => self.for_each(*decl, pattern, obj, body, true)?,
-            StmtKind::Break => {
-                let Some(ctx) = self.st_ref().loops.last() else {
-                    return Err(self.err("Illegal break statement"));
+            StmtKind::Break(label) => {
+                let found = match label {
+                    None => self.st_ref().loops.iter().rposition(|l| !l.is_block),
+                    Some(l) => self
+                        .st_ref()
+                        .loops
+                        .iter()
+                        .rposition(|c| c.labels.contains(l)),
                 };
+                let Some(idx) = found else {
+                    return Err(match label {
+                        Some(l) => self.err(format!("Undefined label '{l}'")),
+                        None => self.err("Illegal break statement"),
+                    });
+                };
+                let ctx = &self.st_ref().loops[idx];
                 let (target, try_depth) = (ctx.break_locals, ctx.try_depth);
                 self.unwind_tries(try_depth)?;
                 if self.locals_len() > target {
                     self.emit(Op::PopTo(target as u32));
                 }
                 let j = self.emit(Op::Jump(0));
-                self.st()
-                    .loops
-                    .last_mut()
-                    .expect("loop")
-                    .break_jumps
-                    .push(j);
+                self.st().loops[idx].break_jumps.push(j);
             }
-            StmtKind::Continue => {
-                let Some(idx) = self.st_ref().loops.iter().rposition(|l| !l.is_switch) else {
-                    return Err(
-                        self.err("Illegal continue statement: no surrounding iteration statement")
-                    );
+            StmtKind::Labeled(..) => self.labeled(s)?,
+            StmtKind::Continue(label) => {
+                let found = match label {
+                    None => self
+                        .st_ref()
+                        .loops
+                        .iter()
+                        .rposition(|l| !l.is_switch && !l.is_block),
+                    Some(l) => match self
+                        .st_ref()
+                        .loops
+                        .iter()
+                        .rposition(|c| c.labels.contains(l))
+                    {
+                        Some(i)
+                            if self.st_ref().loops[i].is_switch
+                                || self.st_ref().loops[i].is_block =>
+                        {
+                            return Err(self.err(format!(
+                                "Illegal continue statement: '{l}' does not denote an iteration statement"
+                            )));
+                        }
+                        other => other,
+                    },
+                };
+                let Some(idx) = found else {
+                    return Err(match label {
+                        Some(l) => self.err(format!("Undefined label '{l}'")),
+                        None => self
+                            .err("Illegal continue statement: no surrounding iteration statement"),
+                    });
                 };
                 let ctx = &self.st_ref().loops[idx];
                 let (target, try_depth) = (ctx.continue_locals, ctx.try_depth);
@@ -856,6 +899,7 @@ impl Compiler {
     fn push_loop(&mut self, is_switch: bool) {
         let n = self.locals_len();
         let try_depth = self.st_ref().tries.len();
+        let labels = std::mem::take(&mut self.pending_labels);
         self.st().loops.push(LoopCtx {
             break_jumps: Vec::new(),
             continue_jumps: Vec::new(),
@@ -863,7 +907,52 @@ impl Compiler {
             continue_locals: n,
             try_depth,
             is_switch,
+            is_block: false,
+            labels,
         });
+    }
+
+    fn labeled(&mut self, s: &Stmt) -> R<()> {
+        let mut labels = Vec::new();
+        let mut cur = s;
+        while let StmtKind::Labeled(l, body) = &cur.kind {
+            if labels.contains(l) || self.st_ref().loops.iter().any(|c| c.labels.contains(l)) {
+                return Err(self.err(format!("Label '{l}' has already been declared")));
+            }
+            labels.push(l.clone());
+            cur = body;
+        }
+        let is_loop = matches!(
+            cur.kind,
+            StmtKind::While(..)
+                | StmtKind::DoWhile(..)
+                | StmtKind::For { .. }
+                | StmtKind::ForOf { .. }
+                | StmtKind::ForIn { .. }
+        );
+        if is_loop {
+            self.pending_labels = labels;
+            return self.stmt(cur);
+        }
+        let n = self.locals_len();
+        let try_depth = self.st_ref().tries.len();
+        self.st().loops.push(LoopCtx {
+            break_jumps: Vec::new(),
+            continue_jumps: Vec::new(),
+            break_locals: n,
+            continue_locals: n,
+            try_depth,
+            is_switch: false,
+            is_block: true,
+            labels,
+        });
+        let r = self.sub_stmt(cur);
+        let ctx = self.st().loops.pop().expect("label");
+        r?;
+        for j in ctx.break_jumps {
+            self.patch(j);
+        }
+        Ok(())
     }
 
     fn for_each(
@@ -874,8 +963,10 @@ impl Compiler {
         body: &Stmt,
         keys: bool,
     ) -> R<()> {
+        let labels = std::mem::take(&mut self.pending_labels);
         self.begin_scope();
         self.expr(source)?;
+        self.pending_labels = labels;
         self.emit(if keys { Op::ForInIter } else { Op::GetIter });
         let iter_name = self.hidden_name("iter");
         let iter_slot = self.add_local(iter_name, true);
@@ -901,6 +992,7 @@ impl Compiler {
         )?;
         let try_depth = self.st_ref().tries.len();
         let continue_locals = iter_slot as usize + 1;
+        let labels = std::mem::take(&mut self.pending_labels);
         self.st().loops.push(LoopCtx {
             break_jumps: Vec::new(),
             continue_jumps: Vec::new(),
@@ -908,6 +1000,8 @@ impl Compiler {
             continue_locals,
             try_depth,
             is_switch: false,
+            is_block: false,
+            labels,
         });
         self.sub_stmt(body)?;
         let ctx = self.st().loops.pop().expect("loop");
@@ -1212,8 +1306,12 @@ impl Compiler {
         self.line = f.line;
         let mut st = FnState::new(name, kind, f.line, f.kind == FuncKind::StaticMethod);
         st.fields = fields;
+        st.is_async = f.is_async;
+        st.is_generator = f.is_generator;
         self.states.push(st);
+        let saved_labels = std::mem::take(&mut self.pending_labels);
         let r = self.function_body(f, kind, self_name);
+        self.pending_labels = saved_labels;
         let st = self.states.pop().expect("function state");
         self.line = saved_line;
         r?;
@@ -1422,6 +1520,8 @@ impl Compiler {
                     } else {
                         FuncKind::ClassConstructor
                     },
+                    is_async: false,
+                    is_generator: false,
                     line: c.line,
                 })
             }
@@ -1470,6 +1570,28 @@ impl Compiler {
                         let idx = self.function(func, None, None)?;
                         self.emit(Op::Closure(idx));
                         self.emit(Op::DefineMethodComputed(*is_static));
+                    }
+                }
+            }
+            if let ClassMember::Accessor {
+                key,
+                func,
+                is_static,
+                setter,
+            } = m
+            {
+                match key {
+                    PropKey::Named(n) => {
+                        let idx = self.function(func, Some(n.clone()), None)?;
+                        self.emit(Op::Closure(idx));
+                        let k = self.str_const(n);
+                        self.emit(Op::DefineAccessor(k, *setter, *is_static));
+                    }
+                    PropKey::Computed(e) => {
+                        self.expr(e)?;
+                        let idx = self.function(func, None, None)?;
+                        self.emit(Op::Closure(idx));
+                        self.emit(Op::DefineAccessorComputed(*setter, *is_static));
                     }
                 }
             }
@@ -1765,6 +1887,23 @@ impl Compiler {
                             self.emit(Op::Closure(idx));
                             self.emit(Op::InitIndex);
                         }
+                        PropDef::Getter(key, f) | PropDef::Setter(key, f) => {
+                            let setter = matches!(p, PropDef::Setter(..));
+                            match key {
+                                PropKey::Named(k) => {
+                                    let idx = self.function(f, Some(k.clone()), None)?;
+                                    self.emit(Op::Closure(idx));
+                                    let k = self.str_const(k);
+                                    self.emit(Op::InitAccessor(k, setter));
+                                }
+                                PropKey::Computed(ke) => {
+                                    self.expr(ke)?;
+                                    let idx = self.function(f, None, None)?;
+                                    self.emit(Op::Closure(idx));
+                                    self.emit(Op::InitAccessorComputed(setter));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1984,6 +2123,43 @@ impl Compiler {
                     if i + 1 < items.len() {
                         self.emit(Op::Pop);
                     }
+                }
+            }
+            ExprKind::Await(x) => {
+                let module_top = self.states.len() == 1 && self.st_ref().kind == ProtoKind::Module;
+                if module_top {
+                    self.st().is_async = true;
+                } else if !self.st_ref().is_async {
+                    return Err(self.err(
+                        "await is only valid in async functions and the top level of modules",
+                    ));
+                }
+                self.expr(x)?;
+                self.emit(Op::Await);
+            }
+            ExprKind::Yield { arg, delegate } => {
+                if !self.st_ref().is_generator {
+                    return Err(self.err("yield is only valid in generator functions"));
+                }
+                match arg {
+                    Some(a) => self.expr(a)?,
+                    None => {
+                        self.emit(Op::Undefined);
+                    }
+                }
+                if *delegate {
+                    self.emit(Op::GetIter);
+                    let start = self.here();
+                    self.emit(Op::Dup);
+                    let exit = self.emit(Op::IterNext(0));
+                    self.emit(Op::Yield);
+                    self.emit(Op::Pop);
+                    self.emit(Op::Jump(start));
+                    self.patch(exit);
+                    self.emit(Op::Pop);
+                    self.emit(Op::Undefined);
+                } else {
+                    self.emit(Op::Yield);
                 }
             }
         }

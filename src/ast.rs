@@ -56,6 +56,11 @@ pub enum ExprKind {
     SuperMember(Rc<str>),
     OptChain(Box<Expr>),
     Seq(Vec<Expr>),
+    Await(Box<Expr>),
+    Yield {
+        arg: Option<Box<Expr>>,
+        delegate: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +89,8 @@ pub enum PropDef {
     ShorthandDefault(Rc<str>, Expr),
     Spread(Expr),
     Method(PropKey, Rc<FuncDef>),
+    Getter(PropKey, Rc<FuncDef>),
+    Setter(PropKey, Rc<FuncDef>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,6 +230,8 @@ pub struct FuncDef {
     pub rest: Option<Pattern>,
     pub body: FuncBody,
     pub kind: FuncKind,
+    pub is_async: bool,
+    pub is_generator: bool,
     pub line: u32,
 }
 
@@ -246,6 +255,12 @@ pub enum ClassMember {
         key: PropKey,
         value: Option<Expr>,
         is_static: bool,
+    },
+    Accessor {
+        key: PropKey,
+        func: Rc<FuncDef>,
+        is_static: bool,
+        setter: bool,
     },
 }
 
@@ -290,8 +305,9 @@ pub enum StmtKind {
         obj: Expr,
         body: Box<Stmt>,
     },
-    Break,
-    Continue,
+    Break(Option<Rc<str>>),
+    Continue(Option<Rc<str>>),
+    Labeled(Rc<str>, Box<Stmt>),
     Throw(Expr),
     Try {
         block: Vec<Stmt>,

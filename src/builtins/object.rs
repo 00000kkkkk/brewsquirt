@@ -28,6 +28,13 @@ pub fn install(vm: &mut Vm) {
     method(vm, &object, "hasOwn", 2, has_own);
     method(vm, &object, "getOwnPropertyNames", 1, keys);
     method(vm, &object, "defineProperty", 3, define_property);
+    method(
+        vm,
+        &object,
+        "getOwnPropertyDescriptor",
+        2,
+        get_own_property_descriptor,
+    );
     method(vm, &object, "is", 2, object_is);
     vm.define_global("Object", Value::Object(object));
 
@@ -131,8 +138,11 @@ fn object_to_string(_vm: &mut Vm, this: Value, _args: &[Value]) -> R {
             ObjKind::Map(_) => "Map",
             ObjKind::Set(_) => "Set",
             ObjKind::Iter(_) => "Iterator",
-            ObjKind::Ordinary => "Object",
+            ObjKind::Promise(_) => "Promise",
+            ObjKind::Coroutine(_) => "Generator",
+            ObjKind::Accessor(_) | ObjKind::Ordinary => "Object",
         },
+        Value::Symbol(_) => "Symbol",
     };
     Ok(format!("[object {tag}]").into())
 }
@@ -176,7 +186,11 @@ fn values(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     if v.is_nullish() {
         return Err(vm.type_error("Cannot convert undefined or null to object"));
     }
-    let vals = vm.own_entries(&v).into_iter().map(|(_, v)| v).collect();
+    let vals = vm
+        .own_entries_resolved(&v, false)?
+        .into_iter()
+        .map(|(_, v)| v)
+        .collect();
     Ok(vm.new_array(vals))
 }
 
@@ -186,7 +200,7 @@ fn entries(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         return Err(vm.type_error("Cannot convert undefined or null to object"));
     }
     let pairs: Vec<Value> = vm
-        .own_entries(&v)
+        .own_entries_resolved(&v, false)?
         .into_iter()
         .map(|(k, v)| vm.new_array(vec![Value::Str(k), v]))
         .collect();
@@ -197,7 +211,7 @@ fn assign(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let target = arg(args, 0);
     to_object(vm, &target)?;
     for src in args.iter().skip(1) {
-        for (k, v) in vm.own_entries(src) {
+        for (k, v) in vm.own_entries_resolved(src, true)? {
             vm.set_prop(&target, k, v)?;
         }
     }
@@ -263,6 +277,7 @@ fn get_prototype_of(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         Value::Str(_) => Value::Object(vm.realm.string_proto.clone()),
         Value::Number(_) => Value::Object(vm.realm.number_proto.clone()),
         Value::Bool(_) => Value::Object(vm.realm.boolean_proto.clone()),
+        Value::Symbol(_) => Value::Object(vm.realm.symbol_proto.clone()),
         _ => return Err(vm.type_error("Cannot convert undefined or null to object")),
     })
 }
@@ -287,10 +302,60 @@ fn define_property(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let k = vm.to_property_key(&arg(args, 1))?;
     let desc = arg(args, 2);
     if desc.is_object() {
+        let getter = vm.get_prop(&desc, "get")?;
+        let setter = vm.get_prop(&desc, "set")?;
+        if getter.is_callable() || setter.is_callable() {
+            if let Value::Object(o) = &target {
+                if getter.is_callable() {
+                    vm.define_accessor(o, k.clone(), getter, false);
+                }
+                if setter.is_callable() {
+                    vm.define_accessor(o, k, setter, true);
+                }
+            }
+            return Ok(target);
+        }
         let v = vm.get_prop(&desc, "value")?;
-        vm.set_prop(&target, k, v)?;
+        if let Value::Object(o) = &target {
+            o.props.borrow_mut().insert(k, v);
+        }
     }
     Ok(target)
+}
+
+fn get_own_property_descriptor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let target = arg(args, 0);
+    let k = vm.to_property_key(&arg(args, 1))?;
+    let Value::Object(o) = &target else {
+        return Ok(Value::Undefined);
+    };
+    let raw = match &o.kind {
+        ObjKind::Array(a) => match crate::object::array_index(&k) {
+            Some(i) => a.borrow().get(i).cloned(),
+            None if &*k == "length" => Some(Value::Number(a.borrow().len() as f64)),
+            None => o.get_own(&k),
+        },
+        _ => o.get_own(&k),
+    };
+    let Some(raw) = raw else {
+        return Ok(Value::Undefined);
+    };
+    let d = vm.new_object();
+    match &raw {
+        Value::Object(a) if a.is_accessor() => {
+            if let ObjKind::Accessor(acc) = &a.kind {
+                d.set_own("get", acc.get.borrow().clone());
+                d.set_own("set", acc.set.borrow().clone());
+            }
+        }
+        _ => {
+            d.set_own("value", raw.clone());
+            d.set_own("writable", Value::Bool(!o.frozen.get()));
+        }
+    }
+    d.set_own("enumerable", Value::Bool(true));
+    d.set_own("configurable", Value::Bool(!o.frozen.get()));
+    Ok(Value::Object(d))
 }
 
 fn object_is(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {

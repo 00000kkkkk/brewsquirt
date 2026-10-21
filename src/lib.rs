@@ -2,6 +2,7 @@ pub mod ast;
 pub mod builtins;
 pub mod bytecode;
 pub mod compiler;
+pub mod event_loop;
 pub mod inspect;
 pub mod lexer;
 pub mod module;

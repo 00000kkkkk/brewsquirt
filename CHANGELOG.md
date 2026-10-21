@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-21
+
+### Added
+
+- `async` functions, async arrow functions and async methods with `await`, including top-level
+  `await` in modules and in `jsq -e`.
+- `Promise` with `then`, `catch`, `finally`, `Promise.resolve`, `Promise.reject`, `Promise.all`,
+  `Promise.allSettled`, `Promise.race`, `Promise.any` and `Promise.withResolvers`.
+- An event loop with a microtask queue: `setTimeout`, `setInterval`, `clearTimeout`,
+  `clearInterval`, `queueMicrotask` and a `sleep(ms)` helper that returns a promise.
+- Unhandled promise rejections fail the process with `Uncaught (in promise)`.
+- Generators: `function*`, generator methods, `yield`, `yield*` delegation, and `next`, `return`
+  and `throw` on generator objects.
+- `Symbol` with `Symbol.iterator`, `Symbol.asyncIterator`, `Symbol.for`, `Symbol.keyFor` and
+  `description`; symbols work as property keys and `Map` keys.
+- The iterator protocol: any object with a `[Symbol.iterator]()` method works with `for...of`,
+  spread, destructuring and `Array.from`.
+- Getters and setters in classes (including `static`) and object literals, `super` access in
+  accessors, and `get`/`set` in `Object.defineProperty`.
+- `Object.getOwnPropertyDescriptor`.
+- Labeled statements with `break label` and `continue label`, including labeled blocks.
+- Interpreter coroutines: suspended frames keep their stack, handlers and captured variables.
+
+### Changed
+
+- Iterators returned by builtins expose `[Symbol.iterator]()`.
+- `console.log` shows getters as `[Getter]`, `[Setter]` or `[Getter/Setter]`, promises with their
+  state, and symbol keys after string keys.
+
 ## [0.1.0] - 2026-10-21
 
 ### Added
@@ -46,5 +75,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Continuous integration on Linux, macOS and Windows, MSRV check, cargo-deny, CodeQL, coverage,
   benchmarks, and release archives for five targets.
 
-[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/00000kkkkk/javasquirt/releases/tag/v0.1.0

@@ -109,7 +109,10 @@ fn is_array(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 fn from(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let src = arg(args, 0);
     let list = match &src {
-        Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => {
+        Value::Object(o)
+            if matches!(o.kind, ObjKind::Ordinary)
+                && o.get_chain(crate::object::ITER_KEY).is_none() =>
+        {
             let n = vm.get_prop(&src, "length")?;
             let n = to_integer(vm, &n)?.max(0.0) as usize;
             let mut out = Vec::with_capacity(n);

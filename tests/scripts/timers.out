@@ -1,0 +1,8 @@
+sync first
+micro first
+args x y
+tick 1
+tick 2
+tick 3
+slept true
+after 3

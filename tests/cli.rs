@@ -127,3 +127,39 @@ fn deep_recursion_is_a_range_error() {
     assert!(out.status.success(), "{}", normalize(&out.stderr));
     assert_eq!(normalize(&out.stdout), "'RangeError'\n");
 }
+
+#[test]
+fn unhandled_rejection_fails_the_process() {
+    let out = run_in(
+        &root(),
+        &[
+            "-e",
+            "async function f() { await null; throw new TypeError('lost') }
+f()",
+        ],
+    );
+    assert!(!out.status.success());
+    let err = normalize(&out.stderr);
+    assert!(
+        err.starts_with("Uncaught (in promise) TypeError: lost"),
+        "{err}"
+    );
+}
+
+#[test]
+fn top_level_await_in_eval() {
+    let out = run_in(
+        &root(),
+        &[
+            "-e",
+            "const v = await sleep(5).then(() => 41)
+v + 1",
+        ],
+    );
+    assert!(out.status.success(), "{}", normalize(&out.stderr));
+    assert_eq!(
+        normalize(&out.stdout),
+        "42
+"
+    );
+}

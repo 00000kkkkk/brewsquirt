@@ -1,0 +1,31 @@
+const delay = (ms, value) => new Promise((resolve) => setTimeout(() => resolve(value), ms))
+
+async function download(name, ms) {
+  console.log(`start ${name}`)
+  await delay(ms)
+  console.log(`done ${name}`)
+  return { name, bytes: name.length * 1024 }
+}
+
+function* ids(prefix) {
+  let n = 1
+  while (true) yield `${prefix}-${n++}`
+}
+
+const gen = ids("job")
+const jobs = [
+  download(gen.next().value, 30),
+  download(gen.next().value, 10),
+  download(gen.next().value, 20),
+]
+
+const started = performance.now()
+const files = await Promise.all(jobs)
+const total = files.reduce((sum, f) => sum + f.bytes, 0)
+console.log(`downloaded ${files.length} files, ${total} bytes`)
+console.log(`ran in parallel: ${performance.now() - started < 55}`)
+
+const first = await Promise.race([delay(40, "slow"), delay(5, "fast")])
+console.log(`race winner: ${first}`)
+await sleep(1)
+console.log(`deep enough ${squirt()}`)

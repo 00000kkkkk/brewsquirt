@@ -1,15 +1,20 @@
 use crate::builtins;
 use crate::bytecode::{FunctionProto, ModuleInfo, NO_NAME, Op, ProtoKind};
 use crate::compiler::{Mode, compile_module};
+use crate::event_loop::{Job, ResumeMode, Signal, Step, Timer};
 use crate::inspect::{inspect_plain, inspect_top};
 use crate::module;
 use crate::number::{js_pow, to_int32, to_uint32};
-use crate::object::{Closure, IterState, MapKey, Obj, ObjKind, Upvalue, array_index};
+use crate::object::{
+    Accessor, Closure, ITER_KEY, IterState, MapKey, Obj, ObjKind, Upvalue, array_index,
+    is_symbol_key,
+};
 use crate::parser;
 use crate::token::SyntaxError;
 use crate::value::{Value, char_at16, compare_strings, len16};
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -57,6 +62,9 @@ pub struct Realm {
     pub map_proto: Rc<Obj>,
     pub set_proto: Rc<Obj>,
     pub iter_proto: Rc<Obj>,
+    pub generator_proto: Rc<Obj>,
+    pub promise_proto: Rc<Obj>,
+    pub symbol_proto: Rc<Obj>,
     pub error_protos: Vec<Rc<Obj>>,
 }
 
@@ -78,30 +86,34 @@ impl Realm {
             map_proto: mk(),
             set_proto: mk(),
             iter_proto: mk(),
+            generator_proto: mk(),
+            promise_proto: mk(),
+            symbol_proto: mk(),
             error_protos,
             object_proto,
         }
     }
 }
 
-struct Frame {
-    closure: Rc<Closure>,
-    ip: usize,
-    base: usize,
-    construct: bool,
+pub(crate) struct Frame {
+    pub(crate) closure: Rc<Closure>,
+    pub(crate) ip: usize,
+    pub(crate) base: usize,
+    pub(crate) construct: bool,
+    pub(crate) co: Option<Rc<Obj>>,
 }
 
-struct Handler {
-    frame: usize,
-    stack_len: usize,
-    catch_ip: usize,
+pub(crate) struct Handler {
+    pub(crate) frame: usize,
+    pub(crate) stack_len: usize,
+    pub(crate) catch_ip: usize,
 }
 
 pub struct Vm {
     pub stack: Vec<Value>,
-    frames: Vec<Frame>,
-    handlers: Vec<Handler>,
-    open_upvalues: Vec<Rc<RefCell<Upvalue>>>,
+    pub(crate) frames: Vec<Frame>,
+    pub(crate) handlers: Vec<Handler>,
+    pub(crate) open_upvalues: Vec<Rc<RefCell<Upvalue>>>,
     pub globals: FxHashMap<Rc<str>, Value>,
     pub realm: Realm,
     modules: FxHashMap<PathBuf, Value>,
@@ -113,7 +125,21 @@ pub struct Vm {
     pub argv: Vec<String>,
     pub start: Instant,
     pub rng: u64,
-    native_depth: usize,
+    pub(crate) native_depth: usize,
+    pub(crate) microtasks: VecDeque<Job>,
+    pub(crate) timers: BTreeMap<(u128, u64), Timer>,
+    pub(crate) timer_keys: FxHashMap<u64, (u128, u64)>,
+    pub(crate) timer_seq: u64,
+    pub(crate) pending_rejections: Vec<Rc<Obj>>,
+    pub(crate) co_signal: Option<Signal>,
+    pub accessors_used: bool,
+    pub rejection: bool,
+    pub symbol_seq: u64,
+    pub symbol_registry: FxHashMap<Rc<str>, Value>,
+    pub symbol_iterator: Value,
+    pub symbol_async_iterator: Value,
+    pub promise_resolve_fn: Value,
+    pub promise_reject_fn: Value,
 }
 
 impl Vm {
@@ -147,8 +173,23 @@ impl Vm {
             start: Instant::now(),
             rng: seed | 1,
             native_depth: 0,
+            microtasks: VecDeque::new(),
+            timers: BTreeMap::new(),
+            timer_keys: FxHashMap::default(),
+            timer_seq: 0,
+            pending_rejections: Vec::new(),
+            co_signal: None,
+            accessors_used: false,
+            rejection: false,
+            symbol_seq: 0,
+            symbol_registry: FxHashMap::default(),
+            symbol_iterator: Value::Undefined,
+            symbol_async_iterator: Value::Undefined,
+            promise_resolve_fn: Value::Undefined,
+            promise_reject_fn: Value::Undefined,
         };
         builtins::install(&mut vm);
+        builtins::run_prelude(&mut vm);
         vm
     }
 
@@ -213,7 +254,12 @@ impl Vm {
             Ok(p) => p,
             Err(e) => return Err(self.syntax_error_value(&e, name)),
         };
-        self.run_proto(proto)
+        let is_async = proto.is_async;
+        let v = self.run_proto(proto)?;
+        if is_async {
+            return self.await_value(&v);
+        }
+        Ok(v)
     }
 
     pub fn run_file(&mut self, path: &Path) -> Result<Value, Value> {
@@ -243,7 +289,12 @@ impl Vm {
     }
 
     pub fn format_uncaught(&self, e: &Value) -> String {
-        format!("Uncaught {}", inspect_top(e))
+        let prefix = if self.rejection {
+            "Uncaught (in promise)"
+        } else {
+            "Uncaught"
+        };
+        format!("{prefix} {}", inspect_top(e))
     }
 
     pub fn write_out(&mut self, s: &str) {
@@ -297,8 +348,13 @@ impl Vm {
             Ok(p) => p,
             Err(e) => return Err(self.syntax_error_value(&e, &name)),
         };
+        let is_async = proto.is_async;
         self.loading.push(path.clone());
         let r = self.run_proto(proto);
+        let r = match r {
+            Ok(v) if is_async => self.await_value(&v),
+            other => other,
+        };
         self.loading.pop();
         let ns = r?;
         self.modules.insert(path, ns.clone());
@@ -360,7 +416,7 @@ impl Vm {
         ))
     }
 
-    fn capture_upvalue(&mut self, idx: usize) -> Rc<RefCell<Upvalue>> {
+    pub(crate) fn capture_upvalue(&mut self, idx: usize) -> Rc<RefCell<Upvalue>> {
         let mut i = self.open_upvalues.len();
         while i > 0 {
             let ui = match &*self.open_upvalues[i - 1].borrow() {
@@ -397,7 +453,12 @@ impl Vm {
         }
     }
 
-    fn push_frame(&mut self, c: Rc<Closure>, argc: usize, construct: bool) -> Result<(), Value> {
+    pub(crate) fn push_frame(
+        &mut self,
+        c: Rc<Closure>,
+        argc: usize,
+        construct: bool,
+    ) -> Result<(), Value> {
         if self.frames.len() >= MAX_FRAMES {
             return Err(self.range_error("Maximum call stack size exceeded"));
         }
@@ -425,11 +486,12 @@ impl Vm {
             ip: 0,
             base: ci + 1,
             construct,
+            co: None,
         });
         Ok(())
     }
 
-    fn unwind(&mut self, err: Value, stop: usize) -> Result<(), Value> {
+    pub(crate) fn unwind(&mut self, err: Value, stop: usize) -> Result<(), Value> {
         if let Some(h) = self.handlers.last() {
             if h.frame >= stop {
                 let h = self.handlers.pop().expect("handler");
@@ -462,6 +524,9 @@ impl Vm {
                 }
                 if self.native_depth >= MAX_NATIVE_DEPTH {
                     return Err(self.range_error("Maximum call stack size exceeded"));
+                }
+                if c.proto.is_coroutine() {
+                    return self.start_coroutine(f, c.clone(), this, args);
                 }
                 let mark = self.stack.len();
                 self.stack.push(f.clone());
@@ -634,9 +699,67 @@ impl Vm {
         o.get_chain(key).unwrap_or_default()
     }
 
+    pub fn resolve_accessor(&mut self, v: Value, receiver: &Value) -> Result<Value, Value> {
+        if let Value::Object(a) = &v {
+            if let ObjKind::Accessor(acc) = &a.kind {
+                let getter = acc.get.borrow().clone();
+                if getter.is_undefined() {
+                    return Ok(Value::Undefined);
+                }
+                return self.call_value(&getter, receiver.clone(), &[]);
+            }
+        }
+        Ok(v)
+    }
+
+    fn accessor_setter(&self, o: &Rc<Obj>, key: &str) -> Option<Value> {
+        let mut cur = Some(o.clone());
+        while let Some(c) = cur {
+            if let Some(v) = c.props.borrow().get(key) {
+                if let Value::Object(a) = v {
+                    if let ObjKind::Accessor(acc) = &a.kind {
+                        return Some(acc.set.borrow().clone());
+                    }
+                }
+                return None;
+            }
+            cur = c.proto.borrow().clone();
+        }
+        None
+    }
+
+    pub fn define_accessor(&mut self, target: &Rc<Obj>, key: Rc<str>, f: Value, setter: bool) {
+        self.accessors_used = true;
+        let existing = target.props.borrow().get(&*key).cloned();
+        let acc_obj = match existing {
+            Some(Value::Object(a)) if a.is_accessor() => a,
+            _ => {
+                let a = Obj::new(ObjKind::Accessor(Accessor::default()), None);
+                target.set_own(key, Value::Object(a.clone()));
+                a
+            }
+        };
+        if let ObjKind::Accessor(acc) = &acc_obj.kind {
+            if setter {
+                *acc.set.borrow_mut() = f;
+            } else {
+                *acc.get.borrow_mut() = f;
+            }
+        }
+    }
+
     pub fn get_prop(&mut self, v: &Value, key: &str) -> Result<Value, Value> {
         match v {
-            Value::Object(o) => Ok(self.get_obj(o, key)),
+            Value::Object(o) => {
+                let raw = self.get_obj(o, key);
+                self.resolve_accessor(raw, v)
+            }
+            Value::Symbol(s) => {
+                if key == "description" {
+                    return Ok(s.description.clone().map(Value::Str).unwrap_or_default());
+                }
+                Ok(self.realm.symbol_proto.get_chain(key).unwrap_or_default())
+            }
             Value::Str(s) => {
                 if key == "length" {
                     return Ok(Value::Number(len16(s) as f64));
@@ -663,6 +786,18 @@ impl Vm {
                     return Err(self.type_error(format!(
                         "Cannot assign to read only property '{key}' of object"
                     )));
+                }
+                if self.accessors_used {
+                    if let Some(setter) = self.accessor_setter(o, &key) {
+                        if setter.is_callable() {
+                            self.call_value(&setter, target.clone(), &[val])?;
+                            return Ok(());
+                        }
+                        return Err(self.type_error(format!(
+                            "Cannot set property {key} of {} which has only a getter",
+                            inspect_plain(target)
+                        )));
+                    }
                 }
                 if let ObjKind::Array(a) = &o.kind {
                     if let Some(i) = array_index(&key) {
@@ -769,6 +904,9 @@ impl Vm {
             return Ok(s);
         }
         let p = self.to_primitive(v, false)?;
+        if matches!(p, Value::Symbol(_)) {
+            return Err(self.type_error("Cannot convert a Symbol value to a string"));
+        }
         Ok(p.to_primitive_string().unwrap_or_else(|| "".into()))
     }
 
@@ -777,12 +915,16 @@ impl Vm {
             return Ok(n);
         }
         let p = self.to_primitive(v, true)?;
+        if matches!(p, Value::Symbol(_)) {
+            return Err(self.type_error("Cannot convert a Symbol value to a number"));
+        }
         Ok(p.to_primitive_number().unwrap_or(f64::NAN))
     }
 
     pub fn to_property_key(&mut self, v: &Value) -> Result<Rc<str>, Value> {
         match v {
             Value::Str(s) => Ok(s.clone()),
+            Value::Symbol(s) => Ok(s.key.clone()),
             _ => self.to_string(v),
         }
     }
@@ -791,6 +933,7 @@ impl Vm {
         Ok(match (a, b) {
             (Value::Undefined | Value::Null, Value::Undefined | Value::Null) => true,
             (Value::Undefined | Value::Null, _) | (_, Value::Undefined | Value::Null) => false,
+            (Value::Symbol(_), _) | (_, Value::Symbol(_)) => a.strict_eq(b),
             (Value::Number(_), Value::Number(_))
             | (Value::Str(_), Value::Str(_))
             | (Value::Bool(_), Value::Bool(_))
@@ -905,18 +1048,46 @@ impl Vm {
                 ObjKind::Map(_) => Ok(self.new_iter(IterState::MapEntries(o.clone(), 0))),
                 ObjKind::Set(_) => Ok(self.new_iter(IterState::SetValues(o.clone(), 0))),
                 ObjKind::Iter(_) => Ok(v.clone()),
-                _ => Err(self.type_error(format!("{} is not iterable", inspect_plain(v)))),
+                ObjKind::Coroutine(c) if c.is_generator => Ok(v.clone()),
+                _ => self.protocol_iterator(v),
             },
             _ => Err(self.type_error(format!("{} is not iterable", inspect_plain(v)))),
         }
     }
 
-    pub fn iter_next(&mut self, it: &Value) -> Option<Value> {
-        let Value::Object(o) = it else {
-            return None;
+    fn protocol_iterator(&mut self, v: &Value) -> Result<Value, Value> {
+        let method = self.get_prop(v, ITER_KEY)?;
+        if !method.is_callable() {
+            return Err(self.type_error(format!("{} is not iterable", inspect_plain(v))));
+        }
+        let it = self.call_value(&method, v.clone(), &[])?;
+        let Value::Object(o) = &it else {
+            return Err(self.type_error("Result of the Symbol.iterator method is not an object"));
         };
-        let ObjKind::Iter(state) = &o.kind else {
-            return None;
+        match &o.kind {
+            ObjKind::Iter(_) => Ok(it),
+            ObjKind::Coroutine(c) if c.is_generator => Ok(it),
+            _ => {
+                let next = self.get_prop(&it, "next")?;
+                Ok(self.new_iter(IterState::Protocol(it, next)))
+            }
+        }
+    }
+
+    pub fn iter_next(&mut self, it: &Value) -> Result<Option<Value>, Value> {
+        let Value::Object(o) = it else {
+            return Ok(None);
+        };
+        let state = match &o.kind {
+            ObjKind::Iter(state) => state,
+            ObjKind::Coroutine(_) => {
+                let o = o.clone();
+                return match self.resume(&o, Value::Undefined, ResumeMode::Next)? {
+                    Step::Yield(v) => Ok(Some(v)),
+                    _ => Ok(None),
+                };
+            }
+            _ => return Ok(None),
         };
         fn map_at(m: &Obj, i: usize) -> Option<(Value, Value)> {
             let ObjKind::Map(map) = &m.kind else {
@@ -926,54 +1097,85 @@ impl Vm {
             let (k, v) = map.get_index(i)?;
             Some((k.to_value(), v.clone()))
         }
-        let pair = {
+        let protocol = {
             let mut st = state.borrow_mut();
             match &mut *st {
                 IterState::Array(arr, i) => {
-                    let v = arr.array()?.borrow().get(*i).cloned();
+                    let v = arr.array().and_then(|a| a.borrow().get(*i).cloned());
                     if v.is_some() {
                         *i += 1;
                     }
-                    return v;
+                    return Ok(v);
                 }
                 IterState::Str(s, pos) => {
-                    let c = s[*pos..].chars().next()?;
+                    let Some(c) = s[*pos..].chars().next() else {
+                        return Ok(None);
+                    };
                     *pos += c.len_utf8();
-                    return Some(Value::Str(c.to_string().into()));
+                    return Ok(Some(Value::Str(c.to_string().into())));
                 }
                 IterState::MapKeys(m, i) => {
-                    let (k, _) = map_at(m, *i)?;
+                    let Some((k, _)) = map_at(m, *i) else {
+                        return Ok(None);
+                    };
                     *i += 1;
-                    return Some(k);
+                    return Ok(Some(k));
                 }
                 IterState::MapValues(m, i) => {
-                    let (_, v) = map_at(m, *i)?;
+                    let Some((_, v)) = map_at(m, *i) else {
+                        return Ok(None);
+                    };
                     *i += 1;
-                    return Some(v);
+                    return Ok(Some(v));
                 }
                 IterState::MapEntries(m, i) => {
-                    let pair = map_at(m, *i)?;
+                    let Some((k, v)) = map_at(m, *i) else {
+                        return Ok(None);
+                    };
                     *i += 1;
-                    pair
+                    drop(st);
+                    return Ok(Some(self.new_array(vec![k, v])));
                 }
                 IterState::SetValues(s, i) => {
                     let ObjKind::Set(set) = &s.kind else {
-                        return None;
+                        return Ok(None);
                     };
-                    let v = set.borrow().get_index(*i)?.to_value();
-                    *i += 1;
-                    return Some(v);
+                    let v = set.borrow().get_index(*i).map(|k| k.to_value());
+                    if v.is_some() {
+                        *i += 1;
+                    }
+                    return Ok(v);
                 }
                 IterState::List(items, i) => {
                     let v = items.get(*i).cloned();
                     if v.is_some() {
                         *i += 1;
                     }
-                    return v;
+                    return Ok(v);
                 }
+                IterState::Protocol(iterator, next) => (iterator.clone(), next.clone()),
             }
         };
-        Some(self.new_array(vec![pair.0, pair.1]))
+        let (iterator, next) = protocol;
+        let r = self.call_value(&next, iterator, &[])?;
+        if !r.is_object() {
+            return Err(self.type_error(format!(
+                "Iterator result {} is not an object",
+                inspect_plain(&r)
+            )));
+        }
+        if self.get_prop(&r, "done")?.truthy() {
+            return Ok(None);
+        }
+        Ok(Some(self.get_prop(&r, "value")?))
+    }
+
+    pub fn drain_iterator(&mut self, it: &Value) -> Result<Vec<Value>, Value> {
+        let mut out = Vec::new();
+        while let Some(x) = self.iter_next(it)? {
+            out.push(x);
+        }
+        Ok(out)
     }
 
     pub fn iterate(&mut self, v: &Value) -> Result<Vec<Value>, Value> {
@@ -984,7 +1186,7 @@ impl Vm {
         }
         let it = self.get_iterator(v)?;
         let mut out = Vec::new();
-        while let Some(x) = self.iter_next(&it) {
+        while let Some(x) = self.iter_next(&it)? {
             out.push(x);
         }
         Ok(out)
@@ -1000,7 +1202,9 @@ impl Vm {
                     }
                 }
                 for k in o.props.borrow().keys() {
-                    keys.push(Value::Str(k.clone()));
+                    if !is_symbol_key(k) {
+                        keys.push(Value::Str(k.clone()));
+                    }
                 }
             }
             Value::Str(s) => {
@@ -1020,7 +1224,13 @@ impl Vm {
         }
     }
 
-    fn super_lookup(&mut self, cl: &Closure, key: &str, is_static: bool) -> Result<Value, Value> {
+    fn super_lookup(
+        &mut self,
+        cl: &Closure,
+        key: &str,
+        is_static: bool,
+        this: &Value,
+    ) -> Result<Value, Value> {
         let home = self.super_home(cl)?;
         let start = if is_static {
             home.proto.borrow().clone()
@@ -1030,10 +1240,11 @@ impl Vm {
         } else {
             home.proto.borrow().clone()
         };
-        Ok(match start {
+        let raw = match start {
             Some(s) => self.get_obj(&s, key),
             None => Value::Undefined,
-        })
+        };
+        self.resolve_accessor(raw, this)
     }
 
     pub fn run(&mut self, stop: usize) -> Result<Value, Value> {
@@ -1254,7 +1465,12 @@ impl Vm {
                         Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => {
                             let key = &cl.proto.consts[k as usize];
                             let Value::Str(key) = key else { unreachable!() };
-                            o.get_chain(key).unwrap_or_default()
+                            let v = o.get_chain(key).unwrap_or_default();
+                            if matches!(&v, Value::Object(a) if a.is_accessor()) {
+                                tri!(self.resolve_accessor(v, &obj))
+                            } else {
+                                v
+                            }
                         }
                         _ => {
                             let n = name!(k);
@@ -1268,7 +1484,9 @@ impl Vm {
                     let obj = pop!();
                     match &obj {
                         Value::Object(o)
-                            if matches!(o.kind, ObjKind::Ordinary) && !o.frozen.get() =>
+                            if matches!(o.kind, ObjKind::Ordinary)
+                                && !o.frozen.get()
+                                && !self.accessors_used =>
                         {
                             o.props.borrow_mut().insert(name!(k), val.clone());
                         }
@@ -1319,15 +1537,15 @@ impl Vm {
                     self.stack.push(obj);
                 }
                 Op::SuperGet(k, is_static) => {
-                    let _this = pop!();
+                    let this = pop!();
                     let n = name!(k);
-                    let v = tri!(self.super_lookup(&cl, &n, is_static));
+                    let v = tri!(self.super_lookup(&cl, &n, is_static, &this));
                     self.stack.push(v);
                 }
                 Op::SuperGetMethod(k, is_static) => {
                     let this = pop!();
                     let n = name!(k);
-                    let v = tri!(self.super_lookup(&cl, &n, is_static));
+                    let v = tri!(self.super_lookup(&cl, &n, is_static, &this));
                     self.stack.push(v);
                     self.stack.push(this);
                 }
@@ -1537,9 +1755,11 @@ impl Vm {
                                 c.proto.name
                             )));
                         }
-                        tri!(self.push_frame(c, argc, false));
-                        reload!();
-                        continue;
+                        if !c.proto.is_coroutine() {
+                            tri!(self.push_frame(c, argc, false));
+                            reload!();
+                            continue;
+                        }
                     }
                     let args = self.stack.split_off(ci + 2);
                     let this = pop!();
@@ -1729,7 +1949,7 @@ impl Vm {
                 }
                 Op::ObjSpread => {
                     let src = pop!();
-                    let pairs = self.own_entries(&src);
+                    let pairs = tri!(self.own_entries_resolved(&src, true));
                     if let Some(Value::Object(o)) = self.stack.last() {
                         let mut props = o.props.borrow_mut();
                         for (k, v) in pairs {
@@ -1748,7 +1968,8 @@ impl Vm {
                         })
                         .collect();
                     let o = self.new_object();
-                    for (k, v) in self.own_entries(&src) {
+                    let pairs = tri!(self.own_entries_resolved(&src, true));
+                    for (k, v) in pairs {
                         if !excluded.contains(&k) {
                             o.set_own(k, v);
                         }
@@ -1787,22 +2008,19 @@ impl Vm {
                 }
                 Op::IterNext(t) => {
                     let it = pop!();
-                    match self.iter_next(&it) {
+                    match tri!(self.iter_next(&it)) {
                         Some(v) => self.stack.push(v),
                         None => ip = t as usize,
                     }
                 }
                 Op::IterNextOrUndef => {
                     let it = pop!();
-                    let v = self.iter_next(&it).unwrap_or_default();
+                    let v = tri!(self.iter_next(&it)).unwrap_or_default();
                     self.stack.push(v);
                 }
                 Op::IterRest => {
                     let it = pop!();
-                    let mut items = Vec::new();
-                    while let Some(v) = self.iter_next(&it) {
-                        items.push(v);
-                    }
+                    let items = tri!(self.drain_iterator(&it));
                     let a = self.new_array(items);
                     self.stack.push(a);
                 }
@@ -1852,6 +2070,47 @@ impl Vm {
                     let f = self.stack[base - 1].clone();
                     self.stack.push(f);
                 }
+                Op::Await | Op::Yield => {
+                    let v = pop!();
+                    self.frames[fi].ip = ip;
+                    if !self.suspend_frame(fi) {
+                        throw!(self.type_error("Cannot suspend outside of a coroutine"));
+                    }
+                    self.co_signal = Some(if op == Op::Await {
+                        Signal::Await
+                    } else {
+                        Signal::Yield
+                    });
+                    return Ok(v);
+                }
+                Op::InitAccessor(k, setter) => {
+                    let f = pop!();
+                    if let Some(Value::Object(o)) = self.stack.last() {
+                        let o = o.clone();
+                        self.define_accessor(&o, name!(k), f, setter);
+                    }
+                }
+                Op::InitAccessorComputed(setter) => {
+                    let f = pop!();
+                    let key = pop!();
+                    let k = tri!(self.to_property_key(&key));
+                    if let Some(Value::Object(o)) = self.stack.last() {
+                        let o = o.clone();
+                        self.define_accessor(&o, k, f, setter);
+                    }
+                }
+                Op::DefineAccessor(k, setter, is_static) => {
+                    let f = pop!();
+                    let class = peek!();
+                    tri!(self.define_class_accessor(&class, name!(k), f, setter, is_static));
+                }
+                Op::DefineAccessorComputed(setter, is_static) => {
+                    let f = pop!();
+                    let key = pop!();
+                    let class = peek!();
+                    let k = tri!(self.to_property_key(&key));
+                    tri!(self.define_class_accessor(&class, k, f, setter, is_static));
+                }
                 Op::ExportAll => {
                     let ns = pop!();
                     let pairs = self.own_entries(&ns);
@@ -1874,6 +2133,24 @@ impl Vm {
     }
 
     pub fn own_entries(&self, v: &Value) -> Vec<(Rc<str>, Value)> {
+        self.own_entries_raw(v, false)
+    }
+
+    pub fn own_entries_resolved(
+        &mut self,
+        v: &Value,
+        include_symbols: bool,
+    ) -> Result<Vec<(Rc<str>, Value)>, Value> {
+        let raw = self.own_entries_raw(v, include_symbols);
+        let mut out = Vec::with_capacity(raw.len());
+        for (k, x) in raw {
+            let x = self.resolve_accessor(x, v)?;
+            out.push((k, x));
+        }
+        Ok(out)
+    }
+
+    pub fn own_entries_raw(&self, v: &Value, include_symbols: bool) -> Vec<(Rc<str>, Value)> {
         let mut out = Vec::new();
         match v {
             Value::Object(o) => {
@@ -1883,7 +2160,9 @@ impl Vm {
                     }
                 }
                 for (k, x) in o.props.borrow().iter() {
-                    out.push((k.clone(), x.clone()));
+                    if include_symbols || !is_symbol_key(k) {
+                        out.push((k.clone(), x.clone()));
+                    }
                 }
             }
             Value::Str(s) => {
@@ -1989,6 +2268,34 @@ impl Vm {
             }
         }
         target.set_own(key, method);
+        Ok(())
+    }
+
+    fn define_class_accessor(
+        &mut self,
+        class: &Value,
+        key: Rc<str>,
+        f: Value,
+        setter: bool,
+        is_static: bool,
+    ) -> Result<(), Value> {
+        let Value::Object(c) = class else {
+            return Ok(());
+        };
+        let target = if is_static {
+            c.clone()
+        } else {
+            match self.function_prototype(c) {
+                Some(p) => p,
+                None => return Err(self.type_error("Class has no prototype")),
+            }
+        };
+        if let Value::Object(m) = &f {
+            if let ObjKind::Function(mc) = &m.kind {
+                *mc.home.borrow_mut() = Some(target.clone());
+            }
+        }
+        self.define_accessor(&target, key, f, setter);
         Ok(())
     }
 

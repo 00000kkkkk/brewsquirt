@@ -1,6 +1,6 @@
 use crate::inspect::inspect_plain;
 use crate::number::number_to_string;
-use crate::object::{Obj, ObjKind};
+use crate::object::{Obj, ObjKind, Symbol};
 use std::fmt;
 use std::rc::Rc;
 
@@ -13,6 +13,7 @@ pub enum Value {
     Number(f64),
     Str(Rc<str>),
     Object(Rc<Obj>),
+    Symbol(Rc<Symbol>),
 }
 
 impl fmt::Debug for Value {
@@ -64,7 +65,7 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Number(n) => *n != 0.0 && !n.is_nan(),
             Value::Str(s) => !s.is_empty(),
-            Value::Object(_) => true,
+            Value::Object(_) | Value::Symbol(_) => true,
         }
     }
 
@@ -108,6 +109,7 @@ impl Value {
             Value::Bool(_) => "boolean",
             Value::Number(_) => "number",
             Value::Str(_) => "string",
+            Value::Symbol(_) => "symbol",
             Value::Object(o) => {
                 if o.is_callable() {
                     "function"
@@ -125,6 +127,7 @@ impl Value {
             (Value::Number(a), Value::Number(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
+            (Value::Symbol(a), Value::Symbol(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -143,7 +146,7 @@ impl Value {
             Value::Bool(b) => if *b { "true" } else { "false" }.into(),
             Value::Number(n) => number_to_string(*n).into(),
             Value::Str(s) => s.clone(),
-            Value::Object(_) => return None,
+            Value::Object(_) | Value::Symbol(_) => return None,
         })
     }
 
@@ -160,7 +163,7 @@ impl Value {
             }
             Value::Number(n) => *n,
             Value::Str(s) => crate::number::string_to_number(s),
-            Value::Object(_) => return None,
+            Value::Object(_) | Value::Symbol(_) => return None,
         })
     }
 

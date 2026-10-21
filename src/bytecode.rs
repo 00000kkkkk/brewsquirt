@@ -110,6 +110,12 @@ pub enum Op {
     Import(u32),
     ExportAll,
     GetCallee,
+    Await,
+    Yield,
+    InitAccessor(u32, bool),
+    InitAccessorComputed(bool),
+    DefineAccessor(u32, bool, bool),
+    DefineAccessorComputed(bool, bool),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,6 +147,8 @@ pub struct FunctionProto {
     pub num_params: u32,
     pub arity: u32,
     pub has_rest: bool,
+    pub is_async: bool,
+    pub is_generator: bool,
     pub code: Vec<Op>,
     pub lines: Vec<u32>,
     pub consts: Vec<Value>,
@@ -152,10 +160,15 @@ pub struct FunctionProto {
 
 impl FunctionProto {
     pub fn is_constructor(&self) -> bool {
-        matches!(
-            self.kind,
-            ProtoKind::Normal | ProtoKind::ClassConstructor | ProtoKind::DerivedConstructor
-        )
+        !self.is_coroutine()
+            && matches!(
+                self.kind,
+                ProtoKind::Normal | ProtoKind::ClassConstructor | ProtoKind::DerivedConstructor
+            )
+    }
+
+    pub fn is_coroutine(&self) -> bool {
+        self.is_async || self.is_generator
     }
 
     pub fn is_class(&self) -> bool {
@@ -224,6 +237,8 @@ impl FunctionProto {
                 | Op::SuperGet(c, _)
                 | Op::SuperGetMethod(c, _)
                 | Op::DefineMethod(c, _)
+                | Op::InitAccessor(c, _)
+                | Op::DefineAccessor(c, _, _)
                 | Op::MakeClass(c, _) => format!("  {}", self.const_text(*c)),
                 Op::Closure(f) => format!(
                     "  <fn {}>",

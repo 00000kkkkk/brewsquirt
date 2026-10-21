@@ -107,7 +107,7 @@ fn execute(command: Command) -> Result<ExitCode, String> {
                     let mut argv = vec!["jsq".to_string(), main.display().to_string()];
                     argv.extend(args);
                     let mut vm = Vm::new(argv);
-                    let r = vm.run_file(&main);
+                    let r = vm.run_file(&main).and_then(|_| vm.run_event_loop());
                     vm.flush();
                     match r {
                         Ok(_) => ExitCode::SUCCESS,

@@ -27,6 +27,87 @@ pub enum ObjKind {
     Map(RefCell<IndexMap<MapKey, Value, FxBuildHasher>>),
     Set(RefCell<IndexSet<MapKey, FxBuildHasher>>),
     Iter(RefCell<IterState>),
+    Accessor(Accessor),
+    Promise(RefCell<PromiseData>),
+    Coroutine(Coroutine),
+}
+
+pub struct Symbol {
+    pub description: Option<Rc<str>>,
+    pub key: Rc<str>,
+}
+
+pub const SYMBOL_PREFIX: char = '\u{0}';
+pub const ITER_KEY: &str = "\u{0}@@iterator:Symbol.iterator";
+pub const ASYNC_ITER_KEY: &str = "\u{0}@@asyncIterator:Symbol.asyncIterator";
+
+pub fn is_symbol_key(k: &str) -> bool {
+    k.starts_with(SYMBOL_PREFIX)
+}
+
+pub fn symbol_key_description(k: &str) -> &str {
+    k.split_once(':').map(|(_, d)| d).unwrap_or("")
+}
+
+#[derive(Default)]
+pub struct Accessor {
+    pub get: RefCell<Value>,
+    pub set: RefCell<Value>,
+}
+
+pub enum PromiseState {
+    Pending,
+    Fulfilled(Value),
+    Rejected(Value),
+}
+
+pub enum Reaction {
+    Then {
+        on_fulfilled: Value,
+        on_rejected: Value,
+        derived: Option<Rc<Obj>>,
+    },
+    Forward(Rc<Obj>),
+    Resume(Rc<Obj>),
+}
+
+pub struct PromiseData {
+    pub state: PromiseState,
+    pub reactions: Vec<Reaction>,
+    pub handled: bool,
+}
+
+impl Default for PromiseData {
+    fn default() -> Self {
+        PromiseData {
+            state: PromiseState::Pending,
+            reactions: Vec::new(),
+            handled: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CoState {
+    Suspended,
+    Running,
+    Done,
+}
+
+pub struct SavedFrame {
+    pub closure: Rc<Closure>,
+    pub ip: usize,
+    pub stack: Vec<Value>,
+    pub handlers: Vec<(usize, usize)>,
+    pub upvalues: Vec<(Rc<RefCell<Upvalue>>, usize)>,
+    pub started: bool,
+}
+
+pub struct Coroutine {
+    pub saved: RefCell<Option<SavedFrame>>,
+    pub state: Cell<CoState>,
+    pub promise: Option<Rc<Obj>>,
+    pub is_generator: bool,
 }
 
 pub struct Closure {
@@ -61,6 +142,7 @@ pub enum IterState {
     MapValues(Rc<Obj>, usize),
     SetValues(Rc<Obj>, usize),
     List(Vec<Value>, usize),
+    Protocol(Value, Value),
 }
 
 #[derive(Clone)]
@@ -71,6 +153,7 @@ pub enum MapKey {
     Num(u64),
     Str(Rc<str>),
     Obj(Rc<Obj>),
+    Sym(Rc<Symbol>),
 }
 
 impl MapKey {
@@ -91,6 +174,7 @@ impl MapKey {
             }
             Value::Str(s) => MapKey::Str(s.clone()),
             Value::Object(o) => MapKey::Obj(o.clone()),
+            Value::Symbol(s) => MapKey::Sym(s.clone()),
         }
     }
 
@@ -102,6 +186,7 @@ impl MapKey {
             MapKey::Num(bits) => Value::Number(f64::from_bits(*bits)),
             MapKey::Str(s) => Value::Str(s.clone()),
             MapKey::Obj(o) => Value::Object(o.clone()),
+            MapKey::Sym(s) => Value::Symbol(s.clone()),
         }
     }
 }
@@ -114,6 +199,7 @@ impl PartialEq for MapKey {
             (MapKey::Num(a), MapKey::Num(b)) => a == b,
             (MapKey::Str(a), MapKey::Str(b)) => a == b,
             (MapKey::Obj(a), MapKey::Obj(b)) => Rc::ptr_eq(a, b),
+            (MapKey::Sym(a), MapKey::Sym(b)) => Rc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -141,6 +227,10 @@ impl Hash for MapKey {
             MapKey::Obj(o) => {
                 5u8.hash(state);
                 (Rc::as_ptr(o) as usize).hash(state)
+            }
+            MapKey::Sym(s) => {
+                6u8.hash(state);
+                (Rc::as_ptr(s) as usize).hash(state)
             }
         }
     }
@@ -210,6 +300,10 @@ impl Obj {
             }
             _ => None,
         }
+    }
+
+    pub fn is_accessor(&self) -> bool {
+        matches!(self.kind, ObjKind::Accessor(_))
     }
 
     pub fn array(&self) -> Option<&RefCell<Vec<Value>>> {

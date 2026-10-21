@@ -46,7 +46,9 @@ fn run(cli: Cli) -> ExitCode {
     let mut vm = Vm::new(argv);
 
     if let Some(code) = &cli.eval {
-        let r = vm.eval("<eval>", code, Mode::Repl);
+        let r = vm
+            .eval("<eval>", code, Mode::Repl)
+            .and_then(|v| vm.run_event_loop().map(|_| v));
         return finish(
             &mut vm,
             r.map(|v| {
@@ -80,7 +82,7 @@ fn run(cli: Cli) -> ExitCode {
                 }
             };
         }
-        let r = vm.run_file(file);
+        let r = vm.run_file(file).and_then(|_| vm.run_event_loop());
         return finish(&mut vm, r.map(|_| None));
     }
 
@@ -139,7 +141,11 @@ fn repl(vm: &mut Vm) -> ExitCode {
                 eprintln!("Uncaught SyntaxError: {}", e.message);
             }
             Ok(proto) => {
-                let r = vm.run_proto(proto);
+                let proto_async = proto.is_async;
+                let r = vm.run_proto(proto).and_then(|v| {
+                    let v = if proto_async { vm.await_value(&v)? } else { v };
+                    vm.run_event_loop().map(|_| v)
+                });
                 vm.flush();
                 match r {
                     Ok(v) => {
@@ -147,7 +153,10 @@ fn repl(vm: &mut Vm) -> ExitCode {
                             println!("{}", inspect_plain(&v));
                         }
                     }
-                    Err(e) => eprintln!("{}", vm.format_uncaught(&e)),
+                    Err(e) => {
+                        eprintln!("{}", vm.format_uncaught(&e));
+                        vm.rejection = false;
+                    }
                 }
             }
         }
