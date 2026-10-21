@@ -1,0 +1,141 @@
+const frozen = Object.freeze({ a: 1, nested: { b: 2 } })
+try {
+  frozen.a = 2
+} catch (e) {
+  console.log(e.name, e.message)
+}
+frozen.nested.b = 3
+console.log(frozen, Object.isFrozen(frozen), Object.isSealed(Object.seal({ x: 1 })), Object.isExtensible(Object.preventExtensions({})))
+const ro = {}
+Object.defineProperty(ro, "id", { value: 7, enumerable: true })
+try {
+  ro.id = 8
+} catch (e) {
+  console.log(e.name)
+}
+console.log(ro, Object.getOwnPropertyDescriptor(ro, "id"), Object.getOwnPropertyDescriptors({ get g() { return 1 } }))
+console.log(Object.keys({ 2: "b", 1: "a", z: "z", 0: "x" }))
+
+const log = []
+const handler = {
+  get(t, k, r) {
+    log.push(`get ${String(k)}`)
+    return Reflect.get(t, k, r)
+  },
+  set(t, k, v, r) {
+    log.push(`set ${String(k)}=${v}`)
+    return Reflect.set(t, k, v * 2, r)
+  },
+  has: (t, k) => k.startsWith("x") || k in t,
+  deleteProperty(t, k) {
+    log.push(`delete ${k}`)
+    return Reflect.deleteProperty(t, k)
+  },
+  ownKeys: (t) => [...Reflect.ownKeys(t), "virtual"],
+  getOwnPropertyDescriptor: (t, k) =>
+    k === "virtual" ? { value: "v", enumerable: true, configurable: true } : Reflect.getOwnPropertyDescriptor(t, k),
+}
+const target = { a: 1 }
+const p = new Proxy(target, handler)
+p.b = 5
+console.log(p.a, p.b, "xyz" in p, "q" in p, delete p.a, Object.keys(p), target)
+console.log(log)
+const fp = new Proxy(function (a, b) { return a + b }, {
+  apply: (t, self, args) => t(...args) * 10,
+  construct: (t, args) => ({ made: args }),
+})
+console.log(fp(1, 2), new fp(3), typeof fp)
+const { proxy, revoke } = Proxy.revocable({}, {})
+revoke()
+try {
+  proxy.x
+} catch (e) {
+  console.log(e.name)
+}
+console.log(Reflect.ownKeys({ b: 1, [Symbol("s")]: 2 }), Reflect.has([], "length"), Reflect.apply(Math.min, null, [3, 1, 2]), Reflect.construct(Array, [3]).length)
+console.log(Reflect.defineProperty(Object.freeze({}), "x", { value: 1 }), Reflect.getPrototypeOf([]) === Array.prototype)
+
+globalThis.shared = 42
+console.log(shared, typeof globalThis, globalThis.Math === Math, "shared" in globalThis)
+Object.defineProperty(globalThis, "lazy", { get: () => "computed" })
+console.log(lazy)
+
+const money = { amount: 5, [Symbol.toPrimitive](hint) { return hint === "number" ? this.amount : `$${this.amount}` } }
+console.log(+money, `${money}`, money * 2)
+class Even {
+  static [Symbol.hasInstance](n) {
+    return n % 2 === 0
+  }
+}
+console.log(4 instanceof Even, 3 instanceof Even, Object.prototype.toString.call({ [Symbol.toStringTag]: "Custom" }), String(Math))
+
+function scoped() {
+  if (true) {
+    var inner = "hoisted"
+  }
+  for (var i = 0; i < 2; i++) {}
+  return [inner, i]
+}
+console.log(scoped())
+
+class Config {
+  static defaults = { port: 80 }
+  static port = this.defaults.port + 1
+  static #count = 0
+  static {
+    Config.ready = Config.#count === 0
+  }
+  constructor() {
+    this.kind = new.target.name
+  }
+}
+class Sub extends Config {}
+console.log(Config.port, Config.ready, new Sub().kind)
+const base = { greet() { return "hi" } }
+const child = { __proto__: base, greet() { return super.greet() + "!" } }
+console.log(child.greet(), Object.getPrototypeOf(child) === base)
+const Named = class Inner { static self() { return Inner } }
+console.log(Named.self() === Named, typeof Inner)
+
+function* gen() {
+  try {
+    yield 1
+    yield 2
+  } finally {
+    console.log("closed")
+  }
+}
+for (const v of gen()) {
+  console.log("got", v)
+  break
+}
+const [only] = gen()
+console.log(only)
+
+console.log(new Function("a", "b", "return a + b")(2, 3), eval("6 * 7"))
+function sample(a, b) { return a + b }
+console.log(sample.toString())
+console.log(((x) => x * 2).toString(), Object.getOwnPropertyNames(sample).sort())
+
+const tag = (s) => s
+const site = () => tag`same`
+console.log(site() === site(), Object.isFrozen(site()))
+const sym = Symbol("meth")
+const named = { [sym]: () => 1, ["k" + 1]: function () {} }
+console.log(named[sym].name, named.k1.name)
+
+const holes = [1, , 3]
+console.log(holes, 1 in holes, Object.keys(holes), holes.map((x) => x * 2), new Array(2))
+
+function args() {
+  return Array.from(arguments).join("+")
+}
+console.log(args(1, 2, 3))
+
+try {
+  await Promise.any([Promise.reject(new Error("a"))])
+} catch (e) {
+  console.log(e.constructor.name, e.errors.length, e instanceof Error)
+}
+const withCause = new Error("outer", { cause: "inner" })
+console.log(withCause.cause, Object.keys(withCause))

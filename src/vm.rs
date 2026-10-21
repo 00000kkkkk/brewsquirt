@@ -194,7 +194,7 @@ pub(crate) struct Frame {
     pub(crate) base: usize,
     pub(crate) construct: bool,
     pub(crate) co: Option<Rc<Obj>>,
-    pub(crate) new_target: Option<Value>,
+    pub(crate) new_target: Option<Rc<Obj>>,
 }
 
 pub(crate) struct Handler {
@@ -232,7 +232,10 @@ pub struct Vm {
     pub accessors_used: bool,
     pub(crate) readonly_used: bool,
     pub(crate) global_accessors: bool,
-    pub(crate) next_new_target: Option<Value>,
+    pub(crate) next_new_target: Option<Rc<Obj>>,
+    pub(crate) gen_return_pending: bool,
+    pub(crate) pending_ns: Option<Value>,
+    pub(crate) import_metas: FxHashMap<Rc<str>, Value>,
     pub rejection: bool,
     pub symbol_seq: u64,
     pub symbol_registry: FxHashMap<Rc<str>, Value>,
@@ -297,6 +300,9 @@ impl Vm {
             readonly_used: false,
             global_accessors: false,
             next_new_target: None,
+            gen_return_pending: false,
+            pending_ns: None,
+            import_metas: FxHashMap::default(),
             rejection: false,
             symbol_seq: 0,
             symbol_registry: FxHashMap::default(),
@@ -345,6 +351,7 @@ impl Vm {
             Rc::new(ModuleInfo {
                 name: name.into(),
                 dir,
+                source: src.into(),
             }),
             mode,
         )
@@ -410,13 +417,20 @@ impl Vm {
             Ok(p) => p,
             Err(e) => return Err(self.syntax_error_value(&e, &name)),
         };
+        let ns = self.new_namespace();
+        self.modules.insert(abs.clone(), ns.clone());
+        self.pending_ns = Some(ns.clone());
         self.loading.push(abs.clone());
         let r = self.run_proto(proto);
         self.loading.pop();
-        if let Ok(ns) = &r {
-            self.modules.insert(abs, ns.clone());
+        match r {
+            Ok(v) if Vm::is_promise(&v) => Ok(v),
+            Ok(_) => Ok(ns),
+            Err(e) => {
+                self.modules.remove(&abs);
+                Err(e)
+            }
         }
-        r
     }
 
     pub fn format_uncaught(&self, e: &Value) -> String {
@@ -465,6 +479,69 @@ impl Vm {
         }
     }
 
+    pub fn new_namespace(&mut self) -> Value {
+        let ns = Obj::new(ObjKind::Ordinary, None);
+        ns.set_with_attrs(
+            crate::object::TO_STRING_TAG_KEY,
+            "Module".into(),
+            crate::object::NON_ENUM | crate::object::READ_ONLY | crate::object::NON_CONFIG,
+        );
+        Value::Object(ns)
+    }
+
+    fn module_file_url(path: &Path) -> String {
+        let s = module::display_path_abs(path).replace('\\', "/");
+        let encoded: String = s
+            .chars()
+            .map(|c| match c {
+                ' ' => "%20".to_string(),
+                '%' => "%25".to_string(),
+                '#' => "%23".to_string(),
+                '?' => "%3F".to_string(),
+                c => c.to_string(),
+            })
+            .collect();
+        if encoded.starts_with('/') {
+            format!("file://{encoded}")
+        } else {
+            format!("file:///{encoded}")
+        }
+    }
+
+    pub fn import_meta(&mut self, module: &Rc<ModuleInfo>) -> Result<Value, Value> {
+        if let Some(m) = self.import_metas.get(&module.name) {
+            return Ok(m.clone());
+        }
+        let raw = Path::new(&*module.name);
+        let file = if raw.is_absolute() {
+            raw.to_path_buf()
+        } else {
+            match raw.file_name() {
+                Some(f) => module.dir.join(f),
+                None => module.dir.clone(),
+            }
+        };
+        let meta = Obj::new(ObjKind::Ordinary, None);
+        let filename = module::display_path_abs(&file);
+        let dirname = module::display_path_abs(&module.dir);
+        meta.set_own("dirname", dirname.into());
+        meta.set_own("filename", filename.into());
+        meta.set_own("url", Self::module_file_url(&file).into());
+        meta.set_own("main", Value::Bool(self.loading.len() <= 1));
+        let resolver = Obj::new(
+            ObjKind::Bound(Box::new(crate::object::Bound {
+                target: crate::builtins::native_fn(self, "resolve", 1, meta_resolve),
+                this: Value::Undefined,
+                args: vec![Value::Str(dirname_of(module).into())],
+            })),
+            Some(self.realm.function_proto.clone()),
+        );
+        meta.set_own("resolve", Value::Object(resolver));
+        let v = Value::Object(meta);
+        self.import_metas.insert(module.name.clone(), v.clone());
+        Ok(v)
+    }
+
     pub fn import_builtin(&mut self, name: &str) -> Result<Value, Value> {
         if let Some(v) = self.builtin_modules.get(name) {
             return Ok(v.clone());
@@ -508,12 +585,6 @@ impl Vm {
         if let Some(v) = self.modules.get(&path) {
             return Ok(v.clone());
         }
-        if self.loading.contains(&path) {
-            return Err(self.make_error(
-                ErrorKind::Error,
-                format!("Circular import of '{spec}' is not supported yet"),
-            ));
-        }
         let src = match std::fs::read_to_string(&path) {
             Ok(s) => s,
             Err(e) => {
@@ -530,6 +601,9 @@ impl Vm {
             Err(e) => return Err(self.syntax_error_value(&e, &name)),
         };
         let is_async = proto.is_async;
+        let ns = self.new_namespace();
+        self.modules.insert(path.clone(), ns.clone());
+        self.pending_ns = Some(ns.clone());
         self.loading.push(path.clone());
         let r = self.run_proto(proto);
         let r = match r {
@@ -537,8 +611,10 @@ impl Vm {
             other => other,
         };
         self.loading.pop();
-        let ns = r?;
-        self.modules.insert(path, ns.clone());
+        if let Err(e) = r {
+            self.modules.remove(&path);
+            return Err(e);
+        }
         Ok(ns)
     }
 
@@ -1330,7 +1406,7 @@ impl Vm {
                                 return Err(self.not_extensible_error(&key));
                             }
                         }
-                        return self.set_array_index(a, i, val);
+                        return self.set_array_index(o, a, i, val);
                     }
                     if &*key == "length" {
                         let n = self.to_number(&val)?;
@@ -1349,6 +1425,11 @@ impl Vm {
                             )));
                         }
                         a.borrow_mut().resize(n as usize, Value::Undefined);
+                        if (n as usize) < len {
+                            o.truncate_holes(n as usize);
+                        } else {
+                            o.mark_holes(len, n as usize);
+                        }
                         return Ok(());
                     }
                 }
@@ -1390,6 +1471,7 @@ impl Vm {
 
     fn set_array_index(
         &mut self,
+        o: &Rc<Obj>,
         a: &RefCell<Vec<Value>>,
         i: usize,
         val: Value,
@@ -1397,12 +1479,17 @@ impl Vm {
         let mut arr = a.borrow_mut();
         if i < arr.len() {
             arr[i] = val;
+            drop(arr);
+            o.fill_hole(i);
         } else if i - arr.len() > 50_000_000 {
             drop(arr);
             return Err(self.range_error("Array index too far beyond the end of the array"));
         } else {
+            let old = arr.len();
             arr.resize(i, Value::Undefined);
             arr.push(val);
+            drop(arr);
+            o.mark_holes(old, i);
         }
         Ok(())
     }
@@ -1435,8 +1522,8 @@ impl Vm {
         if let (Value::Object(o), Value::Number(n)) = (obj, key) {
             if let ObjKind::Array(a) = &o.kind {
                 let i = *n as usize;
-                if i as f64 == *n && o.flags.get() == 0 {
-                    return self.set_array_index(a, i, val);
+                if i as f64 == *n && o.flags.get() & !crate::object::HAS_HOLES == 0 {
+                    return self.set_array_index(o, a, i, val);
                 }
             }
             if let ObjKind::Typed(t) = &o.kind {
@@ -1644,7 +1731,21 @@ impl Vm {
                     return Ok(true);
                 }
                 if let Some(i) = array_index(&k) {
-                    return Ok(i < a.borrow().len());
+                    if i < a.borrow().len() && !o.is_hole(i) {
+                        return Ok(true);
+                    }
+                    if i < a.borrow().len() {
+                        return Ok(o
+                            .proto
+                            .borrow()
+                            .as_ref()
+                            .is_some_and(|p| p.get_chain(&k).is_some()));
+                    }
+                    return Ok(o
+                        .proto
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|p| p.get_chain(&k).is_some()));
                 }
             }
             ObjKind::Function(_) | ObjKind::Native(_) => {
@@ -1808,9 +1909,50 @@ impl Vm {
             )));
         }
         if self.get_prop(&r, "done")?.truthy() {
+            if let ObjKind::Iter(state) = &o.kind {
+                *state.borrow_mut() = IterState::List(Vec::new(), 0);
+            }
             return Ok(None);
         }
         Ok(Some(self.get_prop(&r, "value")?))
+    }
+
+    pub fn iter_close(&mut self, it: &Value) -> Result<(), Value> {
+        let Value::Object(o) = it else {
+            return Ok(());
+        };
+        match &o.kind {
+            ObjKind::Coroutine(c) => {
+                if c.state.get() != crate::object::CoState::Done && !c.is_async {
+                    let o = o.clone();
+                    self.resume(&o, Value::Undefined, ResumeMode::Return)?;
+                }
+                Ok(())
+            }
+            ObjKind::Iter(state) => {
+                let target = match &*state.borrow() {
+                    IterState::Protocol(iterator, _) => Some(iterator.clone()),
+                    _ => None,
+                };
+                let Some(iterator) = target else {
+                    return Ok(());
+                };
+                *state.borrow_mut() = IterState::List(Vec::new(), 0);
+                let ret = self.get_prop(&iterator, "return")?;
+                if ret.is_nullish() {
+                    return Ok(());
+                }
+                let r = self.call_value(&ret, iterator, &[])?;
+                if !r.is_object() {
+                    return Err(self.type_error(format!(
+                        "Iterator result {} is not an object",
+                        inspect_plain(&r)
+                    )));
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     pub fn drain_iterator(&mut self, it: &Value) -> Result<Vec<Value>, Value> {
@@ -1894,6 +2036,23 @@ impl Vm {
 
     pub fn own_keys(&self, v: &Value) -> Vec<Value> {
         let mut keys = Vec::new();
+        if let Value::Object(o) = v {
+            if let ObjKind::Array(a) = &o.kind {
+                if o.has_holes() {
+                    for i in 0..a.borrow().len() {
+                        if !o.is_hole(i) {
+                            keys.push(Value::Str(i.to_string().into()));
+                        }
+                    }
+                    for (k, _) in o.props.borrow().enumerable() {
+                        if !is_symbol_key(k) {
+                            keys.push(Value::Str(k.clone()));
+                        }
+                    }
+                    return keys;
+                }
+            }
+        }
         match v {
             Value::Object(o) if matches!(o.kind, ObjKind::Global) => {
                 for k in self.globals.names() {
@@ -2411,10 +2570,10 @@ impl Vm {
                     let Some(sup) = sup else {
                         throw!(self.type_error("Super constructor is not a constructor"));
                     };
-                    self.next_new_target = Some(match &self.frames[fi].new_target {
-                        Some(t) => t.clone(),
-                        None => self.stack[base - 1].clone(),
-                    });
+                    self.next_new_target = match &self.frames[fi].new_target {
+                        Some(t) => Some(t.clone()),
+                        None => self.stack[base - 1].as_object().cloned(),
+                    };
                     let ti = self.stack.len() - argc - 1;
                     match &sup.kind {
                         ObjKind::Function(c) => {
@@ -2788,7 +2947,9 @@ impl Vm {
                 Op::ArrayHole => {
                     if let Some(Value::Object(o)) = self.stack.last() {
                         if let ObjKind::Array(a) = &o.kind {
+                            let i = a.borrow().len();
                             a.borrow_mut().push(Value::Undefined);
+                            o.mark_holes(i, i + 1);
                         }
                     }
                 }
@@ -2830,6 +2991,7 @@ impl Vm {
                     let v = pop!();
                     let key = pop!();
                     let k = tri!(self.to_property_key(&key));
+                    name_anonymous(&v, &k, "");
                     if let Some(Value::Object(o)) = self.stack.last() {
                         if let Value::Object(f) = &v {
                             if let ObjKind::Function(c) = &f.kind {
@@ -2852,13 +3014,70 @@ impl Vm {
                 Op::NewTarget => {
                     let v = if self.frames[fi].construct {
                         match &self.frames[fi].new_target {
-                            Some(t) => t.clone(),
+                            Some(t) => Value::Object(t.clone()),
                             None => self.stack[base - 1].clone(),
                         }
                     } else {
                         Value::Undefined
                     };
                     self.stack.push(v);
+                }
+                Op::TemplateCache(site, t) => {
+                    let cached = proto.templates[site as usize].borrow().clone();
+                    if let Some(v) = cached {
+                        self.stack.push(v);
+                        ip = t as usize;
+                    }
+                }
+                Op::TemplateStore(site) => {
+                    let v = peek!();
+                    if let Value::Object(o) = &v {
+                        if let Some(Value::Object(raw)) = o.get_own("raw") {
+                            let _ = self.freeze(&raw);
+                        }
+                        let _ = self.freeze(o);
+                    }
+                    *proto.templates[site as usize].borrow_mut() = Some(v);
+                }
+                Op::ModuleNamespace => {
+                    let ns = match self.pending_ns.take() {
+                        Some(ns) => ns,
+                        None => self.new_namespace(),
+                    };
+                    self.stack.push(ns);
+                }
+                Op::ImportMeta => {
+                    let module = cl.proto.module.clone();
+                    let meta = tri!(self.import_meta(&module));
+                    self.stack.push(meta);
+                }
+                Op::DynImport => {
+                    let spec = pop!();
+                    let module = cl.proto.module.clone();
+                    let p = self.new_promise();
+                    let r = self
+                        .to_string(&spec)
+                        .and_then(|s| self.import_module(&s, &module));
+                    match r {
+                        Ok(ns) => self.resolve_promise(&p, ns),
+                        Err(e) => self.reject_promise(&p, e),
+                    }
+                    self.stack.push(Value::Object(p));
+                }
+                Op::IterClose(slot) => {
+                    let it = self.stack[base + slot as usize].clone();
+                    tri!(self.iter_close(&it));
+                }
+                Op::IterCloseTop => {
+                    let it = pop!();
+                    tri!(self.iter_close(&it));
+                }
+                Op::YieldReturn(t) => {
+                    if self.gen_return_pending {
+                        self.gen_return_pending = false;
+                    } else {
+                        ip = t as usize;
+                    }
                 }
                 Op::SetHome => {
                     let n = self.stack.len();
@@ -2880,6 +3099,7 @@ impl Vm {
                     let v = pop!();
                     let key = pop!();
                     let k = tri!(self.to_property_key(&key));
+                    name_anonymous(&v, &k, "");
                     if let Some(Value::Object(o)) = self.stack.last() {
                         o.props.borrow_mut().insert(k, v);
                     }
@@ -2930,6 +3150,7 @@ impl Vm {
                     let key = pop!();
                     let class = peek!();
                     let k = tri!(self.to_property_key(&key));
+                    name_anonymous(&m, &k, "");
                     tri!(self.define_method(&class, k, m, is_static));
                 }
                 Op::GetIter => {
@@ -3117,8 +3338,8 @@ impl Vm {
                     let f = pop!();
                     if let Some(Value::Object(o)) = self.stack.last() {
                         let o = o.clone();
-                        if let Value::Object(fo) = &f {
-                            if let ObjKind::Function(c) = &fo.kind {
+                        if let Value::Object(func) = &f {
+                            if let ObjKind::Function(c) = &func.kind {
                                 *c.home.borrow_mut() = Some(o.clone());
                             }
                         }
@@ -3129,6 +3350,7 @@ impl Vm {
                     let f = pop!();
                     let key = pop!();
                     let k = tri!(self.to_property_key(&key));
+                    name_anonymous(&f, &k, if setter { "set " } else { "get " });
                     if let Some(Value::Object(o)) = self.stack.last() {
                         let o = o.clone();
                         self.define_accessor(&o, k, f, setter);
@@ -3211,7 +3433,9 @@ impl Vm {
             Value::Object(o) => {
                 if let ObjKind::Array(a) = &o.kind {
                     for (i, x) in a.borrow().iter().enumerate() {
-                        out.push((Rc::from(i.to_string()), x.clone()));
+                        if !o.is_hole(i) {
+                            out.push((Rc::from(i.to_string()), x.clone()));
+                        }
                     }
                 }
                 if let ObjKind::Typed(t) = &o.kind {
@@ -3385,4 +3609,48 @@ impl Vm {
     pub fn map_key(v: &Value) -> MapKey {
         MapKey::from_value(v)
     }
+}
+
+fn dirname_of(module: &ModuleInfo) -> String {
+    module::display_path_abs(&module.dir)
+}
+
+fn meta_resolve(vm: &mut Vm, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let dir = vm.to_string(&args.first().cloned().unwrap_or_default())?;
+    let spec = vm.to_string(&args.get(1).cloned().unwrap_or_default())?;
+    if spec.starts_with("node:") || spec.starts_with("squirt:") {
+        return Ok(Value::Str(spec));
+    }
+    match module::resolve(&spec, Path::new(&*dir)) {
+        Ok(p) => Ok(Vm::module_file_url(&p).into()),
+        Err(msg) => Err(vm.make_error(ErrorKind::Error, msg)),
+    }
+}
+
+fn name_anonymous(f: &Value, key: &str, prefix: &str) {
+    let Value::Object(o) = f else {
+        return;
+    };
+    let anonymous = match &o.kind {
+        ObjKind::Function(c) => c.proto.name.is_empty() && !o.has_own("name"),
+        _ => false,
+    };
+    if !anonymous {
+        return;
+    }
+    let base = if crate::object::is_symbol_key(key) {
+        let d = crate::object::symbol_key_description(key);
+        if d.is_empty() {
+            String::new()
+        } else {
+            format!("[{d}]")
+        }
+    } else {
+        key.to_string()
+    };
+    o.set_with_attrs(
+        "name",
+        Value::Str(format!("{prefix}{base}").into()),
+        crate::object::NON_ENUM | crate::object::READ_ONLY,
+    );
 }

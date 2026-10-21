@@ -83,7 +83,7 @@ fn get(o: &Obj, i: usize) -> Value {
 }
 
 fn check_frozen(vm: &mut Vm, o: &Obj) -> Result<(), Value> {
-    let flags = o.flags.get();
+    let flags = o.flags.get() & !crate::object::HAS_HOLES;
     if flags & crate::object::ELEMENTS_FROZEN != 0 {
         Err(vm.type_error("Cannot assign to read only property '0' of object '[object Array]'"))
     } else if flags != 0 {
@@ -105,7 +105,11 @@ fn array_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             if n < 0.0 || n.fract() != 0.0 || n > 4294967295.0 {
                 return Err(vm.range_error("Invalid array length"));
             }
-            return Ok(vm.new_array(vec![Value::Undefined; n as usize]));
+            let a = vm.new_array(vec![Value::Undefined; n as usize]);
+            if let Value::Object(o) = &a {
+                o.mark_holes(0, n as usize);
+            }
+            return Ok(a);
         }
     }
     Ok(vm.new_array(args.to_vec()))
@@ -181,12 +185,16 @@ fn push(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 fn pop(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     let o = this_array(vm, &this, "pop")?;
     check_frozen(vm, &o)?;
-    Ok(items(&o).pop().unwrap_or_default())
+    let v = items(&o).pop().unwrap_or_default();
+    let n = len(&o);
+    o.truncate_holes(n);
+    Ok(v)
 }
 
 fn shift(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     let o = this_array(vm, &this, "shift")?;
     check_frozen(vm, &o)?;
+    o.clear_holes();
     let mut a = items(&o);
     if a.is_empty() {
         Ok(Value::Undefined)
@@ -198,6 +206,7 @@ fn shift(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 fn unshift(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let o = this_array(vm, &this, "unshift")?;
     check_frozen(vm, &o)?;
+    o.clear_holes();
     let mut a = items(&o);
     a.splice(0..0, args.iter().cloned());
     Ok(Value::Number(a.len() as f64))
@@ -229,12 +238,23 @@ fn slice(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     } else {
         Vec::new()
     };
-    Ok(vm.new_array(out))
+    let result = vm.new_array(out);
+    if o.has_holes() && start < end {
+        if let Value::Object(r) = &result {
+            for i in start..end {
+                if o.is_hole(i) {
+                    r.mark_holes(i - start, i - start + 1);
+                }
+            }
+        }
+    }
+    Ok(result)
 }
 
 fn splice(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let o = this_array(vm, &this, "splice")?;
     check_frozen(vm, &o)?;
+    o.clear_holes();
     let n = len(&o);
     let start = match args.first() {
         Some(v) => relative_index(to_integer(vm, v)?, n),
@@ -302,6 +322,7 @@ fn to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 fn reverse(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     let o = this_array(vm, &this, "reverse")?;
     check_frozen(vm, &o)?;
+    o.clear_holes();
     items(&o).reverse();
     Ok(this)
 }
@@ -326,8 +347,9 @@ fn index_of(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let start = from_index(vm, args, len(&o))?;
     let pos = items(&o)
         .iter()
+        .enumerate()
         .skip(start)
-        .position(|v| v.strict_eq(&target));
+        .position(|(i, v)| v.strict_eq(&target) && !o.is_hole(i));
     Ok(Value::Number(
         pos.map(|p| (p + start) as f64).unwrap_or(-1.0),
     ))
@@ -336,7 +358,10 @@ fn index_of(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 fn last_index_of(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let o = this_array(vm, &this, "lastIndexOf")?;
     let target = arg(args, 0);
-    let pos = items(&o).iter().rposition(|v| v.strict_eq(&target));
+    let pos = items(&o)
+        .iter()
+        .enumerate()
+        .rposition(|(i, v)| v.strict_eq(&target) && !o.is_hole(i));
     Ok(Value::Number(pos.map(|p| p as f64).unwrap_or(-1.0)))
 }
 
@@ -428,6 +453,10 @@ fn filter(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let mut out = Vec::new();
     let mut i = 0;
     while i < len(&o) {
+        if o.is_hole(i) {
+            i += 1;
+            continue;
+        }
         let v = get(&o, i);
         if call3(vm, &f, &t, v.clone(), i, &this)?.truthy() {
             out.push(v);
@@ -441,19 +470,36 @@ fn map(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (o, f, t) = callback(vm, &this, args, "map")?;
     let n = len(&o);
     let mut out = Vec::with_capacity(n);
+    let mut holes = Vec::new();
     let mut i = 0;
     while i < n.min(len(&o)) {
+        if o.is_hole(i) {
+            out.push(Value::Undefined);
+            holes.push(i);
+            i += 1;
+            continue;
+        }
         let v = get(&o, i);
         out.push(call3(vm, &f, &t, v, i, &this)?);
         i += 1;
     }
-    Ok(vm.new_array(out))
+    let result = vm.new_array(out);
+    if let Value::Object(r) = &result {
+        for h in holes {
+            r.mark_holes(h, h + 1);
+        }
+    }
+    Ok(result)
 }
 
 fn for_each(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (o, f, t) = callback(vm, &this, args, "forEach")?;
     let mut i = 0;
     while i < len(&o) {
+        if o.is_hole(i) {
+            i += 1;
+            continue;
+        }
         let v = get(&o, i);
         call3(vm, &f, &t, v, i, &this)?;
         i += 1;
@@ -465,6 +511,10 @@ fn some(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (o, f, t) = callback(vm, &this, args, "some")?;
     let mut i = 0;
     while i < len(&o) {
+        if o.is_hole(i) {
+            i += 1;
+            continue;
+        }
         let v = get(&o, i);
         if call3(vm, &f, &t, v, i, &this)?.truthy() {
             return Ok(Value::Bool(true));
@@ -478,6 +528,10 @@ fn every(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (o, f, t) = callback(vm, &this, args, "every")?;
     let mut i = 0;
     while i < len(&o) {
+        if o.is_hole(i) {
+            i += 1;
+            continue;
+        }
         let v = get(&o, i);
         if !call3(vm, &f, &t, v, i, &this)?.truthy() {
             return Ok(Value::Bool(false));
@@ -602,9 +656,20 @@ fn sort(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     if !f.is_undefined() {
         expect_fn(vm, &f)?;
     }
-    let list = items(&o).clone();
-    let sorted = merge_sort(vm, list, &f)?;
+    let all = items(&o).clone();
+    let total = all.len();
+    let list: Vec<Value> = all
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| !o.is_hole(*i))
+        .map(|(_, v)| v)
+        .collect();
+    let kept = list.len();
+    let mut sorted = merge_sort(vm, list, &f)?;
+    sorted.resize(total, Value::Undefined);
     *items(&o) = sorted;
+    o.clear_holes();
+    o.mark_holes(kept, total);
     Ok(this)
 }
 
@@ -660,6 +725,7 @@ fn flat_map(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 fn fill(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let o = this_array(vm, &this, "fill")?;
     check_frozen(vm, &o)?;
+    o.clear_holes();
     let n = len(&o);
     let (start, end) = range_args(vm, args, n, 1)?;
     let v = arg(args, 0);

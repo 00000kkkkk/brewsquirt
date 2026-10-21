@@ -1,6 +1,6 @@
 # JavaSquirt Language Reference
 
-This document describes JavaSquirt 0.6.0. JavaSquirt follows JavaScript semantics: for every
+This document describes JavaSquirt 0.7.0. JavaSquirt follows JavaScript semantics: for every
 supported feature, a program should print the same output under `jsq` as under Node.js. Features
 that are not implemented yet are listed in [Not yet supported](#not-yet-supported).
 
@@ -18,6 +18,8 @@ that are not implemented yet are listed in [Not yet supported](#not-yet-supporte
 - [Classes](#classes)
 - [Private members](#private-members)
 - [Getters and setters](#getters-and-setters)
+- [Objects and properties](#objects-and-properties)
+- [Proxy and Reflect](#proxy-and-reflect)
 - [Async functions and promises](#async-functions-and-promises)
 - [Generators and iterators](#generators-and-iterators)
 - [Async iteration](#async-iteration)
@@ -865,6 +867,104 @@ Java Squirt { first: 'Java', last: 'Squirt', full: [Getter] }
 `Object.defineProperty(obj, key, { get, set })` defines accessors at runtime, and
 `super.prop` inside a class accessor reads the parent's accessor.
 
+## Objects and properties
+
+Every property has the `writable`, `enumerable` and `configurable` attributes. Properties made
+with `Object.defineProperty` default to `false` for all three, class methods and builtin methods
+are not enumerable, and `Object.keys`, `for...in`, spread, `JSON.stringify` and `console.log` only
+see enumerable properties. Programs run in strict mode, so writing a read-only property or adding
+one to a non-extensible object throws a `TypeError`.
+
+```js
+const point = Object.freeze({ x: 1, y: 2 })
+try {
+  point.x = 5
+} catch (e) {
+  console.log(e.message)
+}
+const account = {}
+Object.defineProperty(account, "id", { value: 42, enumerable: true })
+Object.defineProperty(account, "secret", { value: "hidden" })
+console.log(account, Object.keys(account), account.secret)
+console.log(Object.getOwnPropertyDescriptor(account, "id"))
+console.log(Object.keys({ b: 1, 10: "ten", 2: "two", a: 2 }))
+```
+
+```text
+Cannot assign to read only property 'x' of object '#<Object>'
+{ id: 42 } [ 'id' ] hidden
+{ value: 42, writable: false, enumerable: true, configurable: false }
+[ '2', '10', 'b', 'a' ]
+```
+
+`Object.freeze`, `Object.seal`, `Object.preventExtensions` and their `is` checks,
+`Object.getOwnPropertyDescriptors`, `Object.getOwnPropertySymbols` and `propertyIsEnumerable` work
+as in JavaScript. Integer-like keys are listed first, in ascending order.
+
+`globalThis` is the global object. Properties added to it become global variables, and the
+well-known symbols `Symbol.toPrimitive`, `Symbol.hasInstance` and `Symbol.toStringTag` customize
+conversion, `instanceof` and `Object.prototype.toString`.
+
+```js
+globalThis.appName = "squirt"
+console.log(appName)
+const price = {
+  cents: 250,
+  [Symbol.toPrimitive](hint) {
+    return hint === "number" ? this.cents / 100 : `$${this.cents / 100}`
+  },
+}
+console.log(+price, `${price}`)
+class Even {
+  static [Symbol.hasInstance](n) {
+    return n % 2 === 0
+  }
+}
+console.log(4 instanceof Even, Object.prototype.toString.call({ [Symbol.toStringTag]: "Box" }))
+```
+
+```text
+squirt
+2.5 $2.5
+true [object Box]
+```
+
+## Proxy and Reflect
+
+`new Proxy(target, handler)` intercepts the `get`, `set`, `has`, `deleteProperty`, `ownKeys`,
+`getOwnPropertyDescriptor`, `defineProperty`, `getPrototypeOf`, `setPrototypeOf`,
+`isExtensible`, `preventExtensions`, `apply` and `construct` operations. `Proxy.revocable`
+returns a proxy that can be switched off. `Reflect` has the matching thirteen functions.
+
+```js
+const audit = []
+const user = new Proxy(
+  { name: "jsq" },
+  {
+    get(target, key, receiver) {
+      audit.push(String(key))
+      return Reflect.get(target, key, receiver)
+    },
+    set(target, key, value) {
+      if (typeof value !== "string") return false
+      return Reflect.set(target, key, value.toUpperCase())
+    },
+  },
+)
+user.name = "squirt"
+console.log(user.name, audit)
+try {
+  user.age = 3
+} catch (e) {
+  console.log(e.message)
+}
+```
+
+```text
+SQUIRT [ 'name' ]
+'set' on proxy: trap returned falsish for property 'age'
+```
+
 ## Async functions and promises
 
 `async` functions always return a `Promise`. Inside them, `await` suspends the function until the
@@ -1149,8 +1249,8 @@ import pad from "left-pad"
 
 A specifier is resolved in this order:
 
-1. **Builtin modules**: specifiers starting with `squirt:` refer to builtin modules. The only
-   builtin module in 0.1.0 is `squirt:fs`.
+1. **Builtin modules**: specifiers starting with `squirt:` or `node:` refer to builtin modules,
+   and so do the bare names of Node's core modules such as `fs` and `path`.
 2. **Relative paths**: specifiers starting with `./` or `../` are resolved against the directory
    of the importing file. For `./x`, the loader tries:
    1. `x` as written, if it is a file
@@ -1161,6 +1261,28 @@ A specifier is resolved in this order:
    or `index.jsq` when there is no manifest or no `main`.
 
 A specifier that cannot be resolved is an error.
+
+### Live bindings and cycles
+
+Imported names are live: when the exporting module changes an exported variable, importers see
+the new value. Imported bindings are read-only in the importing module. Modules may import each
+other in a cycle; function declarations are available to the other module right away, and other
+exports become available once their declaration runs.
+
+### Dynamic import and `import.meta`
+
+`import(specifier)` loads a module at runtime and returns a promise for its namespace object.
+`import.meta` has the module's `url`, `filename` and `dirname`, and `import.meta.resolve(spec)`
+returns the URL a specifier resolves to.
+
+```js
+const { join } = await import("node:path")
+console.log(typeof join, import.meta.url.startsWith("file://"))
+```
+
+```text
+function true
+```
 
 ### `squirt:fs`
 
@@ -1800,6 +1922,7 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
 - Streaming bodies, WebSockets and HTTPS servers
 - `node:net`, `node:worker_threads` and `node:crypto`
 - `Intl` and locale-aware formatting beyond `en-US`
-- Getters on the global object (`globalThis`)
+- Direct `eval` sees only global variables, not the locals of the calling function
+- Sloppy mode: every program runs with strict mode semantics
 - Tracing garbage collection
 - JIT compilation

@@ -1,0 +1,22 @@
+import * as A from "./fixtures/cycle_a.jsq"
+import Thing, { counter, bump } from "./fixtures/cycle_a.jsq"
+console.log(counter)
+bump()
+console.log(counter, A.counter, Object.keys(A), typeof Thing, A.default === Thing)
+const m = await import("./fixtures/cycle_b.jsq")
+console.log(m.b(), m === (await import("./fixtures/cycle_b.jsq")))
+try {
+  await import("./fixtures/missing.jsq")
+} catch (e) {
+  console.log("missing:", e.constructor.name)
+}
+const p = await import("node:path")
+console.log(typeof p.join, typeof p.default.join)
+console.log(import.meta.url.startsWith("file:///"), import.meta.url.endsWith("/modules_live.jsq"), import.meta.filename.endsWith("modules_live.jsq"))
+console.log(import.meta.resolve("./fixtures/cycle_b.jsq").endsWith("/fixtures/cycle_b.jsq"))
+console.log(A)
+try {
+  counter = 5
+} catch (e) {
+  console.log(e.name)
+}

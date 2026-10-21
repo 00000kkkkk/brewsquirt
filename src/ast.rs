@@ -9,6 +9,8 @@ pub struct Expr {
 #[derive(Clone, Debug)]
 pub enum ExprKind {
     NewTarget,
+    ImportMeta,
+    DynImport(Box<Expr>),
     Number(f64),
     Str(Rc<str>),
     Regex(Rc<str>, Rc<str>),
@@ -237,6 +239,7 @@ pub struct FuncDef {
     pub is_generator: bool,
     pub uses_arguments: bool,
     pub line: u32,
+    pub span: (u32, u32),
 }
 
 #[derive(Clone, Debug)]
@@ -246,6 +249,7 @@ pub struct ClassDef {
     pub constructor: Option<Rc<FuncDef>>,
     pub members: Vec<ClassMember>,
     pub line: u32,
+    pub span: (u32, u32),
 }
 
 #[derive(Clone, Debug)]

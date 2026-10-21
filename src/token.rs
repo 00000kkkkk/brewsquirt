@@ -159,6 +159,8 @@ pub struct Token {
     pub line: u32,
     pub col: u32,
     pub nl_before: bool,
+    pub start: u32,
+    pub end: u32,
 }
 
 impl Token {

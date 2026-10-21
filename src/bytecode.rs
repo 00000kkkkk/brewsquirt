@@ -134,6 +134,14 @@ pub enum Op {
     InitProto,
     NewTarget,
     SetHome,
+    YieldReturn(u32),
+    IterClose(u32),
+    IterCloseTop,
+    ModuleNamespace,
+    ImportMeta,
+    DynImport,
+    TemplateCache(u32, u32),
+    TemplateStore(u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,6 +176,7 @@ pub struct UpvalDesc {
 pub struct ModuleInfo {
     pub name: Rc<str>,
     pub dir: PathBuf,
+    pub source: Rc<str>,
 }
 
 #[derive(Debug)]
@@ -188,6 +197,8 @@ pub struct FunctionProto {
     pub module: Rc<ModuleInfo>,
     pub line: u32,
     pub global_cache: Box<[std::cell::Cell<u32>]>,
+    pub span: (u32, u32),
+    pub templates: Box<[std::cell::RefCell<Option<Value>>]>,
 }
 
 impl FunctionProto {

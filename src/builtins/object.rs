@@ -1,4 +1,4 @@
-use super::{arg, make_ctor, method};
+use super::{arg, make_ctor, method, native_fn};
 use crate::inspect::error_header;
 use crate::object::{Bound, Obj, ObjKind};
 use crate::value::Value;
@@ -65,6 +65,8 @@ pub fn install(vm: &mut Vm) {
     method(vm, &fp, "toString", 0, fn_to_string);
     let function = make_ctor(vm, "Function", 1, function_ctor, None, &fp);
     vm.define_global("Function", Value::Object(function));
+    let eval = native_fn(vm, "eval", 1, global_eval);
+    vm.define_global("eval", eval);
 
     let ctors: [crate::object::NativeFn; 7] = [
         error_ctor::<0>,
@@ -627,23 +629,64 @@ fn fn_bind(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     )))
 }
 
-fn fn_to_string(_vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+fn fn_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     let Value::Object(o) = &this else {
-        return Ok("".into());
+        return Err(vm.type_error("Function.prototype.toString requires that 'this' be a Function"));
     };
-    let name = o.function_name().unwrap_or_else(|| "".into());
-    Ok(match &o.kind {
-        ObjKind::Function(c) if c.proto.is_class() => format!("class {name} {{ }}"),
-        _ => format!("function {name}() {{ [native code] }}"),
+    if !o.is_callable() {
+        return Err(vm.type_error("Function.prototype.toString requires that 'this' be a Function"));
     }
-    .into())
+    let name = o.function_name().unwrap_or_else(|| "".into());
+    if let ObjKind::Function(c) = &o.kind {
+        let (a, b) = c.proto.span;
+        let src = &c.proto.module.source;
+        if b > a && (b as usize) <= src.len() {
+            if let Some(text) = src.get(a as usize..b as usize) {
+                return Ok(text.into());
+            }
+        }
+        if c.proto.is_class() {
+            return Ok(format!("class {name} {{ }}").into());
+        }
+    }
+    Ok(format!("function {name}() {{ [native code] }}").into())
 }
 
-fn function_ctor(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
-    Err(vm.make_error(
-        ErrorKind::Error,
-        "The Function constructor is not supported",
-    ))
+fn function_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let mut params = Vec::new();
+    for a in args.iter().take(args.len().saturating_sub(1)) {
+        params.push(vm.to_string(a)?.to_string());
+    }
+    let body = match args.last() {
+        Some(b) => vm.to_string(b)?.to_string(),
+        None => String::new(),
+    };
+    let src = format!(
+        "(function anonymous({}
+) {{
+{}
+}})",
+        params.join(","),
+        body
+    );
+    let dir = std::env::current_dir().unwrap_or_default();
+    let proto = match vm.compile(&src, "<anonymous>", dir, crate::compiler::Mode::Repl) {
+        Ok(p) => p,
+        Err(e) => return Err(vm.syntax_error_value(&e, "<anonymous>")),
+    };
+    vm.run_proto(proto)
+}
+
+fn global_eval(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let Value::Str(code) = arg(args, 0) else {
+        return Ok(arg(args, 0));
+    };
+    let dir = std::env::current_dir().unwrap_or_default();
+    let proto = match vm.compile(&code, "<eval>", dir, crate::compiler::Mode::Repl) {
+        Ok(p) => p,
+        Err(e) => return Err(vm.syntax_error_value(&e, "<eval>")),
+    };
+    vm.run_proto(proto)
 }
 
 fn error_ctor<const K: usize>(vm: &mut Vm, this: Value, args: &[Value]) -> R {

@@ -60,6 +60,7 @@ pub fn parse(src: &str) -> R<Vec<Stmt>> {
         no_in: false,
         fn_depth: 0,
         args_used: Vec::new(),
+        span_start: None,
         in_async: false,
         in_generator: false,
         class_ids: Vec::new(),
@@ -83,9 +84,18 @@ struct Parser {
     class_ids: Vec<u32>,
     next_class_id: u32,
     args_used: Vec<bool>,
+    span_start: Option<u32>,
 }
 
 impl Parser {
+    fn prev_end(&self) -> u32 {
+        if self.pos == 0 {
+            0
+        } else {
+            self.toks[self.pos - 1].end
+        }
+    }
+
     fn peek(&self) -> &Token {
         &self.toks[self.pos]
     }
@@ -299,6 +309,7 @@ impl Parser {
             }
             Some("function") => {
                 let line = self.line();
+                self.span_start = Some(self.peek().start);
                 self.advance();
                 let is_generator = self.eat(P::Star);
                 let name = self.binding_ident()?;
@@ -308,6 +319,7 @@ impl Parser {
             }
             Some("async") if self.is_kw_at(1, "function") && !self.peek_at(1).nl_before => {
                 let line = self.line();
+                self.span_start = Some(self.peek().start);
                 self.advance();
                 self.advance();
                 let is_generator = self.eat(P::Star);
@@ -802,6 +814,7 @@ impl Parser {
         is_async: bool,
         is_generator: bool,
     ) -> R<Rc<FuncDef>> {
+        let start = self.span_start.take().unwrap_or_else(|| self.peek().start);
         let saved = (self.in_async, self.in_generator);
         self.in_async = is_async;
         self.in_generator = is_generator;
@@ -810,6 +823,7 @@ impl Parser {
             .params()
             .and_then(|(params, rest)| Ok((params, rest, self.function_body()?)));
         let uses_arguments = self.args_used.pop().unwrap_or(false);
+        let end = self.prev_end();
         (self.in_async, self.in_generator) = saved;
         let (params, rest, body) = parsed?;
         Ok(Rc::new(FuncDef {
@@ -821,6 +835,7 @@ impl Parser {
             is_async,
             is_generator,
             uses_arguments,
+            span: (start, end),
             line,
         }))
     }
@@ -979,6 +994,7 @@ impl Parser {
 
     fn class(&mut self, require_name: bool) -> R<Rc<ClassDef>> {
         let line = self.line();
+        let start = self.peek().start;
         self.expect_kw("class")?;
         let name = if matches!(self.peek().tok, Tok::Ident(_)) && !self.is_kw("extends") {
             Some(self.binding_ident()?)
@@ -1003,6 +1019,7 @@ impl Parser {
             constructor,
             members,
             line,
+            span: (start, self.prev_end()),
         }))
     }
 
@@ -1018,6 +1035,7 @@ impl Parser {
                 continue;
             }
             let mline = self.line();
+            let mstart = self.peek().start;
             let ends_name = |p: &Parser, n: usize| {
                 p.is_at(n, P::LParen)
                     || p.is_at(n, P::Eq)
@@ -1048,6 +1066,7 @@ impl Parser {
                         is_generator: false,
                         uses_arguments: false,
                         line: mline,
+                        span: (0, 0),
                     })));
                     continue;
                 }
@@ -1081,6 +1100,7 @@ impl Parser {
                 } else {
                     FuncKind::Method
                 };
+                self.span_start = Some(mstart);
                 let f = self.function_rest(fname, kind, mline)?;
                 members.push(ClassMember::Accessor {
                     key,
@@ -1115,6 +1135,7 @@ impl Parser {
                         1,
                     ));
                 }
+                self.span_start = Some(mstart);
                 let f = self.function_full(fname, kind, mline, is_async, is_generator)?;
                 if is_ctor {
                     if constructor.is_some() {
@@ -1203,6 +1224,11 @@ impl Parser {
 
     fn arrow(&mut self, is_async: bool) -> R<Expr> {
         let line = self.line();
+        let start = if is_async && self.pos > 0 {
+            self.toks[self.pos - 1].start
+        } else {
+            self.peek().start
+        };
         let saved = (self.in_async, self.in_generator);
         self.in_async = is_async;
         self.in_generator = false;
@@ -1220,6 +1246,7 @@ impl Parser {
                 is_generator: false,
                 uses_arguments: false,
                 line,
+                span: (start, self.prev_end()),
             })),
             line,
         })
@@ -1859,6 +1886,7 @@ impl Parser {
                         class_ids: self.class_ids.clone(),
                         next_class_id: self.next_class_id,
                         args_used: vec![false],
+                        span_start: None,
                     };
                     if sub.is_eof() {
                         return Err(sub.error("Unexpected token '}'"));
@@ -1968,6 +1996,7 @@ impl Parser {
                         ExprKind::This
                     }
                     "function" => {
+                        self.span_start = Some(self.peek().start);
                         self.advance();
                         let is_generator = self.eat(P::Star);
                         let fname = if matches!(self.peek().tok, Tok::Ident(_)) {
@@ -1995,6 +2024,7 @@ impl Parser {
                         }
                     }
                     "async" if self.is_kw_at(1, "function") && !self.peek_at(1).nl_before => {
+                        self.span_start = Some(self.peek().start);
                         self.advance();
                         self.advance();
                         let is_generator = self.eat(P::Star);
@@ -2011,7 +2041,31 @@ impl Parser {
                             is_generator,
                         )?)
                     }
-                    "import" => return Err(self.error("Dynamic import is not supported yet")),
+                    "import" => {
+                        self.advance();
+                        if self.eat(P::Dot) {
+                            let n = self.ident_name()?;
+                            if &*n != "meta" {
+                                return Err(self.error(
+                                    "The only valid meta property for import is 'import.meta'",
+                                ));
+                            }
+                            ExprKind::ImportMeta
+                        } else {
+                            self.expect(P::LParen)?;
+                            let saved = self.no_in;
+                            self.no_in = false;
+                            let spec = self.assignment();
+                            self.no_in = saved;
+                            let spec = spec?;
+                            if self.eat(P::Comma) && !self.is(P::RParen) {
+                                let _ = self.assignment()?;
+                                self.eat(P::Comma);
+                            }
+                            self.expect(P::RParen)?;
+                            ExprKind::DynImport(Box::new(spec))
+                        }
+                    }
                     n if is_reserved(n) => return Err(self.unexpected()),
                     _ => {
                         self.advance();
@@ -2039,6 +2093,7 @@ impl Parser {
                 props.push(PropDef::Spread(self.assignment()?));
             } else {
                 let line = self.line();
+                let kstart = self.peek().start;
                 let plain_next = |p: &Parser| {
                     p.is_at(1, P::LParen)
                         || p.is_at(1, P::Colon)
@@ -2070,6 +2125,7 @@ impl Parser {
                     PropKey::Computed(_) => None,
                 };
                 if let Some(setter) = accessor {
+                    self.span_start = Some(kstart);
                     let f = self.function_rest(name, FuncKind::Method, line)?;
                     props.push(if setter {
                         PropDef::Setter(key, f)
@@ -2077,8 +2133,10 @@ impl Parser {
                         PropDef::Getter(key, f)
                     });
                 } else if self.is(P::LParen) {
-                    let f =
-                        self.function_full(name, FuncKind::Method, line, is_async, is_generator)?;
+                    let f = {
+                        self.span_start = Some(kstart);
+                        self.function_full(name, FuncKind::Method, line, is_async, is_generator)?
+                    };
                     props.push(PropDef::Method(key, f));
                 } else if is_async || is_generator {
                     return Err(self.unexpected());

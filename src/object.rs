@@ -18,11 +18,19 @@ pub const NON_CONFIG: u8 = 4;
 pub const NOT_EXTENSIBLE: u8 = 1;
 pub const ELEMENTS_FROZEN: u8 = 2;
 pub const ELEMENTS_SEALED: u8 = 4;
+pub const HAS_HOLES: u8 = 8;
 
 #[derive(Default)]
 struct PropExtra {
     index: rustc_hash::FxHashMap<Rc<str>, u32>,
     attrs: rustc_hash::FxHashMap<Rc<str>, u8>,
+    holes: Vec<u64>,
+}
+
+impl PropExtra {
+    fn is_empty(&self) -> bool {
+        self.index.is_empty() && self.attrs.is_empty() && self.holes.is_empty()
+    }
 }
 
 #[derive(Default)]
@@ -56,7 +64,7 @@ impl PropMap {
             }
         } else if let Some(x) = &mut self.extra {
             x.index.clear();
-            if x.attrs.is_empty() {
+            if x.is_empty() {
                 self.extra = None;
             }
         }
@@ -77,7 +85,7 @@ impl PropMap {
         if bits == 0 {
             if let Some(x) = &mut self.extra {
                 x.attrs.remove(key);
-                if x.attrs.is_empty() && x.index.is_empty() {
+                if x.is_empty() {
                     self.extra = None;
                 }
             }
@@ -145,7 +153,7 @@ impl PropMap {
 
     pub fn insert_fast(&mut self, key: Rc<str>, v: Value, adding_ok: bool) -> bool {
         if let Some(i) = self.find(&key) {
-            if self.attrs(&key) & READ_ONLY != 0 {
+            if self.extra.is_some() && self.attrs(&key) & READ_ONLY != 0 {
                 return false;
             }
             self.entries[i].1 = v;
@@ -154,7 +162,19 @@ impl PropMap {
         if !adding_ok {
             return false;
         }
-        self.insert(key, v);
+        let i = self.entries.len() as u32;
+        match self.extra.as_mut().filter(|x| !x.index.is_empty()) {
+            Some(x) => {
+                x.index.insert(key.clone(), i);
+                self.entries.push((key, v));
+            }
+            None => {
+                self.entries.push((key, v));
+                if self.entries.len() > INDEX_AT {
+                    self.reindex();
+                }
+            }
+        }
         true
     }
 
@@ -221,6 +241,66 @@ impl PropMap {
             }
         }
         Some(v)
+    }
+
+    pub fn is_hole(&self, i: usize) -> bool {
+        match &self.extra {
+            Some(x) => x
+                .holes
+                .get(i / 64)
+                .is_some_and(|w| w & (1u64 << (i % 64)) != 0),
+            None => false,
+        }
+    }
+
+    pub fn set_hole(&mut self, i: usize, on: bool) {
+        if !on {
+            if let Some(x) = &mut self.extra {
+                if let Some(w) = x.holes.get_mut(i / 64) {
+                    *w &= !(1u64 << (i % 64));
+                }
+            }
+            return;
+        }
+        let x = self.extra.get_or_insert_with(Box::default);
+        if x.holes.len() <= i / 64 {
+            x.holes.resize(i / 64 + 1, 0);
+        }
+        x.holes[i / 64] |= 1u64 << (i % 64);
+    }
+
+    pub fn mark_holes(&mut self, from: usize, to: usize) {
+        if from >= to {
+            return;
+        }
+        let x = self.extra.get_or_insert_with(Box::default);
+        if x.holes.len() <= (to - 1) / 64 {
+            x.holes.resize((to - 1) / 64 + 1, 0);
+        }
+        for i in from..to {
+            x.holes[i / 64] |= 1u64 << (i % 64);
+        }
+    }
+
+    pub fn truncate_holes(&mut self, len: usize) {
+        if let Some(x) = &mut self.extra {
+            let words = len.div_ceil(64);
+            x.holes.truncate(words);
+            if len % 64 != 0 {
+                if let Some(w) = x.holes.last_mut() {
+                    *w &= (1u64 << (len % 64)) - 1;
+                }
+            }
+        }
+    }
+
+    pub fn clear_holes(&mut self) {
+        if let Some(x) = &mut self.extra {
+            x.holes.clear();
+            if x.is_empty() {
+                self.extra = None;
+            }
+        }
     }
 
     pub fn enumerable(&self) -> impl Iterator<Item = (&Rc<str>, &Value)> {
@@ -786,6 +866,40 @@ impl Obj {
 
     pub fn is_extensible(&self) -> bool {
         self.flags.get() & NOT_EXTENSIBLE == 0
+    }
+
+    pub fn is_hole(&self, i: usize) -> bool {
+        self.flags.get() & HAS_HOLES != 0 && self.props.borrow().is_hole(i)
+    }
+
+    pub fn mark_holes(&self, from: usize, to: usize) {
+        if from < to {
+            self.flags.set(self.flags.get() | HAS_HOLES);
+            self.props.borrow_mut().mark_holes(from, to);
+        }
+    }
+
+    pub fn fill_hole(&self, i: usize) {
+        if self.flags.get() & HAS_HOLES != 0 {
+            self.props.borrow_mut().set_hole(i, false);
+        }
+    }
+
+    pub fn truncate_holes(&self, len: usize) {
+        if self.flags.get() & HAS_HOLES != 0 {
+            self.props.borrow_mut().truncate_holes(len);
+        }
+    }
+
+    pub fn clear_holes(&self) {
+        if self.flags.get() & HAS_HOLES != 0 {
+            self.props.borrow_mut().clear_holes();
+            self.flags.set(self.flags.get() & !HAS_HOLES);
+        }
+    }
+
+    pub fn has_holes(&self) -> bool {
+        self.flags.get() & HAS_HOLES != 0
     }
 
     pub fn has_own(&self, key: &str) -> bool {

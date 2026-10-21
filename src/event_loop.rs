@@ -171,7 +171,9 @@ impl Vm {
             co.state.set(CoState::Done);
             return Ok(Step::Done(Value::Undefined));
         };
-        if mode == ResumeMode::Return || (mode == ResumeMode::Throw && !saved.started) {
+        if (mode == ResumeMode::Return && !saved.started)
+            || (mode == ResumeMode::Throw && !saved.started)
+        {
             co.state.set(CoState::Done);
             return if mode == ResumeMode::Throw {
                 Err(value)
@@ -215,6 +217,7 @@ impl Vm {
                     return Err(e);
                 }
             } else {
+                self.gen_return_pending = mode == ResumeMode::Return;
                 self.stack.push(value);
             }
         }

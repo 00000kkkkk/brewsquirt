@@ -2,8 +2,17 @@ use crate::token::{P, PUNCTUATORS, SyntaxError, TemplatePart, Tok, Token};
 use std::rc::Rc;
 
 pub fn tokenize(src: &str) -> Result<Vec<Token>, SyntaxError> {
+    let chars: Vec<char> = src.chars().collect();
+    let mut offsets = Vec::with_capacity(chars.len() + 1);
+    let mut b = 0u32;
+    for c in &chars {
+        offsets.push(b);
+        b += c.len_utf8() as u32;
+    }
+    offsets.push(b);
     let mut lexer = Lexer {
-        chars: src.chars().collect(),
+        chars,
+        offsets,
         pos: 0,
         line: 1,
         col: 1,
@@ -60,6 +69,7 @@ pub fn is_id_continue(c: char) -> bool {
 
 struct Lexer {
     chars: Vec<char>,
+    offsets: Vec<u32>,
     pos: usize,
     line: u32,
     col: u32,
@@ -96,6 +106,7 @@ impl Lexer {
         loop {
             nl |= self.skip_trivia()?;
             let (line, col) = (self.line, self.col);
+            let start = self.offsets[self.pos];
             let Some(c) = self.peek() else {
                 if in_template {
                     return Err(self.err("Unterminated template literal"));
@@ -105,6 +116,8 @@ impl Lexer {
                     line,
                     col,
                     nl_before: true,
+                    start,
+                    end: start,
                 });
                 return Ok(());
             };
@@ -119,6 +132,8 @@ impl Lexer {
                             line,
                             col,
                             nl_before: true,
+                            start,
+                            end: start,
                         });
                         return Ok(());
                     }
@@ -136,6 +151,8 @@ impl Lexer {
                 line,
                 col,
                 nl_before: nl,
+                start,
+                end: self.offsets[self.pos],
             });
             nl = false;
         }

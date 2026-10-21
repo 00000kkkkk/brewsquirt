@@ -159,7 +159,8 @@ JavaSquirt 0.4.0 implements a large, practical subset of modern JavaScript:
 - **Classes**: constructors, methods, static methods, instance and static fields, `extends`, `super()`, `super.method()`, `new`, `instanceof`, private `#members`
 - **Operators**: arithmetic, `**`, bitwise and shifts including `>>>`, loose and strict equality, `&&`, `||`, `??`, optional chaining `?.`, ternary, `typeof`, `void`, `delete`, `in`, compound assignment including `&&=`, `||=`, `??=`, `++` and `--`
 - **Syntax**: template literals and tagged templates with `String.raw`, optional semicolons with JS-style ASI, `//` and `/* */` comments
-- **Properties**: enumerable and non-enumerable properties, `Object.defineProperty`, `Object.defineProperties`, `for...in` over inherited properties
+- **Properties**: full property attributes, `Object.defineProperty`, `freeze`, `seal`, `preventExtensions`, `for...in` over inherited properties, array holes
+- **Metaprogramming**: `Proxy` with every trap, `Reflect`, `globalThis`, well-known symbols, `new Function`, `eval`
 - **Async**: `async`/`await` (including top-level `await`), `Promise` with `all`, `allSettled`, `race`, `any`, an event loop with microtasks, `setTimeout`, `setInterval`, `queueMicrotask` and `sleep`
 - **Async iteration**: `for await...of`, async generators and `Symbol.asyncIterator`
 - **Dates**: `Date` with local time zones, parsing, formatting, getters and setters
@@ -168,7 +169,7 @@ JavaSquirt 0.4.0 implements a large, practical subset of modern JavaScript:
 - **Regular expressions**: `/pattern/flags` literals and `RegExp` with groups, named groups, backreferences and lookaround, plus `match`, `matchAll`, `replace`, `split` and `search`
 - **Private members**: `#fields`, `#methods`, static private members and `#field in obj`
 - **Memory**: reference counting plus a cycle collector, so cyclic garbage is reclaimed
-- **Modules**: ES module `import` and `export` (named, default, namespace, renamed), relative and bare-name resolution
+- **Modules**: ES module `import` and `export` (named, default, namespace, renamed), live bindings, cycles, `import()`, `import.meta`, relative and bare-name resolution
 - **Standard library**: `squirt:fs`, `squirt:path`, `squirt:os`, `squirt:child_process`, `squirt:util`
 - **Binary data**: `ArrayBuffer`, typed arrays, `DataView`, `TextEncoder`, `TextDecoder`, `Buffer`, base64 and hex, `structuredClone`, `crypto.randomUUID`
 - **Node.js compatibility**: `node:fs`, `node:path`, `node:events`, `node:assert`, `node:readline`, `node:util`, `node:url` and more, so many Node scripts run unchanged; `process.stdin`, `process.stdout.write`, `process.exitCode`

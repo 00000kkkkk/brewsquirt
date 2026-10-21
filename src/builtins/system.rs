@@ -89,7 +89,14 @@ pub fn install(vm: &mut Vm) {
         process.set_own(name, Value::Object(stream));
     }
     let getter = native_fn(vm, "stdin", 0, process_stdin);
-    vm.define_accessor(&process, "stdin".into(), getter, false);
+    let accessor = crate::object::Obj::new(
+        crate::object::ObjKind::Accessor(Box::new(crate::object::Accessor {
+            get: std::cell::RefCell::new(getter),
+            set: std::cell::RefCell::new(Value::Undefined),
+        })),
+        None,
+    );
+    process.set_own("stdin", Value::Object(accessor));
     vm.define_global("process", Value::Object(process));
 
     let performance = vm.new_object();

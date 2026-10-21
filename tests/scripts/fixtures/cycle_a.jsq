@@ -1,0 +1,11 @@
+import { b, callA } from "./cycle_b.jsq"
+export function a() {
+  return "a"
+}
+export let counter = 0
+export function bump() {
+  counter++
+  counter += 10
+}
+export default class Thing {}
+console.log("a sees", b(), callA())

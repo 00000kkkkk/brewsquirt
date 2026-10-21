@@ -48,6 +48,7 @@ struct LoopCtx {
     is_switch: bool,
     is_block: bool,
     labels: Vec<Rc<str>>,
+    iter_slot: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -79,6 +80,8 @@ struct FnState {
     is_generator: bool,
     fields: Option<Rc<Vec<ClassMember>>>,
     vars: Vec<Rc<str>>,
+    span: (u32, u32),
+    template_sites: u32,
 }
 
 impl FnState {
@@ -106,6 +109,8 @@ impl FnState {
             is_generator: false,
             fields: None,
             vars: Vec::new(),
+            span: (0, 0),
+            template_sites: 0,
         }
     }
 }
@@ -121,6 +126,8 @@ pub struct Compiler {
     self_bind: Option<Rc<str>>,
     repl_consts: Vec<Rc<str>>,
     pending_labels: Vec<Rc<str>>,
+    import_aliases: Vec<(Rc<str>, Rc<str>, Rc<str>)>,
+    export_names: Vec<(Rc<str>, Rc<str>)>,
 }
 
 fn collect_var_names(s: &Stmt, out: &mut Vec<Rc<str>>) {
@@ -216,11 +223,17 @@ pub fn compile_module(stmts: &[Stmt], module: Rc<ModuleInfo>, mode: Mode) -> R<R
         self_bind: None,
         repl_consts: Vec::new(),
         pending_labels: Vec::new(),
+        import_aliases: Vec::new(),
+        export_names: Vec::new(),
     };
     c.states
         .push(FnState::new("<main>".into(), ProtoKind::Module, 1, false));
     c.begin_scope();
     c.add_local("this".into(), true);
+    if mode == Mode::Module {
+        c.emit(Op::ModuleNamespace);
+        c.add_local("%ns".into(), true);
+    }
     c.declare_vars(stmts);
     let refs: Vec<&Stmt> = stmts.iter().collect();
     c.hoist_list(&refs, true)?;
@@ -242,7 +255,7 @@ pub fn compile_module(stmts: &[Stmt], module: Rc<ModuleInfo>, mode: Mode) -> R<R
         let st = c.states.pop().expect("module state");
         return Ok(Rc::new(c.finish(st)));
     }
-    c.emit(Op::NewObject);
+    c.load_var(&"%ns".into());
     let exports = std::mem::take(&mut c.exports);
     for entry in &exports {
         match entry {
@@ -348,6 +361,10 @@ impl Compiler {
             upvalues: st.upvalues,
             module: self.module.clone(),
             line: st.line,
+            span: st.span,
+            templates: (0..st.template_sites)
+                .map(|_| std::cell::RefCell::new(None))
+                .collect(),
             global_cache: (0..cache_len)
                 .map(|_| std::cell::Cell::new(u32::MAX))
                 .collect(),
@@ -380,6 +397,8 @@ impl Compiler {
             Op::JumpIfNotUndef(_) => Op::JumpIfNotUndef(t),
             Op::IterNext(_) => Op::IterNext(t),
             Op::TryBegin(_, s) => Op::TryBegin(t, s),
+            Op::YieldReturn(_) => Op::YieldReturn(t),
+            Op::TemplateCache(s, _) => Op::TemplateCache(s, t),
             Op::CmpJump(c, _) => Op::CmpJump(c, t),
             other => other,
         };
@@ -509,6 +528,12 @@ impl Compiler {
             Var::Upval(i, _) => {
                 self.emit(Op::GetUpval(i));
             }
+            Var::Global if self.alias(name).is_some() => {
+                let (h, key) = self.alias(name).expect("alias");
+                self.load_var(&h);
+                let k = self.str_const(&key);
+                self.emit(Op::GetProp(k));
+            }
             Var::Global => {
                 if &**name == "undefined" {
                     self.emit(Op::Undefined);
@@ -528,6 +553,7 @@ impl Compiler {
                     self.emit(Op::ThrowConstAssign(k));
                 } else {
                     self.emit(Op::SetLocal(s));
+                    self.export_hook(name);
                 }
             }
             Var::Upval(i, c) => {
@@ -536,7 +562,12 @@ impl Compiler {
                     self.emit(Op::ThrowConstAssign(k));
                 } else {
                     self.emit(Op::SetUpval(i));
+                    self.export_hook(name);
                 }
+            }
+            Var::Global if self.alias(name).is_some() => {
+                let k = self.str_const(name);
+                self.emit(Op::ThrowConstAssign(k));
             }
             Var::Global => {
                 let k = self.str_const(name);
@@ -588,14 +619,18 @@ impl Compiler {
                         1,
                     ));
                 }
+                let hidden: Rc<str> = format!("%import{}", imports.len()).into();
+                names.push((hidden.clone(), true));
                 if let Some(n) = &i.default {
-                    names.push((n.clone(), true));
+                    self.import_aliases
+                        .push((n.clone(), hidden.clone(), "default".into()));
                 }
                 if let Some(n) = &i.namespace {
                     names.push((n.clone(), true));
                 }
-                for (_, local) in &i.named {
-                    names.push((local.clone(), true));
+                for (imported, local) in &i.named {
+                    self.import_aliases
+                        .push((local.clone(), hidden.clone(), imported.clone()));
                 }
                 imports.push(i);
             }
@@ -730,26 +765,45 @@ impl Compiler {
                 self.add_local(n.clone(), *c);
             }
         }
-        for imp in imports {
+        if top && self.mode == Mode::Module {
+            let mut pre: Vec<(Rc<str>, Rc<str>)> = self
+                .exports
+                .iter()
+                .filter_map(|e| match e {
+                    ExportEntry::Local(l, x) => Some((x.clone(), l.clone())),
+                    _ => None,
+                })
+                .collect();
+            pre.sort();
+            self.export_names = pre.iter().map(|(x, l)| (l.clone(), x.clone())).collect();
+            for f in &funcs {
+                let idx = self.function(f, None, None)?;
+                self.emit(Op::Closure(idx));
+                if let Some(n) = &f.name {
+                    self.store_var(n, true);
+                }
+                self.emit(Op::Pop);
+            }
+            for (exported, local) in &pre {
+                self.load_var(&"%ns".into());
+                if funcs.iter().any(|f| f.name.as_ref() == Some(local)) {
+                    self.load_var(local);
+                } else {
+                    self.emit(Op::Undefined);
+                }
+                let k = self.str_const(exported);
+                self.emit(Op::SetProp(k));
+                self.emit(Op::Pop);
+            }
+        }
+        for (n, imp) in imports.iter().enumerate() {
             let src = self.str_const(&imp.source);
             self.emit(Op::Import(src));
             if let Some(ns) = &imp.namespace {
                 self.store_var(ns, true);
             }
-            if let Some(d) = &imp.default {
-                self.emit(Op::Dup);
-                let k = self.str_const(&"default".into());
-                self.emit(Op::GetProp(k));
-                self.store_var(d, true);
-                self.emit(Op::Pop);
-            }
-            for (imported, local) in &imp.named {
-                self.emit(Op::Dup);
-                let k = self.str_const(imported);
-                self.emit(Op::GetProp(k));
-                self.store_var(local, true);
-                self.emit(Op::Pop);
-            }
+            let hidden: Rc<str> = format!("%import{n}").into();
+            self.store_var(&hidden, true);
             self.emit(Op::Pop);
         }
         for (source, list) in reexports {
@@ -767,15 +821,58 @@ impl Compiler {
                 }
             }
         }
-        for f in funcs {
-            let idx = self.function(f, None, None)?;
-            self.emit(Op::Closure(idx));
-            if let Some(n) = &f.name {
-                self.store_var(n, true);
+        if !(top && self.mode == Mode::Module) {
+            for f in funcs {
+                let idx = self.function(f, None, None)?;
+                self.emit(Op::Closure(idx));
+                if let Some(n) = &f.name {
+                    self.store_var(n, true);
+                }
+                self.emit(Op::Pop);
             }
-            self.emit(Op::Pop);
         }
         Ok(())
+    }
+
+    fn alias(&self, name: &str) -> Option<(Rc<str>, Rc<str>)> {
+        self.import_aliases
+            .iter()
+            .find(|(l, _, _)| &**l == name)
+            .map(|(_, h, k)| (h.clone(), k.clone()))
+    }
+
+    fn is_export_binding(&self, name: &str) -> bool {
+        if self.export_names.is_empty() || !self.export_names.iter().any(|(l, _)| &**l == name) {
+            return false;
+        }
+        if self.states[1..]
+            .iter()
+            .any(|st| st.locals.iter().any(|l| &*l.name == name))
+        {
+            return false;
+        }
+        match self.states[0].locals.iter().rposition(|l| &*l.name == name) {
+            Some(i) => self.states[0].locals[i].depth == 1,
+            None => false,
+        }
+    }
+
+    fn export_hook(&mut self, name: &Rc<str>) {
+        if !self.is_export_binding(name) {
+            return;
+        }
+        let targets: Vec<Rc<str>> = self
+            .export_names
+            .iter()
+            .filter(|(l, _)| l == name)
+            .map(|(_, x)| x.clone())
+            .collect();
+        for x in targets {
+            self.load_var(&"%ns".into());
+            self.emit(Op::Swap);
+            let k = self.str_const(&x);
+            self.emit(Op::SetProp(k));
+        }
     }
 
     fn block(&mut self, stmts: &[Stmt]) -> R<()> {
@@ -978,6 +1075,7 @@ impl Compiler {
                 let ctx = &self.st_ref().loops[idx];
                 let (target, try_depth) = (ctx.break_locals, ctx.try_depth);
                 self.unwind_tries(try_depth)?;
+                self.close_iterators(idx);
                 if self.locals_len() > target {
                     self.emit(Op::PopTo(target as u32));
                 }
@@ -1019,6 +1117,7 @@ impl Compiler {
                 let ctx = &self.st_ref().loops[idx];
                 let (target, try_depth) = (ctx.continue_locals, ctx.try_depth);
                 self.unwind_tries(try_depth)?;
+                self.close_iterators(idx + 1);
                 if self.locals_len() > target {
                     self.emit(Op::PopTo(target as u32));
                 }
@@ -1062,6 +1161,7 @@ impl Compiler {
             is_switch,
             is_block: false,
             labels,
+            iter_slot: None,
         });
     }
 
@@ -1098,6 +1198,7 @@ impl Compiler {
             is_switch: false,
             is_block: true,
             labels,
+            iter_slot: None,
         });
         let r = self.sub_stmt(cur);
         let ctx = self.st().loops.pop().expect("label");
@@ -1156,6 +1257,7 @@ impl Compiler {
             is_switch: false,
             is_block: false,
             labels,
+            iter_slot: if keys { None } else { Some(iter_slot) },
         });
         self.sub_stmt(body)?;
         let ctx = self.st().loops.pop().expect("loop");
@@ -1246,6 +1348,7 @@ impl Compiler {
             is_switch: false,
             is_block: false,
             labels,
+            iter_slot: None,
         });
         self.sub_stmt(body)?;
         let ctx = self.st().loops.pop().expect("loop");
@@ -1290,6 +1393,30 @@ impl Compiler {
                 self.emit(Op::Undefined);
             }
         }
+        self.return_top()
+    }
+
+    fn emit_yield(&mut self) -> R<()> {
+        self.emit(Op::Yield);
+        let check = self.emit(Op::YieldReturn(0));
+        self.return_top()?;
+        self.patch(check);
+        Ok(())
+    }
+
+    fn close_iterators(&mut self, from: usize) {
+        let slots: Vec<u32> = self.st_ref().loops[from..]
+            .iter()
+            .rev()
+            .filter_map(|l| l.iter_slot)
+            .collect();
+        for slot in slots {
+            self.emit(Op::IterClose(slot));
+        }
+    }
+
+    fn return_top(&mut self) -> R<()> {
+        self.close_iterators(0);
         if self.st_ref().tries.iter().any(|t| t.finally.is_some()) {
             let name = self.hidden_name("ret");
             let slot = self.add_local(name, true);
@@ -1529,8 +1656,10 @@ impl Compiler {
                     self.emit(Op::Dup);
                     self.emit(Op::IterRest);
                     self.bind_pattern(r, mode)?;
+                    self.emit(Op::Pop);
+                } else {
+                    self.emit(Op::IterCloseTop);
                 }
-                self.emit(Op::Pop);
             }
         }
         Ok(())
@@ -1554,6 +1683,7 @@ impl Compiler {
         let saved_line = self.line;
         self.line = f.line;
         let mut st = FnState::new(name, kind, f.line, f.kind == FuncKind::StaticMethod);
+        st.span = f.span;
         st.fields = fields;
         st.is_async = f.is_async;
         st.is_generator = f.is_generator;
@@ -1778,6 +1908,7 @@ impl Compiler {
                     is_generator: false,
                     uses_arguments: false,
                     line: c.line,
+                    span: c.span,
                 })
             }
         };
@@ -1802,6 +1933,7 @@ impl Compiler {
         };
         let mut ctor_def = (*ctor).clone();
         ctor_def.name = Some(name.clone());
+        ctor_def.span = c.span;
         let idx = self.function(&ctor_def, Some(name.clone()), fields)?;
         self.emit(Op::Closure(idx));
         let k = self.str_const(&name);
@@ -1848,7 +1980,10 @@ impl Compiler {
             {
                 match key {
                     PropKey::Named(n) => {
-                        let idx = self.function(func, Some(n.clone()), None)?;
+                        let mut g = (**func).clone();
+                        g.name =
+                            Some(format!("{} {n}", if *setter { "set" } else { "get" }).into());
+                        let idx = self.function(&g, None, None)?;
                         self.emit(Op::Closure(idx));
                         let k = self.str_const(n);
                         self.emit(Op::DefineAccessor(k, *setter, *is_static));
@@ -1931,6 +2066,7 @@ impl Compiler {
             is_generator: false,
             uses_arguments: false,
             line,
+            span: (0, 0),
         };
         let idx = self.function(&f, name.cloned(), None)?;
         self.emit(Op::Closure(idx));
@@ -2115,6 +2251,11 @@ impl Compiler {
     }
 
     fn store_discard(&mut self, name: &Rc<str>) {
+        if self.is_export_binding(name) {
+            self.store_var(name, false);
+            self.emit(Op::Pop);
+            return;
+        }
         match self.resolve(name) {
             Var::Local(s, false) => {
                 self.emit(Op::StoreLocal(s));
@@ -2141,7 +2282,9 @@ impl Compiler {
         match &e.kind {
             ExprKind::Update { inc, target, .. } => {
                 if let ExprKind::Ident(n) = &target.kind {
-                    if let Var::Local(s, false) = self.resolve(n) {
+                    if let (Var::Local(s, false), false) =
+                        (self.resolve(n), self.is_export_binding(n))
+                    {
                         self.emit(if *inc {
                             Op::IncLocal(s)
                         } else {
@@ -2171,7 +2314,8 @@ impl Compiler {
                     self.store_discard(n);
                 }
                 (ExprKind::Ident(n), Some(AssignOp::Bin(BinOp::Add)))
-                    if matches!(self.resolve(n), Var::Local(_, false)) =>
+                    if matches!(self.resolve(n), Var::Local(_, false))
+                        && !self.is_export_binding(n) =>
                 {
                     let Var::Local(slot, _) = self.resolve(n) else {
                         unreachable!()
@@ -2256,6 +2400,9 @@ impl Compiler {
                 }
             }
             ExprKind::TemplateStrings(cooked, raw) => {
+                let site = self.st_ref().template_sites;
+                self.st().template_sites += 1;
+                let jump = self.emit(Op::TemplateCache(site, 0));
                 for q in cooked {
                     match q {
                         Some(q) => {
@@ -2275,6 +2422,8 @@ impl Compiler {
                 self.emit(Op::NewArray(raw.len() as u32));
                 let k = self.str_const(&"raw".into());
                 self.emit(Op::InitHidden(k));
+                self.emit(Op::TemplateStore(site));
+                self.patch(jump);
             }
             ExprKind::Bool(true) => {
                 self.emit(Op::True);
@@ -2361,7 +2510,12 @@ impl Compiler {
                             let setter = matches!(p, PropDef::Setter(..));
                             match key {
                                 PropKey::Named(k) => {
-                                    let idx = self.function(f, Some(k.clone()), None)?;
+                                    let mut g = (**f).clone();
+                                    g.name = Some(
+                                        format!("{} {k}", if setter { "set" } else { "get" })
+                                            .into(),
+                                    );
+                                    let idx = self.function(&g, None, None)?;
                                     self.emit(Op::Closure(idx));
                                     let k = self.str_const(k);
                                     self.emit(Op::InitAccessor(k, setter));
@@ -2408,6 +2562,7 @@ impl Compiler {
                         is_generator: false,
                         uses_arguments: false,
                         line: c.line,
+                        span: (0, 0),
                     };
                     let idx = self.function(&wrapper, None, None)?;
                     self.emit(Op::Closure(idx));
@@ -2419,10 +2574,17 @@ impl Compiler {
             ExprKind::NewTarget => {
                 self.emit(Op::NewTarget);
             }
+            ExprKind::ImportMeta => {
+                self.emit(Op::ImportMeta);
+            }
+            ExprKind::DynImport(spec) => {
+                self.expr(spec)?;
+                self.emit(Op::DynImport);
+            }
             ExprKind::Unary(op, x) => match op {
                 UnaryOp::Typeof => {
                     if let ExprKind::Ident(n) = &x.kind {
-                        if matches!(self.resolve(n), Var::Global) {
+                        if matches!(self.resolve(n), Var::Global) && self.alias(n).is_none() {
                             let k = self.str_const(n);
                             self.emit(Op::TypeofGlobal(k));
                             return Ok(());
@@ -2667,7 +2829,7 @@ impl Compiler {
                     let value: Rc<str> = "value".into();
                     let kv = self.str_const(&value);
                     self.emit(Op::GetProp(kv));
-                    self.emit(Op::Yield);
+                    self.emit_yield()?;
                     self.emit(Op::Pop);
                     self.emit(Op::Jump(start));
                     self.patch(exit);
@@ -2676,20 +2838,20 @@ impl Compiler {
                     self.emit(Op::Pop);
                 } else if async_gen {
                     self.emit(Op::Await);
-                    self.emit(Op::Yield);
+                    self.emit_yield()?;
                 } else if *delegate {
                     self.emit(Op::GetIter);
                     let start = self.here();
                     self.emit(Op::Dup);
                     let exit = self.emit(Op::IterNext(0));
-                    self.emit(Op::Yield);
+                    self.emit_yield()?;
                     self.emit(Op::Pop);
                     self.emit(Op::Jump(start));
                     self.patch(exit);
                     self.emit(Op::Pop);
                     self.emit(Op::Undefined);
                 } else {
-                    self.emit(Op::Yield);
+                    self.emit_yield()?;
                 }
             }
         }

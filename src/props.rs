@@ -114,6 +114,9 @@ impl Vm {
         match &o.kind {
             ObjKind::Array(a) => {
                 if let Some(i) = array_index(key) {
+                    if o.is_hole(i) {
+                        return None;
+                    }
                     return a.borrow().get(i).cloned().map(|v| (v, element_attrs(o)));
                 }
                 if key == "length" {
@@ -270,6 +273,7 @@ impl Vm {
             ObjKind::Array(a) => {
                 if let Some(i) = array_index(key) {
                     let mut items = a.borrow_mut();
+                    let old = items.len();
                     if i >= items.len() {
                         if i - items.len() > 50_000_000 {
                             drop(items);
@@ -278,6 +282,9 @@ impl Vm {
                         items.resize(i + 1, Value::Undefined);
                     }
                     items[i] = raw;
+                    drop(items);
+                    o.mark_holes(old, i);
+                    o.fill_hole(i);
                     return Ok(());
                 }
                 if &**key == "length" {
@@ -285,7 +292,13 @@ impl Vm {
                     if n < 0.0 || n.fract() != 0.0 || n > 4294967295.0 {
                         return Err(self.range_error("Invalid array length"));
                     }
+                    let old = a.borrow().len();
                     a.borrow_mut().resize(n as usize, Value::Undefined);
+                    if (n as usize) < old {
+                        o.truncate_holes(n as usize);
+                    } else {
+                        o.mark_holes(old, n as usize);
+                    }
                     if attrs & READ_ONLY != 0 {
                         o.flags.set(o.flags.get() | ELEMENTS_FROZEN);
                     }
@@ -469,8 +482,12 @@ impl Vm {
                     if o.flags.get() & ELEMENTS_SEALED != 0 && i < a.borrow().len() {
                         return false;
                     }
+                    let len = a.borrow().len();
                     if let Some(slot) = a.borrow_mut().get_mut(i) {
                         *slot = Value::Undefined;
+                    }
+                    if i < len {
+                        o.mark_holes(i, i + 1);
                     }
                     return true;
                 }

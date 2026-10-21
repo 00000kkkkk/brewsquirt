@@ -561,7 +561,28 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
                 return "[Array]".to_string();
             }
             let inner = enter(ctx, ptr, rt);
-            let mut output: Vec<String> = items.iter().map(|v| child(ctx, v, inner)).collect();
+            let holey = o.has_holes();
+            let mut output: Vec<String> = if holey {
+                let all = a.borrow().clone();
+                let mut out = Vec::new();
+                let mut i = 0;
+                while i < all.len() && out.len() < MAX_ITEMS {
+                    if o.is_hole(i) {
+                        let start = i;
+                        while i < all.len() && o.is_hole(i) {
+                            i += 1;
+                        }
+                        let n = i - start;
+                        out.push(format!("<{n} empty item{}>", if n == 1 { "" } else { "s" }));
+                    } else {
+                        out.push(child(ctx, &all[i], inner));
+                        i += 1;
+                    }
+                }
+                out
+            } else {
+                items.iter().map(|v| child(ctx, v, inner)).collect()
+            };
             let has_more = total > MAX_ITEMS;
             if has_more {
                 let more = total - MAX_ITEMS;
@@ -574,7 +595,8 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
                 output.push(format_prop(ctx, k, v, inner));
             }
             let all = a.borrow();
-            let numeric = (0..output.len()).all(|i| matches!(all.get(i), Some(Value::Number(_))));
+            let numeric =
+                !holey && (0..output.len()).all(|i| matches!(all.get(i), Some(Value::Number(_))));
             drop(all);
             let mut base = String::new();
             leave(ctx, ptr, &mut base);
@@ -869,6 +891,9 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             let prefix = match (&cname, o.proto.borrow().is_none(), &tag) {
                 (Some(n), _, Some(t)) => format!("{n} [{t}] "),
                 (Some(n), _, None) => format!("{n} "),
+                (None, true, Some(t)) if &**t == "Module" => {
+                    "[Module: null prototype] ".to_string()
+                }
                 (None, true, Some(t)) => format!("[Object: null prototype] [{t}] "),
                 (None, true, None) => "[Object: null prototype] ".to_string(),
                 (None, false, Some(t)) => format!("Object [{t}] "),

@@ -1,0 +1,16 @@
+b loading, a is function
+a sees b a
+0
+11 11 [ 'a', 'bump', 'counter', 'default' ] function true
+b true
+missing: Error
+function function
+true true true
+true
+[Module: null prototype] {
+  a: [Function: a],
+  bump: [Function: bump],
+  counter: 11,
+  default: [class Thing]
+}
+TypeError

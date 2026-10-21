@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-21
+
+### Added
+
+- Property attributes: `writable`, `enumerable` and `configurable` on every property, full
+  `Object.defineProperty` validation, `Object.seal`, `Object.preventExtensions`,
+  `Object.isSealed`, `Object.isExtensible`, `Object.getOwnPropertyDescriptors` and
+  `Object.getOwnPropertySymbols`. Writes to read-only properties and to non-extensible objects
+  throw a `TypeError`.
+- `globalThis` as a real global object, including accessors defined on it.
+- `Proxy` with all thirteen traps, `Proxy.revocable`, and `Reflect` with all thirteen functions.
+- Well-known symbols `Symbol.toPrimitive`, `Symbol.hasInstance`, `Symbol.toStringTag`,
+  `Symbol.species`, `Symbol.isConcatSpreadable`, `Symbol.unscopables`, `Symbol.match`,
+  `Symbol.matchAll`, `Symbol.replace`, `Symbol.search` and `Symbol.split`, with the first three
+  wired into conversions, `instanceof`, `Object.prototype.toString` and `console.log`.
+- `var` with function scope and hoisting.
+- Static initialization blocks, `this` in static field initializers, `new.target`, `super` in
+  object literal methods, `__proto__` in object literals, and the inner binding of named class
+  expressions.
+- `new Function(...)`, `eval` (in the global scope), and `Function.prototype.toString` returning
+  the source text.
+- Modules: cycles, live bindings, `import()`, `import.meta` with `url`, `filename`, `dirname` and
+  `resolve`, and `[Module: null prototype]` namespace objects.
+- `generator.return()` runs `finally` blocks, and `for...of` loops and array destructuring close
+  their iterators when they exit early.
+- Array holes: `[1, , 3]`, `new Array(n)`, `delete arr[i]` and growing `length` leave real holes
+  that `in`, `Object.keys`, `forEach`, `map`, `filter`, `indexOf`, `sort` and `console.log`
+  respect.
+- Cached and frozen template objects for tagged templates.
+- `AggregateError`, `Error.captureStackTrace`, and `[cause]`, `[errors]` and nested stacks in
+  `console.log` of errors.
+- Function names for computed keys and accessors (`get x`, `[Symbol.iterator]`).
+
+### Changed
+
+- Error `message`, `stack` and `cause` are non-enumerable, as in JavaScript.
+- Symbol identity no longer depends on the `Symbol` wrapper object.
+
 ## [0.6.0] - 2026-10-21
 
 ### Added
@@ -181,7 +219,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Continuous integration on Linux, macOS and Windows, MSRV check, cargo-deny, CodeQL, coverage,
   benchmarks, and release archives for five targets.
 
-[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.3.0...v0.4.0
