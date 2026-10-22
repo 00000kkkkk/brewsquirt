@@ -1948,7 +1948,7 @@ const WEB_SRC: &str = r##"
       this.complete = true
       this.aborted = false
       this.socket = { remoteAddress: req.remoteAddress, remotePort: 0, encrypted: false }
-      const b = req.body
+      const b = req[kRaw]
       this.#bytes = b == null ? new Uint8Array(0) : typeof b === "string" ? encoder.encode(b) : b
     }
     #chunk() {
