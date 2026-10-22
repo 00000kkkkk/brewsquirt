@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- IANA time zones in `Intl.DateTimeFormat` and the `toLocale*String` methods: the `timeZone`
+  option accepts any zone from the bundled tz database (case-insensitively), fixed offsets such
+  as `+05:30` and the UTC aliases, invalid names throw a `RangeError`, `timeZoneName` renders
+  abbreviations and GMT offsets, `resolvedOptions().timeZone` reports the system zone, and
+  `Intl.supportedValuesOf("timeZone")` lists the canonical zones.
+
 ## [1.3.0] - 2026-10-22
 
 ### Fixed

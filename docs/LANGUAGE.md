@@ -2127,15 +2127,15 @@ Dependency specs:
 
 These are on the roadmap and currently produce a `SyntaxError` or are absent:
 
-- `URL.createObjectURL`, BYOB stream readers and WebSocket servers
-- HTTPS servers
-- TLS servers, Unix domain sockets, `node:worker_threads`, and ciphers, key pairs and
-  signatures in `node:crypto`
+- `URL.createObjectURL` and BYOB stream readers
+- HTTPS and TLS servers, Unix domain sockets, shared memory between `worker_threads`, and
+  ciphers, key pairs and signatures in `node:crypto`
+- WebAssembly
 - `Intl` covers numbers, plural rules, lists, relative times, collation and segmentation in a
   handful of locales; dates know the month and weekday names, date orders and separators of
   English (US, GB, AU, CA), Ukrainian, Russian, German, French, Spanish, Italian, Portuguese,
   Polish, Dutch, Swedish, Turkish, Japanese and Chinese and fall back to English elsewhere;
-  time zones other than UTC and fixed offsets use the system zone
+  every IANA time zone is supported, but `timeZoneName: "long"` falls back to GMT offsets
 - Regular expressions: the `v` flag's set operations, most `\p{...}` property escapes, lookbehind
   containing back-references, duplicate named groups and some early errors for invalid patterns
 - Arrays are dense: writing an index far beyond the end or setting `length` to a huge value

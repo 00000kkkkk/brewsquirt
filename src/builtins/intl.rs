@@ -460,13 +460,55 @@ const INTL_SRC: &str = r##"
   }
   const dateData = (locale) => DATE_DATA[locale] ?? DATE_DATA[lang(locale)] ?? EN_DATES
 
+  const tzInfo = globalThis["%tzInfo%"]
+  const tzCanonicalName = globalThis["%tzCanonical%"]
+  const tzList = globalThis["%tzList%"]
+  const tzSystem = globalThis["%tzSystem%"]
+  const UTC_ALIASES = ["UTC", "ETC/UTC", "ETC/GMT", "GMT", "ETC/UCT", "UCT", "ETC/ZULU", "ZULU", "ETC/UNIVERSAL", "UNIVERSAL", "ETC/GREENWICH", "GREENWICH", "GMT0", "ETC/GMT0", "ETC/GMT+0", "ETC/GMT-0", "GMT+0", "GMT-0", "Z"]
+  const parseZoneOffset = (tz) => {
+    const m = /^(?:UTC|GMT)?([+-])(\d{1,2})(?::?(\d{2}))?$/.exec(tz)
+    if (!m) return undefined
+    const hours = Number(m[2])
+    const minutes = Number(m[3] ?? 0)
+    if (hours > 23 || minutes > 59) return undefined
+    return (m[1] === "-" ? -1 : 1) * (hours * 60 + minutes)
+  }
+  const canonicalTimeZone = (tz) => {
+    if (UTC_ALIASES.includes(tz.toUpperCase())) return "UTC"
+    const offset = parseZoneOffset(tz)
+    if (offset !== undefined) {
+      const a = Math.abs(offset)
+      return `${offset < 0 ? "-" : "+"}${pad2(Math.floor(a / 60))}:${pad2(a % 60)}`
+    }
+    const canonical = tzCanonicalName(tz)
+    if (canonical === undefined) throw new RangeError(`Invalid time zone specified: ${tz}`)
+    return canonical
+  }
   const zoneOffset = (tz, date) => {
     if (tz === undefined) return -date.getTimezoneOffset()
-    const z = tz.toUpperCase()
-    if (z === "UTC" || z === "ETC/UTC" || z === "GMT" || z === "ETC/GMT" || z === "Z") return 0
-    const m = /^(?:UTC|GMT)?([+-])(\d{1,2})(?::?(\d{2}))?$/.exec(tz)
-    if (m) return (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] ?? 0))
-    return -date.getTimezoneOffset()
+    if (tz === "UTC") return 0
+    const fixed = parseZoneOffset(tz)
+    if (fixed !== undefined) return fixed
+    const info = tzInfo(tz, date.getTime())
+    return info === undefined ? -date.getTimezoneOffset() : info[0]
+  }
+  const zoneName = (tz, style, offset, date) => {
+    const gmt = (long) => {
+      if (offset === 0) return "GMT"
+      const sign = offset < 0 ? "-" : "+"
+      const a = Math.abs(offset)
+      const h = Math.floor(a / 60)
+      const m = a % 60
+      return long ? `GMT${sign}${pad2(h)}:${pad2(m)}` : `GMT${sign}${h}${m ? ":" + pad2(m) : ""}`
+    }
+    if (tz === "UTC") return style === "long" || style === "longGeneric" ? "Coordinated Universal Time" : "UTC"
+    if (style === "shortOffset") return gmt(false)
+    if (style === "longOffset") return gmt(true)
+    if (parseZoneOffset(tz) !== undefined) return gmt(style === "long")
+    const info = tzInfo(tz, date.getTime())
+    const abbreviation = info !== undefined && info[1] !== "" && !/^[+-]?\d/.test(info[1]) ? info[1] : undefined
+    if ((style === "short" || style === "shortGeneric") && abbreviation !== undefined) return abbreviation
+    return gmt(style === "long" || style === "longGeneric")
   }
 
   const fields = (date, offset) => {
@@ -501,7 +543,7 @@ const INTL_SRC: &str = r##"
         locale,
         calendar: "gregory",
         numberingSystem: "latn",
-        timeZone: opts.timeZone === undefined ? undefined : String(opts.timeZone),
+        timeZone: opts.timeZone === undefined ? undefined : canonicalTimeZone(String(opts.timeZone)),
         weekday: pick("weekday", ["long", "short", "narrow"]),
         era: pick("era", ["long", "short", "narrow"]),
         year: pick("year", ["numeric", "2-digit"]),
@@ -543,12 +585,7 @@ const INTL_SRC: &str = r##"
         if (h12) h = h % 12 === 0 ? 12 : h % 12
         return style === "2-digit" ? pad2(h) : String(h)
       }
-      const tzName = () => {
-        if (offset === 0) return o.timeZoneName === "short" || o.timeZoneName === undefined ? "UTC" : "Coordinated Universal Time"
-        const sign = offset < 0 ? "-" : "+"
-        const a = Math.abs(offset)
-        return `GMT${sign}${Math.floor(a / 60)}${a % 60 ? ":" + pad2(a % 60) : ""}`
-      }
+      const tzName = () => zoneName(o.timeZone ?? tzSystem(), o.timeZoneName ?? "short", offset, d)
       const monthName = (style) => {
         if (style === "short") return L.short[f.month]
         if (style === "narrow") return [...L.months[f.month]][0]
@@ -620,7 +657,7 @@ const INTL_SRC: &str = r##"
         }
         if (style === "full" || style === "long") {
           lit(" ")
-          parts.push({ type: "timeZoneName", value: style === "full" && offset === 0 ? "Coordinated Universal Time" : tzName() })
+          parts.push({ type: "timeZoneName", value: zoneName(o.timeZone ?? tzSystem(), style === "full" ? "long" : "short", offset, d) })
         }
       }
       if (o.dateStyle || o.timeStyle) {
@@ -690,7 +727,7 @@ const INTL_SRC: &str = r##"
     resolvedOptions() {
       const out = {}
       for (const [k, v] of Object.entries(this.#o)) if (v !== undefined && k !== "defaulted") out[k] = v
-      out.timeZone ??= process.env.TZ ?? "UTC"
+      out.timeZone ??= tzSystem()
       return out
     }
     static supportedLocalesOf(locales) {
@@ -1034,7 +1071,7 @@ const INTL_SRC: &str = r##"
       if (k === "unit") return Object.keys(UNITS).sort()
       if (k === "calendar") return ["gregory"]
       if (k === "numberingSystem") return ["latn"]
-      if (k === "timeZone") return ["UTC"]
+      if (k === "timeZone") return tzList()
       if (k === "collation") return ["default"]
       throw new RangeError(`Invalid key : ${k}`)
     },
@@ -1046,9 +1083,89 @@ const INTL_SRC: &str = r##"
 })()
 "##;
 
+fn tz_lookup(name: &str) -> Option<chrono_tz::Tz> {
+    use std::str::FromStr;
+    if let Ok(tz) = chrono_tz::Tz::from_str(name) {
+        return Some(tz);
+    }
+    let lower = name.to_ascii_lowercase();
+    chrono_tz::TZ_VARIANTS
+        .iter()
+        .copied()
+        .find(|tz| tz.name().to_ascii_lowercase() == lower)
+}
+
+fn tz_info(vm: &mut Vm, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    use chrono::{Offset, TimeZone};
+    use chrono_tz::OffsetName;
+    let name = vm.to_string(&super::arg(args, 0))?;
+    let t = vm.to_number(&super::arg(args, 1))?;
+    let Some(tz) = tz_lookup(&name) else {
+        return Ok(Value::Undefined);
+    };
+    if !t.is_finite() {
+        return Ok(Value::Undefined);
+    }
+    let Some(utc) = chrono::DateTime::from_timestamp((t / 1000.0).floor() as i64, 0) else {
+        return Ok(Value::Undefined);
+    };
+    let offset = tz.offset_from_utc_datetime(&utc.naive_utc());
+    let minutes = offset.fix().local_minus_utc() / 60;
+    let abbreviation = offset.abbreviation().unwrap_or("");
+    Ok(vm.new_array(vec![
+        Value::Number(minutes as f64),
+        Value::from(abbreviation),
+    ]))
+}
+
+fn tz_canonical(vm: &mut Vm, _this: Value, args: &[Value]) -> Result<Value, Value> {
+    let name = vm.to_string(&super::arg(args, 0))?;
+    Ok(match tz_lookup(&name) {
+        Some(tz) => Value::from(tz.name()),
+        None => Value::Undefined,
+    })
+}
+
+fn tz_list(vm: &mut Vm, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    let mut names: Vec<&str> = chrono_tz::TZ_VARIANTS
+        .iter()
+        .map(|tz| tz.name())
+        .filter(|name| {
+            name.contains('/')
+                && !name.starts_with("Etc/")
+                && !name.starts_with("SystemV/")
+                && !name.starts_with("US/")
+                && !name.starts_with("Canada/")
+                && !name.starts_with("Mexico/")
+                && !name.starts_with("Brazil/")
+                && !name.starts_with("Chile/")
+        })
+        .collect();
+    names.push("UTC");
+    names.sort_unstable();
+    names.dedup();
+    let values = names.into_iter().map(Value::from).collect();
+    Ok(vm.new_array(values))
+}
+
+fn tz_system(_vm: &mut Vm, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    let name = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
+    Ok(Value::from(name))
+}
+
 pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     if let Some(v) = vm.globals.get("Intl").cloned() {
         return Ok(v);
+    }
+    let natives: [(&str, u32, crate::object::NativeFn); 4] = [
+        ("%tzInfo%", 2, tz_info),
+        ("%tzCanonical%", 1, tz_canonical),
+        ("%tzList%", 0, tz_list),
+        ("%tzSystem%", 0, tz_system),
+    ];
+    for (name, arity, f) in natives {
+        let v = super::native_fn(vm, name, arity, f);
+        vm.define_global(name, v);
     }
     let dir = std::env::current_dir().unwrap_or_default();
     let proto = match vm.compile(INTL_SRC, "<squirt:intl>", dir, Mode::Repl) {
