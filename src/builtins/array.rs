@@ -24,45 +24,45 @@ pub fn install(vm: &mut Vm) {
     vm.define_global("Array", Value::Object(array));
 }
 
-const METHODS: &[(&str, u32, crate::object::NativeFn, bool)] = &[
-    ("push", 1, push, false),
-    ("pop", 0, pop, false),
-    ("shift", 0, shift, false),
-    ("unshift", 1, unshift, false),
-    ("slice", 2, slice, true),
-    ("splice", 2, splice, true),
-    ("concat", 1, concat, true),
-    ("join", 1, join, false),
-    ("reverse", 0, reverse, false),
-    ("indexOf", 1, index_of, false),
-    ("lastIndexOf", 1, last_index_of, false),
-    ("includes", 1, includes, false),
-    ("find", 1, find, false),
-    ("findIndex", 1, find_index, false),
-    ("findLast", 1, find_last, false),
-    ("findLastIndex", 1, find_last_index, false),
-    ("filter", 1, filter, true),
-    ("map", 1, map, true),
-    ("forEach", 1, for_each, false),
-    ("reduce", 1, reduce, false),
-    ("reduceRight", 1, reduce_right, false),
-    ("some", 1, some, false),
-    ("every", 1, every, false),
-    ("sort", 1, sort, false),
-    ("toSorted", 1, to_sorted, false),
-    ("toReversed", 0, to_reversed, false),
-    ("flat", 0, flat, true),
-    ("flatMap", 1, flat_map, true),
-    ("fill", 1, fill, false),
-    ("at", 1, at, false),
-    ("keys", 0, keys, false),
-    ("values", 0, values, false),
-    ("entries", 0, entries, false),
-    ("toString", 0, to_string, false),
-    ("copyWithin", 2, copy_within, false),
-    ("toSpliced", 2, to_spliced, false),
-    ("with", 2, with, false),
-    ("toLocaleString", 0, to_locale_string, false),
+const METHODS: &[(&str, u32, crate::object::NativeFn, u8)] = &[
+    ("push", 1, push, 0),
+    ("pop", 0, pop, 0),
+    ("shift", 0, shift, 0),
+    ("unshift", 1, unshift, 0),
+    ("slice", 2, slice, 1),
+    ("splice", 2, splice, 1),
+    ("concat", 1, concat, 1),
+    ("join", 1, join, 0),
+    ("reverse", 0, reverse, 0),
+    ("indexOf", 1, index_of, 0),
+    ("lastIndexOf", 1, last_index_of, 0),
+    ("includes", 1, includes, 0),
+    ("find", 1, find, 0),
+    ("findIndex", 1, find_index, 0),
+    ("findLast", 1, find_last, 0),
+    ("findLastIndex", 1, find_last_index, 0),
+    ("filter", 1, filter, 1),
+    ("map", 1, map, 1),
+    ("forEach", 1, for_each, 0),
+    ("reduce", 1, reduce, 0),
+    ("reduceRight", 1, reduce_right, 0),
+    ("some", 1, some, 0),
+    ("every", 1, every, 0),
+    ("sort", 1, sort, 0),
+    ("toSorted", 1, to_sorted, 0),
+    ("toReversed", 0, to_reversed, 0),
+    ("flat", 0, flat, 1),
+    ("flatMap", 1, flat_map, 1),
+    ("fill", 1, fill, 0),
+    ("at", 1, at, 0),
+    ("keys", 0, keys, 2),
+    ("values", 0, values, 2),
+    ("entries", 0, entries, 2),
+    ("toString", 0, to_string, 0),
+    ("copyWithin", 2, copy_within, 0),
+    ("toSpliced", 2, to_spliced, 0),
+    ("with", 2, with, 0),
+    ("toLocaleString", 0, to_locale_string, 0),
 ];
 
 macro_rules! dispatch_table {
@@ -73,12 +73,15 @@ macro_rules! dispatch_table {
 use dispatch_table;
 
 fn dispatch<const I: usize>(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let (name, _, f, species) = METHODS[I];
+    let (name, _, f, mode) = METHODS[I];
+    if mode == 2 {
+        return f(vm, this, args);
+    }
     if let Value::Object(o) = &this {
         if matches!(o.kind, ObjKind::Array(_))
             && o.flags.get() & crate::object::SLOW_ELEMENTS == 0
             && !vm.proto_indices
-            && (!species || species_intact(vm, o))
+            && (mode == 0 || species_intact(vm, o))
         {
             return f(vm, this, args);
         }
@@ -182,6 +185,10 @@ fn len(o: &Obj) -> usize {
     o.array().map(|a| a.borrow().len()).unwrap_or(0)
 }
 
+fn present(o: &Obj, i: usize) -> bool {
+    i < len(o) && !o.is_hole(i)
+}
+
 fn get(o: &Obj, i: usize) -> Value {
     o.array()
         .and_then(|a| a.borrow().get(i).cloned())
@@ -210,6 +217,9 @@ fn array_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         if let Value::Number(n) = args[0] {
             if n < 0.0 || n.fract() != 0.0 || n > 4294967295.0 {
                 return Err(vm.range_error("Invalid array length"));
+            }
+            if n > 50_000_000.0 {
+                return Err(vm.range_error("Array length too large"));
             }
             let a = vm.new_array(vec![Value::Undefined; n as usize]);
             if let Value::Object(o) = &a {
@@ -391,7 +401,26 @@ fn splice(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     Ok(vm.new_array(removed))
 }
 
+fn plain_spread(v: &Value) -> bool {
+    match v {
+        Value::Object(x) => {
+            matches!(x.kind, ObjKind::Array(_))
+                && !x.has_holes()
+                && !x
+                    .props
+                    .borrow()
+                    .contains_key(crate::object::IS_CONCAT_SPREADABLE_KEY)
+        }
+        _ => true,
+    }
+}
+
 fn concat(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let key = crate::object::IS_CONCAT_SPREADABLE_KEY;
+    let tagged = vm.realm.array_proto.get_chain(key).is_some();
+    if tagged || !plain_spread(&this) || !args.iter().all(plain_spread) {
+        return generic(vm, "concat", this, args);
+    }
     let o = this_array(vm, &this, "concat")?;
     let mut out = items(&o).clone();
     for a in args {
@@ -478,7 +507,25 @@ fn index_of(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 fn last_index_of(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let o = this_array(vm, &this, "lastIndexOf")?;
     let target = arg(args, 0);
-    let pos = items(&o)
+    let n = len(&o) as f64;
+    if n == 0.0 {
+        return Ok(Value::Number(-1.0));
+    }
+    let from = match args.get(1) {
+        Some(v) => to_integer(vm, v)?,
+        None => n - 1.0,
+    };
+    let k = if from >= 0.0 {
+        from.min(n - 1.0)
+    } else {
+        n + from
+    };
+    if k < 0.0 {
+        return Ok(Value::Number(-1.0));
+    }
+    let list = items(&o);
+    let end = (k as usize + 1).min(list.len());
+    let pos = list[..end]
         .iter()
         .enumerate()
         .rposition(|(i, v)| v.strict_eq(&target) && !o.is_hole(i));
@@ -518,26 +565,24 @@ fn call3(vm: &mut Vm, f: &Value, this_arg: &Value, v: Value, i: usize, arr: &Val
 
 fn find(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (o, f, t) = callback(vm, &this, args, "find")?;
-    let mut i = 0;
-    while i < len(&o) {
+    let n = len(&o);
+    for i in 0..n {
         let v = get(&o, i);
         if call3(vm, &f, &t, v.clone(), i, &this)?.truthy() {
             return Ok(v);
         }
-        i += 1;
     }
     Ok(Value::Undefined)
 }
 
 fn find_index(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (o, f, t) = callback(vm, &this, args, "findIndex")?;
-    let mut i = 0;
-    while i < len(&o) {
+    let n = len(&o);
+    for i in 0..n {
         let v = get(&o, i);
         if call3(vm, &f, &t, v, i, &this)?.truthy() {
             return Ok(Value::Number(i as f64));
         }
-        i += 1;
     }
     Ok(Value::Number(-1.0))
 }
@@ -571,17 +616,15 @@ fn find_last_index(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 fn filter(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (o, f, t) = callback(vm, &this, args, "filter")?;
     let mut out = Vec::new();
-    let mut i = 0;
-    while i < len(&o) {
-        if o.is_hole(i) {
-            i += 1;
+    let n = len(&o);
+    for i in 0..n {
+        if !present(&o, i) {
             continue;
         }
         let v = get(&o, i);
         if call3(vm, &f, &t, v.clone(), i, &this)?.truthy() {
             out.push(v);
         }
-        i += 1;
     }
     Ok(vm.new_array(out))
 }
@@ -591,17 +634,14 @@ fn map(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let n = len(&o);
     let mut out = Vec::with_capacity(n);
     let mut holes = Vec::new();
-    let mut i = 0;
-    while i < n.min(len(&o)) {
-        if o.is_hole(i) {
+    for i in 0..n {
+        if !present(&o, i) {
             out.push(Value::Undefined);
             holes.push(i);
-            i += 1;
             continue;
         }
         let v = get(&o, i);
         out.push(call3(vm, &f, &t, v, i, &this)?);
-        i += 1;
     }
     let result = vm.new_array(out);
     if let Value::Object(r) = &result {
@@ -614,49 +654,40 @@ fn map(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 
 fn for_each(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (o, f, t) = callback(vm, &this, args, "forEach")?;
-    let mut i = 0;
-    while i < len(&o) {
-        if o.is_hole(i) {
-            i += 1;
-            continue;
+    let n = len(&o);
+    for i in 0..n {
+        if present(&o, i) {
+            let v = get(&o, i);
+            call3(vm, &f, &t, v, i, &this)?;
         }
-        let v = get(&o, i);
-        call3(vm, &f, &t, v, i, &this)?;
-        i += 1;
     }
     Ok(Value::Undefined)
 }
 
 fn some(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (o, f, t) = callback(vm, &this, args, "some")?;
-    let mut i = 0;
-    while i < len(&o) {
-        if o.is_hole(i) {
-            i += 1;
-            continue;
+    let n = len(&o);
+    for i in 0..n {
+        if present(&o, i) {
+            let v = get(&o, i);
+            if call3(vm, &f, &t, v, i, &this)?.truthy() {
+                return Ok(Value::Bool(true));
+            }
         }
-        let v = get(&o, i);
-        if call3(vm, &f, &t, v, i, &this)?.truthy() {
-            return Ok(Value::Bool(true));
-        }
-        i += 1;
     }
     Ok(Value::Bool(false))
 }
 
 fn every(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (o, f, t) = callback(vm, &this, args, "every")?;
-    let mut i = 0;
-    while i < len(&o) {
-        if o.is_hole(i) {
-            i += 1;
-            continue;
+    let n = len(&o);
+    for i in 0..n {
+        if present(&o, i) {
+            let v = get(&o, i);
+            if !call3(vm, &f, &t, v, i, &this)?.truthy() {
+                return Ok(Value::Bool(false));
+            }
         }
-        let v = get(&o, i);
-        if !call3(vm, &f, &t, v, i, &this)?.truthy() {
-            return Ok(Value::Bool(false));
-        }
-        i += 1;
     }
     Ok(Value::Bool(true))
 }
@@ -665,23 +696,29 @@ fn reduce(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let o = this_array(vm, &this, "reduce")?;
     let f = arg(args, 0);
     expect_fn(vm, &f)?;
+    let n = len(&o);
     let mut i = 0;
     let mut acc = if args.len() >= 2 {
         args[1].clone()
     } else {
-        if len(&o) == 0 {
+        while i < n && !present(&o, i) {
+            i += 1;
+        }
+        if i >= n {
             return Err(vm.type_error("Reduce of empty array with no initial value"));
         }
-        i = 1;
-        get(&o, 0)
+        i += 1;
+        get(&o, i - 1)
     };
-    while i < len(&o) {
-        let v = get(&o, i);
-        acc = vm.call_value(
-            &f,
-            Value::Undefined,
-            &[acc, v, Value::Number(i as f64), this.clone()],
-        )?;
+    while i < n {
+        if present(&o, i) {
+            let v = get(&o, i);
+            acc = vm.call_value(
+                &f,
+                Value::Undefined,
+                &[acc, v, Value::Number(i as f64), this.clone()],
+            )?;
+        }
         i += 1;
     }
     Ok(acc)
@@ -695,6 +732,9 @@ fn reduce_right(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let mut acc = if args.len() >= 2 {
         args[1].clone()
     } else {
+        while i > 0 && !present(&o, i - 1) {
+            i -= 1;
+        }
         if i == 0 {
             return Err(vm.type_error("Reduce of empty array with no initial value"));
         }
@@ -703,12 +743,14 @@ fn reduce_right(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     };
     while i > 0 {
         i -= 1;
-        let v = get(&o, i);
-        acc = vm.call_value(
-            &f,
-            Value::Undefined,
-            &[acc, v, Value::Number(i as f64), this.clone()],
-        )?;
+        if present(&o, i) {
+            let v = get(&o, i);
+            acc = vm.call_value(
+                &f,
+                Value::Undefined,
+                &[acc, v, Value::Number(i as f64), this.clone()],
+            )?;
+        }
     }
     Ok(acc)
 }
@@ -869,23 +911,16 @@ fn at(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 }
 
 fn keys(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let o = this_array(vm, &this, "keys")?;
-    let list = (0..len(&o)).map(|i| Value::Number(i as f64)).collect();
-    Ok(vm.new_iter(IterState::List(list, 0)))
+    let o = vm.to_object(&this)?;
+    Ok(vm.new_iter(IterState::Array(o, 0, 0)))
 }
 
 fn values(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let o = this_array(vm, &this, "values")?;
-    Ok(vm.new_iter(IterState::Array(o, 0)))
+    let o = vm.to_object(&this)?;
+    Ok(vm.new_iter(IterState::Array(o, 0, 1)))
 }
 
 fn entries(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let o = this_array(vm, &this, "entries")?;
-    let list = items(&o).clone();
-    let pairs = list
-        .into_iter()
-        .enumerate()
-        .map(|(i, v)| vm.new_array(vec![Value::Number(i as f64), v]))
-        .collect();
-    Ok(vm.new_iter(IterState::List(pairs, 0)))
+    let o = vm.to_object(&this)?;
+    Ok(vm.new_iter(IterState::Array(o, 0, 2)))
 }

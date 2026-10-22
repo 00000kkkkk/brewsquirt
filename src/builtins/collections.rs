@@ -92,9 +92,36 @@ pub fn install(vm: &mut Vm) {
     let weakref = make_ctor(vm, "WeakRef", 1, weakref_ctor, None, &wr);
     vm.define_global("WeakRef", Value::Object(weakref));
 
-    let ip = vm.realm.iter_proto.clone();
-    method(vm, &ip, "next", 0, iter_next);
-    method(vm, &ip, "toArray", 0, iter_to_array);
+    let protos: [(Rc<Obj>, &str, crate::object::NativeFn); 4] = [
+        (
+            vm.realm.iter_proto.clone(),
+            "Array Iterator",
+            iter_next::<0>,
+        ),
+        (
+            vm.realm.map_iter_proto.clone(),
+            "Map Iterator",
+            iter_next::<1>,
+        ),
+        (
+            vm.realm.set_iter_proto.clone(),
+            "Set Iterator",
+            iter_next::<2>,
+        ),
+        (
+            vm.realm.string_iter_proto.clone(),
+            "String Iterator",
+            iter_next::<3>,
+        ),
+    ];
+    for (p, tag, f) in protos {
+        method(vm, &p, "next", 0, f);
+        p.set_with_attrs(
+            crate::object::TO_STRING_TAG_KEY,
+            tag.into(),
+            crate::object::NON_ENUM | crate::object::READ_ONLY,
+        );
+    }
 }
 
 fn this_map(vm: &mut Vm, this: &Value) -> Result<Rc<Obj>, Value> {
@@ -285,26 +312,30 @@ fn set_values(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 
 fn set_entries(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     let o = this_set(vm, &this)?;
-    let vals: Vec<Value> = set_of!(o).borrow().iter().map(|k| k.to_value()).collect();
-    let pairs = vals
-        .into_iter()
-        .map(|v| vm.new_array(vec![v.clone(), v]))
-        .collect();
-    Ok(vm.new_iter(IterState::List(pairs, 0)))
+    Ok(vm.new_iter(IterState::SetEntries(o, 0)))
 }
 
-fn iter_next(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+fn iter_next<const F: usize>(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    let ok = match &this {
+        Value::Object(o) => match &o.kind {
+            ObjKind::Iter(st) => st.borrow().family() == F,
+            _ => false,
+        },
+        _ => false,
+    };
+    if !ok {
+        let what = ["Array", "Map", "Set", "String"][F];
+        return Err(vm.type_error(format!(
+            "Method %{what}IteratorPrototype%.next called on incompatible receiver {}",
+            inspect_plain(&this)
+        )));
+    }
     let next = vm.iter_next(&this)?;
     let o = vm.new_object();
     let done = next.is_none();
     o.set_own("value", next.unwrap_or_default());
     o.set_own("done", Value::Bool(done));
     Ok(Value::Object(o))
-}
-
-fn iter_to_array(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let items = vm.iterate(&this)?;
-    Ok(vm.new_array(items))
 }
 
 fn weak_key(vm: &mut Vm, v: &Value, what: &str) -> Result<Rc<Obj>, Value> {

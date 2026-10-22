@@ -203,11 +203,12 @@ fn obj_edges(o: &Obj, f: &mut dyn FnMut(Edge<'_>)) {
         ObjKind::Iter(st) => {
             if let Ok(st) = st.try_borrow() {
                 match &*st {
-                    IterState::Array(o, _)
+                    IterState::Array(o, _, _)
                     | IterState::MapEntries(o, _)
                     | IterState::MapKeys(o, _)
                     | IterState::MapValues(o, _)
                     | IterState::SetValues(o, _)
+                    | IterState::SetEntries(o, _)
                     | IterState::Typed(o, _, _) => f(Edge::Obj(o)),
                     IterState::Str(..) => {}
                     IterState::List(items, _) => {

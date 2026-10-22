@@ -962,15 +962,27 @@ pub struct Bound {
 }
 
 pub enum IterState {
-    Array(Rc<Obj>, usize),
+    Array(Rc<Obj>, usize, u8),
     Str(Rc<str>, usize),
     MapEntries(Rc<Obj>, usize),
     MapKeys(Rc<Obj>, usize),
     MapValues(Rc<Obj>, usize),
     SetValues(Rc<Obj>, usize),
+    SetEntries(Rc<Obj>, usize),
     List(Vec<Value>, usize),
     Protocol(Value, Value),
     Typed(Rc<Obj>, usize, u8),
+}
+
+impl IterState {
+    pub fn family(&self) -> usize {
+        match self {
+            IterState::MapEntries(..) | IterState::MapKeys(..) | IterState::MapValues(..) => 1,
+            IterState::SetValues(..) | IterState::SetEntries(..) => 2,
+            IterState::Str(..) => 3,
+            _ => 0,
+        }
+    }
 }
 
 #[derive(Clone)]

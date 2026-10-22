@@ -66,7 +66,7 @@ pub struct Pristine {
     map_iter: Value,
     set_iter: Value,
     string_iter: Value,
-    iter_next: Value,
+    iter_nexts: [Value; 4],
     gen_next: Value,
 }
 
@@ -80,6 +80,9 @@ pub struct Realm {
     pub map_proto: Rc<Obj>,
     pub set_proto: Rc<Obj>,
     pub iter_proto: Rc<Obj>,
+    pub map_iter_proto: Rc<Obj>,
+    pub set_iter_proto: Rc<Obj>,
+    pub string_iter_proto: Rc<Obj>,
     pub generator_proto: Rc<Obj>,
     pub async_generator_proto: Rc<Obj>,
     pub generator_function_proto: Rc<Obj>,
@@ -128,6 +131,9 @@ impl Realm {
             dataview_proto: mk(),
             bigint_proto: mk(),
             iter_proto: Obj::new(ObjKind::Ordinary, Some(iterator_base.clone())),
+            map_iter_proto: Obj::new(ObjKind::Ordinary, Some(iterator_base.clone())),
+            set_iter_proto: Obj::new(ObjKind::Ordinary, Some(iterator_base.clone())),
+            string_iter_proto: Obj::new(ObjKind::Ordinary, Some(iterator_base.clone())),
             generator_proto: Obj::new(ObjKind::Ordinary, Some(iterator_base.clone())),
             async_generator_proto: Obj::new(ObjKind::Ordinary, Some(async_iterator_base.clone())),
             generator_function_proto: Obj::new(ObjKind::Ordinary, Some(function_proto.clone())),
@@ -1023,10 +1029,31 @@ impl Vm {
     }
 
     pub fn new_iter(&self, state: IterState) -> Value {
+        let proto = self.iter_family_proto(state.family()).clone();
         Value::Object(Obj::new(
             ObjKind::Iter(Box::new(RefCell::new(state))),
-            Some(self.realm.iter_proto.clone()),
+            Some(proto),
         ))
+    }
+
+    pub fn iter_family_proto(&self, family: usize) -> &Rc<Obj> {
+        match family {
+            1 => &self.realm.map_iter_proto,
+            2 => &self.realm.set_iter_proto,
+            3 => &self.realm.string_iter_proto,
+            _ => &self.realm.iter_proto,
+        }
+    }
+
+    fn family_next_pristine(&self, family: usize) -> bool {
+        let Some(p) = &self.pristine else {
+            return true;
+        };
+        self.iter_family_proto(family)
+            .props
+            .borrow()
+            .get("next")
+            .is_some_and(|v| v.strict_eq(&p.iter_nexts[family]))
     }
 
     pub(crate) fn capture_upvalue(&mut self, idx: usize) -> Rc<UpCell> {
@@ -1974,6 +2001,9 @@ impl Vm {
                             return Err(self.read_only_error(o, &key));
                         }
                         let len = a.borrow().len();
+                        if n as usize > len + 50_000_000 {
+                            return Err(self.range_error("Array length too large"));
+                        }
                         if flags & crate::object::ELEMENTS_SEALED != 0 && (n as usize) < len {
                             return Err(self.type_error(format!(
                                 "Cannot delete property '{}' of [object Array]",
@@ -2443,7 +2473,12 @@ impl Vm {
             map_iter: own(&self.realm.map_proto, ITER_KEY),
             set_iter: own(&self.realm.set_proto, ITER_KEY),
             string_iter: own(&self.realm.string_proto, ITER_KEY),
-            iter_next: own(&self.realm.iter_proto, "next"),
+            iter_nexts: [
+                own(&self.realm.iter_proto, "next"),
+                own(&self.realm.map_iter_proto, "next"),
+                own(&self.realm.set_iter_proto, "next"),
+                own(&self.realm.string_iter_proto, "next"),
+            ],
             gen_next,
         }));
     }
@@ -2452,19 +2487,20 @@ impl Vm {
         let Some(p) = &self.pristine else {
             return true;
         };
-        let (proto, orig) = match &o.kind {
-            ObjKind::Array(_) => (&self.realm.array_proto, &p.array_iter),
-            ObjKind::Map(_) => (&self.realm.map_proto, &p.map_iter),
-            ObjKind::Set(_) => (&self.realm.set_proto, &p.set_iter),
-            ObjKind::Iter(_) => {
-                return !o.props.borrow().contains_key("next")
-                    && self
-                        .realm
-                        .iter_proto
-                        .props
-                        .borrow()
-                        .get("next")
-                        .is_some_and(|v| v.strict_eq(&p.iter_next));
+        let (proto, orig, family) = match &o.kind {
+            ObjKind::Array(_) => (&self.realm.array_proto, &p.array_iter, 0),
+            ObjKind::Map(_) => (&self.realm.map_proto, &p.map_iter, 1),
+            ObjKind::Set(_) => (&self.realm.set_proto, &p.set_iter, 2),
+            ObjKind::Iter(st) => {
+                let family = st.borrow().family();
+                let plain = o
+                    .proto
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|x| Rc::ptr_eq(x, self.iter_family_proto(family)));
+                return plain
+                    && !o.props.borrow().contains_key("next")
+                    && self.family_next_pristine(family);
             }
             ObjKind::Coroutine(_) => {
                 return o
@@ -2485,13 +2521,7 @@ impl Vm {
                 .borrow()
                 .get(ITER_KEY)
                 .is_some_and(|v| v.strict_eq(orig))
-            && self
-                .realm
-                .iter_proto
-                .props
-                .borrow()
-                .get("next")
-                .is_some_and(|v| v.strict_eq(&p.iter_next))
+            && self.family_next_pristine(family)
     }
 
     fn string_iterable(&self) -> bool {
@@ -2504,13 +2534,7 @@ impl Vm {
             .borrow()
             .get(ITER_KEY)
             .is_some_and(|v| v.strict_eq(&p.string_iter))
-            && self
-                .realm
-                .iter_proto
-                .props
-                .borrow()
-                .get("next")
-                .is_some_and(|v| v.strict_eq(&p.iter_next))
+            && self.family_next_pristine(3)
     }
 
     pub fn get_iterator(&mut self, v: &Value) -> Result<Value, Value> {
@@ -2519,7 +2543,7 @@ impl Vm {
                 Ok(self.new_iter(IterState::Str(s.clone(), 0)))
             }
             Value::Object(o) if self.builtin_iterable(o) => match &o.kind {
-                ObjKind::Array(_) => Ok(self.new_iter(IterState::Array(o.clone(), 0))),
+                ObjKind::Array(_) => Ok(self.new_iter(IterState::Array(o.clone(), 0, 1))),
                 ObjKind::Map(_) => Ok(self.new_iter(IterState::MapEntries(o.clone(), 0))),
                 ObjKind::Set(_) => Ok(self.new_iter(IterState::SetValues(o.clone(), 0))),
                 ObjKind::Iter(_) => Ok(v.clone()),
@@ -2658,21 +2682,61 @@ impl Vm {
                     };
                     return Ok(Some(v));
                 }
-                IterState::Array(arr, i) => {
-                    let len = arr.array().map(|a| a.borrow().len()).unwrap_or(0);
-                    if *i >= len {
+                IterState::Array(arr, i, kind) => {
+                    if *i == usize::MAX {
                         return Ok(None);
                     }
+                    let kind = *kind;
                     let idx = *i;
-                    *i += 1;
-                    let slow = arr.flags.get() & crate::object::SLOW_ELEMENTS != 0
-                        || (self.proto_indices && arr.is_hole(idx));
-                    if !slow {
-                        return Ok(arr.array().and_then(|a| a.borrow().get(idx).cloned()));
-                    }
-                    let arr = Value::Object(arr.clone());
+                    let arr = arr.clone();
+                    let len = match &arr.kind {
+                        ObjKind::Array(a) => Some(a.borrow().len()),
+                        ObjKind::Typed(t) => {
+                            if t.out_of_bounds() {
+                                return Err(self.type_error(
+                                    "Cannot perform %ArrayIteratorPrototype%.next on a detached ArrayBuffer",
+                                ));
+                            }
+                            Some(t.len())
+                        }
+                        _ => None,
+                    };
+                    let fast = matches!(arr.kind, ObjKind::Array(_))
+                        && arr.flags.get() & crate::object::SLOW_ELEMENTS == 0
+                        && !(self.proto_indices && arr.is_hole(idx));
                     drop(st);
-                    return Ok(Some(self.get_prop(&arr, &idx.to_string())?));
+                    let len = match len {
+                        Some(n) => n,
+                        None => {
+                            let v = self.get_prop(&Value::Object(arr.clone()), "length")?;
+                            let n = crate::builtins::to_integer(self, &v)?;
+                            n.clamp(0.0, 9007199254740991.0) as usize
+                        }
+                    };
+                    let mut st = state.borrow_mut();
+                    let IterState::Array(_, i, _) = &mut *st else {
+                        return Ok(None);
+                    };
+                    if idx >= len {
+                        *i = usize::MAX;
+                        return Ok(None);
+                    }
+                    *i = idx + 1;
+                    drop(st);
+                    if kind == 0 {
+                        return Ok(Some(Value::Number(idx as f64)));
+                    }
+                    let v = if fast {
+                        arr.array()
+                            .and_then(|a| a.borrow().get(idx).cloned())
+                            .unwrap_or_default()
+                    } else {
+                        self.get_prop(&Value::Object(arr.clone()), &idx.to_string())?
+                    };
+                    if kind == 1 {
+                        return Ok(Some(v));
+                    }
+                    return Ok(Some(self.new_array(vec![Value::Number(idx as f64), v])));
                 }
                 IterState::Str(s, pos) => {
                     let Some(c) = s[*pos..].chars().next() else {
@@ -2683,6 +2747,7 @@ impl Vm {
                 }
                 IterState::MapKeys(m, i) => {
                     let Some((k, _)) = map_at(m, *i) else {
+                        *i = usize::MAX;
                         return Ok(None);
                     };
                     *i += 1;
@@ -2690,6 +2755,7 @@ impl Vm {
                 }
                 IterState::MapValues(m, i) => {
                     let Some((_, v)) = map_at(m, *i) else {
+                        *i = usize::MAX;
                         return Ok(None);
                     };
                     *i += 1;
@@ -2697,6 +2763,7 @@ impl Vm {
                 }
                 IterState::MapEntries(m, i) => {
                     let Some((k, v)) = map_at(m, *i) else {
+                        *i = usize::MAX;
                         return Ok(None);
                     };
                     *i += 1;
@@ -2708,10 +2775,24 @@ impl Vm {
                         return Ok(None);
                     };
                     let v = set.borrow().get_index(*i).map(|k| k.to_value());
-                    if v.is_some() {
-                        *i += 1;
+                    match v {
+                        Some(_) => *i += 1,
+                        None => *i = usize::MAX,
                     }
                     return Ok(v);
+                }
+                IterState::SetEntries(s, i) => {
+                    let ObjKind::Set(set) = &s.kind else {
+                        return Ok(None);
+                    };
+                    let v = set.borrow().get_index(*i).map(|k| k.to_value());
+                    let Some(v) = v else {
+                        *i = usize::MAX;
+                        return Ok(None);
+                    };
+                    *i += 1;
+                    drop(st);
+                    return Ok(Some(self.new_array(vec![v.clone(), v])));
                 }
                 IterState::List(items, i) => {
                     let v = items.get(*i).cloned();

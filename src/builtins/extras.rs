@@ -640,6 +640,13 @@ define(Array, "fromAsync", named("fromAsync", async function fromAsync(items, ma
 
 
 Object.defineProperty(Array, Symbol.species, { get: Object.defineProperty(function () { return this }, "name", { value: "get [Symbol.species]" }), configurable: true })
+{
+  const unscopables = Object.create(null)
+  for (const k of ["at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast", "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed", "toSorted", "toSpliced", "values"]) {
+    unscopables[k] = true
+  }
+  Object.defineProperty(Array.prototype, Symbol.unscopables, { value: unscopables, writable: false, enumerable: false, configurable: true })
+}
 for (const C of [Map, Set, Promise, RegExp, ArrayBuffer]) {
   Object.defineProperty(C, Symbol.species, { get: Object.defineProperty(function () { return this }, "name", { value: "get [Symbol.species]" }), configurable: true })
 }

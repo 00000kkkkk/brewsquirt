@@ -350,6 +350,9 @@ impl Vm {
                         return Err(self.range_error("Invalid array length"));
                     }
                     let old = a.borrow().len();
+                    if n as usize > old + 50_000_000 {
+                        return Err(self.range_error("Array length too large"));
+                    }
                     a.borrow_mut().resize(n as usize, Value::Undefined);
                     if (n as usize) < old {
                         o.truncate_holes(n as usize);

@@ -264,9 +264,12 @@ fn symbol_value_of(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 fn array_values(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     match &this {
         Value::Object(o) if matches!(o.kind, ObjKind::Array(_)) => {
-            Ok(vm.new_iter(IterState::Array(o.clone(), 0)))
+            Ok(vm.new_iter(IterState::Array(o.clone(), 0, 1)))
         }
-        _ => Err(vm.type_error("Array.prototype[Symbol.iterator] called on non-array")),
+        _ => {
+            let o = vm.to_object(&this)?;
+            Ok(vm.new_iter(IterState::Array(o, 0, 1)))
+        }
     }
 }
 
