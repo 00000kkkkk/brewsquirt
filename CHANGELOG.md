@@ -79,6 +79,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `net.createServer` accepts connections with `connection`, `listening` and `close` events,
   `address`, `maxConnections` and `getConnections`; `tls.connect` opens TLS 1.2/1.3 client
   connections verified against the Mozilla root store, with `secureConnect`.
+- `vm.constants` with `DONT_CONTEXTIFY` and `USE_MAIN_CONTEXT_DEFAULT_LOADER`;
+  `vm.createContext(vm.constants.DONT_CONTEXTIFY)` returns a plain context object.
 - `zlib` exposes the Brotli and Zstandard constants, classes and functions; they report
   `ERR_ZLIB_UNSUPPORTED` when used, which lets `undici` and `jsdom` load.
 - A global `WebSocket` client (RFC 6455 over `net`/`tls` and the HTTP upgrade path) with

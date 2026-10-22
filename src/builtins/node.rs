@@ -4268,9 +4268,12 @@ const NODE_SRC: &str = r##"
     const fn = new Function("__sandbox__", `with (__sandbox__) { return eval(${JSON.stringify(String(code))}) }`)
     return fn(sandbox)
   }
+  const vmConstants = { USE_MAIN_CONTEXT_DEFAULT_LOADER: Symbol("vm_dynamic_import_main_context_default"), DONT_CONTEXTIFY: Symbol("vm_context_no_contextify") }
   const vmModule = {
     Script: VmScript,
+    constants: vmConstants,
     createContext(sandbox = {}) {
+      if (sandbox === vmConstants.DONT_CONTEXTIFY) sandbox = {}
       contexts.add(sandbox)
       return sandbox
     },
