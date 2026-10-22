@@ -34,6 +34,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Japanese and three fraction digits in engineering notation.
 - `path.toNamespacedPath`, `util.types.isProxy`, lenient `querystring.unescape`, `blob:`
   origins in `URL`, and `ERR_OUT_OF_RANGE`/`ERR_INVALID_ARG_TYPE` codes on `Buffer` errors.
+- `Readable.toWeb`/`fromWeb`, `Writable.toWeb`/`fromWeb` and `Duplex.toWeb`/`fromWeb` bridge
+  Node streams and WHATWG streams; `fs` streams report `writableEnded`, `writableFinished`,
+  `readableEnded`, `destroyed` and `closed`.
+- `toLocaleUpperCase`/`toLocaleLowerCase` apply the Turkish and Azerbaijani dotted and dotless
+  `i` rules, and `BigInt.prototype.toLocaleString` formats every digit instead of rounding
+  through a `Number`.
 
 ### Fixed
 
@@ -46,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DataCloneError`; the month in `weekday: "short", month: "short"` formats is abbreviated.
 - `process.nextTick` callbacks run after the microtask queue drains, as in Node ES modules, so
   `await` continuations are not interleaved with ticks.
+- `toFixed` and `toPrecision` round exact ties up and everything else by the exact binary value,
+  so `(1.45).toFixed(1)` is `1.4` and `(2.5).toPrecision(1)` is `3`, matching V8.
+- `Array.prototype.flat` skips holes, `Writable.prototype.write` reports back-pressure from the
+  buffered byte count, and `stream.pipeline` settles when a `PassThrough` destination finishes
+  even if nobody reads it.
 - `Date.parse` accepts the slash-separated legacy formats V8 understands, such as
   `7/1/2026, 9:00:00 PM`, `2026/07/01 21:00:00` and `12/31/99`, so `new Date(date.toLocaleString("en-US", { timeZone }))`
   round-trips and the `dayjs` and `luxon` time zone plugins work.

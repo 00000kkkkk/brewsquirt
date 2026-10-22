@@ -25,8 +25,8 @@ pub fn install(vm: &mut Vm) {
         ("substr", 2, substr),
         ("toUpperCase", 0, to_upper),
         ("toLowerCase", 0, to_lower),
-        ("toLocaleUpperCase", 0, to_upper),
-        ("toLocaleLowerCase", 0, to_lower),
+        ("toLocaleUpperCase", 0, to_locale_upper),
+        ("toLocaleLowerCase", 0, to_locale_lower),
         ("trim", 0, trim),
         ("trimStart", 0, trim_start),
         ("trimEnd", 0, trim_end),
@@ -323,6 +323,38 @@ fn to_upper(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 
 fn to_lower(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     Ok(this_str(vm, &this)?.to_lowercase().into())
+}
+
+fn turkic_locale(vm: &mut Vm, args: &[Value]) -> Result<bool, Value> {
+    let locale = match arg(args, 0) {
+        Value::Undefined => return Ok(false),
+        Value::Object(o) if matches!(o.kind, crate::object::ObjKind::Array(_)) => {
+            vm.get_prop(&Value::Object(o), "0")?
+        }
+        v => v,
+    };
+    let tag = match locale {
+        Value::Undefined => return Ok(false),
+        v => vm.to_string(&v)?.to_ascii_lowercase(),
+    };
+    let lang = tag.split(['-', '_']).next().unwrap_or("");
+    Ok(matches!(lang, "tr" | "az"))
+}
+
+fn to_locale_upper(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let s = this_str(vm, &this)?;
+    if turkic_locale(vm, args)? {
+        return Ok(s.replace('i', "İ").to_uppercase().into());
+    }
+    Ok(s.to_uppercase().into())
+}
+
+fn to_locale_lower(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let s = this_str(vm, &this)?;
+    if turkic_locale(vm, args)? {
+        return Ok(s.replace('İ', "i").replace('I', "ı").to_lowercase().into());
+    }
+    Ok(s.to_lowercase().into())
 }
 
 fn trim(vm: &mut Vm, this: Value, _args: &[Value]) -> R {

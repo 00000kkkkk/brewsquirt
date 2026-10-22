@@ -1630,6 +1630,8 @@ const NODE_SRC: &str = r##"
       this.path = path
       this.bytesRead = 0
       this.readable = true
+      this.readableEnded = false
+      this.closed = false
       this.highWaterMark = options.highWaterMark ?? 65536
       if (options.encoding) this.#encoding = options.encoding
       queueMicrotask(() => this.#open(options))
@@ -1672,6 +1674,7 @@ const NODE_SRC: &str = r##"
         }
         if (!this.#chunks.length && !this.#destroyed) {
           this.readable = false
+          this.readableEnded = true
           this.emit("end")
           this.destroy()
         }
@@ -1699,6 +1702,9 @@ const NODE_SRC: &str = r##"
     isPaused() {
       return this.#paused
     }
+    get destroyed() {
+      return this.#destroyed
+    }
     destroy(err) {
       if (this.#destroyed) return this
       this.#destroyed = true
@@ -1706,6 +1712,7 @@ const NODE_SRC: &str = r##"
       this.#chunks = []
       queueMicrotask(() => {
         if (err) this.emit("error", err)
+        this.closed = true
         this.emit("close")
       })
       return this
@@ -1763,6 +1770,9 @@ const NODE_SRC: &str = r##"
       this.path = path
       this.bytesWritten = 0
       this.writable = true
+      this.writableEnded = false
+      this.writableFinished = false
+      this.closed = false
       this.pending = false
       this.encoding = options.encoding ?? "utf8"
       const append = String(options.flags ?? "w").startsWith("a")
@@ -1811,12 +1821,17 @@ const NODE_SRC: &str = r##"
       if (!this.#ended) {
         this.#ended = true
         this.writable = false
+        this.writableEnded = true
         queueMicrotask(() => {
+          this.writableFinished = true
           this.emit("finish")
           this.destroy()
         })
       }
       return this
+    }
+    get destroyed() {
+      return this.#destroyed
     }
     destroy(err) {
       if (this.#destroyed) return this
@@ -1824,6 +1839,7 @@ const NODE_SRC: &str = r##"
       this.writable = false
       queueMicrotask(() => {
         if (err) this.emit("error", err)
+        this.closed = true
         this.emit("close")
       })
       return this
@@ -2796,7 +2812,8 @@ const NODE_SRC: &str = r##"
       }
       w.queue.push([c, enc, cb])
       processWrites(this)
-      const ok = w.queue.length < w.highWaterMark
+      const buffered = w.queue.reduce((n, [chunk]) => n + (w.objectMode ? 1 : chunk.length), 0) + (w.writing && w.current ? (w.objectMode ? 1 : w.current.length) : 0)
+      const ok = buffered < w.highWaterMark
       if (!ok) w.needDrain = true
       return ok
     },
@@ -2847,11 +2864,13 @@ const NODE_SRC: &str = r##"
     }
     w.writing = true
     const [chunk, enc, cb] = next
+    w.current = chunk
     let called = false
     const done = (err) => {
       if (called) return
       called = true
       w.writing = false
+      w.current = null
       if (err) {
         if (typeof cb === "function") cb(err)
         stream.destroy(err)
@@ -3048,8 +3067,9 @@ const NODE_SRC: &str = r##"
         else throw streamError("ERR_INVALID_ARG_TYPE", "pipeline expects streams")
       }
     }
-    finished(streams[streams.length - 1], (err) => settle(err))
-    return streams[streams.length - 1]
+    const last = streams[streams.length - 1]
+    finished(last, last[kWrite] !== undefined ? { readable: false } : {}, (err) => settle(err))
+    return last
   }
 
   const streamPromises = {
@@ -3073,6 +3093,65 @@ const NODE_SRC: &str = r##"
   stream.isReadable = (s) => !!(s && s[kRead] && !s[kRead].destroyed && !s[kRead].endEmitted)
   stream.isWritable = (s) => !!(s && s[kWrite] && !s[kWrite].destroyed && !s[kWrite].ending)
   stream.isErrored = () => false
+  Readable.toWeb = (r) =>
+    new ReadableStream({
+      start(controller) {
+        r.on("data", (chunk) => controller.enqueue(chunk))
+        r.on("end", () => controller.close())
+        r.on("error", (e) => controller.error(e))
+      },
+      cancel() {
+        r.destroy()
+      },
+    })
+  Readable.fromWeb = (rs, options) => Readable.from(rs, options)
+  Writable.toWeb = (w) =>
+    new WritableStream({
+      write(chunk) {
+        return new Promise((resolve, reject) => w.write(chunk, (e) => (e ? reject(e) : resolve())))
+      },
+      close() {
+        return new Promise((resolve) => w.end(resolve))
+      },
+      abort(reason) {
+        w.destroy(reason)
+      },
+    })
+  Writable.fromWeb = (ws, options) => {
+    const writer = ws.getWriter()
+    return new Writable({
+      ...options,
+      write(chunk, encoding, cb) {
+        writer.write(chunk).then(() => cb(), cb)
+      },
+      final(cb) {
+        writer.close().then(() => cb(), cb)
+      },
+    })
+  }
+  Duplex.toWeb = (d) => ({ readable: Readable.toWeb(d), writable: Writable.toWeb(d) })
+  Duplex.fromWeb = (pair, options) => {
+    const writer = pair.writable.getWriter()
+    const d = new Duplex({
+      ...options,
+      read() {},
+      write(chunk, encoding, cb) {
+        writer.write(chunk).then(() => cb(), cb)
+      },
+      final(cb) {
+        writer.close().then(() => cb(), cb)
+      },
+    })
+    ;(async () => {
+      try {
+        for await (const chunk of pair.readable) d.push(chunk)
+        d.push(null)
+      } catch (e) {
+        d.destroy(e)
+      }
+    })()
+    return d
+  }
   stream.addAbortSignal = (signal, s) => {
     signal.addEventListener("abort", () => s.destroy(new DOMException("The operation was aborted", "AbortError")), { once: true })
     return s

@@ -874,7 +874,12 @@ fn flatten(list: &[Value], depth: f64, out: &mut Vec<Value>) {
     for v in list {
         match v {
             Value::Object(o) if depth >= 1.0 && matches!(o.kind, ObjKind::Array(_)) => {
-                let inner = items(o).clone();
+                let inner: Vec<Value> = items(o)
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !o.is_hole(*i))
+                    .map(|(_, v)| v.clone())
+                    .collect();
                 flatten(&inner, depth - 1.0, out);
             }
             _ => out.push(v.clone()),
@@ -888,7 +893,12 @@ fn flat(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         Value::Undefined => 1.0,
         v => to_integer(vm, &v)?,
     };
-    let list = items(&o).clone();
+    let list: Vec<Value> = items(&o)
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !o.is_hole(*i))
+        .map(|(_, v)| v.clone())
+        .collect();
     let mut out = Vec::new();
     flatten(&list, depth, &mut out);
     Ok(vm.new_array(out))

@@ -324,11 +324,10 @@ pub fn fixed(x: f64, digits: usize) -> String {
         return number_to_string(x);
     }
     let x = if x == 0.0 { 0.0 } else { x };
-    let scale = 10f64.powi(digits as i32);
-    let scaled = x.abs() * scale;
-    if scaled < 9007199254740992.0 && scaled.fract() == 0.5 {
-        let rounded = (scaled.floor() + 1.0) / scale;
-        let s = format!("{:.*}", digits, rounded);
+    if exact_tie(x.abs(), digits as i32) {
+        let scale = 10f64.powi(digits as i32);
+        let rounded = (x.abs() * scale).floor() + 1.0;
+        let s = format!("{:.*}", digits, rounded / scale);
         return if x < 0.0 { format!("-{s}") } else { s };
     }
     let s = format!("{:.*}", digits, x);
@@ -337,6 +336,37 @@ pub fn fixed(x: f64, digits: usize) -> String {
     } else {
         s
     }
+}
+
+fn exact_tie(x: f64, d: i32) -> bool {
+    if !x.is_finite() || x == 0.0 {
+        return false;
+    }
+    let bits = x.to_bits();
+    let exp = ((bits >> 52) & 0x7ff) as i32;
+    let frac = bits & ((1u64 << 52) - 1);
+    let (mut m, mut e) = if exp == 0 {
+        (frac, -1074)
+    } else {
+        (frac | (1u64 << 52), exp - 1075)
+    };
+    if d >= 0 {
+        for _ in 0..d {
+            m = match m.checked_mul(5) {
+                Some(v) => v,
+                None => return false,
+            };
+        }
+    } else {
+        for _ in 0..(-d) {
+            if m % 5 != 0 {
+                return false;
+            }
+            m /= 5;
+        }
+    }
+    e += d;
+    e < 0 && m.trailing_zeros() as i32 + 1 == -e
 }
 
 fn to_fixed(vm: &mut Vm, this: Value, args: &[Value]) -> R {
@@ -364,15 +394,28 @@ fn to_precision(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     if n == 0.0 {
         return Ok(fixed(0.0, p - 1).into());
     }
-    let sci = format!("{:.*e}", p - 1, n);
+    let negative = n < 0.0;
+    let mut v = n.abs();
+    let shortest = format!("{v:e}");
+    let e0: i32 = shortest
+        .split_once('e')
+        .and_then(|(_, e)| e.parse().ok())
+        .unwrap_or(0);
+    let d = p as i32 - 1 - e0;
+    if exact_tie(v, d) {
+        let scale = 10f64.powi(d);
+        v = ((v * scale).floor() + 1.0) / scale;
+    }
+    let sci = format!("{:.*e}", p - 1, v);
     let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
     let e: i32 = exp.parse().unwrap_or(0);
+    let sign_prefix = if negative { "-" } else { "" };
     if e < -6 || e >= p as i32 {
         let sign = if e >= 0 { "+" } else { "-" };
-        return Ok(format!("{mantissa}e{sign}{}", e.abs()).into());
+        return Ok(format!("{sign_prefix}{mantissa}e{sign}{}", e.abs()).into());
     }
     let decimals = (p as i32 - 1 - e).max(0) as usize;
-    Ok(format!("{:.*}", decimals, n).into())
+    Ok(format!("{sign_prefix}{:.*}", decimals, v).into())
 }
 
 fn is_integer(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {

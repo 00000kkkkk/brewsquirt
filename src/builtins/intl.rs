@@ -178,6 +178,17 @@ const INTL_SRC: &str = r##"
     #parts(value) {
       const o = this.#o
       const data = numberData(o.locale)
+      if (typeof value === "bigint" && o.notation === "standard" && o.style !== "percent") {
+        const negative = value < 0n
+        const digits = (negative ? -value : value).toString().padStart(o.minimumIntegerDigits, "0")
+        const parts = []
+        this.#withGroup(digits, data).split(data.group).forEach((chunk, idx) => {
+          if (idx > 0) parts.push({ type: "group", value: data.group })
+          parts.push({ type: "integer", value: chunk })
+        })
+        if (o.minimumFractionDigits > 0) parts.push({ type: "decimal", value: data.decimal }, { type: "fraction", value: "0".repeat(o.minimumFractionDigits) })
+        return this.#decorate(parts, "", negative, Number(value), data, null)
+      }
       let x = typeof value === "bigint" ? Number(value) : Number(value)
       const parts = []
       const negative = x < 0 || Object.is(x, -0)

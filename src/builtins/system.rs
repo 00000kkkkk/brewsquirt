@@ -236,6 +236,10 @@ pub fn format_args(vm: &mut Vm, args: &[Value]) -> Result<String, Value> {
                         chars.next();
                         out.push('%');
                     }
+                    Some('c') if i < args.len() => {
+                        chars.next();
+                        i += 1;
+                    }
                     Some(spec @ ('s' | 'd' | 'i' | 'f' | 'o' | 'O' | 'j')) if i < args.len() => {
                         chars.next();
                         let a = &args[i];
