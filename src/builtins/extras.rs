@@ -521,71 +521,99 @@ define(Iterator, "from", {
 }.from)
 define(globalThis, "Iterator", Iterator)
 
+const setHas = Set.prototype.has
+const setAdd = Set.prototype.add
+const setDelete = Set.prototype.delete
+const setKeys = Set.prototype.keys
+const requireSet = (s, name) => {
+  try {
+    setHas.call(s)
+  } catch (e) {
+    throw new TypeError(`Method Set.prototype.${name} called on incompatible receiver`)
+  }
+}
 const setRecord = (other) => {
-  if (other === null || typeof other !== "object") throw new TypeError("The 'other' argument must be an object")
-  const size = Number(other.size)
-  if (Number.isNaN(size)) throw new TypeError("The 'size' property must be a number")
+  if (other === null || (typeof other !== "object" && typeof other !== "function")) {
+    throw new TypeError("The 'other' argument must be an object")
+  }
+  const numSize = +other.size
+  if (Number.isNaN(numSize)) throw new TypeError("The 'size' property must be a number")
+  const size = Math.trunc(numSize)
+  if (size < 0) throw new RangeError("The 'size' property must be non-negative")
   const has = other.has
   needFn(has)
   const keys = other.keys
   needFn(keys)
   return { obj: other, size, has: (v) => has.call(other, v), keys: () => keys.call(other) }
 }
+const setCopy = (s) => {
+  const out = new Set()
+  for (const v of setKeys.call(s)) setAdd.call(out, v)
+  return out
+}
+const otherKeys = (r) => ({ [Symbol.iterator]: () => r.keys() })
 
 defineAll(Set.prototype, {
   union(other) {
+    requireSet(this, "union")
     const r = setRecord(other)
-    const out = new Set(this)
-    for (const v of { [Symbol.iterator]: () => r.keys() }) out.add(v)
+    const out = setCopy(this)
+    for (const v of otherKeys(r)) setAdd.call(out, v)
     return out
   },
   intersection(other) {
+    requireSet(this, "intersection")
     const r = setRecord(other)
     const out = new Set()
     if (this.size <= r.size) {
-      for (const v of this) if (r.has(v)) out.add(v)
+      for (const v of setKeys.call(this)) if (r.has(v)) setAdd.call(out, v)
     } else {
-      for (const v of { [Symbol.iterator]: () => r.keys() }) if (this.has(v)) out.add(v)
+      for (const v of otherKeys(r)) if (setHas.call(this, v)) setAdd.call(out, v)
     }
     return out
   },
   difference(other) {
+    requireSet(this, "difference")
     const r = setRecord(other)
-    const out = new Set(this)
+    const out = setCopy(this)
     if (this.size <= r.size) {
-      for (const v of this) if (r.has(v)) out.delete(v)
+      for (const v of setKeys.call(this)) if (r.has(v)) setDelete.call(out, v)
     } else {
-      for (const v of { [Symbol.iterator]: () => r.keys() }) out.delete(v)
+      for (const v of otherKeys(r)) setDelete.call(out, v)
     }
     return out
   },
   symmetricDifference(other) {
+    requireSet(this, "symmetricDifference")
     const r = setRecord(other)
-    const out = new Set(this)
-    for (const v of { [Symbol.iterator]: () => r.keys() }) {
-      if (this.has(v)) out.delete(v)
-      else out.add(v)
+    const out = setCopy(this)
+    for (const v of otherKeys(r)) {
+      if (setHas.call(this, v)) setDelete.call(out, v)
+      else setAdd.call(out, v)
     }
     return out
   },
   isSubsetOf(other) {
+    requireSet(this, "isSubsetOf")
     const r = setRecord(other)
     if (this.size > r.size) return false
-    for (const v of this) if (!r.has(v)) return false
+    for (const v of setKeys.call(this)) if (!r.has(v)) return false
     return true
   },
   isSupersetOf(other) {
+    requireSet(this, "isSupersetOf")
     const r = setRecord(other)
     if (this.size < r.size) return false
-    for (const v of { [Symbol.iterator]: () => r.keys() }) if (!this.has(v)) return false
+    for (const v of otherKeys(r)) if (!setHas.call(this, v)) return false
     return true
   },
   isDisjointFrom(other) {
+    requireSet(this, "isDisjointFrom")
     const r = setRecord(other)
     if (this.size <= r.size) {
-      for (const v of this) if (r.has(v)) return false
+      for (const v of setKeys.call(this)) if (r.has(v)) return false
     } else {
-      for (const v of { [Symbol.iterator]: () => r.keys() }) if (this.has(v)) return false
+      for (const v of otherKeys(r)) if (setHas.call(this, v)) return false
     }
     return true
   },

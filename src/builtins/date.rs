@@ -14,6 +14,20 @@ const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
+fn date_to_primitive(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    if !this.is_object() {
+        return Err(
+            vm.type_error("Date.prototype[Symbol.toPrimitive] called on incompatible receiver")
+        );
+    }
+    let hint = match arg(args, 0) {
+        Value::Str(s) if &*s == "string" || &*s == "default" => "string",
+        Value::Str(s) if &*s == "number" => "number",
+        _ => return Err(vm.type_error("Invalid hint")),
+    };
+    vm.ordinary_to_primitive(&this, hint)
+}
+
 pub fn install(vm: &mut Vm) {
     let dp = vm.realm.date_proto.clone();
     let methods: &[(&str, u32, crate::object::NativeFn)] = &[
@@ -65,6 +79,15 @@ pub fn install(vm: &mut Vm) {
     for (name, arity, f) in methods {
         method(vm, &dp, name, *arity, *f);
     }
+    if let Some(f) = dp.get_own("toUTCString") {
+        dp.set_with_attrs("toGMTString", f, crate::object::NON_ENUM);
+    }
+    let tp = super::native_fn(vm, crate::object::TO_PRIMITIVE_KEY, 1, date_to_primitive);
+    dp.set_with_attrs(
+        crate::object::TO_PRIMITIVE_KEY,
+        tp,
+        crate::object::NON_ENUM | crate::object::READ_ONLY,
+    );
     let date = make_ctor(
         vm,
         "Date",

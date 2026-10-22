@@ -234,8 +234,18 @@ fn last_index_of(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     ))
 }
 
+fn no_regexp(vm: &mut Vm, args: &[Value], name: &str) -> Result<(), Value> {
+    if is_regexp(vm, &arg(args, 0))? {
+        return Err(vm.type_error(format!(
+            "First argument to String.prototype.{name} must not be a regular expression"
+        )));
+    }
+    Ok(())
+}
+
 fn includes(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_str(vm, &this)?;
+    no_regexp(vm, args, "includes")?;
     let needle = str_arg(vm, args, 0)?;
     let from = position(vm, args, 1, 0, len16(&s))?;
     Ok(Value::Bool(index_of16(&s, &needle, from).is_some()))
@@ -243,6 +253,7 @@ fn includes(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 
 fn starts_with(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_str(vm, &this)?;
+    no_regexp(vm, args, "startsWith")?;
     let needle = str_arg(vm, args, 0)?;
     let from = position(vm, args, 1, 0, len16(&s))?;
     let rest = slice16(&s, from, usize::MAX);
@@ -251,6 +262,7 @@ fn starts_with(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 
 fn ends_with(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_str(vm, &this)?;
+    no_regexp(vm, args, "endsWith")?;
     let needle = str_arg(vm, args, 0)?;
     let n = len16(&s);
     let end = position(vm, args, 1, n, n)?;

@@ -68,6 +68,8 @@ pub struct Pristine {
     string_iter: Value,
     iter_nexts: [Value; 4],
     gen_next: Value,
+    pub(crate) set_add: Value,
+    pub(crate) map_set: Value,
 }
 
 pub struct Realm {
@@ -117,7 +119,15 @@ impl Realm {
         }
         let iterator_base = mk();
         let async_iterator_base = mk();
-        let function_proto = mk();
+        let function_proto = Obj::new(
+            ObjKind::Native(Box::new(crate::object::Native {
+                name: "".into(),
+                arity: 0,
+                func: function_proto_call,
+                ctor: None,
+            })),
+            Some(object_proto.clone()),
+        );
         let typed_proto = mk();
         let typed_protos = crate::object::TypedKind::ALL
             .iter()
@@ -1381,6 +1391,28 @@ impl Vm {
         }
     }
 
+    fn check_function_realm(&mut self, f: &Value) -> Result<(), Value> {
+        let mut cur = f.clone();
+        loop {
+            let next = match &cur {
+                Value::Object(o) => match &o.kind {
+                    ObjKind::Proxy(p) => match p.target.borrow().clone() {
+                        Some(t) => Value::Object(t),
+                        None => {
+                            return Err(self.type_error(
+                                "Cannot perform 'construct' on a proxy that has been revoked",
+                            ));
+                        }
+                    },
+                    ObjKind::Bound(b) => b.target.clone(),
+                    _ => return Ok(()),
+                },
+                _ => return Ok(()),
+            };
+            cur = next;
+        }
+    }
+
     pub fn construct_with_target(
         &mut self,
         callee: &Value,
@@ -1399,10 +1431,13 @@ impl Vm {
                         let f = n.func;
                         let proto = match self.get_prop(new_target, "prototype")? {
                             Value::Object(p) => p,
-                            _ => match o.get_own("prototype") {
-                                Some(Value::Object(p)) => p,
-                                _ => self.realm.object_proto.clone(),
-                            },
+                            _ => {
+                                self.check_function_realm(new_target)?;
+                                match o.get_own("prototype") {
+                                    Some(Value::Object(p)) => p,
+                                    _ => self.realm.object_proto.clone(),
+                                }
+                            }
                         };
                         let this = Obj::new(k(), Some(proto.clone()));
                         let r = f(self, Value::Object(this.clone()), args)?;
@@ -1426,16 +1461,25 @@ impl Vm {
                 if c.proto.is_constructor() && !Rc::ptr_eq(o, nt) {
                     let proto = match self.get_prop(new_target, "prototype")? {
                         Value::Object(p) => p,
-                        _ if &*c.proto.module.name == "<prelude>" => self
-                            .function_prototype(o)
-                            .unwrap_or_else(|| self.realm.object_proto.clone()),
-                        _ => self.realm.object_proto.clone(),
+                        _ => {
+                            self.check_function_realm(new_target)?;
+                            if &*c.proto.module.name == "<prelude>" {
+                                self.function_prototype(o)
+                                    .unwrap_or_else(|| self.realm.object_proto.clone())
+                            } else {
+                                self.realm.object_proto.clone()
+                            }
+                        }
                     };
-                    let kind = self
-                        .root_ctor_kind(o)
-                        .map(|k| k())
-                        .unwrap_or(ObjKind::Ordinary);
-                    let this = Value::Object(Obj::new(kind, Some(proto)));
+                    let this = if c.proto.kind == ProtoKind::DerivedConstructor {
+                        Value::Uninit
+                    } else {
+                        let kind = self
+                            .root_ctor_kind(o)
+                            .map(|k| k())
+                            .unwrap_or(ObjKind::Ordinary);
+                        Value::Object(Obj::new(kind, Some(proto)))
+                    };
                     let c = c.clone();
                     let mark = self.stack.len();
                     self.stack.push(callee.clone());
@@ -1557,7 +1601,11 @@ impl Vm {
                 if !c.proto.is_constructor() {
                     return Err(self.not_constructor(callee, NO_NAME, None));
                 }
-                let this = self.alloc_this(o);
+                let this = if c.proto.kind == ProtoKind::DerivedConstructor {
+                    Value::Uninit
+                } else {
+                    self.alloc_this(o)
+                };
                 let mark = self.stack.len();
                 self.stack.push(callee.clone());
                 self.stack.push(this);
@@ -1685,7 +1733,11 @@ impl Vm {
                     }
                 }
             }
-            ObjKind::Bound(_) if key == "name" => {
+            ObjKind::Bound(_)
+                if key == "name"
+                    && !o.has_own("name")
+                    && o.flags.get() & crate::object::NAME_DELETED == 0 =>
+            {
                 return o.function_name().map(Value::Str).unwrap_or_default();
             }
             ObjKind::Map(m) if key == "size" => {
@@ -1916,7 +1968,7 @@ impl Vm {
                     }
                     return Ok(());
                 }
-                if self.accessors_used {
+                if self.accessors_used || o.is_callable() {
                     if let Some(setter) = self.accessor_setter(o, &key) {
                         if setter.is_callable() {
                             self.call_value(&setter, target.clone(), &[val])?;
@@ -2004,13 +2056,17 @@ impl Vm {
                         if n as usize > len + 50_000_000 {
                             return Err(self.range_error("Array length too large"));
                         }
-                        if flags & crate::object::ELEMENTS_SEALED != 0 && (n as usize) < len {
+                        let limit = self.shrink_limit(o, n as usize);
+                        a.borrow_mut().resize(limit, Value::Undefined);
+                        if limit > n as usize {
+                            if limit < len {
+                                o.truncate_holes(limit);
+                            }
                             return Err(self.type_error(format!(
                                 "Cannot delete property '{}' of [object Array]",
-                                len - 1
+                                limit - 1
                             )));
                         }
-                        a.borrow_mut().resize(n as usize, Value::Undefined);
                         if (n as usize) < len {
                             o.truncate_holes(n as usize);
                         } else {
@@ -2102,7 +2158,7 @@ impl Vm {
                 match obj {
                     Value::Object(o) => {
                         if let ObjKind::Array(a) = &o.kind {
-                            if o.flags.get() & crate::object::SLOW_ELEMENTS == 0 {
+                            if o.flags.get() & crate::object::SLOW_ELEMENTS == 0 && i < 4294967295 {
                                 if let Some(v) = a.borrow().get(i) {
                                     if !o.is_hole(i) {
                                         return Ok(v.clone());
@@ -2124,6 +2180,13 @@ impl Vm {
                 }
             }
         }
+        if obj.is_nullish() {
+            return Err(self.type_error(format!(
+                "Cannot read properties of {} (reading '{}')",
+                inspect_plain(obj),
+                inspect_plain(key)
+            )));
+        }
         let k = self.to_property_key(key)?;
         self.get_prop(obj, &k)
     }
@@ -2133,6 +2196,7 @@ impl Vm {
             if let ObjKind::Array(a) = &o.kind {
                 let i = *n as usize;
                 if i as f64 == *n
+                    && i < 4294967295
                     && o.flags.get() & !crate::object::HAS_HOLES == 0
                     && !(self.proxies_used && proxy_in_chain(o))
                     && !Rc::ptr_eq(o, &self.realm.array_proto)
@@ -2148,6 +2212,13 @@ impl Vm {
                     return Ok(());
                 }
             }
+        }
+        if obj.is_nullish() {
+            return Err(self.type_error(format!(
+                "Cannot set properties of {} (setting '{}')",
+                inspect_plain(obj),
+                inspect_plain(key)
+            )));
         }
         let k = self.to_property_key(key)?;
         self.set_prop(obj, k, val)
@@ -2174,6 +2245,10 @@ impl Vm {
             }
             return Ok(r);
         }
+        self.ordinary_to_primitive(v, hint)
+    }
+
+    pub fn ordinary_to_primitive(&mut self, v: &Value, hint: &str) -> Result<Value, Value> {
         let order = if hint == "string" {
             ["toString", "valueOf"]
         } else {
@@ -2220,6 +2295,10 @@ impl Vm {
         match v {
             Value::Str(s) => Ok(s.clone()),
             Value::Symbol(s) => Ok(s.key.clone()),
+            Value::Object(_) => match self.to_primitive(v, false)? {
+                Value::Symbol(s) => Ok(s.key.clone()),
+                other => self.to_string(&other),
+            },
             _ => self.to_string(v),
         }
     }
@@ -2260,8 +2339,7 @@ impl Vm {
     }
 
     fn default_primitive(&mut self, v: &Value) -> Result<Value, Value> {
-        let is_date = matches!(v, Value::Object(o) if matches!(o.kind, ObjKind::Date(_)));
-        self.to_primitive_hint(v, if is_date { "string" } else { "default" })
+        self.to_primitive_hint(v, "default")
     }
 
     fn add_slow(&mut self, a: &Value, b: &Value) -> Result<Value, Value> {
@@ -2480,6 +2558,8 @@ impl Vm {
                 own(&self.realm.string_iter_proto, "next"),
             ],
             gen_next,
+            set_add: own(&self.realm.set_proto, "add"),
+            map_set: own(&self.realm.map_proto, "set"),
         }));
     }
 
@@ -2955,11 +3035,17 @@ impl Vm {
         let mut keys = Vec::new();
         if let Value::Object(o) = v {
             if let ObjKind::Array(a) = &o.kind {
-                if o.has_holes() {
+                let slow = o.flags.get() & crate::object::SLOW_ELEMENTS != 0;
+                if o.has_holes() || slow {
                     for i in 0..a.borrow().len() {
-                        if !o.is_hole(i) {
-                            keys.push(Value::Str(i.to_string().into()));
+                        if o.is_hole(i) {
+                            continue;
                         }
+                        let k: Rc<str> = i.to_string().into();
+                        if slow && o.props.borrow().attrs(&k) & crate::object::NON_ENUM != 0 {
+                            continue;
+                        }
+                        keys.push(Value::Str(k));
                     }
                     for (k, _) in o.props.borrow().enumerable() {
                         if !is_symbol_key(k) {
@@ -3813,11 +3899,40 @@ impl Vm {
                     let Some(sup) = sup else {
                         throw!(self.type_error("Super constructor is not a constructor"));
                     };
+                    if !self.is_constructor(&Value::Object(sup.clone())) {
+                        throw!(self.type_error("Super constructor is not a constructor"));
+                    }
                     self.next_new_target = match &self.frames[fi].new_target {
                         Some(t) => Some(t.clone()),
                         None => self.stack[base - 1].as_object().cloned(),
                     };
                     let ti = self.stack.len() - argc - 1;
+                    if !matches!(self.stack[ti], Value::Uninit) {
+                        throw!(self.make_error(
+                            ErrorKind::ReferenceError,
+                            "Super constructor may only be called once",
+                        ));
+                    }
+                    {
+                        let derived_sup = matches!(&sup.kind, ObjKind::Function(c) if c.proto.kind == ProtoKind::DerivedConstructor);
+                        if !derived_sup {
+                            let proto = match self.next_new_target.clone() {
+                                Some(t) => {
+                                    match tri!(self.get_prop(&Value::Object(t), "prototype")) {
+                                        Value::Object(p) => p,
+                                        _ => self.realm.object_proto.clone(),
+                                    }
+                                }
+                                None => self.realm.object_proto.clone(),
+                            };
+                            let kind = match &sup.kind {
+                                ObjKind::Native(n) => n.ctor.map(|k| k()),
+                                _ => self.root_ctor_kind(&sup).map(|k| k()),
+                            }
+                            .unwrap_or(ObjKind::Ordinary);
+                            self.stack[ti] = Value::Object(Obj::new(kind, Some(proto)));
+                        }
+                    }
                     match &sup.kind {
                         ObjKind::Function(c) => {
                             let c = c.clone();
@@ -4136,7 +4251,11 @@ impl Vm {
                         _ => None,
                     };
                     if let Some((o, c)) = fast {
-                        let this = self.alloc_this(&o);
+                        let this = if c.proto.kind == ProtoKind::DerivedConstructor {
+                            Value::Uninit
+                        } else {
+                            self.alloc_this(&o)
+                        };
                         self.stack.insert(ci + 1, this);
                         tri!(self.push_frame(c, argc, true));
                         reload!();
@@ -4162,6 +4281,24 @@ impl Vm {
                 }
                 Op::Return => {
                     let result = pop!();
+                    let result = if self.frames[fi].construct && !result.is_object() {
+                        let derived = proto.kind == ProtoKind::DerivedConstructor;
+                        if derived && !result.is_undefined() {
+                            throw!(self.type_error(
+                                "Derived constructors may only return object or undefined"
+                            ));
+                        }
+                        let this = self.stack[base].clone();
+                        if derived && matches!(this, Value::Uninit) {
+                            throw!(self.make_error(
+                                ErrorKind::ReferenceError,
+                                "Must call super constructor in derived class before accessing 'this' or returning from derived constructor",
+                            ));
+                        }
+                        this
+                    } else {
+                        result
+                    };
                     let frame = self.frames.pop().expect("frame");
                     self.close_upvalues(frame.base);
                     while self
@@ -4171,11 +4308,6 @@ impl Vm {
                     {
                         self.handlers.pop();
                     }
-                    let result = if frame.construct && !result.is_object() {
-                        self.stack[frame.base].clone()
-                    } else {
-                        result
-                    };
                     self.prune_builders(frame.base - 1);
                     self.stack.truncate(frame.base - 1);
                     if self.frames.len() == stop {
@@ -4897,6 +5029,9 @@ impl Vm {
         let Value::Object(c) = class else {
             return Ok(());
         };
+        if is_static && &*key == "prototype" {
+            return Err(self.type_error("Cannot redefine property: prototype"));
+        }
         let target = if is_static {
             c.clone()
         } else {
@@ -4933,6 +5068,9 @@ impl Vm {
         let Value::Object(c) = class else {
             return Ok(());
         };
+        if is_static && &*key == "prototype" {
+            return Err(self.type_error("Cannot redefine property: prototype"));
+        }
         let target = if is_static {
             c.clone()
         } else {
@@ -5023,4 +5161,8 @@ pub(crate) fn proxy_in_chain(o: &Rc<Obj>) -> bool {
         cur = p.proto.borrow().clone();
     }
     false
+}
+
+fn function_proto_call(_vm: &mut Vm, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    Ok(Value::Undefined)
 }

@@ -803,6 +803,20 @@ impl Compiler {
         }
     }
 
+    fn load_this_raw(&mut self) {
+        match self.resolve("this") {
+            Var::Local(s, _) | Var::LocalTdz(s, _) => {
+                self.emit(Op::GetLocal(s));
+            }
+            Var::Upval(i, _) | Var::UpvalTdz(i, _) => {
+                self.emit(Op::GetUpval(i));
+            }
+            Var::Global => {
+                self.emit(Op::Undefined);
+            }
+        }
+    }
+
     fn store_var(&mut self, name: &Rc<str>, init: bool) {
         match self.resolve(name) {
             Var::Local(s, c) => {
@@ -2076,7 +2090,10 @@ impl Compiler {
     fn simple_params(&mut self, f: &FuncDef) -> R<()> {
         for p in &f.params {
             if let Pattern::Ident(n) = &p.pattern {
-                if self.resolve_local(self.states.len() - 1, n).is_some() && &**n != "this" {
+                if !self.module.sloppy
+                    && self.resolve_local(self.states.len() - 1, n).is_some()
+                    && &**n != "this"
+                {
                     return Err(self.err(format!("Duplicate parameter name '{n}'")));
                 }
                 self.add_local(n.clone(), false);
@@ -2084,7 +2101,7 @@ impl Compiler {
         }
         self.param_counts(f);
         if let Some(Pattern::Ident(n)) = &f.rest {
-            if self.resolve_local(self.states.len() - 1, n).is_some() {
+            if !self.module.sloppy && self.resolve_local(self.states.len() - 1, n).is_some() {
                 return Err(self.err(format!("Duplicate parameter name '{n}'")));
             }
             self.add_local(n.clone(), false);
@@ -2150,6 +2167,9 @@ impl Compiler {
         self.begin_scope();
         if kind == ProtoKind::Arrow {
             self.add_local("".into(), true);
+        } else if kind == ProtoKind::DerivedConstructor {
+            let s = self.add_lexical("this".into(), true);
+            self.st().locals[s as usize].sticky = true;
         } else {
             self.add_local("this".into(), true);
         }
@@ -2173,7 +2193,7 @@ impl Compiler {
         if let Some(n) = self_name {
             if self.resolve_local(self.states.len() - 1, &n).is_none() {
                 self.emit(Op::GetCallee);
-                self.add_local(n, false);
+                self.add_local(n, true);
             }
         }
         if kind == ProtoKind::ClassConstructor {
@@ -2262,6 +2282,14 @@ impl Compiler {
             .clone()
             .or_else(|| name_hint.cloned())
             .unwrap_or_else(|| "".into());
+        let inner = match &c.name {
+            Some(n) => {
+                self.begin_scope();
+                self.emit(Op::Uninit);
+                Some(self.add_lexical(n.clone(), true))
+            }
+            None => None,
+        };
         let has_super = c.superclass.is_some();
         if let Some(sup) = &c.superclass {
             self.expr(sup)?;
@@ -2338,17 +2366,9 @@ impl Compiler {
         self.emit(Op::Closure(idx));
         let k = self.str_const(&name);
         self.emit(Op::MakeClass(k, has_super));
-        if let Some(n) = &c.name {
-            match self.resolve(n) {
-                Var::Local(s, _) | Var::LocalTdz(s, _) => {
-                    self.emit(Op::SetLocal(s));
-                }
-                Var::Upval(i, _) | Var::UpvalTdz(i, _) => {
-                    self.emit(Op::SetUpval(i));
-                }
-                Var::Global => {}
-            }
-            self.mark_init(n);
+        if let Some(s) = inner {
+            self.emit(Op::SetLocal(s));
+            self.st().locals[s as usize].tdz = false;
         }
         for m in &c.members {
             if let ClassMember::Method {
@@ -2453,6 +2473,24 @@ impl Compiler {
                 }
                 _ => {}
             }
+        }
+        if let Some(s) = inner {
+            self.emit(Op::CloseUpvalues(s));
+            self.emit(Op::Swap);
+            self.emit(Op::Pop);
+            self.scope_cut();
+        }
+        if let Some(n) = &c.name {
+            match self.resolve(n) {
+                Var::Local(s, _) | Var::LocalTdz(s, _) => {
+                    self.emit(Op::SetLocal(s));
+                }
+                Var::Upval(i, _) | Var::UpvalTdz(i, _) => {
+                    self.emit(Op::SetUpval(i));
+                }
+                Var::Global => {}
+            }
+            self.mark_init(n);
         }
         self.line = saved_line;
         Ok(())
@@ -3091,6 +3129,7 @@ impl Compiler {
                     ExprKind::Index { obj, index, .. } => {
                         self.expr(obj)?;
                         self.expr(index)?;
+                        self.emit(Op::ToPropertyKey);
                         self.emit(Op::Dup2);
                         self.emit(Op::GetIndex);
                         if *prefix {
@@ -3192,7 +3231,7 @@ impl Compiler {
             }
             ExprKind::SuperCall(args) => {
                 self.super_info(true)?;
-                self.load_var(&"this".into());
+                self.load_this_raw();
                 if Self::has_spread(args) {
                     self.args_array(args)?;
                     self.emit(Op::SuperCall(u32::MAX));
@@ -3334,6 +3373,9 @@ impl Compiler {
                 ExprKind::Index { obj, index, .. } => {
                     self.expr(obj)?;
                     self.expr(index)?;
+                    if op.is_some() {
+                        self.emit(Op::ToPropertyKey);
+                    }
                     match op {
                         None => {
                             self.expr(value)?;

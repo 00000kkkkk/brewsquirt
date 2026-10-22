@@ -54,13 +54,17 @@ pub fn install(vm: &mut Vm) {
     let acc = raw_accessor(get, set);
     vm.proto_accessor = acc.clone();
     op.set_with_attrs("__proto__", acc, NON_ENUM);
-    for (name, f) in [
-        ("__defineGetter__", define_getter as crate::object::NativeFn),
-        ("__defineSetter__", define_setter),
-        ("__lookupGetter__", lookup_getter),
-        ("__lookupSetter__", lookup_setter),
+    for (name, arity, f) in [
+        (
+            "__defineGetter__",
+            2,
+            define_getter as crate::object::NativeFn,
+        ),
+        ("__defineSetter__", 2, define_setter),
+        ("__lookupGetter__", 1, lookup_getter),
+        ("__lookupSetter__", 1, lookup_setter),
     ] {
-        method(vm, &op, name, 2, f);
+        method(vm, &op, name, arity, f);
         op.props.borrow_mut().set_enumerable(name, false);
     }
 
@@ -68,13 +72,13 @@ pub fn install(vm: &mut Vm) {
     let thrower = native_fn(vm, "", 0, throw_type_error);
     if let Value::Object(t) = &thrower {
         t.set_with_attrs(
-            "name",
-            "".into(),
+            "length",
+            Value::Number(0.0),
             crate::object::NON_ENUM | crate::object::READ_ONLY | crate::object::NON_CONFIG,
         );
         t.set_with_attrs(
-            "length",
-            Value::Number(0.0),
+            "name",
+            "".into(),
             crate::object::NON_ENUM | crate::object::READ_ONLY | crate::object::NON_CONFIG,
         );
         t.flags.set(t.flags.get() | crate::object::NOT_EXTENSIBLE);
@@ -87,12 +91,12 @@ pub fn install(vm: &mut Vm) {
             NON_ENUM,
         );
     }
-    fp.set_with_attrs("name", "".into(), NON_ENUM | crate::object::READ_ONLY);
     fp.set_with_attrs(
         "length",
         Value::Number(0.0),
         NON_ENUM | crate::object::READ_ONLY,
     );
+    fp.set_with_attrs("name", "".into(), NON_ENUM | crate::object::READ_ONLY);
 
     let np = vm.realm.number_proto.clone();
     method(vm, &np, "toExponential", 1, to_exponential);
@@ -237,16 +241,19 @@ fn proto_get(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 }
 
 fn proto_set(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let Value::Object(o) = &this else {
-        return Ok(Value::Undefined);
-    };
+    if this.is_nullish() {
+        return Err(vm.type_error("Object.prototype.__proto__ called on null or undefined"));
+    }
     let proto = match arg(args, 0) {
         Value::Object(p) => Some(p),
         Value::Null => None,
         _ => return Ok(Value::Undefined),
     };
+    let Value::Object(o) = &this else {
+        return Ok(Value::Undefined);
+    };
     if !vm.op_set_prototype_of(o, proto)? {
-        return Err(vm.type_error("Cyclic __proto__ value"));
+        return Err(super::object::proto_set_error(vm, o));
     }
     Ok(Value::Undefined)
 }
@@ -283,11 +290,9 @@ fn define_setter(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 }
 
 fn lookup_accessor(vm: &mut Vm, this: Value, args: &[Value], setter: bool) -> R {
-    let Value::Object(o) = &this else {
-        return Ok(Value::Undefined);
-    };
+    let o = vm.to_object(&this)?;
     let key = vm.to_property_key(&arg(args, 0))?;
-    let mut cur = Some(o.clone());
+    let mut cur = Some(o);
     while let Some(c) = cur {
         if let Some(d) = vm.op_get_own_property(&c, &key)? {
             return Ok(if setter { d.set } else { d.get }.unwrap_or_default());
@@ -316,24 +321,72 @@ fn this_number(vm: &mut Vm, this: &Value) -> Result<f64, Value> {
 }
 
 pub fn exponential(n: f64, digits: Option<usize>) -> String {
-    let raw = match digits {
-        Some(d) => format!("{:.*e}", d, n),
+    let x = if n == 0.0 { 0.0 } else { n };
+    let a = x.abs();
+    let d = match digits {
+        Some(d) => d,
         None => {
-            let shortest = crate::number::number_to_string(n.abs());
-            let digits_only: String = shortest
-                .chars()
-                .filter(|c| c.is_ascii_digit())
-                .collect::<String>()
-                .trim_start_matches('0')
-                .to_string();
-            let sig = digits_only.trim_end_matches('0').len().max(1);
-            format!("{:.*e}", sig - 1, n)
+            let s = crate::number::number_to_string(a);
+            let m = s.split('e').next().unwrap_or(&s);
+            let sig: String = m.chars().filter(|c| c.is_ascii_digit()).collect();
+            let sig = sig.trim_start_matches('0').trim_end_matches('0');
+            sig.len().max(1) - 1
         }
     };
-    let (mantissa, exp) = raw.split_once('e').unwrap_or((&raw, "0"));
-    let exp: i32 = exp.parse().unwrap_or(0);
-    let sign = if exp < 0 { "-" } else { "+" };
-    format!("{mantissa}e{sign}{}", exp.abs())
+    let (mant, exp) = round_half_up(a, d);
+    format!(
+        "{}{mant}e{}{}",
+        if x < 0.0 { "-" } else { "" },
+        if exp < 0 { "-" } else { "+" },
+        exp.abs()
+    )
+}
+
+fn round_half_up(a: f64, d: usize) -> (String, i32) {
+    if a == 0.0 {
+        let m = if d == 0 {
+            "0".to_string()
+        } else {
+            format!("0.{}", "0".repeat(d))
+        };
+        return (m, 0);
+    }
+    let s = format!("{:.*e}", d + 30, a);
+    let (m, e) = s.split_once('e').unwrap_or((&s, "0"));
+    let mut exp: i32 = e.parse().unwrap_or(0);
+    let digits: Vec<u8> = m
+        .bytes()
+        .filter(u8::is_ascii_digit)
+        .map(|b| b - b'0')
+        .collect();
+    let mut keep: Vec<u8> = digits[..d + 1].to_vec();
+    if digits[d + 1] >= 5 {
+        let mut i = d + 1;
+        loop {
+            if i == 0 {
+                keep.insert(0, 1);
+                keep.pop();
+                exp += 1;
+                break;
+            }
+            i -= 1;
+            if keep[i] == 9 {
+                keep[i] = 0;
+            } else {
+                keep[i] += 1;
+                break;
+            }
+        }
+    }
+    let mut out = String::new();
+    out.push((b'0' + keep[0]) as char);
+    if d > 0 {
+        out.push('.');
+        for k in &keep[1..] {
+            out.push((b'0' + k) as char);
+        }
+    }
+    (out, exp)
 }
 
 fn to_exponential(vm: &mut Vm, this: Value, args: &[Value]) -> R {

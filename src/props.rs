@@ -208,9 +208,14 @@ impl Vm {
                     return Some((v.clone(), props.attrs(key)));
                 }
                 drop(props);
+                let gone = o.flags.get();
                 return match key {
-                    "name" => Some((self.get_obj(o, "name"), NON_ENUM | READ_ONLY)),
-                    "length" => Some((self.get_obj(o, "length"), NON_ENUM | READ_ONLY)),
+                    "name" if gone & NAME_DELETED == 0 => {
+                        Some((self.get_obj(o, "name"), NON_ENUM | READ_ONLY))
+                    }
+                    "length" if gone & LENGTH_DELETED == 0 => {
+                        Some((self.get_obj(o, "length"), NON_ENUM | READ_ONLY))
+                    }
                     _ => None,
                 };
             }
@@ -353,14 +358,21 @@ impl Vm {
                     if n as usize > old + 50_000_000 {
                         return Err(self.range_error("Array length too large"));
                     }
-                    a.borrow_mut().resize(n as usize, Value::Undefined);
-                    if (n as usize) < old {
-                        o.truncate_holes(n as usize);
+                    let limit = self.shrink_limit(o, n as usize);
+                    a.borrow_mut().resize(limit, Value::Undefined);
+                    if limit < old {
+                        o.truncate_holes(limit);
                     } else {
-                        o.mark_holes(old, n as usize);
+                        o.mark_holes(old, limit);
                     }
                     if attrs & READ_ONLY != 0 {
                         o.flags.set(o.flags.get() | ELEMENTS_FROZEN);
+                    }
+                    if limit > n as usize {
+                        return Err(self.type_error(format!(
+                            "Cannot delete property '{}' of [object Array]",
+                            limit - 1
+                        )));
                     }
                     return Ok(());
                 }
@@ -634,6 +646,30 @@ impl Vm {
         }
         o.props.borrow_mut().shift_remove(key);
         true
+    }
+
+    pub(crate) fn shrink_limit(&self, o: &Rc<Obj>, n: usize) -> usize {
+        let len = o.array().map(|a| a.borrow().len()).unwrap_or(0);
+        if n >= len {
+            return n;
+        }
+        if o.flags.get() & ELEMENTS_SEALED != 0 {
+            return len;
+        }
+        if o.flags.get() & crate::object::SLOW_ELEMENTS == 0 {
+            return n;
+        }
+        let mut limit = n;
+        for (k, bits) in o.props.borrow().attr_entries() {
+            if bits & NON_CONFIG != 0 {
+                if let Some(i) = array_index(k) {
+                    if i >= n && i < len && !o.is_hole(i) {
+                        limit = limit.max(i + 1);
+                    }
+                }
+            }
+        }
+        limit
     }
 
     pub fn prevent_extensions(&mut self, o: &Rc<Obj>) {

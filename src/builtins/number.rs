@@ -26,8 +26,10 @@ pub fn install(vm: &mut Vm) {
     method(vm, &number, "isSafeInteger", 1, is_safe_integer);
     method(vm, &number, "isFinite", 1, number_is_finite);
     method(vm, &number, "isNaN", 1, number_is_nan);
-    method(vm, &number, "parseFloat", 1, parse_float_fn);
-    method(vm, &number, "parseInt", 2, parse_int_fn);
+    let pf = native_fn(vm, "parseFloat", 1, parse_float_fn);
+    let pi = native_fn(vm, "parseInt", 2, parse_int_fn);
+    number.set_with_attrs("parseFloat", pf.clone(), crate::object::NON_ENUM);
+    number.set_with_attrs("parseInt", pi.clone(), crate::object::NON_ENUM);
     let consts: &[(&str, f64)] = &[
         ("MAX_SAFE_INTEGER", 9007199254740991.0),
         ("MIN_SAFE_INTEGER", -9007199254740991.0),
@@ -39,7 +41,11 @@ pub fn install(vm: &mut Vm) {
         ("NaN", f64::NAN),
     ];
     for (k, v) in consts {
-        number.set_own(*k, Value::Number(*v));
+        number.set_with_attrs(
+            *k,
+            Value::Number(*v),
+            crate::object::NON_ENUM | crate::object::READ_ONLY | crate::object::NON_CONFIG,
+        );
     }
     vm.define_global("Number", Value::Object(number));
 
@@ -64,9 +70,7 @@ pub fn install(vm: &mut Vm) {
     method(vm, &bigint, "asUintN", 2, bigint_as_uint_n);
     vm.define_global("BigInt", Value::Object(bigint));
 
-    let pf = native_fn(vm, "parseFloat", 1, parse_float_fn);
     vm.define_global("parseFloat", pf);
-    let pi = native_fn(vm, "parseInt", 2, parse_int_fn);
     vm.define_global("parseInt", pi);
     let isn = native_fn(vm, "isNaN", 1, global_is_nan);
     vm.define_global("isNaN", isn);
@@ -74,6 +78,14 @@ pub fn install(vm: &mut Vm) {
     vm.define_global("isFinite", isf);
     vm.define_global("NaN", Value::Number(f64::NAN));
     vm.define_global("Infinity", Value::Number(f64::INFINITY));
+    vm.define_global("undefined", Value::Undefined);
+    for k in ["NaN", "Infinity", "undefined"] {
+        vm.globals.attrs.insert(
+            k.into(),
+            crate::object::NON_ENUM | crate::object::READ_ONLY | crate::object::NON_CONFIG,
+        );
+    }
+    vm.globals.readonly = true;
 
     let math = vm.new_object();
     let fns: &[(&str, u32, crate::object::NativeFn)] = &[
@@ -123,7 +135,11 @@ pub fn install(vm: &mut Vm) {
         ("SQRT1_2", std::f64::consts::FRAC_1_SQRT_2),
     ];
     for (k, v) in mconsts {
-        math.set_own(*k, Value::Number(*v));
+        math.set_with_attrs(
+            *k,
+            Value::Number(*v),
+            crate::object::NON_ENUM | crate::object::READ_ONLY | crate::object::NON_CONFIG,
+        );
     }
     vm.define_global("Math", Value::Object(math));
 }
@@ -334,10 +350,13 @@ fn to_fixed(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 
 fn to_precision(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let n = this_num(vm, &this)?;
-    if arg(args, 0).is_undefined() || !n.is_finite() {
+    if arg(args, 0).is_undefined() {
         return Ok(number_to_string(n).into());
     }
     let p = to_integer(vm, &arg(args, 0))?;
+    if !n.is_finite() {
+        return Ok(number_to_string(n).into());
+    }
     if !(1.0..=100.0).contains(&p) {
         return Err(vm.range_error("toPrecision() argument must be between 1 and 100"));
     }
@@ -452,7 +471,8 @@ unary_math! {
         } else if (-0.5..0.0).contains(&x) {
             -0.0
         } else {
-            (x + 0.5).floor()
+            let f = x.floor();
+            if x - f >= 0.5 { f + 1.0 } else { f }
         }
     },
 }
@@ -471,11 +491,25 @@ fn m_atan2(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 
 fn m_hypot(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let mut sum = 0.0;
+    let mut inf = false;
+    let mut nan = false;
     for a in args {
         let x = vm.to_number(a)?;
-        sum += x * x;
+        if x.is_infinite() {
+            inf = true;
+        } else if x.is_nan() {
+            nan = true;
+        } else {
+            sum += x * x;
+        }
     }
-    Ok(Value::Number(sum.sqrt()))
+    Ok(Value::Number(if inf {
+        f64::INFINITY
+    } else if nan {
+        f64::NAN
+    } else {
+        sum.sqrt()
+    }))
 }
 
 fn m_min(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

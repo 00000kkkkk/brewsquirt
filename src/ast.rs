@@ -236,6 +236,7 @@ pub struct EvalCtx {
     pub privates: Vec<(u32, Rc<Vec<Rc<str>>>)>,
     pub in_function: bool,
     pub field_init: bool,
+    pub strict: bool,
 }
 
 #[derive(Clone, Debug)]

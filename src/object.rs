@@ -105,6 +105,12 @@ impl PropMap {
         }
     }
 
+    pub fn attr_entries(&self) -> impl Iterator<Item = (&Rc<str>, u8)> {
+        self.extra
+            .iter()
+            .flat_map(|x| x.attrs.iter().map(|(k, b)| (k, *b)))
+    }
+
     pub fn set_index_attrs(&mut self, key: &Rc<str>, bits: u8) {
         if bits == 0 {
             if let Some(x) = &mut self.extra {

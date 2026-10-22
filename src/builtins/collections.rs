@@ -122,6 +122,10 @@ pub fn install(vm: &mut Vm) {
             crate::object::NON_ENUM | crate::object::READ_ONLY,
         );
     }
+    let sp = vm.realm.set_proto.clone();
+    if let Some(v) = sp.get_own("values") {
+        sp.set_with_attrs("keys", v, crate::object::NON_ENUM);
+    }
 }
 
 fn this_map(vm: &mut Vm, this: &Value) -> Result<Rc<Obj>, Value> {
@@ -167,20 +171,51 @@ fn map_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         return Err(vm.type_error("Constructor Map requires 'new'"));
     };
     let src = arg(args, 0);
-    if !src.is_nullish() {
-        for entry in vm.iterate(&src)? {
-            if !entry.is_object() {
-                return Err(vm.type_error(format!(
-                    "Iterator value {} is not an entry object",
-                    inspect_plain(&entry)
-                )));
-            }
-            let k = vm.get_prop(&entry, "0")?;
-            let v = vm.get_prop(&entry, "1")?;
-            map_of!(o).borrow_mut().insert(MapKey::from_value(&k), v);
+    if src.is_nullish() {
+        return Ok(this);
+    }
+    let adder = vm.get_prop(&this, "set")?;
+    if !adder.is_callable() {
+        return Err(
+            vm.type_error("'set' returned for property 'set' of object '#<Map>' is not callable")
+        );
+    }
+    let pristine = vm
+        .pristine
+        .as_ref()
+        .is_some_and(|p| adder.strict_eq(&p.map_set));
+    let it = vm.get_iterator(&src)?;
+    while let Some(entry) = vm.iter_next(&it)? {
+        if let Err(e) = map_entry(vm, &o, &this, &adder, pristine, &entry) {
+            let _ = vm.iter_close(&it);
+            return Err(e);
         }
     }
     Ok(this)
+}
+
+fn map_entry(
+    vm: &mut Vm,
+    o: &Rc<Obj>,
+    this: &Value,
+    adder: &Value,
+    pristine: bool,
+    entry: &Value,
+) -> Result<(), Value> {
+    if !entry.is_object() {
+        return Err(vm.type_error(format!(
+            "Iterator value {} is not an entry object",
+            inspect_plain(entry)
+        )));
+    }
+    let k = vm.get_prop(entry, "0")?;
+    let v = vm.get_prop(entry, "1")?;
+    if pristine {
+        map_of!(o).borrow_mut().insert(MapKey::from_value(&k), v);
+    } else {
+        vm.call_value(adder, this.clone(), &[k, v])?;
+    }
+    Ok(())
 }
 
 fn map_get(vm: &mut Vm, this: Value, args: &[Value]) -> R {
@@ -255,9 +290,30 @@ fn set_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         return Err(vm.type_error("Constructor Set requires 'new'"));
     };
     let src = arg(args, 0);
-    if !src.is_nullish() {
+    if src.is_nullish() {
+        return Ok(this);
+    }
+    let adder = vm.get_prop(&this, "add")?;
+    if !adder.is_callable() {
+        return Err(
+            vm.type_error("'add' returned for property 'add' of object '#<Set>' is not callable")
+        );
+    }
+    if vm
+        .pristine
+        .as_ref()
+        .is_some_and(|p| adder.strict_eq(&p.set_add))
+    {
         for v in vm.iterate(&src)? {
             set_of!(o).borrow_mut().insert(MapKey::from_value(&v));
+        }
+        return Ok(this);
+    }
+    let it = vm.get_iterator(&src)?;
+    while let Some(v) = vm.iter_next(&it)? {
+        if let Err(e) = vm.call_value(&adder, this.clone(), &[v]) {
+            let _ = vm.iter_close(&it);
+            return Err(e);
         }
     }
     Ok(this)

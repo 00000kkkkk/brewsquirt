@@ -59,6 +59,16 @@ pub fn is_reserved(name: &str) -> bool {
     RESERVED.contains(&name)
 }
 
+const STRICT_RESERVED: &[&str] = &[
+    "implements",
+    "interface",
+    "package",
+    "private",
+    "protected",
+    "public",
+    "static",
+];
+
 pub fn parse(src: &str) -> R<Vec<Stmt>> {
     parse_goal(src, false)
 }
@@ -82,7 +92,10 @@ fn parse_goal(src: &str, script: bool) -> R<Vec<Stmt>> {
         class_ids: Vec::new(),
         field_init: 0,
         nt_ok: false,
+        strict: !script,
+        static_block: false,
     };
+    parser.strict = !script || parser.has_use_strict_from(0);
     parser.program()
 }
 
@@ -101,7 +114,10 @@ pub fn parse_eval(src: &str, ctx: &EvalCtx) -> R<Vec<Stmt>> {
         class_ids: ctx.privates.clone(),
         field_init: u32::from(ctx.field_init),
         nt_ok: ctx.in_function,
+        strict: ctx.strict,
+        static_block: false,
     };
+    parser.strict = ctx.strict || parser.has_use_strict_from(0);
     parser.program()
 }
 
@@ -133,11 +149,17 @@ struct Parser {
     field_init: u32,
     script: bool,
     nt_ok: bool,
+    strict: bool,
+    static_block: bool,
     args_used: Vec<bool>,
     span_start: Option<u32>,
 }
 
 impl Parser {
+    fn reserved(&self, name: &str) -> bool {
+        is_reserved(name) && (self.strict || !STRICT_RESERVED.contains(&name))
+    }
+
     fn prev_end(&self) -> u32 {
         if self.pos == 0 {
             0
@@ -322,13 +344,13 @@ impl Parser {
 
     fn binding_ident(&mut self) -> R<Rc<str>> {
         match self.word() {
-            Some(s) if is_reserved(&s) && self.peek().escaped => {
+            Some(s) if self.reserved(&s) && self.peek().escaped => {
                 Err(self.error("Keyword must not contain escaped characters"))
             }
-            Some(s) if matches!(&*s, "eval" | "arguments") => {
+            Some(s) if self.strict && matches!(&*s, "eval" | "arguments") => {
                 Err(self.error("Unexpected eval or arguments in strict mode"))
             }
-            Some(s) if is_reserved(&s) && !(&*s == "await" && self.script && !self.in_async) => {
+            Some(s) if self.reserved(&s) && !(&*s == "await" && self.script && !self.in_async) => {
                 Err(self.error(format!("Unexpected reserved word '{s}'")))
             }
             Some(s) => {
@@ -473,7 +495,7 @@ impl Parser {
             }
             Some("for") => self.for_statement(),
             Some("return") => {
-                if self.fn_depth == 0 {
+                if self.fn_depth == 0 || self.static_block {
                     return Err(self.error("Illegal return statement"));
                 }
                 self.advance();
@@ -589,7 +611,7 @@ impl Parser {
                 Ok(StmtKind::Empty)
             }
             Some("with") => Err(self.error("'with' is not supported")),
-            Some(w) if !is_reserved(w) && self.is_at(1, P::Colon) => {
+            Some(w) if !self.reserved(w) && self.is_at(1, P::Colon) => {
                 let label: Rc<str> = w.into();
                 self.advance();
                 self.advance();
@@ -920,7 +942,7 @@ impl Parser {
 
     fn jump_label(&mut self) -> R<Option<Rc<str>>> {
         match self.word() {
-            Some(w) if !self.peek().nl_before && !is_reserved(&w) => {
+            Some(w) if !self.peek().nl_before && !self.reserved(&w) => {
                 self.advance();
                 Ok(Some(w))
             }
@@ -961,7 +983,7 @@ impl Parser {
         let end = self.prev_end();
         (self.in_async, self.in_generator) = saved;
         let (params, rest, body) = parsed?;
-        check_strict_params(&params, &rest, &body, line)?;
+        check_strict_params(&params, &rest, &body, line, self.strict)?;
         Ok(Rc::new(FuncDef {
             name,
             params,
@@ -980,10 +1002,41 @@ impl Parser {
         let saved = self.no_in;
         self.no_in = false;
         self.fn_depth += 1;
+        let saved_strict = self.strict;
+        if !self.strict && self.has_use_strict() {
+            self.strict = true;
+        }
+        let saved_sb = std::mem::take(&mut self.static_block);
         let body = self.block();
+        self.static_block = saved_sb;
+        self.strict = saved_strict;
         self.fn_depth -= 1;
         self.no_in = saved;
         body
+    }
+
+    fn has_use_strict(&self) -> bool {
+        self.has_use_strict_from(self.pos + 1)
+    }
+
+    fn has_use_strict_from(&self, start: usize) -> bool {
+        let last = self.toks.len() - 1;
+        let mut i = start;
+        loop {
+            let Tok::Str(s) = &self.toks[i.min(last)].tok else {
+                return false;
+            };
+            if &**s == "use strict" {
+                return true;
+            }
+            i += 1;
+            let t = &self.toks[i.min(last)];
+            match &t.tok {
+                Tok::Punct(P::Semi) => i += 1,
+                Tok::Str(_) if t.nl_before => {}
+                _ => return false,
+            }
+        }
     }
 
     fn params(&mut self) -> R<(Vec<Param>, Option<Pattern>)> {
@@ -1099,7 +1152,7 @@ impl Parser {
                 } else {
                     match &key {
                         PropKey::Named(n) if is_ident => {
-                            if is_reserved(n) {
+                            if self.reserved(n) {
                                 return Err(self.error(format!("Unexpected reserved word '{n}'")));
                             }
                             let d = if self.eat(P::Eq) {
@@ -1129,6 +1182,13 @@ impl Parser {
     }
 
     fn class(&mut self, require_name: bool) -> R<Rc<ClassDef>> {
+        let saved = std::mem::replace(&mut self.strict, true);
+        let r = self.class_inner(require_name);
+        self.strict = saved;
+        r
+    }
+
+    fn class_inner(&mut self, require_name: bool) -> R<Rc<ClassDef>> {
         let line = self.line();
         let start = self.peek().start;
         self.expect_kw("class")?;
@@ -1173,7 +1233,7 @@ impl Parser {
                 continue;
             }
             let mline = self.line();
-            let mstart = self.peek().start;
+            let mut mstart = self.peek().start;
             let ends_name = |p: &Parser, n: usize| {
                 p.is_at(n, P::LParen)
                     || p.is_at(n, P::Eq)
@@ -1185,6 +1245,7 @@ impl Parser {
             if self.is_kw("static") && !ends_name(self, 1) {
                 self.advance();
                 is_static = true;
+                mstart = self.peek().start;
                 if self.is(P::LBrace) {
                     let saved = (self.in_async, self.in_generator);
                     self.in_async = false;
@@ -1192,7 +1253,11 @@ impl Parser {
                     self.args_used.push(false);
                     self.field_init += 1;
                     let nt = std::mem::replace(&mut self.nt_ok, true);
-                    let body = self.function_body();
+                    let saved_no_in = std::mem::replace(&mut self.no_in, false);
+                    let saved_sb = std::mem::replace(&mut self.static_block, true);
+                    let body = self.block();
+                    self.static_block = saved_sb;
+                    self.no_in = saved_no_in;
                     self.nt_ok = nt;
                     self.field_init -= 1;
                     self.args_used.pop();
@@ -1244,6 +1309,7 @@ impl Parser {
                 };
                 self.span_start = Some(mstart);
                 let f = self.function_rest(fname, kind, mline)?;
+                check_accessor_params(&f, setter, mline)?;
                 members.push(ClassMember::Accessor {
                     key,
                     func: f,
@@ -1340,7 +1406,7 @@ impl Parser {
 
     fn is_arrow_ahead(&self) -> bool {
         match &self.peek().tok {
-            Tok::Ident(n) if !is_reserved(n) => {
+            Tok::Ident(n) if !self.reserved(n) => {
                 self.is_at(1, P::Arrow) && !self.peek_at(1).nl_before
             }
             Tok::Punct(P::LParen) => {
@@ -1382,7 +1448,7 @@ impl Parser {
         (self.in_async, self.in_generator) = saved;
         let (params, rest, body) = parsed?;
         if let FuncBody::Block(stmts) = &body {
-            check_strict_params(&params, &rest, stmts, line)?;
+            check_strict_params(&params, &rest, stmts, line, self.strict)?;
         }
         Ok(Expr {
             kind: ExprKind::Function(Rc::new(FuncDef {
@@ -1500,7 +1566,7 @@ impl Parser {
         let lhs = self.conditional()?;
         if let Some(op) = self.assign_op() {
             if let ExprKind::Ident(n) = &lhs.kind {
-                if matches!(&**n, "eval" | "arguments") {
+                if self.strict && matches!(&**n, "eval" | "arguments") {
                     return Err(self.error("Unexpected eval or arguments in strict mode"));
                 }
             }
@@ -1544,7 +1610,7 @@ impl Parser {
         let line = e.line;
         match e.kind {
             ExprKind::Ident(n) => {
-                if is_reserved(&n) {
+                if self.reserved(&n) {
                     return Err(SyntaxError::new(
                         "Invalid destructuring assignment target",
                         line,
@@ -1735,11 +1801,9 @@ impl Parser {
 
     fn check_update_target(&self, e: &Expr) -> R<()> {
         match &e.kind {
-            ExprKind::Ident(n) if matches!(&**n, "eval" | "arguments") => Err(SyntaxError::new(
-                "Unexpected eval or arguments in strict mode",
-                e.line,
-                1,
-            )),
+            ExprKind::Ident(n) if self.strict && matches!(&**n, "eval" | "arguments") => Err(
+                SyntaxError::new("Unexpected eval or arguments in strict mode", e.line, 1),
+            ),
             ExprKind::Ident(_)
             | ExprKind::Member {
                 optional: false, ..
@@ -1946,6 +2010,7 @@ impl Parser {
                         privates: self.class_ids.clone(),
                         in_function: self.nt_ok,
                         field_init: self.field_init > 0,
+                        strict: self.strict,
                     });
                     Expr {
                         kind: ExprKind::DirectEval(args, ctx),
@@ -2094,6 +2159,8 @@ impl Parser {
                         field_init: self.field_init,
                         script: self.script,
                         nt_ok: self.nt_ok,
+                        strict: self.strict,
+                        static_block: false,
                         args_used: vec![false],
                         span_start: None,
                     };
@@ -2190,7 +2257,7 @@ impl Parser {
                 ExprKind::Object(props)
             }
             Tok::Punct(P::Hash) => ExprKind::Str(self.private_name()?),
-            Tok::Ident(name) if self.peek().escaped && is_reserved(name) => {
+            Tok::Ident(name) if self.peek().escaped && self.reserved(name) => {
                 return Err(self.error("Keyword must not contain escaped characters"));
             }
             Tok::Ident(name) if self.peek().escaped => {
@@ -2299,7 +2366,7 @@ impl Parser {
                             ExprKind::DynImport(Box::new(spec))
                         }
                     }
-                    n if is_reserved(n) && !(n == "await" && self.script && !self.in_async) => {
+                    n if self.reserved(n) && !(n == "await" && self.script && !self.in_async) => {
                         return Err(self.unexpected());
                     }
                     _ => {
@@ -2370,6 +2437,7 @@ impl Parser {
                 if let Some(setter) = accessor {
                     self.span_start = Some(kstart);
                     let f = self.function_rest(name, FuncKind::Method, line)?;
+                    check_accessor_params(&f, setter, line)?;
                     props.push(if setter {
                         PropDef::Setter(key, f)
                     } else {
@@ -2392,7 +2460,7 @@ impl Parser {
                     if self.eat(P::Eq) {
                         props.push(PropDef::ShorthandDefault(n, self.assignment()?));
                     } else {
-                        if is_reserved(&n) {
+                        if self.reserved(&n) {
                             return Err(self.error(format!("Unexpected reserved word '{n}'")));
                         }
                         props.push(PropDef::Shorthand(n));
@@ -2485,34 +2553,86 @@ fn check_class_members(members: &[ClassMember], line: u32) -> R<()> {
     Ok(())
 }
 
-fn check_strict_params(
-    params: &[Param],
-    rest: &Option<Pattern>,
-    body: &[Stmt],
-    line: u32,
-) -> R<()> {
-    let simple = rest.is_none()
-        && params
-            .iter()
-            .all(|p| p.default.is_none() && matches!(p.pattern, Pattern::Ident(_)));
-    if simple {
+fn check_accessor_params(f: &FuncDef, setter: bool, line: u32) -> R<()> {
+    let ok = if setter {
+        f.params.len() == 1 && f.rest.is_none()
+    } else {
+        f.params.is_empty() && f.rest.is_none()
+    };
+    if ok {
         return Ok(());
     }
+    Err(SyntaxError::new(
+        if setter {
+            "Setter must have exactly one formal parameter"
+        } else {
+            "Getter must not have any formal parameters"
+        },
+        line,
+        1,
+    ))
+}
+
+fn body_use_strict(body: &[Stmt]) -> bool {
     for s in body {
         match &s.kind {
             StmtKind::Expr(e) => match &e.kind {
                 ExprKind::Str(t) => {
                     if &**t == "use strict" {
-                        return Err(SyntaxError::new(
-                            "Illegal 'use strict' directive in function with non-simple parameter list",
-                            line,
-                            1,
-                        ));
+                        return true;
                     }
                 }
-                _ => break,
+                _ => return false,
             },
-            _ => break,
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn check_strict_params(
+    params: &[Param],
+    rest: &Option<Pattern>,
+    body: &[Stmt],
+    line: u32,
+    strict: bool,
+) -> R<()> {
+    let simple = rest.is_none()
+        && params
+            .iter()
+            .all(|p| p.default.is_none() && matches!(p.pattern, Pattern::Ident(_)));
+    let directive = body_use_strict(body);
+    if !simple && directive {
+        return Err(SyntaxError::new(
+            "Illegal 'use strict' directive in function with non-simple parameter list",
+            line,
+            1,
+        ));
+    }
+    if !(strict || directive) {
+        return Ok(());
+    }
+    let mut names = Vec::new();
+    for p in params {
+        p.pattern.bound_names(&mut names);
+    }
+    if let Some(r) = rest {
+        r.bound_names(&mut names);
+    }
+    for (i, n) in names.iter().enumerate() {
+        if matches!(&**n, "eval" | "arguments") {
+            return Err(SyntaxError::new(
+                "Unexpected eval or arguments in strict mode",
+                line,
+                1,
+            ));
+        }
+        if simple && names[..i].contains(n) {
+            return Err(SyntaxError::new(
+                format!("Duplicate parameter name '{n}'"),
+                line,
+                1,
+            ));
         }
     }
     Ok(())

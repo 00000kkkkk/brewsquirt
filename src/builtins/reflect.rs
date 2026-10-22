@@ -117,7 +117,7 @@ impl Vm {
         if same {
             return Ok(true);
         }
-        if !o.is_extensible() {
+        if Rc::ptr_eq(o, &self.realm.object_proto) || !o.is_extensible() {
             return Ok(false);
         }
         let mut cur = proto.clone();
