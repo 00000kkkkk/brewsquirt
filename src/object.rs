@@ -404,6 +404,7 @@ pub enum ObjKind {
     Global,
     Proxy(Box<ProxyData>),
     Primitive(Value),
+    Namespace,
 }
 
 pub fn wrapper_marker() -> ObjKind {

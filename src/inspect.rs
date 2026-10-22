@@ -910,7 +910,7 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
                 inner,
             )
         }
-        ObjKind::Ordinary => {
+        ObjKind::Ordinary | ObjKind::Namespace => {
             let arguments = o.flags.get() & crate::object::ARGUMENTS != 0;
             let cname = if arguments { None } else { class_name(o) };
             let tag = match o.get_chain(crate::object::TO_STRING_TAG_KEY) {

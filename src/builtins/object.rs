@@ -179,7 +179,7 @@ fn own_property_names(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         return Err(vm.type_error("Cannot convert undefined or null to object"));
     }
     if let Value::Object(o) = &v {
-        if crate::builtins::reflect::is_proxy(o) || matches!(o.kind, ObjKind::Global) {
+        if crate::builtins::reflect::is_exotic(o) || matches!(o.kind, ObjKind::Global) {
             let keys = vm.op_own_keys(o)?;
             let list = keys
                 .into_iter()
@@ -200,7 +200,7 @@ fn has_own_property(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 
 fn has_own_key(vm: &mut Vm, target: &Value, k: &str) -> R {
     Ok(Value::Bool(match target {
-        Value::Object(o) if crate::builtins::reflect::is_proxy(o) => {
+        Value::Object(o) if crate::builtins::reflect::is_exotic(o) => {
             vm.op_get_own_property(o, k)?.is_some()
         }
         Value::Object(o) => vm.own_property(o, k).is_some(),
@@ -348,7 +348,7 @@ fn keys(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         return Err(vm.type_error("Cannot convert undefined or null to object"));
     }
     if let Value::Object(o) = &v {
-        if crate::builtins::reflect::is_proxy(o) {
+        if crate::builtins::reflect::is_exotic(o) {
             let keys = vm.op_own_enumerable_keys(o)?;
             let list = keys.into_iter().map(Value::Str).collect();
             return Ok(vm.new_array(list));
@@ -702,7 +702,7 @@ fn own_symbols(o: &Obj) -> Vec<Value> {
 
 fn get_own_property_symbols(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let list = match arg(args, 0) {
-        Value::Object(o) if crate::builtins::reflect::is_proxy(&o) => vm
+        Value::Object(o) if crate::builtins::reflect::is_exotic(&o) => vm
             .op_own_keys(&o)?
             .into_iter()
             .filter(|k| crate::object::is_symbol_key(k))
@@ -793,6 +793,11 @@ fn fn_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
         return Err(vm.type_error("Function.prototype.toString requires that 'this' be a Function"));
     }
     let name = o.function_name().unwrap_or_else(|| "".into());
+    let name: Rc<str> = if matches!(o.kind, ObjKind::Bound(_)) {
+        "".into()
+    } else {
+        name
+    };
     if let ObjKind::Function(c) = &o.kind {
         let m = &c.proto.module.name;
         if &**m == "<prelude>" || m.starts_with("<squirt:") {

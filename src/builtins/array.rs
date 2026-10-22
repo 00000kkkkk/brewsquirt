@@ -266,11 +266,12 @@ fn from(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         return generic(vm, "from", this, args);
     }
     let src = arg(args, 0);
+    let array_like = match &src {
+        Value::Object(_) => vm.get_prop(&src, crate::object::ITER_KEY)?.is_nullish(),
+        _ => false,
+    };
     let list = match &src {
-        Value::Object(o)
-            if matches!(o.kind, ObjKind::Ordinary)
-                && o.get_chain(crate::object::ITER_KEY).is_none() =>
-        {
+        Value::Object(_) if array_like => {
             let n = vm.get_prop(&src, "length")?;
             let n = to_integer(vm, &n)?.max(0.0) as usize;
             let mut out = Vec::with_capacity(n);

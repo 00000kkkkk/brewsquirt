@@ -226,6 +226,7 @@ pub fn json_stringify(vm: &mut Vm, v: &Value, indent: &str) -> Result<Option<Str
 
 fn stringify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let space = arg(args, 2);
+    let space = crate::object::unwrap_primitive(&space).unwrap_or(space);
     let indent = match &space {
         Value::Number(_) => {
             let n = to_integer(vm, &space)?.clamp(0.0, 10.0) as usize;
@@ -247,6 +248,7 @@ fn stringify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         if Ser::is_array(r) {
             let mut list: Vec<Rc<str>> = Vec::new();
             for item in vm.iterate(&replacer)? {
+                let item = crate::object::unwrap_primitive(&item).unwrap_or(item);
                 let key = match &item {
                     Value::Str(s) => Some(s.clone()),
                     Value::Number(n) => Some(number_to_string(*n).into()),

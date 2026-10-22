@@ -624,6 +624,7 @@ impl Vm {
                 }
             }
             ObjKind::RegExp(_) if key == "lastIndex" => return false,
+            ObjKind::Namespace if !crate::object::is_symbol_key(key) => return !o.has_own(key),
             ObjKind::Function(c)
                 if key == "prototype"
                     && (c.proto.is_constructor() || c.proto.is_generator)

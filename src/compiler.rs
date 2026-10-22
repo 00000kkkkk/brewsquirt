@@ -1168,7 +1168,7 @@ impl Compiler {
                     self.emit(Op::Uninit);
                 }
                 let k = self.str_const(exported);
-                self.emit(Op::SetProp(k));
+                self.emit(Op::InitProp(k));
                 self.emit(Op::Pop);
             }
         }
@@ -1268,10 +1268,12 @@ impl Compiler {
             .map(|(_, x)| x.clone())
             .collect();
         for x in targets {
+            self.emit(Op::Dup);
             self.load_var(&"%ns".into());
             self.emit(Op::Swap);
             let k = self.str_const(&x);
-            self.emit(Op::SetProp(k));
+            self.emit(Op::InitProp(k));
+            self.emit(Op::Pop);
         }
     }
 

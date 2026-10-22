@@ -853,7 +853,8 @@ impl Vm {
     }
 
     pub fn new_namespace(&mut self) -> Value {
-        let ns = Obj::new(ObjKind::Ordinary, None);
+        let ns = Obj::new(ObjKind::Namespace, None);
+        ns.flags.set(ns.flags.get() | crate::object::NOT_EXTENSIBLE);
         ns.set_with_attrs(
             crate::object::TO_STRING_TAG_KEY,
             "Module".into(),
@@ -2219,6 +2220,12 @@ impl Vm {
                         return Ok(());
                     }
                     ObjKind::Global => return self.set_global_prop(key, val),
+                    ObjKind::Namespace => {
+                        return Err(self.type_error(format!(
+                            "Cannot assign to read only property '{}' of object '[object Module]'",
+                            crate::props::key_text(&key)
+                        )));
+                    }
                     _ => {}
                 }
                 if self.proxies_used && proxy_in_chain(o) {
@@ -3295,6 +3302,12 @@ impl Vm {
                 if !is_symbol_key(k) {
                     keys.push(Value::Str(k.clone()));
                 }
+            }
+            if matches!(o.kind, ObjKind::Namespace) {
+                keys.sort_by(|a, b| match (a, b) {
+                    (Value::Str(x), Value::Str(y)) => compare_strings(x, y),
+                    _ => std::cmp::Ordering::Equal,
+                });
             }
             return keys;
         }

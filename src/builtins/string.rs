@@ -316,15 +316,21 @@ fn to_lower(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 }
 
 fn trim(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    Ok(this_str(vm, &this)?.trim().into())
+    Ok(this_str(vm, &this)?
+        .trim_matches(crate::value::is_js_space)
+        .into())
 }
 
 fn trim_start(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    Ok(this_str(vm, &this)?.trim_start().into())
+    Ok(this_str(vm, &this)?
+        .trim_start_matches(crate::value::is_js_space)
+        .into())
 }
 
 fn trim_end(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    Ok(this_str(vm, &this)?.trim_end().into())
+    Ok(this_str(vm, &this)?
+        .trim_end_matches(crate::value::is_js_space)
+        .into())
 }
 
 const MATCH: usize = 0;

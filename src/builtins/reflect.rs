@@ -46,6 +46,10 @@ pub fn is_proxy(o: &Obj) -> bool {
     matches!(o.kind, ObjKind::Proxy(_))
 }
 
+pub fn is_exotic(o: &Obj) -> bool {
+    matches!(o.kind, ObjKind::Proxy(_) | ObjKind::Namespace)
+}
+
 impl Vm {
     pub fn op_get_prototype_of(&mut self, o: &Rc<Obj>) -> Result<Option<Rc<Obj>>, Value> {
         if is_proxy(o) {
@@ -107,6 +111,9 @@ impl Vm {
                 }
                 None => self.op_set_prototype_of(&t, proto),
             };
+        }
+        if matches!(o.kind, ObjKind::Namespace) {
+            return Ok(proto.is_none());
         }
         let current = o.proto.borrow().clone();
         let same = match (&current, &proto) {
@@ -240,6 +247,13 @@ impl Vm {
                 None => self.op_get_own_property(&t, key),
             };
         }
+        if matches!(o.kind, ObjKind::Namespace) && !is_symbol_key(key) {
+            let Some((raw, _)) = self.own_property(o, key) else {
+                return Ok(None);
+            };
+            let v = self.resolve_accessor(raw, &Value::Object(o.clone()))?;
+            return Ok(Some(PropDesc::data(v, crate::object::NON_CONFIG)));
+        }
         if let ObjKind::Global = o.kind {
             return Ok(self.global_descriptor(key));
         }
@@ -301,6 +315,29 @@ impl Vm {
                 }
                 None => self.op_define_own_property(&t, key, d, throw),
             };
+        }
+        if matches!(o.kind, ObjKind::Namespace) && !is_symbol_key(&key) {
+            let ok = match self.op_get_own_property(o, &key)? {
+                None => false,
+                Some(cur) => {
+                    !d.is_accessor()
+                        && d.configurable != Some(true)
+                        && d.enumerable != Some(false)
+                        && d.writable != Some(false)
+                        && d.value.as_ref().is_none_or(|v| {
+                            cur.value
+                                .as_ref()
+                                .is_some_and(|c| crate::props::same_value(v, c))
+                        })
+                }
+            };
+            if !ok && throw {
+                return Err(self.type_error(format!(
+                    "Cannot redefine property: {}",
+                    crate::props::key_text(&key)
+                )));
+            }
+            return Ok(ok);
         }
         if let ObjKind::Global = o.kind {
             return self.define_global_prop(key, d, throw);
@@ -449,6 +486,9 @@ impl Vm {
                 }
                 None => self.op_set(&t, key, val, receiver),
             };
+        }
+        if matches!(o.kind, ObjKind::Namespace) {
+            return Ok(false);
         }
         let mut cur = Some(o.clone());
         while let Some(c) = cur {
@@ -666,7 +706,7 @@ impl Vm {
     }
 
     pub fn op_own_enumerable_keys(&mut self, o: &Rc<Obj>) -> Result<Vec<Rc<str>>, Value> {
-        if !is_proxy(o) {
+        if !is_exotic(o) {
             return Ok(self
                 .own_keys(&Value::Object(o.clone()))
                 .into_iter()

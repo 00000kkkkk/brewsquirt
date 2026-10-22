@@ -41,7 +41,7 @@ pub fn parse_literal(text: &str) -> Option<BigInt> {
 }
 
 pub fn from_string(s: &str) -> Option<BigInt> {
-    let t = s.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    let t = s.trim_matches(crate::value::is_js_space);
     if t.is_empty() {
         return Some(BigInt::zero());
     }

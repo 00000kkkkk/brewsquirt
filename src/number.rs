@@ -84,7 +84,7 @@ pub fn number_to_radix_string(n: f64, radix: u32) -> String {
 }
 
 pub fn string_to_number(s: &str) -> f64 {
-    let t = s.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}');
+    let t = s.trim_matches(crate::value::is_js_space);
     if t.is_empty() {
         return 0.0;
     }
