@@ -96,9 +96,13 @@ fn execute(command: Command) -> Result<ExitCode, String> {
         }
         Command::Add { name, spec } => {
             let root = root()?;
+            let before = pm::read_manifest(&root)?;
             let (dep, stored) = pm::add(&root, &name, spec.as_deref())?;
             println!("added {dep} -> {stored}");
-            install(&root, false)?;
+            if let Err(e) = install(&root, false) {
+                pm::write_manifest(&root, &before)?;
+                return Err(format!("{e}\n{dep} was not added to {MANIFEST}"));
+            }
         }
         Command::Remove { name } => {
             let root = root()?;

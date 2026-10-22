@@ -6150,8 +6150,21 @@ fn crypto_random_bytes(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     ))
 }
 
+pub(crate) fn gunzip_members(data: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    let mut rest = data;
+    loop {
+        let mut decoder = flate2::bufread::GzDecoder::new(rest);
+        decoder.read_to_end(&mut out)?;
+        rest = decoder.into_inner();
+        if !rest.starts_with(&[0x1f, 0x8b]) {
+            return Ok(out);
+        }
+    }
+}
+
 fn zlib_bytes(op: &str, data: &[u8], level: i32) -> std::io::Result<Vec<u8>> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     let level = if level < 0 {
         flate2::Compression::default()
     } else {
@@ -6173,11 +6186,7 @@ fn zlib_bytes(op: &str, data: &[u8], level: i32) -> std::io::Result<Vec<u8>> {
             e.write_all(data)?;
             e.finish()
         }
-        "gunzip" => {
-            let mut out = Vec::new();
-            flate2::read::MultiGzDecoder::new(data).read_to_end(&mut out)?;
-            Ok(out)
-        }
+        "gunzip" => gunzip_members(data),
         "inflate" => {
             let mut out = Vec::new();
             flate2::read::ZlibDecoder::new(data).read_to_end(&mut out)?;

@@ -23,6 +23,7 @@ const packed = gz._processChunk(Buffer.from("world"), zlib.constants.Z_FINISH)
 console.log(zlib.gunzipSync(packed).toString())
 const gunzip = new zlib.Gunzip()
 console.log(gunzip._processChunk(packed, zlib.constants.Z_FINISH).toString())
+console.log(zlib.gunzipSync(Buffer.concat([zlib.gzipSync("padded"), Buffer.alloc(512)])).toString(), zlib.gunzipSync(Buffer.concat([zlib.gzipSync("two "), zlib.gzipSync("members")])).toString())
 
 const http = require("node:http")
 const util = require("node:util")

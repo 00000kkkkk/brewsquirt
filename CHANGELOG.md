@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exports.
 - `\uD800`-style escapes and `\u{...}` surrogate code points in regular expressions match the
   lone surrogates stored in strings instead of failing to compile.
+- `zlib.gunzip` and the tarball extractor in `vrotdaem` ignore bytes after the last gzip member,
+  so block-padded tarballs such as `sylvester-0.0.21.tgz` install instead of failing with
+  `invalid gzip header`; a failed `vrotdaem add` no longer leaves the dependency in `squirt.json`.
 - `http.ServerResponse` and `http.IncomingMessage` are function constructors with real
   `once`/`off`/`listenerCount` semantics, `assignSocket`, `appendHeader` and `getHeaderNames`, so
   `util.inherits` subclasses that call them (`light-my-request`, and therefore `fastify.inject`)

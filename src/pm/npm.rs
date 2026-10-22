@@ -1,6 +1,5 @@
 use super::semver::{Range, Version};
 use indexmap::IndexMap;
-use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 pub const REGISTRY: &str = "https://registry.npmjs.org";
@@ -149,9 +148,7 @@ fn pax_path(data: &[u8]) -> Option<String> {
 }
 
 pub fn extract_tarball(tgz: &[u8], dest: &Path) -> Result<usize, String> {
-    let mut tar = Vec::new();
-    flate2::read::MultiGzDecoder::new(tgz)
-        .read_to_end(&mut tar)
+    let tar = crate::builtins::node::gunzip_members(tgz)
         .map_err(|e| format!("cannot decompress tarball: {e}"))?;
     let mut pos = 0;
     let mut long_name: Option<String> = None;
