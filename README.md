@@ -186,7 +186,7 @@ import helpers from "./helpers"
 
 ## Features
 
-JavaSquirt 1.0.0 implements modern JavaScript as specified, passing 97% of test262:
+JavaSquirt 1.1.0 implements modern JavaScript as specified, passing 97% of test262:
 
 - **Values**: `undefined`, `null`, booleans, numbers, strings, arrays, objects, functions, classes, `Map`, `Set`, `Error`
 - **Bindings**: block-scoped `let` and `const`, hoisted function declarations
@@ -321,6 +321,9 @@ typos
 - [x] 97% of test262
 - [x] Mapped `arguments` and the global lexical environment
 - [x] 1.0.0
+- [x] Install without Rust: one-liners, Scoop and Homebrew
+- [x] Node compatibility: streams, crypto, zlib, http client, CommonJS `require`
+- [x] Web streams, Blob, File and FormData
 - [ ] 98% of test262
 - [ ] Own regular expression engine with lookbehind back-references and the `v` flag
 - [ ] WebSockets
