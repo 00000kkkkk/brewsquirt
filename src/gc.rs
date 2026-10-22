@@ -175,6 +175,13 @@ fn obj_edges(o: &Obj, f: &mut dyn FnMut(Edge<'_>)) {
             }
         }
         ObjKind::Function(c) => f(Edge::Closure(c)),
+        ObjKind::Arguments(m) => {
+            if let Ok(cells) = m.cells.try_borrow() {
+                for c in cells.iter().flatten() {
+                    f(Edge::Cell(c));
+                }
+            }
+        }
         ObjKind::Bound(b) => {
             value_edge(&b.target, f);
             value_edge(&b.this, f);
@@ -213,6 +220,12 @@ fn obj_edges(o: &Obj, f: &mut dyn FnMut(Edge<'_>)) {
                     | IterState::Typed(o, _, _) => f(Edge::Obj(o)),
                     IterState::Str(..) => {}
                     IterState::List(items, _) => {
+                        for v in items {
+                            value_edge(v, f);
+                        }
+                    }
+                    IterState::ForIn(obj, items, _) => {
+                        value_edge(obj, f);
                         for v in items {
                             value_edge(v, f);
                         }

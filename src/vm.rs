@@ -190,12 +190,56 @@ impl Realm {
 #[derive(Default)]
 pub struct Globals {
     index: FxHashMap<Rc<str>, u32>,
+    lex: FxHashMap<Rc<str>, u32>,
     values: Vec<Value>,
+    kinds: Vec<u8>,
     pub(crate) attrs: FxHashMap<Rc<str>, u8>,
     pub(crate) readonly: bool,
 }
 
+const SLOT_LEX: u8 = 1;
+const SLOT_CONST: u8 = 2;
+
 impl Globals {
+    pub fn resolve(&self, name: &str) -> Option<u32> {
+        if !self.lex.is_empty() {
+            if let Some(&i) = self.lex.get(name) {
+                return Some(i);
+            }
+        }
+        self.index.get(name).copied()
+    }
+
+    pub fn lookup(&self, name: &str) -> Option<&Value> {
+        self.resolve(name).map(|i| &self.values[i as usize])
+    }
+
+    pub fn has_lex(&self, name: &str) -> bool {
+        self.lex.contains_key(name)
+    }
+
+    pub fn is_lex_slot(&self, slot: u32) -> bool {
+        self.kinds[slot as usize] & SLOT_LEX != 0
+    }
+
+    pub fn is_const_slot(&self, slot: u32) -> bool {
+        self.kinds[slot as usize] & SLOT_CONST != 0
+    }
+
+    pub fn declare_lex(&mut self, name: Rc<str>, v: Value, is_const: bool) -> u32 {
+        let kind = SLOT_LEX | if is_const { SLOT_CONST } else { 0 };
+        if let Some(&i) = self.lex.get(&name) {
+            self.values[i as usize] = v;
+            self.kinds[i as usize] = kind;
+            return i;
+        }
+        let i = self.values.len() as u32;
+        self.values.push(v);
+        self.kinds.push(kind);
+        self.lex.insert(name, i);
+        i
+    }
+
     pub fn names(&self) -> Vec<Rc<str>> {
         let mut v: Vec<(u32, Rc<str>)> = self.index.iter().map(|(k, &i)| (i, k.clone())).collect();
         v.sort_unstable_by_key(|(i, _)| *i);
@@ -237,6 +281,7 @@ impl Globals {
         }
         let i = self.values.len() as u32;
         self.values.push(v);
+        self.kinds.push(0);
         self.index.insert(name, i);
         i
     }
@@ -281,7 +326,6 @@ pub struct Vm {
     ns_get_fn: Option<Value>,
     loading: Vec<PathBuf>,
     builtin_modules: FxHashMap<String, Value>,
-    const_globals: Vec<Rc<str>>,
     pub out: Box<dyn Write>,
     pub err: Box<dyn Write>,
     pub argv: Vec<String>,
@@ -361,7 +405,6 @@ impl Vm {
             ns_get_fn: None,
             loading: Vec::new(),
             builtin_modules: FxHashMap::default(),
-            const_globals: Vec::new(),
             out,
             err,
             argv,
@@ -532,7 +575,55 @@ impl Vm {
     }
 
     pub fn new_arguments(&mut self, items: Vec<Value>) -> Value {
-        let o = Obj::new(ObjKind::Ordinary, Some(self.realm.object_proto.clone()));
+        self.new_arguments_kind(items, ObjKind::Ordinary)
+    }
+
+    fn new_mapped_arguments(&mut self, items: Vec<Value>, mapped: &[bool], first: usize) -> Value {
+        let mut cells = Vec::with_capacity(items.len().min(mapped.len()));
+        for (i, m) in mapped.iter().enumerate().take(items.len()) {
+            cells.push(m.then(|| self.capture_upvalue(first + i)));
+        }
+        let map = crate::object::ArgMap {
+            cells: RefCell::new(cells),
+        };
+        self.new_arguments_kind(items, ObjKind::Arguments(Box::new(map)))
+    }
+
+    fn mapped_arg(&self, m: &crate::object::ArgMap, key: &str) -> Option<Value> {
+        let c = m.cell(key)?;
+        Some(match &*c.borrow() {
+            Upvalue::Open(idx) => self.stack[*idx].clone(),
+            Upvalue::Closed(v) => v.clone(),
+        })
+    }
+
+    pub(crate) fn set_mapped_arg(&mut self, m: &crate::object::ArgMap, key: &str, val: &Value) {
+        if let Some(c) = m.cell(key) {
+            match &mut *c.borrow_mut() {
+                Upvalue::Open(idx) => self.stack[*idx] = val.clone(),
+                Upvalue::Closed(v) => *v = val.clone(),
+            }
+        }
+    }
+
+    pub(crate) fn sync_arguments(&self, o: &Rc<Obj>) {
+        if let ObjKind::Arguments(m) = &o.kind {
+            let cells = m.cells.borrow();
+            for (i, c) in cells.iter().enumerate() {
+                if let Some(c) = c {
+                    let v = match &*c.borrow() {
+                        Upvalue::Open(idx) => self.stack[*idx].clone(),
+                        Upvalue::Closed(v) => v.clone(),
+                    };
+                    let k: Rc<str> = i.to_string().into();
+                    o.props.borrow_mut().insert(k, v);
+                }
+            }
+        }
+    }
+
+    fn new_arguments_kind(&mut self, items: Vec<Value>, kind: ObjKind) -> Value {
+        let o = Obj::new(kind, Some(self.realm.object_proto.clone()));
         let len = items.len();
         for (i, v) in items.into_iter().enumerate() {
             o.set_own(i.to_string(), v);
@@ -1517,7 +1608,12 @@ impl Vm {
             self.stack.truncate(ci + 2 + np);
         }
         if let Some(all) = all_args {
-            let arr = self.new_arguments(all);
+            let arr = if p.mapped.is_empty() {
+                self.new_arguments(all)
+            } else {
+                let mapped = p.mapped.clone();
+                self.new_mapped_arguments(all, &mapped, ci + 2)
+            };
             if p.sloppy {
                 if let Value::Object(a) = &arr {
                     a.set_with_attrs("callee", self.stack[ci].clone(), crate::object::NON_ENUM);
@@ -2018,6 +2114,11 @@ impl Vm {
                     return v.clone();
                 }
             }
+            ObjKind::Arguments(m) => {
+                if let Some(v) = self.mapped_arg(m, key) {
+                    return v;
+                }
+            }
             ObjKind::Proxy(p) => {
                 if let Some(t) = p.target.borrow().clone() {
                     return self.get_obj(&t, key);
@@ -2170,6 +2271,11 @@ impl Vm {
                     return self.op_get(o, key, v);
                 }
                 let raw = self.get_obj(o, key);
+                if key == "caller" {
+                    if let Some(c) = self.legacy_caller(o, &raw) {
+                        return Ok(c);
+                    }
+                }
                 self.resolve_accessor(raw, v)
             }
             Value::Symbol(s) => {
@@ -2207,6 +2313,42 @@ impl Vm {
                 key
             ))),
         }
+    }
+
+    #[inline(never)]
+    fn legacy_caller(&self, o: &Rc<Obj>, raw: &Value) -> Option<Value> {
+        let Value::Object(a) = raw else {
+            return None;
+        };
+        let ObjKind::Accessor(acc) = &a.kind else {
+            return None;
+        };
+        if !acc.get.borrow().strict_eq(&self.thrower) {
+            return None;
+        }
+        let ObjKind::Function(c) = &o.kind else {
+            return None;
+        };
+        if !crate::builtins::intrinsics::plain_sloppy_function(&Value::Object(o.clone())) {
+            return None;
+        }
+        let mut i = self.frames.len();
+        while i > 0 {
+            i -= 1;
+            if Rc::ptr_eq(&self.frames[i].closure, c) {
+                if i == 0 {
+                    return Some(Value::Null);
+                }
+                let base = self.frames[i - 1].base;
+                let f = self.stack[base - 1].clone();
+                return Some(if crate::builtins::intrinsics::plain_sloppy_function(&f) {
+                    f
+                } else {
+                    Value::Null
+                });
+            }
+        }
+        Some(Value::Null)
     }
 
     pub(crate) fn note_proto_index(&mut self, o: &Rc<Obj>, key: &str) {
@@ -2278,6 +2420,9 @@ impl Vm {
                     if &*key == "length" || array_index(&key).is_some_and(|i| i < len16(s)) {
                         return Err(self.read_only_error(o, &key));
                     }
+                }
+                if let ObjKind::Arguments(m) = &o.kind {
+                    self.set_mapped_arg(m, &key, &val);
                 }
                 if let ObjKind::Typed(t) = &o.kind {
                     if let Some(i) = array_index(&key) {
@@ -2424,8 +2569,44 @@ impl Vm {
                 inspect_plain(target),
                 key
             ))),
-            _ => Ok(()),
+            _ => self.set_on_primitive(target, key, val),
         }
+    }
+
+    #[inline(never)]
+    fn set_on_primitive(&mut self, target: &Value, key: Rc<str>, val: Value) -> Result<(), Value> {
+        let proto = match target {
+            Value::Number(_) => self.realm.number_proto.clone(),
+            Value::Str(s) => {
+                if &*key == "length" || array_index(&key).is_some_and(|i| i < len16(s)) {
+                    return Err(self.assign_error(format!(
+                        "Cannot assign to read only property '{}' of string",
+                        crate::props::key_text(&key)
+                    )));
+                }
+                self.realm.string_proto.clone()
+            }
+            Value::Bool(_) => self.realm.boolean_proto.clone(),
+            Value::Symbol(_) => self.realm.symbol_proto.clone(),
+            Value::BigInt(_) => self.realm.bigint_proto.clone(),
+            _ => return Ok(()),
+        };
+        if self.proxies_used && proxy_in_chain(&proto) {
+            if self.op_set(&proto, key.clone(), val, target)? {
+                return Ok(());
+            }
+        } else if let Some(setter) = self.accessor_setter(&proto, &key) {
+            if setter.is_callable() {
+                self.call_value(&setter, target.clone(), &[val])?;
+                return Ok(());
+            }
+        }
+        Err(self.assign_error(format!(
+            "Cannot create property '{}' on {} '{}'",
+            crate::props::key_text(&key),
+            target.type_of(),
+            inspect_plain(target)
+        )))
     }
 
     fn set_array_index(
@@ -2609,6 +2790,15 @@ impl Vm {
         Ok(match (a, b) {
             (Value::Undefined | Value::Null, Value::Undefined | Value::Null) => true,
             (Value::Undefined | Value::Null, _) | (_, Value::Undefined | Value::Null) => false,
+            (Value::Symbol(_), Value::Object(_)) | (Value::Object(_), Value::Symbol(_)) => {
+                let (obj, sym) = if matches!(a, Value::Object(_)) {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
+                let p = self.default_primitive(obj)?;
+                return Ok(p.strict_eq(sym));
+            }
             (Value::Symbol(_), _) | (_, Value::Symbol(_)) => a.strict_eq(b),
             (Value::BigInt(x), Value::BigInt(y)) => x == y,
             (Value::BigInt(x), Value::Number(n)) | (Value::Number(n), Value::BigInt(x)) => {
@@ -3184,6 +3374,24 @@ impl Vm {
                     }
                     return Ok(v);
                 }
+                IterState::ForIn(obj, keys, i) => {
+                    let obj = obj.clone();
+                    let k = keys.get(*i).cloned();
+                    if k.is_some() {
+                        *i += 1;
+                    }
+                    drop(st);
+                    return match k {
+                        None => Ok(None),
+                        Some(k) => {
+                            if self.has_property(&obj, &k)? {
+                                Ok(Some(k))
+                            } else {
+                                self.iter_next(it)
+                            }
+                        }
+                    };
+                }
                 IterState::Protocol(iterator, next) => (iterator.clone(), next.clone()),
             }
         };
@@ -3325,13 +3533,26 @@ impl Vm {
                         let _ = self.get_obj(o, "prototype");
                     }
                 }
+                let mut indices: Vec<(usize, Rc<str>)> = o
+                    .props
+                    .borrow()
+                    .keys()
+                    .filter_map(|k| array_index(k).map(|i| (i, k.clone())))
+                    .collect();
+                indices.sort_by_key(|(i, _)| *i);
+                for (_, k) in indices {
+                    keys.push(Value::Str(k));
+                }
                 for k in ["length", "name", "prototype"] {
                     if self.own_property(o, k).is_some() {
                         keys.push(Value::Str(k.into()));
                     }
                 }
                 for k in o.props.borrow().keys() {
-                    if !is_symbol_key(k) && !matches!(&**k, "length" | "name" | "prototype") {
+                    if !is_symbol_key(k)
+                        && !matches!(&**k, "length" | "name" | "prototype")
+                        && array_index(k).is_none()
+                    {
                         keys.push(Value::Str(k.clone()));
                     }
                 }
@@ -3834,9 +4055,9 @@ impl Vm {
                         continue;
                     }
                     let n = name!(k);
-                    let mut slot = self.globals.slot(&n);
+                    let mut slot = self.globals.resolve(&n);
                     if slot.is_none() && tri!(self.load_lazy_global(&n)) {
-                        slot = self.globals.slot(&n);
+                        slot = self.globals.resolve(&n);
                     }
                     match slot {
                         Some(slot) => {
@@ -3862,21 +4083,45 @@ impl Vm {
                         )),
                     }
                 }
-                Op::SetGlobal(k) => {
+                Op::GlobalRef(k) => {
                     let n = name!(k);
-                    let v = peek!();
-                    if self.const_globals.contains(&n) {
-                        throw!(self.make_error_at(
-                            ErrorKind::TypeError,
-                            "Assignment to constant variable.".to_string(),
-                            fi,
-                            ip
-                        ));
+                    let found =
+                        self.globals.resolve(&n).is_some() || tri!(self.load_lazy_global(&n));
+                    self.stack.push(Value::Bool(found));
+                }
+                Op::SetGlobal(k) | Op::SetGlobalStrict(k) => {
+                    let n = name!(k);
+                    if matches!(op, Op::SetGlobalStrict(_)) {
+                        let v = pop!();
+                        let flag = pop!();
+                        self.stack.push(v);
+                        if !matches!(flag, Value::Bool(true)) {
+                            throw!(self.make_error_at(
+                                ErrorKind::ReferenceError,
+                                format!("{n} is not defined"),
+                                fi,
+                                ip
+                            ));
+                        }
                     }
-                    match self.globals.slot(&n) {
+                    let v = peek!();
+                    match self.globals.resolve(&n) {
                         Some(slot) => {
                             if matches!(self.globals.at(slot), Value::Uninit) {
                                 throw!(self.tdz_error(&proto, k));
+                            }
+                            if self.globals.is_lex_slot(slot) {
+                                if self.globals.is_const_slot(slot) {
+                                    throw!(self.make_error_at(
+                                        ErrorKind::TypeError,
+                                        "Assignment to constant variable.".to_string(),
+                                        fi,
+                                        ip
+                                    ));
+                                }
+                                proto.global_cache[k as usize].set(slot);
+                                *self.globals.at_mut(slot) = v;
+                                continue;
                             }
                             if self.global_accessors || self.globals.readonly {
                                 self.silent_fail = false;
@@ -3914,6 +4159,14 @@ impl Vm {
                     let n = name!(k);
                     tri!(self.can_declare_global_fn(&n));
                 }
+                Op::CheckGlobalLex(k) => {
+                    let n = name!(k);
+                    tri!(self.check_global_lex(&n));
+                }
+                Op::CheckGlobalVar(k) => {
+                    let n = name!(k);
+                    tri!(self.check_global_var(&n));
+                }
                 Op::EvalVar(k) => {
                     let obj = pop!();
                     let n = name!(k);
@@ -3930,17 +4183,20 @@ impl Vm {
                 }
                 Op::TypeofGlobal(k) => {
                     let n = name!(k);
-                    if self.globals.slot(&n).is_none() {
+                    if self.globals.resolve(&n).is_none() {
                         tri!(self.load_lazy_global(&n));
                     }
-                    if matches!(self.globals.get(&n), Some(Value::Uninit)) {
+                    if matches!(self.globals.lookup(&n), Some(Value::Uninit)) {
                         throw!(self.tdz_error(&proto, k));
                     }
-                    let t = self
-                        .globals
-                        .get(&n)
-                        .map(|v| v.type_of())
-                        .unwrap_or("undefined");
+                    let mut found = self.globals.lookup(&n).cloned();
+                    if let Some(Value::Object(a)) = &found {
+                        if a.is_accessor() {
+                            let raw = found.take().unwrap_or_default();
+                            found = Some(tri!(self.resolve_accessor(raw, &Value::Undefined)));
+                        }
+                    }
+                    let t = found.as_ref().map(|v| v.type_of()).unwrap_or("undefined");
                     self.stack.push(Value::Str(t.into()));
                 }
                 Op::GetProp(k) => {
@@ -5131,7 +5387,11 @@ impl Vm {
                 Op::ForInIter => {
                     let v = pop!();
                     let keys = self.for_in_keys(&v);
-                    let it = self.new_iter(IterState::List(keys, 0));
+                    let it = if v.is_object() {
+                        self.new_iter(IterState::ForIn(v, keys, 0))
+                    } else {
+                        self.new_iter(IterState::List(keys, 0))
+                    };
                     self.stack.push(it);
                 }
                 Op::IterNext(t) => {
@@ -5470,21 +5730,71 @@ impl Vm {
 
     #[inline(never)]
     fn can_declare_global_fn(&mut self, n: &str) -> Result<(), Value> {
-        if self.globals.slot(n).is_some() {
-            let a = self.globals.attrs_of(n);
-            if a & crate::object::NON_CONFIG != 0
-                && a & (crate::object::READ_ONLY | crate::object::NON_ENUM) != 0
-            {
-                return Err(self.type_error(format!(
-                    "Cannot redefine non-configurable global property '{n}'"
-                )));
+        match self.globals.get(n) {
+            Some(raw) => {
+                let a = self.globals.attrs_of(n);
+                if a & crate::object::NON_CONFIG != 0
+                    && (a & (crate::object::READ_ONLY | crate::object::NON_ENUM) != 0
+                        || crate::props::accessor_parts(raw).is_some())
+                {
+                    return Err(self.type_error(format!(
+                        "Cannot redefine non-configurable global property '{n}'"
+                    )));
+                }
             }
+            None => {
+                if !self.global_extensible() {
+                    return Err(self.type_error(format!(
+                        "Cannot define global function '{n}', object is not extensible"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn global_extensible(&self) -> bool {
+        match self.global_this() {
+            Value::Object(o) => o.is_extensible(),
+            _ => true,
+        }
+    }
+
+    fn redeclaration_error(&mut self, n: &str) -> Value {
+        let msg = format!("Identifier '{n}' has already been declared");
+        self.make_error(ErrorKind::SyntaxError, msg)
+    }
+
+    #[inline(never)]
+    fn check_global_lex(&mut self, n: &str) -> Result<(), Value> {
+        if self.globals.has_lex(n)
+            || (self.globals.slot(n).is_some()
+                && self.globals.attrs_of(n) & crate::object::NON_CONFIG != 0)
+        {
+            return Err(self.redeclaration_error(n));
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn check_global_var(&mut self, n: &str) -> Result<(), Value> {
+        if self.globals.has_lex(n) {
+            return Err(self.redeclaration_error(n));
+        }
+        if self.globals.slot(n).is_none() && !self.load_lazy_global(n)? && !self.global_extensible()
+        {
+            return Err(self.type_error(format!(
+                "Cannot define global variable '{n}', object is not extensible"
+            )));
         }
         Ok(())
     }
 
     #[inline(never)]
     fn delete_global_binding(&mut self, n: &str) -> bool {
+        if self.globals.has_lex(n) {
+            return false;
+        }
         match self.globals.slot(n) {
             None => true,
             Some(_) if self.globals.attrs_of(n) & crate::object::NON_CONFIG != 0 => false,
@@ -5494,12 +5804,13 @@ impl Vm {
 
     #[inline(never)]
     fn define_global_binding(&mut self, n: Rc<str>, v: Value, flags: u8) -> Result<(), Value> {
-        if flags & crate::bytecode::DG_CONST != 0 {
-            if !self.const_globals.contains(&n) {
-                self.const_globals.push(n.clone());
+        if flags & crate::bytecode::DG_LEXICAL != 0 {
+            let is_const = flags & crate::bytecode::DG_CONST != 0;
+            if self.globals.slot(&n).is_some() {
+                self.global_accessors = true;
             }
-        } else {
-            self.const_globals.retain(|m| *m != n);
+            self.globals.declare_lex(n, v, is_const);
+            return Ok(());
         }
         if flags & crate::bytecode::DG_KEEP != 0
             && (self.globals.slot(&n).is_some() || self.load_lazy_global(&n)?)
@@ -5605,6 +5916,7 @@ impl Vm {
     pub fn own_entries_raw(&self, v: &Value, include_symbols: bool) -> Vec<(Rc<str>, Value)> {
         let mut out = Vec::new();
         if let Value::Object(o) = v {
+            self.sync_arguments(o);
             match &o.kind {
                 ObjKind::Global => {
                     for k in self.globals.names() {

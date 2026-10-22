@@ -31,6 +31,10 @@ pub enum Op {
     GetGlobal(u32),
     SetGlobal(u32),
     DefineGlobal(u32, u8),
+    CheckGlobalLex(u32),
+    CheckGlobalVar(u32),
+    GlobalRef(u32),
+    SetGlobalStrict(u32),
     DeleteGlobal(u32),
     EvalVar(u32),
     CanDeclareGlobalFn(u32),
@@ -216,6 +220,7 @@ pub const DG_KEEP: u8 = 1;
 pub const DG_CONFIGURABLE: u8 = 2;
 pub const DG_CONST: u8 = 4;
 pub const DG_FUNCTION: u8 = 8;
+pub const DG_LEXICAL: u8 = 16;
 
 #[derive(Debug)]
 pub struct ModuleInfo {
@@ -233,6 +238,7 @@ pub struct FunctionProto {
     pub arity: u32,
     pub has_rest: bool,
     pub uses_arguments: bool,
+    pub mapped: Box<[bool]>,
     pub is_async: bool,
     pub is_generator: bool,
     pub sloppy: bool,
@@ -268,6 +274,7 @@ pub struct EvalScope {
     pub kind: ProtoKind,
     pub is_static: bool,
     pub in_arrow: bool,
+    pub self_names: Vec<Rc<str>>,
     pub ctx: Rc<crate::ast::EvalCtx>,
 }
 
@@ -342,6 +349,10 @@ impl FunctionProto {
                 | Op::DeleteGlobal(c)
                 | Op::EvalVar(c)
                 | Op::CanDeclareGlobalFn(c)
+                | Op::CheckGlobalLex(c)
+                | Op::CheckGlobalVar(c)
+                | Op::GlobalRef(c)
+                | Op::SetGlobalStrict(c)
                 | Op::WithGet(c)
                 | Op::WithSet(c)
                 | Op::ThrowRef(c)

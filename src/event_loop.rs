@@ -79,13 +79,18 @@ impl Vm {
                 queue: RefCell::new(Default::default()),
                 awaiting: Cell::new(false),
             };
+            let fallback = if is_async {
+                self.realm.async_generator_proto.clone()
+            } else {
+                self.realm.generator_proto.clone()
+            };
+            let obj = Obj::new(ObjKind::Coroutine(Box::new(co)), Some(fallback.clone()));
+            self.resume(&obj, Value::Undefined, ResumeMode::Next)?;
             let proto = match self.get_prop(f, "prototype")? {
                 Value::Object(p) => p,
-                _ if is_async => self.realm.async_generator_proto.clone(),
-                _ => self.realm.generator_proto.clone(),
+                _ => fallback,
             };
-            let obj = Obj::new(ObjKind::Coroutine(Box::new(co)), Some(proto));
-            self.resume(&obj, Value::Undefined, ResumeMode::Next)?;
+            *obj.proto.borrow_mut() = Some(proto);
             return Ok(Value::Object(obj));
         }
         let promise = self.new_promise();

@@ -515,7 +515,19 @@ impl Parser {
             return Ok(StmtKind::Empty);
         }
         let word = if self.peek().escaped {
-            None
+            match self.word() {
+                Some(w)
+                    if self.is_at(1, P::Colon)
+                        && (!self.reserved(&w)
+                            || (&*w == "await"
+                                && self.script
+                                && !self.in_async
+                                && !self.static_block)) =>
+                {
+                    Some(w)
+                }
+                _ => None,
+            }
         } else {
             self.word()
         };
@@ -727,7 +739,14 @@ impl Parser {
                 let body = self.sub_statement()?;
                 Ok(StmtKind::With(obj, Box::new(body)))
             }
-            Some(w) if !self.reserved(w) && self.is_at(1, P::Colon) => {
+            Some(w)
+                if self.is_at(1, P::Colon)
+                    && (!self.reserved(w)
+                        || (w == "await"
+                            && self.script
+                            && !self.in_async
+                            && !self.static_block)) =>
+            {
                 let label: Rc<str> = w.into();
                 self.advance();
                 self.advance();
@@ -744,11 +763,33 @@ impl Parser {
                 Ok(StmtKind::Labeled(label, Box::new(body)))
             }
             _ => {
+                let first = self.pos;
                 let e = self.expression()?;
                 self.semicolon()?;
+                let directive_like = matches!(&e.kind, ExprKind::Str(t) if &**t == "use strict");
+                if directive_like {
+                    let t = &self.toks[first];
+                    let raw = self.src.get(t.start as usize..t.end as usize);
+                    if raw != Some("\"use strict\"") && raw != Some("'use strict'") {
+                        let line = e.line;
+                        return Ok(StmtKind::Expr(Expr {
+                            kind: ExprKind::Seq(vec![e]),
+                            line,
+                        }));
+                    }
+                }
                 Ok(StmtKind::Expr(e))
             }
         }
+    }
+
+    fn check_lexical_name(&self, p: &Pattern) -> R<()> {
+        let mut names = Vec::new();
+        p.bound_names(&mut names);
+        if names.iter().any(|n| &**n == "let") {
+            return Err(self.error("let is disallowed as a lexically bound name"));
+        }
+        Ok(())
     }
 
     fn var_decl(&mut self) -> R<StmtKind> {
@@ -763,6 +804,9 @@ impl Parser {
         let mut decls = Vec::new();
         loop {
             let pattern = self.binding_pattern()?;
+            if kind != DeclKind::Var {
+                self.check_lexical_name(&pattern)?;
+            }
             let init = if self.eat(P::Eq) {
                 Some(self.assignment()?)
             } else {
@@ -801,7 +845,9 @@ impl Parser {
             && matches!(
                 self.peek_at(1).tok,
                 Tok::Ident(_) | Tok::Punct(P::LBracket) | Tok::Punct(P::LBrace)
-            ) {
+            )
+            && !(self.is_kw("let") && self.is_kw_at(1, "in"))
+        {
             let kind = if self.is_kw("const") {
                 DeclKind::Const
             } else if self.is_kw("var") {
@@ -811,7 +857,43 @@ impl Parser {
             };
             self.advance();
             let pattern = self.binding_pattern()?;
-            if self.eat_kw("of") {
+            if kind != DeclKind::Var {
+                self.check_lexical_name(&pattern)?;
+            }
+            let mut annexb_init = None;
+            if kind == DeclKind::Var
+                && !self.strict
+                && matches!(pattern, Pattern::Ident(_))
+                && self.is(P::Eq)
+            {
+                let saved = self.no_in;
+                self.no_in = true;
+                self.advance();
+                let e = self.assignment()?;
+                self.no_in = saved;
+                if self.eat_kw("in") {
+                    let obj = self.expression()?;
+                    self.expect(P::RParen)?;
+                    let body = self.sub_statement()?;
+                    return Ok(StmtKind::Block(vec![
+                        Stmt {
+                            kind: StmtKind::Decl(kind, vec![(pattern.clone(), Some(e))]),
+                            line: init_line,
+                        },
+                        Stmt {
+                            kind: StmtKind::ForIn {
+                                decl: Some(kind),
+                                pattern,
+                                obj,
+                                body: Box::new(body),
+                            },
+                            line: init_line,
+                        },
+                    ]));
+                }
+                annexb_init = Some(e);
+            }
+            if annexb_init.is_none() && self.eat_kw("of") {
                 let iter = self.assignment()?;
                 self.expect(P::RParen)?;
                 let body = self.sub_statement()?;
@@ -823,7 +905,7 @@ impl Parser {
                     is_await,
                 });
             }
-            if self.eat_kw("in") {
+            if annexb_init.is_none() && self.eat_kw("in") {
                 let obj = self.expression()?;
                 self.expect(P::RParen)?;
                 let body = self.sub_statement()?;
@@ -837,10 +919,10 @@ impl Parser {
             let saved = self.no_in;
             self.no_in = true;
             let mut decls = Vec::new();
-            let first = if self.eat(P::Eq) {
-                Some(self.assignment()?)
-            } else {
-                None
+            let first = match annexb_init {
+                Some(e) => Some(e),
+                None if self.eat(P::Eq) => Some(self.assignment()?),
+                None => None,
             };
             if first.is_none() && kind == DeclKind::Const {
                 return Err(self.error("Missing initializer in const declaration"));
@@ -883,7 +965,13 @@ impl Parser {
                     );
                 }
                 self.advance();
-                let pattern = self.expr_to_pattern(e)?;
+                let pattern = if !self.strict
+                    && matches!(&e.kind, ExprKind::Call { args, .. } if !is_tagged(args))
+                {
+                    Pattern::Target(Box::new(e))
+                } else {
+                    self.expr_to_pattern(e)?
+                };
                 let rhs = if is_of {
                     self.assignment()?
                 } else {
@@ -1932,6 +2020,11 @@ impl Parser {
                 (ExprKind::SuperMember(_), _) | (ExprKind::SuperIndex(_), _) => {
                     AssignTarget::Simple(Box::new(lhs))
                 }
+                (ExprKind::Call { args, .. }, None | Some(AssignOp::Bin(_)))
+                    if !self.strict && !parenthesized && !is_tagged(args) =>
+                {
+                    AssignTarget::Simple(Box::new(lhs))
+                }
                 (ExprKind::Ident(_), _)
                 | (
                     ExprKind::Member {
@@ -2222,6 +2315,7 @@ impl Parser {
             }
             | ExprKind::SuperMember(_)
             | ExprKind::SuperIndex(_) => Ok(()),
+            ExprKind::Call { args, .. } if !self.strict && !is_tagged(args) => Ok(()),
             _ => Err(SyntaxError::new(
                 "Invalid left-hand side expression in update operation",
                 e.line,
@@ -2481,7 +2575,7 @@ impl Parser {
     fn new_expr(&mut self) -> R<Expr> {
         let line = self.line();
         self.advance();
-        if self.is_kw("import") {
+        if self.is_kw("import") && !self.is_at(1, P::Dot) {
             return Err(self.error("Cannot use new with import"));
         }
         if self.is(P::Dot) {
@@ -2522,6 +2616,25 @@ impl Parser {
                     kind: ExprKind::Index {
                         obj: Box::new(callee),
                         index: Box::new(index),
+                        optional: false,
+                    },
+                    line: mline,
+                };
+            } else if matches!(self.peek().tok, Tok::Template(_)) {
+                let Tok::Template(parts) = self.advance().tok else {
+                    unreachable!()
+                };
+                let (quasis, exprs) = self.template_parts(parts)?;
+                let (cooked, raw) = quasis.into_iter().map(|(c, r)| (c.ok(), r)).unzip();
+                let mut args = vec![Arg::Expr(Expr {
+                    kind: ExprKind::TemplateStrings(cooked, raw),
+                    line: mline,
+                })];
+                args.extend(exprs.into_iter().map(Arg::Expr));
+                callee = Expr {
+                    kind: ExprKind::Call {
+                        callee: Box::new(callee),
+                        args,
                         optional: false,
                     },
                     line: mline,
@@ -3097,4 +3210,8 @@ fn display_name(n: &Rc<str>) -> Rc<str> {
         }
         _ => n.clone(),
     }
+}
+
+fn is_tagged(args: &[Arg]) -> bool {
+    matches!(args.first(), Some(Arg::Expr(e)) if matches!(e.kind, ExprKind::TemplateStrings(..)))
 }

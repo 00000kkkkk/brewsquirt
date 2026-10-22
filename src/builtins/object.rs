@@ -252,6 +252,7 @@ pub fn object_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
             ObjKind::Primitive(Value::Str(_)) => "String",
             ObjKind::Primitive(Value::Number(_)) => "Number",
             ObjKind::Primitive(Value::Bool(_)) => "Boolean",
+            ObjKind::Arguments(_) => "Arguments",
             ObjKind::Ordinary if o.flags.get() & crate::object::ARGUMENTS != 0 => "Arguments",
             ObjKind::Proxy(_) => proxy_builtin_tag(vm, o)?,
             _ => "Object",
@@ -470,6 +471,10 @@ fn freeze(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         if crate::builtins::reflect::is_proxy(o) {
             integrity_via_ops(vm, o, true)?;
         } else {
+            if let ObjKind::Arguments(m) = &o.kind {
+                vm.sync_arguments(o);
+                m.cells.borrow_mut().clear();
+            }
             vm.freeze(o)?;
         }
     }

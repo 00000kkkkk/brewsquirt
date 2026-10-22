@@ -843,7 +843,9 @@ defineAll(Date.prototype, {
   },
   setYear(y) {
     const n = Number(y)
-    return this.setFullYear(n >= 0 && n <= 99 ? 1900 + Math.trunc(n) : n)
+    if (n !== n) return this.setTime(NaN)
+    const t = Math.trunc(n)
+    return this.setFullYear(t >= 0 && t <= 99 ? 1900 + t : n)
   },
 })
 

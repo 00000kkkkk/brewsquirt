@@ -405,6 +405,26 @@ pub enum ObjKind {
     Proxy(Box<ProxyData>),
     Primitive(Value),
     Namespace,
+    Arguments(Box<ArgMap>),
+}
+
+pub struct ArgMap {
+    pub cells: RefCell<Vec<Option<Rc<UpCell>>>>,
+}
+
+impl ArgMap {
+    pub fn cell(&self, key: &str) -> Option<Rc<UpCell>> {
+        let i = array_index(key)?;
+        self.cells.borrow().get(i)?.clone()
+    }
+
+    pub fn unmap(&self, key: &str) {
+        if let Some(i) = array_index(key) {
+            if let Some(slot) = self.cells.borrow_mut().get_mut(i) {
+                *slot = None;
+            }
+        }
+    }
 }
 
 pub fn wrapper_marker() -> ObjKind {
@@ -993,6 +1013,7 @@ pub enum IterState {
     SetValues(Rc<Obj>, usize),
     SetEntries(Rc<Obj>, usize),
     List(Vec<Value>, usize),
+    ForIn(Value, Vec<Value>, usize),
     Protocol(Value, Value),
     Typed(Rc<Obj>, usize, u8),
 }

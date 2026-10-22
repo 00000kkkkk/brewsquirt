@@ -64,12 +64,7 @@ pub fn tokenize_goal(src: &str, html: bool) -> Result<Vec<Token>, SyntaxError> {
         force_regex: None,
     };
     if lexer.chars.first() == Some(&'#') && lexer.chars.get(1) == Some(&'!') {
-        while let Some(c) = lexer.peek() {
-            if c == '\n' {
-                break;
-            }
-            lexer.bump();
-        }
+        lexer.skip_line();
     }
     let mut out = Vec::new();
     lexer.lex_into(&mut out, false)?;
@@ -267,9 +262,10 @@ impl Lexer {
 
     fn skip_trivia(&mut self) -> Result<bool, SyntaxError> {
         let mut nl = false;
+        let at_start = self.pos == 0;
         loop {
             match self.peek() {
-                Some('\n') | Some('\u{2028}') | Some('\u{2029}') => {
+                Some('\n') | Some('\r') | Some('\u{2028}') | Some('\u{2029}') => {
                     nl = true;
                     self.bump();
                 }
@@ -287,7 +283,7 @@ impl Lexer {
                 }
                 Some('-')
                     if self.html
-                        && (nl || self.pos == 0)
+                        && (nl || at_start)
                         && self.peek_at(1) == Some('-')
                         && self.peek_at(2) == Some('>') =>
                 {
@@ -306,7 +302,9 @@ impl Lexer {
                                 self.bump();
                                 break;
                             }
-                            Some('\n') => nl = true,
+                            Some('\n') | Some('\r') | Some('\u{2028}') | Some('\u{2029}') => {
+                                nl = true
+                            }
                             _ => {}
                         }
                     }
@@ -507,7 +505,7 @@ impl Lexer {
         let mut s = String::new();
         loop {
             match self.bump() {
-                None | Some('\n') => {
+                None | Some('\n') | Some('\r') => {
                     return Err(SyntaxError::new("Unterminated string literal", line, col));
                 }
                 Some(c) if c == quote => break,
@@ -715,7 +713,19 @@ impl Lexer {
                         (self.pos, self.line, self.col) = save;
                         self.bump();
                     }
-                    raw.extend(&self.chars[start..self.pos]);
+                    let mut i = start;
+                    while i < self.pos {
+                        let c = self.chars[i];
+                        if c == '\r' {
+                            raw.push('\n');
+                            if self.chars.get(i + 1) == Some(&'\n') {
+                                i += 1;
+                            }
+                        } else {
+                            raw.push(c);
+                        }
+                        i += 1;
+                    }
                 }
                 Some('$') if self.peek() == Some('{') => {
                     self.bump();

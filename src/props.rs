@@ -165,6 +165,15 @@ impl Vm {
                 let raw = self.globals.get(key)?.clone();
                 return Some((raw, self.globals.attrs_of(key)));
             }
+            ObjKind::Arguments(m) => {
+                if let Some(c) = m.cell(key) {
+                    let v = match &*c.borrow() {
+                        crate::object::Upvalue::Open(idx) => self.stack[*idx].clone(),
+                        crate::object::Upvalue::Closed(v) => v.clone(),
+                    };
+                    return Some((v, o.props.borrow().attrs(key)));
+                }
+            }
             ObjKind::Function(c) => {
                 let props = o.props.borrow();
                 if let Some(v) = props.get(key) {
@@ -432,6 +441,46 @@ impl Vm {
         d: PropDesc,
         throw: bool,
     ) -> Result<bool, Value> {
+        if let ObjKind::Arguments(m) = &o.kind {
+            if let Some(c) = m.cell(&key) {
+                let current = match &*c.borrow() {
+                    crate::object::Upvalue::Open(idx) => self.stack[*idx].clone(),
+                    crate::object::Upvalue::Closed(v) => v.clone(),
+                };
+                let mut d = d;
+                if d.is_data() && d.value.is_none() && d.writable == Some(false) {
+                    d.value = Some(current);
+                }
+                let value = d.value.clone();
+                let accessor = d.is_accessor();
+                let frozen = d.writable == Some(false);
+                let ok = self.define_own_ordinary(o, key.clone(), d, throw)?;
+                if !ok {
+                    return Ok(false);
+                }
+                if accessor {
+                    m.unmap(&key);
+                } else {
+                    if let Some(v) = &value {
+                        self.set_mapped_arg(m, &key, v);
+                    }
+                    if frozen {
+                        m.unmap(&key);
+                    }
+                }
+                return Ok(true);
+            }
+        }
+        self.define_own_ordinary(o, key, d, throw)
+    }
+
+    fn define_own_ordinary(
+        &mut self,
+        o: &Rc<Obj>,
+        key: Rc<str>,
+        d: PropDesc,
+        throw: bool,
+    ) -> Result<bool, Value> {
         self.note_proto_index(o, &key);
         if let ObjKind::Typed(t) = &o.kind {
             if let Some(n) = crate::builtins::typed::canonical_numeric(&key) {
@@ -646,6 +695,9 @@ impl Vm {
             }
         }
         o.props.borrow_mut().shift_remove(key);
+        if let ObjKind::Arguments(m) = &o.kind {
+            m.unmap(key);
+        }
         true
     }
 
