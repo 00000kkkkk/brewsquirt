@@ -1236,7 +1236,142 @@ class SuppressedError extends Error {
 define(SuppressedError.prototype, "name", "SuppressedError")
 define(globalThis, "SuppressedError", SuppressedError)
 
+define(globalThis, "%makeCallSite%", function makeCallSite(file, line, name, top, construct, isEval) {
+  const site = {
+    getThis: () => undefined,
+    getTypeName: () => (top ? null : "Object"),
+    getFunction: () => undefined,
+    getFunctionName: () => name || null,
+    getMethodName: () => null,
+    getFileName: () => file,
+    getLineNumber: () => line,
+    getColumnNumber: () => 1,
+    getEnclosingLineNumber: () => line,
+    getEnclosingColumnNumber: () => 1,
+    getEvalOrigin: () => undefined,
+    getScriptNameOrSourceURL: () => file,
+    getScriptHash: () => "",
+    getPosition: () => 0,
+    getPromiseIndex: () => null,
+    isToplevel: () => top,
+    isEval: () => isEval,
+    isNative: () => false,
+    isConstructor: () => construct,
+    isAsync: () => false,
+    isPromiseAll: () => false,
+    toString: () => (name ? `${name} (${file}:${line}:1)` : `${file}:${line}:1`),
+  }
+  return site
+})
 define(globalThis, "global", globalThis)
+{
+  const registry = new Map()
+  const listOf = (name) => {
+    let l = registry.get(name)
+    if (!l) registry.set(name, (l = []))
+    return l
+  }
+  const check = (fn) => {
+    if (typeof fn !== "function") throw new TypeError(`The "listener" argument must be of type function. Received ${fn === null ? "null" : typeof fn}`)
+  }
+  const add = (name, fn, prepend, once) => {
+    check(fn)
+    const entry = { fn, once }
+    if (prepend) listOf(name).unshift(entry)
+    else listOf(name).push(entry)
+    return process
+  }
+  const remove = (name, fn) => {
+    const l = registry.get(name)
+    if (!l) return process
+    const i = l.findIndex((e) => e.fn === fn)
+    if (i >= 0) l.splice(i, 1)
+    return process
+  }
+  let warned = false
+  defineAll(process, {
+    on(name, fn) {
+      return add(name, fn, false, false)
+    },
+    addListener(name, fn) {
+      return add(name, fn, false, false)
+    },
+    prependListener(name, fn) {
+      return add(name, fn, true, false)
+    },
+    once(name, fn) {
+      return add(name, fn, false, true)
+    },
+    prependOnceListener(name, fn) {
+      return add(name, fn, true, true)
+    },
+    off(name, fn) {
+      return remove(name, fn)
+    },
+    removeListener(name, fn) {
+      return remove(name, fn)
+    },
+    removeAllListeners(name) {
+      if (name === undefined) registry.clear()
+      else registry.delete(name)
+      return process
+    },
+    emit(name, ...args) {
+      const l = registry.get(name)
+      if (!l || l.length === 0) return false
+      for (const entry of l.slice()) {
+        if (entry.once) remove(name, entry.fn)
+        entry.fn.apply(process, args)
+      }
+      return true
+    },
+    listeners(name) {
+      return (registry.get(name) ?? []).map((e) => e.fn)
+    },
+    rawListeners(name) {
+      return (registry.get(name) ?? []).map((e) => e.fn)
+    },
+    listenerCount(name) {
+      return registry.get(name)?.length ?? 0
+    },
+    eventNames() {
+      return [...registry.keys()].filter((k) => registry.get(k).length > 0)
+    },
+    setMaxListeners() {
+      return process
+    },
+    getMaxListeners() {
+      return 10
+    },
+    emitWarning(warning, type, code, ctor) {
+      let detail
+      if (type !== null && typeof type === "object") {
+        ;({ type, code, detail, ctor } = type)
+      }
+      let err = warning
+      if (typeof warning === "string") {
+        err = new Error(warning)
+        err.name = typeof type === "string" ? type : "Warning"
+      } else if (!(warning instanceof Error)) {
+        throw new TypeError('The "warning" argument must be of type string or an instance of Error')
+      }
+      if (code !== undefined) err.code = code
+      if (detail !== undefined) err.detail = detail
+      if (err.name === "DeprecationWarning" && process.noDeprecation) return
+      if (err.name === "DeprecationWarning" && process.throwDeprecation) throw err
+      process.nextTick(() => {
+        process.emit("warning", err)
+        if (process.env.NODE_NO_WARNINGS === "1") return
+        const prefix = err.code ? `[${err.code}] ` : ""
+        console.error(`(jsq:${process.pid}) ${prefix}${err.name}: ${err.message}`)
+        if (!warned) {
+          warned = true
+          console.error("(Set NODE_NO_WARNINGS=1 to silence warnings)")
+        }
+      })
+    },
+  })
+}
 define(globalThis, "setImmediate", named("setImmediate", function setImmediate(fn, ...args) {
   return setTimeout(fn, 0, ...args)
 }))
@@ -1272,6 +1407,11 @@ define(globalThis, "navigator", {
   const origin = Date.now() - performance.now()
   define(performance, "timeOrigin", origin)
   defineAll(performance, {
+    markResourceTiming(timingInfo, requestedUrl, initiatorType) {
+      const entry = { name: String(requestedUrl), entryType: "resource", startTime: performance.now(), duration: 0, initiatorType: String(initiatorType ?? "other") }
+      entries.push(entry)
+      return entry
+    },
     mark(name, options) {
       const entry = { name: String(name), entryType: "mark", startTime: options?.startTime ?? performance.now(), duration: 0, detail: options?.detail ?? null }
       marks.set(entry.name, entry)
@@ -1334,11 +1474,8 @@ define(globalThis, "navigator", {
     const keys = Object.keys(v)
     return keys.length === 0 ? "{}" : `{ ${keys.map((k) => `${k}: ${cell(v[k])}`).join(", ")} }`
   }
-  const table = (data, columns) => {
-    if (data === null || typeof data !== "object") {
-      console.log(data)
-      return
-    }
+  const renderTable = (data, columns) => {
+    if (data === null || typeof data !== "object") return null
     let rows
     let indexName = "(index)"
     let keyColumn = false
@@ -1380,7 +1517,12 @@ define(globalThis, "navigator", {
     const line = (l, m, r) => l + widths.map((w) => "─".repeat(w + 2)).join(m) + r
     const render = (cells) => "│" + cells.map((c, i) => ` ${c.padEnd(widths[i])} `).join("│") + "│"
     const out = [line("┌", "┬", "┐"), render(header), line("├", "┼", "┤"), ...body.map(render), line("└", "┴", "┘")]
-    console.log(out.join("\n"))
+    return out.join("\n")
+  }
+  define(globalThis, "%renderTable%", renderTable)
+  const table = (data, columns) => {
+    const text = renderTable(data, columns)
+    console.log(text === null ? data : text)
   }
   defineAll(console, {
     table,

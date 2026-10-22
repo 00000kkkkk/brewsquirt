@@ -901,9 +901,119 @@ fn error_ctor<const K: usize>(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     }
     let options = arg(args, 1);
     install_cause(vm, &target, &options)?;
-    let stack = format!("{}{}", error_header(&target), vm.stack_trace());
-    target.set_hidden("stack", stack.into());
+    let header = error_header(&target);
+    let stack = error_stack(vm, &target, &header, None)?;
+    target.set_hidden("stack", stack);
     Ok(Value::Object(target))
+}
+
+thread_local! {
+    static PREPARING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn stack_limit(vm: &Vm) -> usize {
+    vm.globals
+        .get("Error")
+        .and_then(|e| e.as_object().and_then(|o| o.get_own("stackTraceLimit")))
+        .and_then(|v| match v {
+            Value::Number(n) if n.is_finite() && n >= 0.0 => Some(n as usize),
+            _ => None,
+        })
+        .unwrap_or(10)
+}
+
+type FrameInfo = (Rc<str>, f64, Rc<str>, bool, bool, bool);
+
+fn error_stack(
+    vm: &mut Vm,
+    target: &Rc<Obj>,
+    header: &str,
+    skip_until: Option<&Value>,
+) -> Result<Value, Value> {
+    let limit = stack_limit(vm);
+    let prepare = vm
+        .globals
+        .get("Error")
+        .and_then(|e| e.as_object().and_then(|o| o.get_own("prepareStackTrace")))
+        .filter(|p| p.is_callable());
+    let make = vm.globals.get("%makeCallSite%").cloned();
+    let mut frames: Vec<FrameInfo> = Vec::new();
+    let mut skipping = skip_until.is_some();
+    for f in vm.frames.iter().rev() {
+        let p = &f.closure.proto;
+        if skipping {
+            let hit = match skip_until {
+                Some(Value::Object(fo)) => match &fo.kind {
+                    ObjKind::Function(c) => Rc::ptr_eq(c, &f.closure),
+                    _ => false,
+                },
+                _ => false,
+            };
+            if hit {
+                skipping = false;
+            }
+            continue;
+        }
+        let m = &p.module.name;
+        if m.starts_with("<squirt:") || &**m == "<prelude>" {
+            continue;
+        }
+        if frames.len() >= limit {
+            break;
+        }
+        frames.push((
+            m.clone(),
+            p.line_at(f.ip) as f64,
+            p.name.clone(),
+            p.kind == crate::bytecode::ProtoKind::Module,
+            f.construct,
+            m.starts_with("<eval"),
+        ));
+    }
+    if let (Some(prepare), Some(make)) = (prepare, make) {
+        if !PREPARING.with(|p| p.get()) {
+            PREPARING.with(|p| p.set(true));
+            let mut sites = Vec::new();
+            let mut failed = None;
+            for (file, line, name, top, construct, eval) in &frames {
+                let r = vm.call_value(
+                    &make,
+                    Value::Undefined,
+                    &[
+                        Value::Str(file.clone()),
+                        Value::Number(*line),
+                        Value::Str(name.clone()),
+                        Value::Bool(*top),
+                        Value::Bool(*construct),
+                        Value::Bool(*eval),
+                    ],
+                );
+                match r {
+                    Ok(v) => sites.push(v),
+                    Err(e) => {
+                        failed = Some(e);
+                        break;
+                    }
+                }
+            }
+            let result = match failed {
+                Some(e) => Err(e),
+                None => {
+                    let list = vm.new_array(sites);
+                    let error_ctor = vm.globals.get("Error").cloned().unwrap_or_default();
+                    vm.call_value(&prepare, error_ctor, &[Value::Object(target.clone()), list])
+                }
+            };
+            PREPARING.with(|p| p.set(false));
+            return result;
+        }
+    }
+    let mut s = String::from(header);
+    for (file, line, name, _, _, _) in &frames {
+        let name = if name.is_empty() { "<anonymous>" } else { name };
+        s.push_str(&format!("\n    at {name} ({file}:{line})"));
+    }
+    Ok(Value::Str(s.into()))
 }
 
 fn install_cause(vm: &mut Vm, target: &Rc<Obj>, options: &Value) -> Result<(), Value> {
@@ -934,8 +1044,9 @@ fn aggregate_error_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let errors = vm.iterate(&arg(args, 0))?;
     let list = vm.new_array(errors);
     target.set_hidden("errors", list);
-    let stack = format!("{}{}", error_header(&target), vm.stack_trace());
-    target.set_hidden("stack", stack.into());
+    let header = error_header(&target);
+    let stack = error_stack(vm, &target, &header, None)?;
+    target.set_hidden("stack", stack);
     Ok(Value::Object(target))
 }
 
@@ -965,8 +1076,14 @@ fn capture_stack_trace(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             }
         }
     };
-    let stack = format!("{header}{}", vm.stack_trace());
-    o.set_hidden("stack", stack.into());
+    let skip = arg(args, 1);
+    let skip = if skip.is_callable() {
+        Some(&skip)
+    } else {
+        None
+    };
+    let stack = error_stack(vm, &o, &header, skip)?;
+    o.set_hidden("stack", stack);
     Ok(Value::Undefined)
 }
 

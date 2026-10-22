@@ -85,9 +85,8 @@ fn run(cli: Cli) -> ExitCode {
 
     if let Some(code) = cli.eval.as_ref().or(cli.print.as_ref()) {
         let show = cli.print.is_some();
-        let r = vm
-            .eval("<eval>", code, Mode::Repl)
-            .and_then(|v| vm.run_event_loop().map(|_| v));
+        let r = vm.eval("<eval>", code, Mode::Repl);
+        let r = complete(&mut vm, r);
         return finish(
             &mut vm,
             r.map(|v| if show { println_value(&v) } else { None }),
@@ -137,14 +136,26 @@ fn run(cli: Cli) -> ExitCode {
                 }
             };
             let name = file.display().to_string();
-            let r = vm.run_script(&src, &name).and_then(|_| vm.run_event_loop());
+            let r = vm.run_script(&src, &name);
+            let r = complete(&mut vm, r);
             return finish(&mut vm, r.map(|_| None));
         }
-        let r = vm.run_file(file).and_then(|_| vm.run_event_loop());
+        let r = vm.run_file(file);
+        let r = complete(&mut vm, r);
         return finish(&mut vm, r.map(|_| None));
     }
 
     repl(&mut vm)
+}
+
+fn complete(
+    vm: &mut Vm,
+    r: Result<javasquirt::Value, javasquirt::Value>,
+) -> Result<javasquirt::Value, javasquirt::Value> {
+    match r {
+        Ok(v) => vm.finish_main(Ok(())).map(|_| v),
+        Err(e) => vm.finish_main(Err(e)).map(|_| javasquirt::Value::Undefined),
+    }
 }
 
 fn println_value(v: &javasquirt::Value) -> Option<String> {

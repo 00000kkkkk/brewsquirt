@@ -1,0 +1,52 @@
+const { Console } = require("node:console")
+const lines = []
+const c = new Console({ stdout: { write: (s) => lines.push(s) }, stderr: { write: (s) => lines.push("E " + s) } })
+c.log("a %d", 1)
+c.group("g")
+c.error("inner")
+c.groupEnd()
+c.table([{ x: 1 }])
+c.assert(false, "nope")
+console.log(JSON.stringify(lines))
+console.log(require("console") === console, typeof console.Console)
+const types = require("node:util/types")
+console.log(
+  types.isGeneratorFunction(function* () {}),
+  types.isBoxedPrimitive(new String("s")),
+  types.isArgumentsObject(
+    (function () {
+      return arguments
+    })(),
+  ),
+  types.isMapIterator(new Map().keys()),
+)
+const sw = require("node:stream/web")
+console.log(sw.ReadableStream === ReadableStream, typeof sw.TextDecoderStream)
+const buffer = require("node:buffer")
+const copied = {}
+for (const key in buffer.Buffer) copied[key] = buffer.Buffer[key]
+console.log(typeof copied.from, typeof copied.isBuffer, buffer.kMaxLength > 0, buffer.SlowBuffer(2).length, Object.keys(buffer).includes("default"))
+const { Readable } = require("node:stream")
+const consumers = require("node:stream/consumers")
+const tp = require("node:timers/promises")
+const test = require("node:test")
+;(async () => {
+  console.log(await consumers.text(Readable.from(["ab", "cd"])))
+  console.log(await consumers.json(new Blob(['{"x":1}']).stream()))
+  console.log(await tp.setTimeout(1, "v"), await tp.setImmediate("i"))
+  let n = 0
+  for await (const v of tp.setInterval(1, "t")) if (++n === 2) break
+  console.log(n)
+  const m = test.mock.fn((a) => a + 1)
+  m(1)
+  console.log(typeof test, typeof test.describe, test.default === test, m.mock.callCount(), m.mock.calls[0].result)
+  console.log(
+    require("sys") === require("util"),
+    require("node:domain").create().run(() => 5),
+    require("node:sea").isSea(),
+    typeof require("node:wasi").WASI,
+    typeof require("node:repl").start,
+    typeof require("node:trace_events").createTracing,
+  )
+  console.log(require("node:module").isBuiltin("node:console"), require("node:module").isBuiltin("stream/web"))
+})()

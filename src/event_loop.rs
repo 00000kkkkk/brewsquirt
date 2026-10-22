@@ -584,15 +584,95 @@ impl Vm {
     fn check_rejections(&mut self) -> Result<(), Value> {
         while !self.pending_rejections.is_empty() {
             let p = self.pending_rejections.remove(0);
-            if let ObjKind::Promise(d) = &p.kind {
+            let reason = {
+                let ObjKind::Promise(d) = &p.kind else {
+                    continue;
+                };
                 let d = d.borrow();
-                if !d.handled {
-                    if let PromiseState::Rejected(e) = &d.state {
-                        self.rejection = true;
-                        return Err(e.clone());
-                    }
+                if d.handled {
+                    continue;
+                }
+                match &d.state {
+                    PromiseState::Rejected(e) => e.clone(),
+                    _ => continue,
+                }
+            };
+            if self.process_listener_count("unhandledRejection")? > 0 {
+                self.emit_process("unhandledRejection", &[reason, Value::Object(p.clone())])?;
+                continue;
+            }
+            self.rejection = true;
+            return Err(reason);
+        }
+        Ok(())
+    }
+
+    pub fn process_listener_count(&mut self, name: &str) -> Result<usize, Value> {
+        let Some(process) = self.globals.get("process").cloned() else {
+            return Ok(0);
+        };
+        let f = self.get_prop(&process, "listenerCount")?;
+        if !f.is_callable() {
+            return Ok(0);
+        }
+        match self.call_value(&f, process, &[Value::Str(name.into())])? {
+            Value::Number(n) => Ok(n as usize),
+            _ => Ok(0),
+        }
+    }
+
+    pub fn emit_process(&mut self, name: &str, args: &[Value]) -> Result<bool, Value> {
+        let Some(process) = self.globals.get("process").cloned() else {
+            return Ok(false);
+        };
+        let f = self.get_prop(&process, "emit")?;
+        if !f.is_callable() {
+            return Ok(false);
+        }
+        let mut all = vec![Value::Str(name.into())];
+        all.extend_from_slice(args);
+        Ok(matches!(
+            self.call_value(&f, process, &all)?,
+            Value::Bool(true)
+        ))
+    }
+
+    pub fn has_pending_work(&self) -> bool {
+        !self.microtasks.is_empty()
+            || self.io.pending > 0
+            || self.has_refed_timers()
+            || !self.pending_rejections.is_empty()
+    }
+
+    pub fn finish_main(&mut self, first: Result<(), Value>) -> Result<(), Value> {
+        let mut pending = first;
+        loop {
+            if let Err(e) = pending {
+                if self.process_listener_count("uncaughtException")? == 0 {
+                    return Err(e);
+                }
+                self.emit_process(
+                    "uncaughtException",
+                    &[e, Value::Str("uncaughtException".into())],
+                )?;
+            }
+            pending = self.run_event_loop();
+            if pending.is_err() {
+                continue;
+            }
+            let code = crate::builtins::exit_code(self);
+            if self.process_listener_count("beforeExit")? > 0 {
+                self.emit_process("beforeExit", &[Value::Number(code as f64)])?;
+                if self.has_pending_work() {
+                    continue;
                 }
             }
+            break;
+        }
+        if !self.exiting {
+            self.exiting = true;
+            let code = crate::builtins::exit_code(self);
+            self.emit_process("exit", &[Value::Number(code as f64)])?;
         }
         Ok(())
     }

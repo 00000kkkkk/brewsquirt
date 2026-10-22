@@ -34,7 +34,7 @@ pub fn install(vm: &mut Vm) {
         other => other,
     };
     process.set_own("platform", platform.into());
-    process.set_own("version", format!("v{}", crate::VERSION).into());
+    process.set_own("version", "v22.12.0".into());
     method(vm, &process, "exit", 1, exit);
     method(vm, &process, "cwd", 0, cwd);
     method(vm, &process, "chdir", 1, chdir);
@@ -69,6 +69,10 @@ pub fn install(vm: &mut Vm) {
             .into(),
     );
     let versions = vm.new_object();
+    versions.set_own("node", "22.12.0".into());
+    versions.set_own("v8", "12.4.254.21-node.21".into());
+    versions.set_own("uv", "1.49.1".into());
+    versions.set_own("modules", "127".into());
     versions.set_own("jsq", crate::VERSION.into());
     versions.set_own("javasquirt", crate::VERSION.into());
     process.set_own("versions", Value::Object(versions));
@@ -76,7 +80,9 @@ pub fn install(vm: &mut Vm) {
         "release",
         Value::Object({
             let r = vm.new_object();
-            r.set_own("name", "javasquirt".into());
+            r.set_own("name", "node".into());
+            r.set_own("lts", "Jod".into());
+            r.set_own("javasquirt", crate::VERSION.into());
             r
         }),
     );
@@ -350,7 +356,7 @@ fn require_resolve(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         return Ok(Value::Str(spec));
     }
     let from = caller_module(vm);
-    match crate::module::resolve(&spec, &from.dir) {
+    match crate::module::resolve_with(&spec, &from.dir, true) {
         Ok(p) => Ok(Value::Str(p.display().to_string().into())),
         Err(msg) => {
             let e = vm.make_error(ErrorKind::Error, msg);
@@ -374,6 +380,14 @@ fn exit(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         Value::Undefined => exit_code(vm),
         v => to_integer(vm, &v)? as i32,
     };
+    if let Some(Value::Object(p)) = vm.globals.get("process").cloned() {
+        p.set_own("exitCode", Value::Number(code as f64));
+    }
+    if !vm.exiting {
+        vm.exiting = true;
+        vm.emit_process("exit", &[Value::Number(code as f64)])?;
+    }
+    let code = exit_code(vm);
     vm.flush();
     std::process::exit(code)
 }
@@ -577,6 +591,6 @@ pub fn fs_module(vm: &mut Vm) -> Value {
     method(vm, &fs, "remove", 1, fs_remove);
     method(vm, &fs, "readDir", 1, fs_read_dir);
     method(vm, &fs, "mkdir", 1, fs_mkdir);
-    fs.set_own("default", Value::Object(fs.clone()));
+    fs.set_hidden("default", Value::Object(fs.clone()));
     Value::Object(fs)
 }

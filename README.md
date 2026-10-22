@@ -215,7 +215,7 @@ JavaSquirt 1.1.0 implements modern JavaScript as specified, passing 97% of test2
 - **Modules**: ES module `import` and `export` (named, default, namespace, renamed), live bindings, cycles, `import()`, `import.meta`, relative and bare-name resolution
 - **Standard library**: `squirt:fs`, `squirt:path`, `squirt:os`, `squirt:child_process`, `squirt:util`
 - **Binary data**: `ArrayBuffer`, typed arrays, `DataView`, `TextEncoder`, `TextDecoder`, `Buffer`, base64 and hex, `structuredClone`, `crypto.randomUUID`
-- **Node.js compatibility**: `node:fs`, `node:path`, `node:events`, `node:assert`, `node:readline`, `node:util`, `node:url` and more, so many Node scripts run unchanged; `process.stdin`, `process.stdout.write`, `process.exitCode`
+- **Node.js compatibility**: `node:fs`, `node:path`, `node:events`, `node:assert`, `node:readline`, `node:util`, `node:url`, `node:test` and more, so many Node scripts run unchanged; `process.stdin`, `process.stdout.write`, `process.exitCode`, `process.on("exit")`
 - **Cancellation**: `AbortController`, `AbortSignal.timeout`, `EventTarget` and `DOMException`
 - **Networking**: `fetch` over HTTP and HTTPS, `URL`, `URLSearchParams`, `Headers`, `Request`, `Response`, and HTTP servers with `squirt:http` (`serve` and Node-style `createServer`)
 - **Testing**: `jsq test` with `squirt:test` (`describe`, `test`, `expect`, `assert`, hooks, async tests)

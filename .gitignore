@@ -1,5 +1,6 @@
 target/
 nude_modules/
+!tests/modules/nude_modules/
 *.profraw
 *.profdata
 lcov.info

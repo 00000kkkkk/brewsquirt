@@ -1665,7 +1665,11 @@ name=jsq&tags=fast%26wet false
 
 ## Events and cancellation
 
-`EventTarget`, `Event`, `AbortController`, `AbortSignal` and `DOMException` are globals.
+`EventTarget`, `Event`, `CustomEvent`, `MessageEvent`, `CloseEvent`, `ErrorEvent`,
+`AbortController`, `AbortSignal` and `DOMException` are globals. `MessageChannel` creates two
+entangled `MessagePort`s that deliver structured clones of posted messages asynchronously, and
+`BroadcastChannel` delivers to every other channel with the same name; both accept `onmessage`,
+`addEventListener("message")` and Node's `on("message")`.
 `AbortSignal.timeout(ms)` aborts after a delay without keeping the program alive, and
 `AbortSignal.any(signals)` aborts when any of the signals does.
 
@@ -1776,6 +1780,12 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:querystring`             | `parse`, `stringify`, `escape`, `unescape`, `encode`, `decode`      |
 | `node:tty`, `node:perf_hooks`  | `isatty`; `performance` with `mark`, `measure` and entries, and a `PerformanceObserver` stub |
 | `node:module`                  | `createRequire`, `builtinModules` and `isBuiltin`                   |
+| `node:console`                 | The global `console` plus `Console`, which writes to any `stdout`/`stderr` pair with groups, tables, timers and counters |
+| `node:util/types`              | `isDate`, `isRegExp`, `isPromise`, `isGeneratorFunction`, `isBoxedPrimitive`, `isArgumentsObject`, typed array checks and the rest of Node's `util.types` |
+| `node:stream/web`, `node:stream/consumers` | The WHATWG stream classes; `text`, `json`, `buffer`, `arrayBuffer` and `blob` over any stream or async iterable |
+| `node:test`                    | `test`, `it`, `describe`, `suite`, `before`, `after`, `beforeEach`, `afterEach`, `skip`, `todo` and `mock` (`fn`, `method`, `getter`, `setter`) on top of `squirt:test`; only reachable as `node:test` |
+| `node:timers`, `node:timers/promises` | Timer functions; promise versions of `setTimeout`, `setImmediate`, async-iterable `setInterval` and `scheduler.wait`/`scheduler.yield` with abort signals |
+| `node:sys`, `node:domain`, `node:trace_events`, `node:repl`, `node:sea`, `node:wasi` | Aliases and small implementations so that packages importing them load |
 | `node:dns`, `node:dns/promises` | `lookup`, `resolve`, `resolve4`, `resolve6` through the system resolver |
 | `node:vm`                      | `Script`, `runInThisContext`, `runInNewContext` and `runInContext` (sandboxes are plain objects scoped with `with`), `createContext`, `compileFunction` |
 | `node:async_hooks`             | `AsyncLocalStorage` whose store is visible to synchronous callees of `run` and `enterWith`, `AsyncResource`, `createHook` as a no-op |
@@ -1977,6 +1987,8 @@ a|b 42 7
 | `process.platform`, `process.arch`, `process.pid`, `process.versions` | Host details |
 | `process.cwd()`, `process.chdir(dir)` | The working directory                      |
 | `process.nextTick(fn, ...args)`, `process.hrtime()`, `process.uptime()` | Scheduling and timing |
+| `process.on(event, fn)`, `once`, `off`, `emit`, `listenerCount` | Event emitter methods; `exit` fires with the exit code, `beforeExit` when the event loop drains and may schedule more work, `uncaughtException` and `unhandledRejection` receive errors that would otherwise end the program, `warning` receives emitted warnings |
+| `process.emitWarning(message, type?, code?)` | Emits `warning` and prints `(jsq:pid) Type: message` to stderr unless `NODE_NO_WARNINGS=1` |
 
 ```js
 const name = process.env.USER ?? "anonymous"

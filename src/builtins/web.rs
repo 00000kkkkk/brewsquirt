@@ -7,8 +7,14 @@ use std::time::Duration;
 
 type R = Result<Value, Value>;
 
-pub const LAZY_GLOBALS: [&str; 24] = [
+pub const LAZY_GLOBALS: [&str; 30] = [
     "fetch",
+    "MessageEvent",
+    "CloseEvent",
+    "ErrorEvent",
+    "MessageChannel",
+    "MessagePort",
+    "BroadcastChannel",
     "CustomEvent",
     "Blob",
     "File",
@@ -110,6 +116,89 @@ const WEB_SRC: &str = r##"
     }
   }
 
+  class MessageEvent extends Event {
+    #data
+    #origin
+    #lastEventId
+    #source
+    #ports
+    constructor(type, init = {}) {
+      super(type, init)
+      this.#data = init?.data ?? null
+      this.#origin = init?.origin == null ? "" : String(init.origin)
+      this.#lastEventId = init?.lastEventId == null ? "" : String(init.lastEventId)
+      this.#source = init?.source ?? null
+      this.#ports = Object.freeze([...(init?.ports ?? [])])
+    }
+    get data() {
+      return this.#data
+    }
+    get origin() {
+      return this.#origin
+    }
+    get lastEventId() {
+      return this.#lastEventId
+    }
+    get source() {
+      return this.#source
+    }
+    get ports() {
+      return this.#ports
+    }
+  }
+
+  class CloseEvent extends Event {
+    #wasClean
+    #code
+    #reason
+    constructor(type, init = {}) {
+      super(type, init)
+      this.#wasClean = !!init?.wasClean
+      this.#code = init?.code ?? 0
+      this.#reason = init?.reason == null ? "" : String(init.reason)
+    }
+    get wasClean() {
+      return this.#wasClean
+    }
+    get code() {
+      return this.#code
+    }
+    get reason() {
+      return this.#reason
+    }
+  }
+
+  class ErrorEvent extends Event {
+    #message
+    #filename
+    #lineno
+    #colno
+    #error
+    constructor(type, init = {}) {
+      super(type, init)
+      this.#message = init?.message == null ? "" : String(init.message)
+      this.#filename = init?.filename == null ? "" : String(init.filename)
+      this.#lineno = init?.lineno ?? 0
+      this.#colno = init?.colno ?? 0
+      this.#error = init?.error
+    }
+    get message() {
+      return this.#message
+    }
+    get filename() {
+      return this.#filename
+    }
+    get lineno() {
+      return this.#lineno
+    }
+    get colno() {
+      return this.#colno
+    }
+    get error() {
+      return this.#error
+    }
+  }
+
   class EventTarget {
     #listeners = new Map()
     addEventListener(type, listener, options) {
@@ -149,6 +238,190 @@ const WEB_SRC: &str = r##"
 
   const SIGNAL_KEY = Symbol("signal")
   const ABORT = Symbol("abort")
+  const kDeliver = Symbol("deliver")
+  const kPeer = Symbol("peer")
+  const kClosed = Symbol("closed")
+
+  class NodeEventTarget extends EventTarget {
+    #wrapped = []
+    #listen(type, fn, once) {
+      if (typeof fn !== "function") throw new TypeError(`The "listener" argument must be of type function. Received ${fn === null ? "null" : typeof fn}`)
+      const wrapper = (ev) => {
+        if (once) this.off(type, fn)
+        fn.call(this, ev instanceof MessageEvent ? ev.data : ev)
+      }
+      this.#wrapped.push({ type, fn, wrapper })
+      this.addEventListener(type, wrapper)
+      return this
+    }
+    on(type, fn) {
+      return this.#listen(type, fn, false)
+    }
+    addListener(type, fn) {
+      return this.#listen(type, fn, false)
+    }
+    once(type, fn) {
+      return this.#listen(type, fn, true)
+    }
+    off(type, fn) {
+      const i = this.#wrapped.findIndex((w) => w.type === type && w.fn === fn)
+      if (i >= 0) {
+        this.removeEventListener(type, this.#wrapped[i].wrapper)
+        this.#wrapped.splice(i, 1)
+      }
+      return this
+    }
+    removeListener(type, fn) {
+      return this.off(type, fn)
+    }
+    removeAllListeners(type) {
+      for (const w of this.#wrapped.filter((w) => type === undefined || w.type === type)) this.off(w.type, w.fn)
+      return this
+    }
+    listenerCount(type) {
+      return this.#wrapped.filter((w) => w.type === type).length
+    }
+    listeners(type) {
+      return this.#wrapped.filter((w) => w.type === type).map((w) => w.fn)
+    }
+    eventNames() {
+      return [...new Set(this.#wrapped.map((w) => w.type))]
+    }
+    emit(type, ...args) {
+      return this.dispatchEvent(type === "message" ? new MessageEvent(type, { data: args[0] }) : new Event(type))
+    }
+    setMaxListeners() {
+      return this
+    }
+    getMaxListeners() {
+      return 10
+    }
+  }
+
+  class MessagePort extends NodeEventTarget {
+    #peer = null
+    #started = false
+    #closed = false
+    #queue = []
+    #onmessage = null
+    #refed = true
+    constructor(key) {
+      if (key !== SIGNAL_KEY) throw new TypeError("Illegal constructor")
+      super()
+      this.onmessageerror = null
+      this.onclose = null
+    }
+    get onmessage() {
+      return this.#onmessage
+    }
+    set onmessage(fn) {
+      this.#onmessage = typeof fn === "function" ? fn : null
+      this.start()
+    }
+    addEventListener(type, listener, options) {
+      super.addEventListener(type, listener, options)
+      if (String(type) === "message") this.start()
+    }
+    [kPeer](port) {
+      this.#peer = port
+    }
+    postMessage(message) {
+      if (this.#closed || !this.#peer) return
+      this.#peer[kDeliver](structuredClone(message))
+    }
+    [kDeliver](data) {
+      this.#queue.push(data)
+      this.#flush()
+    }
+    #flush() {
+      if (!this.#started || this.#closed || this.#queue.length === 0) return
+      const batch = this.#queue.splice(0)
+      setTimeout(() => {
+        for (const data of batch) {
+          if (this.#closed) break
+          this.dispatchEvent(new MessageEvent("message", { data }))
+        }
+      }, 0)
+    }
+    start() {
+      if (this.#started) return
+      this.#started = true
+      this.#flush()
+    }
+    close() {
+      if (this.#closed) return
+      this.#closed = true
+      const peer = this.#peer
+      this.#peer = null
+      setTimeout(() => this.dispatchEvent(new Event("close")), 0)
+      if (peer) peer.close()
+    }
+    ref() {
+      this.#refed = true
+      return this
+    }
+    unref() {
+      this.#refed = false
+      return this
+    }
+    hasRef() {
+      return this.#refed
+    }
+  }
+
+  class MessageChannel {
+    constructor() {
+      const a = new MessagePort(SIGNAL_KEY)
+      const b = new MessagePort(SIGNAL_KEY)
+      a[kPeer](b)
+      b[kPeer](a)
+      Object.defineProperty(this, "port1", { value: a, enumerable: true, configurable: true })
+      Object.defineProperty(this, "port2", { value: b, enumerable: true, configurable: true })
+    }
+  }
+
+  const broadcastChannels = new Map()
+  class BroadcastChannel extends NodeEventTarget {
+    #name
+    #closed = false
+    constructor(name) {
+      if (arguments.length === 0) throw new TypeError('The "name" argument must be specified')
+      super()
+      this.onmessage = null
+      this.onmessageerror = null
+      this.#name = String(name)
+      let set = broadcastChannels.get(this.#name)
+      if (!set) broadcastChannels.set(this.#name, (set = new Set()))
+      set.add(this)
+    }
+    get name() {
+      return this.#name
+    }
+    get [kClosed]() {
+      return this.#closed
+    }
+    postMessage(message) {
+      if (this.#closed) throw new DOMException("BroadcastChannel is closed", "InvalidStateError")
+      const data = structuredClone(message)
+      for (const other of broadcastChannels.get(this.#name) ?? []) {
+        if (other === this) continue
+        setTimeout(() => {
+          if (!other[kClosed]) other.dispatchEvent(new MessageEvent("message", { data }))
+        }, 0)
+      }
+    }
+    close() {
+      if (this.#closed) return
+      this.#closed = true
+      broadcastChannels.get(this.#name)?.delete(this)
+    }
+    ref() {
+      return this
+    }
+    unref() {
+      return this
+    }
+  }
 
   class AbortSignal extends EventTarget {
     #aborted = false
@@ -1945,9 +2218,30 @@ const WEB_SRC: &str = r##"
       this.httpVersion = "1.1"
       this.httpVersionMajor = 1
       this.httpVersionMinor = 1
-      this.complete = true
+      this.complete = false
+      this.readable = true
       this.aborted = false
-      this.socket = { remoteAddress: req.remoteAddress, remotePort: 0, encrypted: false }
+      this.destroyed = false
+      this.socket = {
+        remoteAddress: req.remoteAddress,
+        remotePort: 0,
+        localAddress: "127.0.0.1",
+        localPort: 0,
+        encrypted: false,
+        readable: true,
+        writable: true,
+        destroyed: false,
+        setTimeout() {},
+        setNoDelay() {},
+        setKeepAlive() {},
+        on() {},
+        once() {},
+        off() {},
+        removeListener() {},
+        destroy() {},
+        address: () => ({ address: "127.0.0.1", family: "IPv4", port: 0 }),
+      }
+      this.connection = this.socket
       const b = req[kRaw]
       this.#bytes = b == null ? new Uint8Array(0) : typeof b === "string" ? encoder.encode(b) : b
     }
@@ -1962,7 +2256,14 @@ const WEB_SRC: &str = r##"
     on(event, fn) {
       ;(this.#listeners[event] ??= []).push(fn)
       if (event === "data" && this.#bytes.length !== 0) queueMicrotask(() => fn(this.#chunk()))
-      if (event === "end") queueMicrotask(() => queueMicrotask(() => fn()))
+      if (event === "end")
+        queueMicrotask(() =>
+          queueMicrotask(() => {
+            this.complete = true
+            this.readable = false
+            fn()
+          }),
+        )
       if (event === "close") queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => fn())))
       return this
     }
@@ -2135,14 +2436,75 @@ const WEB_SRC: &str = r##"
     if (typeof options === "function") [options, listener] = [{}, options]
     let srv = null
     const handlers = { request: listener ? [listener] : [], listening: [], close: [] }
+    const onceWrappers = new WeakMap()
     const emit = (name, ...args) => {
-      for (const h of handlers[name] ?? []) h(...args)
+      let any = false
+      for (const h of (handlers[name] ?? []).slice()) {
+        any = true
+        if (onceWrappers.has(h)) server.off(name, h)
+        h(...args)
+      }
+      return any
     }
     const server = {
       listening: false,
+      timeout: 0,
+      keepAliveTimeout: 5000,
+      headersTimeout: 60000,
+      requestTimeout: 300000,
+      maxHeadersCount: null,
       on(event, fn) {
         ;(handlers[event] ??= []).push(fn)
         return server
+      },
+      once(event, fn) {
+        const wrapper = (...args) => fn(...args)
+        onceWrappers.set(wrapper, fn)
+        ;(handlers[event] ??= []).push(wrapper)
+        return server
+      },
+      off(event, fn) {
+        const list = handlers[event]
+        if (list) handlers[event] = list.filter((h) => h !== fn && onceWrappers.get(h) !== fn)
+        return server
+      },
+      removeListener(event, fn) {
+        return server.off(event, fn)
+      },
+      addListener(event, fn) {
+        return server.on(event, fn)
+      },
+      prependListener(event, fn) {
+        ;(handlers[event] ??= []).unshift(fn)
+        return server
+      },
+      removeAllListeners(event) {
+        if (event === undefined) for (const k of Object.keys(handlers)) handlers[k] = []
+        else handlers[event] = []
+        return server
+      },
+      emit,
+      listenerCount(event) {
+        return handlers[event]?.length ?? 0
+      },
+      listeners(event) {
+        return (handlers[event] ?? []).map((h) => onceWrappers.get(h) ?? h)
+      },
+      setTimeout(ms, cb) {
+        server.timeout = ms
+        if (typeof cb === "function") server.on("timeout", cb)
+        return server
+      },
+      ref() {
+        return server
+      },
+      unref() {
+        return server
+      },
+      closeAllConnections() {},
+      closeIdleConnections() {},
+      getConnections(cb) {
+        if (typeof cb === "function") queueMicrotask(() => cb(null, 0))
       },
       listen(port = 0, host, cb) {
         if (typeof port === "object" && port !== null) [port, host, cb] = [port.port ?? 0, port.host, host]
@@ -2183,6 +2545,12 @@ const WEB_SRC: &str = r##"
     AbortSignal,
     Event,
     CustomEvent,
+    MessageEvent,
+    CloseEvent,
+    ErrorEvent,
+    MessageChannel,
+    MessagePort,
+    BroadcastChannel,
     EventTarget,
     DOMException,
     Blob,
@@ -2200,6 +2568,8 @@ const WEB_SRC: &str = r##"
     fetch,
     serve,
     createServer,
+    IncomingMessage,
+    ServerResponse,
     STATUS_CODES,
   }
 }
@@ -2245,6 +2615,8 @@ pub fn http_module(vm: &mut Vm) -> Result<Value, Value> {
     for name in [
         "serve",
         "createServer",
+        "IncomingMessage",
+        "ServerResponse",
         "STATUS_CODES",
         "fetch",
         "Request",
@@ -2255,7 +2627,7 @@ pub fn http_module(vm: &mut Vm) -> Result<Value, Value> {
         let v = vm.get_prop(&web, name)?;
         o.set_own(name, v);
     }
-    o.set_own("default", Value::Object(o.clone()));
+    o.set_hidden("default", Value::Object(o.clone()));
     Ok(Value::Object(o))
 }
 

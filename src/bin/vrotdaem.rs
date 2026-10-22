@@ -122,7 +122,8 @@ fn execute(command: Command) -> Result<ExitCode, String> {
                     let mut argv = vec!["jsq".to_string(), main.display().to_string()];
                     argv.extend(args);
                     let mut vm = Vm::new(argv);
-                    let r = vm.run_file(&main).and_then(|_| vm.run_event_loop());
+                    let r = vm.run_file(&main).map(|_| ());
+                    let r = vm.finish_main(r);
                     vm.flush();
                     match r {
                         Ok(_) => match javasquirt::builtins::exit_code(&mut vm) {

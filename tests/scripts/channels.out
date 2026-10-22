@@ -1,0 +1,5 @@
+1000 bye true
+m 3 1
+port2 {"a":[1,{"b":2}]}
+y hello true message
+port1 closed

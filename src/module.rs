@@ -31,7 +31,15 @@ pub fn display_path_abs(p: &Path) -> String {
 }
 
 fn canonical(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+    let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let text = c.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        if let Some(unc) = rest.strip_prefix("UNC\\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        return PathBuf::from(rest);
+    }
+    c
 }
 
 pub const EXTENSIONS: [&str; 5] = [EXT, "js", "mjs", "cjs", "json"];
@@ -43,16 +51,26 @@ fn with_extension(p: &Path, ext: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-const CONDITIONS: [&str; 5] = ["import", "require", "node", "module-sync", "default"];
+const IMPORT_CONDITIONS: [&str; 4] = ["import", "node", "module-sync", "default"];
+const REQUIRE_CONDITIONS: [&str; 4] = ["require", "node", "module-sync", "default"];
 
-fn export_target(value: &serde_json::Value) -> Option<String> {
+fn conditions(cjs: bool) -> &'static [&'static str] {
+    if cjs {
+        &REQUIRE_CONDITIONS
+    } else {
+        &IMPORT_CONDITIONS
+    }
+}
+
+fn export_target(value: &serde_json::Value, cjs: bool) -> Option<String> {
     match value {
         serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Array(items) => items.iter().find_map(export_target),
+        serde_json::Value::Array(items) => items.iter().find_map(|v| export_target(v, cjs)),
         serde_json::Value::Object(map) => {
-            for key in CONDITIONS {
-                if let Some(v) = map.get(key) {
-                    if let Some(t) = export_target(v) {
+            let active = conditions(cjs);
+            for (key, v) in map {
+                if active.contains(&key.as_str()) {
+                    if let Some(t) = export_target(v, cjs) {
                         return Some(t);
                     }
                 }
@@ -63,7 +81,7 @@ fn export_target(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn exports_lookup(exports: &serde_json::Value, sub: &str) -> Option<String> {
+fn exports_lookup(exports: &serde_json::Value, sub: &str, cjs: bool) -> Option<String> {
     let key = if sub.is_empty() {
         ".".to_string()
     } else {
@@ -74,13 +92,13 @@ fn exports_lookup(exports: &serde_json::Value, sub: &str) -> Option<String> {
             let is_map = map.keys().any(|k| k.starts_with('.'));
             if !is_map {
                 return if sub.is_empty() {
-                    export_target(exports)
+                    export_target(exports, cjs)
                 } else {
                     None
                 };
             }
             if let Some(v) = map.get(&key) {
-                return export_target(v);
+                return export_target(v, cjs);
             }
             for (pattern, v) in map {
                 if let Some((prefix, suffix)) = pattern.split_once('*') {
@@ -89,7 +107,7 @@ fn exports_lookup(exports: &serde_json::Value, sub: &str) -> Option<String> {
                         && key.len() >= prefix.len() + suffix.len()
                     {
                         let star = &key[prefix.len()..key.len() - suffix.len()];
-                        return export_target(v).map(|t| t.replace('*', star));
+                        return export_target(v, cjs).map(|t| t.replace('*', star));
                     }
                 }
             }
@@ -97,7 +115,7 @@ fn exports_lookup(exports: &serde_json::Value, sub: &str) -> Option<String> {
         }
         _ => {
             if sub.is_empty() {
-                export_target(exports)
+                export_target(exports, cjs)
             } else {
                 None
             }
@@ -133,10 +151,10 @@ fn resolve_in_package(dir: &Path, target: &str) -> Option<PathBuf> {
     None
 }
 
-pub fn package_subpath(dir: &Path, sub: &str) -> Option<PathBuf> {
+pub fn package_subpath(dir: &Path, sub: &str, cjs: bool) -> Option<PathBuf> {
     if let Some(v) = package_json(dir) {
         if let Some(exports) = v.get("exports") {
-            if let Some(target) = exports_lookup(exports, sub) {
+            if let Some(target) = exports_lookup(exports, sub, cjs) {
                 if let Some(found) = resolve_in_package(dir, &target) {
                     return Some(found);
                 }
@@ -144,16 +162,16 @@ pub fn package_subpath(dir: &Path, sub: &str) -> Option<PathBuf> {
         }
     }
     if sub.is_empty() {
-        package_main(dir)
+        package_main(dir, cjs)
     } else {
         resolve_file(&dir.join(sub))
     }
 }
 
-fn package_main(dir: &Path) -> Option<PathBuf> {
+fn package_main(dir: &Path, cjs: bool) -> Option<PathBuf> {
     if let Some(v) = package_json(dir) {
         let mut candidates: Vec<String> = Vec::new();
-        if let Some(target) = v.get("exports").and_then(|e| exports_lookup(e, "")) {
+        if let Some(target) = v.get("exports").and_then(|e| exports_lookup(e, "", cjs)) {
             candidates.push(target);
         }
         for key in ["main", "module"] {
@@ -189,7 +207,7 @@ fn resolve_file(p: &Path) -> Option<PathBuf> {
         }
     }
     if p.is_dir() {
-        return package_main(p);
+        return package_main(p, false);
     }
     None
 }
@@ -206,6 +224,16 @@ pub fn has_module_syntax(src: &str) -> bool {
     })
 }
 
+pub fn is_commonjs(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    ext == "cjs"
+        || ext == "json"
+        || (ext == "js"
+            && std::fs::read_to_string(path)
+                .map(|s| looks_like_commonjs(&s))
+                .unwrap_or(false))
+}
+
 pub fn looks_like_commonjs(src: &str) -> bool {
     let has_cjs = src.lines().any(|line| {
         let t = line.trim_start();
@@ -214,10 +242,10 @@ pub fn looks_like_commonjs(src: &str) -> bool {
     has_cjs && !has_module_syntax(src)
 }
 
-fn imports_lookup(imports: &serde_json::Value, spec: &str) -> Option<String> {
+fn imports_lookup(imports: &serde_json::Value, spec: &str, cjs: bool) -> Option<String> {
     let map = imports.as_object()?;
     if let Some(v) = map.get(spec) {
-        return export_target(v);
+        return export_target(v, cjs);
     }
     for (pattern, v) in map {
         if let Some((prefix, suffix)) = pattern.split_once('*') {
@@ -226,27 +254,27 @@ fn imports_lookup(imports: &serde_json::Value, spec: &str) -> Option<String> {
                 && spec.len() >= prefix.len() + suffix.len()
             {
                 let star = &spec[prefix.len()..spec.len() - suffix.len()];
-                return export_target(v).map(|t| t.replace('*', star));
+                return export_target(v, cjs).map(|t| t.replace('*', star));
             }
         }
     }
     None
 }
 
-fn resolve_import_alias(spec: &str, from_dir: &Path) -> Result<PathBuf, String> {
+fn resolve_import_alias(spec: &str, from_dir: &Path, cjs: bool) -> Result<PathBuf, String> {
     let mut dir = Some(from_dir.to_path_buf());
     while let Some(d) = dir {
         if d.join("package.json").is_file() || d.join(MANIFEST).is_file() {
             let target = package_json(&d)
                 .and_then(|v| v.get("imports").cloned())
-                .and_then(|imports| imports_lookup(&imports, spec));
+                .and_then(|imports| imports_lookup(&imports, spec, cjs));
             if let Some(target) = target {
                 if target.starts_with("./") || target.starts_with("../") {
                     if let Some(found) = resolve_in_package(&d, &target) {
                         return Ok(canonical(&found));
                     }
                 } else {
-                    return resolve(&target, &d);
+                    return resolve_with(&target, &d, cjs);
                 }
             }
             break;
@@ -257,8 +285,12 @@ fn resolve_import_alias(spec: &str, from_dir: &Path) -> Result<PathBuf, String> 
 }
 
 pub fn resolve(spec: &str, from_dir: &Path) -> Result<PathBuf, String> {
+    resolve_with(spec, from_dir, false)
+}
+
+pub fn resolve_with(spec: &str, from_dir: &Path, cjs: bool) -> Result<PathBuf, String> {
     if spec.starts_with('#') {
-        return resolve_import_alias(spec, from_dir);
+        return resolve_import_alias(spec, from_dir, cjs);
     }
     let relative = spec.starts_with("./")
         || spec.starts_with("../")
@@ -284,7 +316,7 @@ pub fn resolve(spec: &str, from_dir: &Path) -> Result<PathBuf, String> {
     while let Some(d) = dir {
         let candidate = d.join(DEPS_DIR).join(&pkg);
         if candidate.is_dir() {
-            let found = package_subpath(&candidate, sub);
+            let found = package_subpath(&candidate, sub, cjs);
             return found.map(|p| canonical(&p)).ok_or_else(|| {
                 format!("Cannot find module '{spec}': package '{pkg}' has no entry point")
             });

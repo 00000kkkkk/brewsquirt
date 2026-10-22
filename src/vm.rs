@@ -352,6 +352,7 @@ pub struct Vm {
     pub(crate) pending_ns: Option<Value>,
     pub(crate) import_metas: FxHashMap<Rc<str>, Value>,
     pub rejection: bool,
+    pub exiting: bool,
     pub symbol_seq: u64,
     pub symbol_registry: FxHashMap<Rc<str>, Value>,
     pub symbol_iterator: Value,
@@ -457,6 +458,7 @@ impl Vm {
             node: None,
             stdin_handler: None,
             stdin_stopped: false,
+            exiting: false,
         };
         crate::gc::configure_from_env();
         builtins::install(&mut vm);
@@ -1056,10 +1058,10 @@ impl Vm {
     }
 
     fn link_target(&mut self, from: &Path, spec: &str) -> Result<Option<PathBuf>, Value> {
-        if spec.starts_with("squirt:")
-            || spec.starts_with("node:")
-            || (!spec.starts_with('.') && !spec.starts_with('/') && !spec.contains(':'))
-        {
+        if spec.starts_with("squirt:") || spec.starts_with("node:") {
+            return Ok(None);
+        }
+        if Self::bare_specifier(spec) && Self::is_node_builtin(spec) {
             return Ok(None);
         }
         let dir = from.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -1067,6 +1069,37 @@ impl Vm {
             Ok(p) => Ok(Some(p)),
             Err(msg) => Err(self.make_error(ErrorKind::Error, msg)),
         }
+    }
+
+    fn bare_specifier(spec: &str) -> bool {
+        !spec.starts_with('.') && !spec.starts_with('/') && !spec.contains(':')
+    }
+
+    fn is_node_builtin(spec: &str) -> bool {
+        builtins::node::BUILTIN_MODULES.contains(&spec)
+            && !builtins::node::PREFIX_ONLY.contains(&spec)
+    }
+
+    fn cjs_namespace(&mut self, path: &PathBuf) -> Result<Value, Value> {
+        if let Some(v) = self.modules.get(path) {
+            return Ok(v.clone());
+        }
+        let spec = path.display().to_string();
+        let exports = self.require_path(path, &spec)?;
+        let ns = self.new_object();
+        ns.set_own("default", exports.clone());
+        if let Value::Object(o) = &exports {
+            if !o.is_callable() {
+                for (k, v) in self.own_entries(&exports) {
+                    if &*k != "default" {
+                        ns.set_own(k, v);
+                    }
+                }
+            }
+        }
+        let ns = Value::Object(ns);
+        self.modules.insert(path.clone(), ns.clone());
+        Ok(ns)
     }
 
     fn resolve_export(
@@ -1080,6 +1113,9 @@ impl Vm {
             return Ok(Resolution::NotFound);
         }
         seen.push(key);
+        if module::is_commonjs(path) {
+            return Ok(Resolution::Found(path.clone(), name.into()));
+        }
         let spec = path.display().to_string();
         let proto = self.load_proto(path, &spec)?;
         let Some(link) = proto.link.clone() else {
@@ -1155,6 +1191,15 @@ impl Vm {
             return Ok(Vec::new());
         }
         visited.push(path.clone());
+        if module::is_commonjs(path) {
+            let ns = self.cjs_namespace(path)?;
+            return Ok(self
+                .own_entries(&ns)
+                .into_iter()
+                .filter(|(k, _)| &**k != "default")
+                .map(|(k, _)| Rc::from(&*k))
+                .collect());
+        }
         let spec = path.display().to_string();
         let proto = self.load_proto(path, &spec)?;
         let Some(link) = proto.link.clone() else {
@@ -1208,7 +1253,11 @@ impl Vm {
                     if target == *path && local == name {
                         continue;
                     }
-                    let target_ns = self.namespace_for(&target);
+                    let target_ns = if module::is_commonjs(&target) {
+                        self.cjs_namespace(&target)?
+                    } else {
+                        self.namespace_for(&target)
+                    };
                     let getter = self.ns_getter(target_ns, &local);
                     nso.set_with_attrs(
                         name.clone(),
@@ -1217,7 +1266,11 @@ impl Vm {
                     );
                 }
                 Resolution::Namespace(dep) => {
-                    let dep_ns = self.namespace_for(&dep);
+                    let dep_ns = if module::is_commonjs(&dep) {
+                        self.cjs_namespace(&dep)?
+                    } else {
+                        self.namespace_for(&dep)
+                    };
                     nso.set_own(name.clone(), dep_ns);
                 }
                 _ => {}
@@ -1251,13 +1304,18 @@ impl Vm {
         };
         for source in &link.stars {
             if let Some(dep) = self.link_target(path, source)? {
-                self.load_proto(&dep, source)?;
+                if !module::is_commonjs(&dep) {
+                    self.load_proto(&dep, source)?;
+                }
             }
         }
         for (source, names) in &link.imports {
             let Some(dep) = self.link_target(path, source)? else {
                 continue;
             };
+            if module::is_commonjs(&dep) {
+                continue;
+            }
             let dep_proto = self.load_proto(&dep, source)?;
             if !dep_proto.link.as_ref().is_some_and(|l| l.esm) {
                 continue;
@@ -1277,6 +1335,9 @@ impl Vm {
             let Some(dep) = self.link_target(path, source)? else {
                 continue;
             };
+            if module::is_commonjs(&dep) {
+                continue;
+            }
             let dep_proto = self.load_proto(&dep, source)?;
             if !dep_proto.link.as_ref().is_some_and(|l| l.esm) {
                 continue;
@@ -1303,7 +1364,7 @@ impl Vm {
                 }
             };
         }
-        if !spec.starts_with('.') && !spec.starts_with('/') && !spec.contains(':') {
+        if Self::bare_specifier(spec) && !builtins::node::PREFIX_ONLY.contains(&spec) {
             if let Some(v) = self.import_node(spec)? {
                 return Ok(v);
             }
@@ -1315,29 +1376,8 @@ impl Vm {
         if let Some(v) = self.modules.get(&path) {
             return Ok(v.clone());
         }
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let commonjs = ext == "cjs"
-            || ext == "json"
-            || (ext == "js"
-                && std::fs::read_to_string(&path)
-                    .map(|s| module::looks_like_commonjs(&s))
-                    .unwrap_or(false));
-        if commonjs {
-            let exports = self.require_path(&path, spec)?;
-            let ns = self.new_object();
-            ns.set_own("default", exports.clone());
-            if let Value::Object(o) = &exports {
-                if !o.is_callable() {
-                    for (k, v) in self.own_entries(&exports) {
-                        if &*k != "default" {
-                            ns.set_own(k, v);
-                        }
-                    }
-                }
-            }
-            let ns = Value::Object(ns);
-            self.modules.insert(path, ns.clone());
-            return Ok(ns);
+        if module::is_commonjs(&path) {
+            return self.cjs_namespace(&path);
         }
         let proto = self.load_proto(&path, spec)?;
         self.link_module(&path, &proto)?;
@@ -1390,12 +1430,12 @@ impl Vm {
                 }
             };
         }
-        if !spec.starts_with('.') && !spec.starts_with('/') && !spec.contains(':') {
+        if Self::bare_specifier(spec) && !builtins::node::PREFIX_ONLY.contains(&spec) {
             if let Some(v) = self.import_node(spec)? {
                 return Ok(unwrap(v));
             }
         }
-        let path = match module::resolve(spec, &from.dir) {
+        let path = match module::resolve_with(spec, &from.dir, true) {
             Ok(p) => p,
             Err(msg) => return Err(self.make_error(ErrorKind::Error, msg)),
         };

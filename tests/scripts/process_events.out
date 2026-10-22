@@ -1,0 +1,7 @@
+1 5
+warning CustomWarning W1
+unhandled rejected true
+caught boom uncaughtException
+beforeExit 0
+late
+exit 0 0

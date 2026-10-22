@@ -239,7 +239,21 @@ fn parse_set(text: &str) -> Option<Vec<Comparator>> {
             version: v(0, 0, 0),
         }]);
     }
-    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let raw: Vec<&str> = text.split_whitespace().collect();
+    let mut tokens: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        let t = raw[i];
+        let is_op = matches!(t, ">=" | "<=" | ">" | "<" | "=" | "^" | "~" | "~>");
+        if is_op && i + 1 < raw.len() {
+            tokens.push(format!("{t}{}", raw[i + 1]));
+            i += 2;
+        } else {
+            tokens.push(t.to_string());
+            i += 1;
+        }
+    }
+    let tokens: Vec<&str> = tokens.iter().map(String::as_str).collect();
     if tokens.len() == 3 && tokens[1] == "-" {
         let lo = parse_partial(tokens[0])?;
         let hi = parse_partial(tokens[2])?;
@@ -331,6 +345,10 @@ mod tests {
         let r = Range::parse("1.2.3 - 2.3").unwrap();
         assert!(r.matches(&ver("2.3.9")));
         assert!(!r.matches(&ver("2.4.0")));
+        let spaced = Range::parse(">= 2.1.2 < 3.0.0").unwrap();
+        assert!(spaced.matches(&ver("2.1.2")));
+        assert!(spaced.matches(&ver("2.9.0")));
+        assert!(!spaced.matches(&ver("3.0.0")));
         let r = Range::parse(">=1.0.0 <1.5.0 || 3.x").unwrap();
         assert!(r.matches(&ver("1.4.9")));
         assert!(r.matches(&ver("3.1.0")));

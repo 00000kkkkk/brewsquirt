@@ -347,7 +347,7 @@ pub fn path_module(vm: &mut Vm) -> Value {
     posix.set_own("win32", Value::Object(win32.clone()));
     win32.set_own("posix", Value::Object(posix));
     win32.set_own("win32", Value::Object(win32.clone()));
-    native.set_own("default", Value::Object(native.clone()));
+    native.set_hidden("default", Value::Object(native.clone()));
     Value::Object(native)
 }
 
@@ -453,7 +453,7 @@ pub fn os_module(vm: &mut Vm) -> Value {
         method(vm, &o, name, 0, *f);
     }
     o.set_own("EOL", if cfg!(windows) { "\r\n" } else { "\n" }.into());
-    o.set_own("default", Value::Object(o.clone()));
+    o.set_hidden("default", Value::Object(o.clone()));
     Value::Object(o)
 }
 
@@ -593,6 +593,6 @@ pub fn child_process_module(vm: &mut Vm) -> Value {
     let o = vm.new_object();
     method(vm, &o, "execSync", 2, exec_sync);
     method(vm, &o, "spawnSync", 3, spawn_sync);
-    o.set_own("default", Value::Object(o.clone()));
+    o.set_hidden("default", Value::Object(o.clone()));
     Value::Object(o)
 }

@@ -234,133 +234,311 @@ const NODE_SRC: &str = r##"
     writeDoubleLE(v, o = 0) { this.#view().setFloat64(o, v, true); return o + 8 }
     writeDoubleBE(v, o = 0) { this.#view().setFloat64(o, v); return o + 8 }
   }
+  for (const key of ["from", "alloc", "allocUnsafe", "allocUnsafeSlow", "byteLength", "concat", "isBuffer", "isEncoding", "compare"]) {
+    Object.defineProperty(Buffer, key, { value: Buffer[key], writable: true, enumerable: true, configurable: true })
+  }
+  Buffer.poolSize = 8192
+  const kMaxLength = 2 ** 32
+  const kStringMaxLength = 2 ** 29 - 24
+  function SlowBuffer(size) {
+    return Buffer.alloc(size)
+  }
+  SlowBuffer.prototype = Buffer.prototype
+  const bufferModule = {
+    Buffer,
+    SlowBuffer,
+    kMaxLength,
+    kStringMaxLength,
+    INSPECT_MAX_BYTES: 50,
+    constants: { MAX_LENGTH: kMaxLength, MAX_STRING_LENGTH: kStringMaxLength },
+    atob: (s) => globalThis.atob(s),
+    btoa: (s) => globalThis.btoa(s),
+    isUtf8: (input) => {
+      try {
+        new TextDecoder("utf-8", { fatal: true }).decode(input)
+        return true
+      } catch {
+        return false
+      }
+    },
+    isAscii: (input) => {
+      const bytes = input instanceof ArrayBuffer ? new Uint8Array(input) : input
+      for (let i = 0; i < bytes.length; i++) if (bytes[i] > 127) return false
+      return true
+    },
+    transcode: (source, fromEnc, toEnc) => Buffer.from(stringFromBytes(source, fromEnc), toEnc),
+    resolveObjectURL: () => undefined,
+    get Blob() {
+      return globalThis.Blob
+    },
+    get File() {
+      return globalThis.File
+    },
+  }
   for (const name of Object.getOwnPropertyNames(Buffer.prototype)) {
     if (/^(read|write)UInt/.test(name)) {
       Object.defineProperty(Buffer.prototype, name.replace("UInt", "Uint"), { value: Buffer.prototype[name], writable: true, configurable: true })
     }
   }
 
-  const kCapture = Symbol("listeners")
-  const listenersOf = (self) => {
-    if (!self[kCapture]) Object.defineProperty(self, kCapture, { value: new Map(), writable: true, configurable: true })
-    return self[kCapture]
+  const kRejection = Symbol.for("nodejs.rejection")
+  function EventEmitter(opts) {
+    EventEmitter.init.call(this, opts)
   }
-
-  class EventEmitter {
-    static defaultMaxListeners = 10
-    constructor() {
-      Object.defineProperty(this, kCapture, { value: new Map(), writable: true, configurable: true })
+  EventEmitter.defaultMaxListeners = 10
+  EventEmitter.errorMonitor = Symbol("events.errorMonitor")
+  EventEmitter.captureRejectionSymbol = kRejection
+  EventEmitter.captureRejections = false
+  EventEmitter.EventEmitter = EventEmitter
+  EventEmitter.init = function init(opts) {
+    if (this._events === undefined || this._events === Object.getPrototypeOf(this)?._events) {
+      this._events = Object.create(null)
+      this._eventsCount = 0
     }
-    #add(name, fn, once, prepend) {
-      if (typeof fn !== "function") throw new TypeError('The "listener" argument must be of type function')
-      if (listenersOf(this).has("newListener") && name !== "newListener") this.emit("newListener", name, fn)
-      let list = listenersOf(this).get(name)
-      if (!list) listenersOf(this).set(name, (list = []))
-      const entry = { fn, once }
-      if (prepend) list.unshift(entry)
-      else list.push(entry)
-      return this
+    this._maxListeners = this._maxListeners || undefined
+    if (opts?.captureRejections) this[kRejection] = true
+  }
+  const eventsOf = (self) => {
+    if (self._events === undefined || self._events === null || self._events === Object.getPrototypeOf(self)?._events) {
+      self._events = Object.create(null)
+      self._eventsCount = 0
     }
-    on(name, fn) {
-      return this.#add(name, fn, false, false)
+    return self._events
+  }
+  const checkListener = (fn) => {
+    if (typeof fn !== "function") throw new TypeError(`The "listener" argument must be of type function. Received ${fn === null ? "null" : typeof fn}`)
+  }
+  const attachListener = (self, name, fn, prepend) => {
+    checkListener(fn)
+    const events = eventsOf(self)
+    if (events.newListener !== undefined) {
+      self.emit("newListener", name, fn.listener ?? fn)
     }
-    addListener(name, fn) {
-      return this.#add(name, fn, false, false)
+    const existing = events[name]
+    if (existing === undefined) {
+      events[name] = fn
+      self._eventsCount = (self._eventsCount ?? 0) + 1
+    } else if (typeof existing === "function") {
+      events[name] = prepend ? [fn, existing] : [existing, fn]
+    } else if (prepend) existing.unshift(fn)
+    else existing.push(fn)
+    return self
+  }
+  const onceWrap = (self, name, fn) => {
+    const state = { fired: false, wrapFn: undefined, target: self, type: name, listener: fn }
+    const wrapper = function (...args) {
+      if (state.fired) return
+      state.target.removeListener(state.type, state.wrapFn)
+      state.fired = true
+      return state.listener.apply(state.target, args)
     }
-    prependListener(name, fn) {
-      return this.#add(name, fn, false, true)
+    wrapper.listener = fn
+    state.wrapFn = wrapper
+    return wrapper
+  }
+  EventEmitter.prototype._events = undefined
+  EventEmitter.prototype._eventsCount = 0
+  EventEmitter.prototype._maxListeners = undefined
+  EventEmitter.prototype.setMaxListeners = function setMaxListeners(n) {
+    if (typeof n !== "number" || n < 0 || Number.isNaN(n)) throw new RangeError(`The value of "n" is out of range. It must be a non-negative number. Received ${n}`)
+    this._maxListeners = n
+    return this
+  }
+  EventEmitter.prototype.getMaxListeners = function getMaxListeners() {
+    return this._maxListeners === undefined ? EventEmitter.defaultMaxListeners : this._maxListeners
+  }
+  EventEmitter.prototype.emit = function emit(name, ...args) {
+    const events = eventsOf(this)
+    if (name === "error" && events[EventEmitter.errorMonitor] !== undefined) this.emit(EventEmitter.errorMonitor, ...args)
+    const handler = events[name]
+    if (handler === undefined) {
+      if (name === "error") {
+        const err = args[0]
+        if (err instanceof Error) throw err
+        const e = new Error(`Unhandled error. (${typeof err === "string" ? `'${err}'` : String(err)})`)
+        e.code = "ERR_UNHANDLED_ERROR"
+        e.context = err
+        throw e
+      }
+      return false
     }
-    once(name, fn) {
-      return this.#add(name, fn, true, false)
+    if (typeof handler === "function") {
+      handler.apply(this, args)
+    } else {
+      for (const fn of handler.slice()) fn.apply(this, args)
     }
-    prependOnceListener(name, fn) {
-      return this.#add(name, fn, true, true)
+    return true
+  }
+  EventEmitter.prototype.addListener = function addListener(name, fn) {
+    return attachListener(this, name, fn, false)
+  }
+  EventEmitter.prototype.on = EventEmitter.prototype.addListener
+  EventEmitter.prototype.prependListener = function prependListener(name, fn) {
+    return attachListener(this, name, fn, true)
+  }
+  EventEmitter.prototype.once = function once(name, fn) {
+    checkListener(fn)
+    return this.on(name, onceWrap(this, name, fn))
+  }
+  EventEmitter.prototype.prependOnceListener = function prependOnceListener(name, fn) {
+    checkListener(fn)
+    return this.prependListener(name, onceWrap(this, name, fn))
+  }
+  EventEmitter.prototype.removeListener = function removeListener(name, fn) {
+    checkListener(fn)
+    const events = eventsOf(this)
+    const list = events[name]
+    if (list === undefined) return this
+    if (list === fn || list.listener === fn) {
+      if (--this._eventsCount === 0) this._events = Object.create(null)
+      else delete events[name]
+      if (events.removeListener !== undefined) this.emit("removeListener", name, list.listener ?? fn)
+    } else if (typeof list !== "function") {
+      let position = -1
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (list[i] === fn || list[i].listener === fn) {
+          position = i
+          break
+        }
+      }
+      if (position < 0) return this
+      const removed = list[position]
+      if (position === 0) list.shift()
+      else list.splice(position, 1)
+      if (list.length === 1) events[name] = list[0]
+      if (events.removeListener !== undefined) this.emit("removeListener", name, removed.listener ?? fn)
     }
-    off(name, fn) {
-      return this.removeListener(name, fn)
-    }
-    removeListener(name, fn) {
-      const list = listenersOf(this).get(name)
-      if (!list) return this
-      const i = list.findLastIndex((l) => l.fn === fn)
-      if (i >= 0) {
-        list.splice(i, 1)
-        if (list.length === 0) listenersOf(this).delete(name)
-        if (listenersOf(this).has("removeListener")) this.emit("removeListener", name, fn)
+    return this
+  }
+  EventEmitter.prototype.off = EventEmitter.prototype.removeListener
+  EventEmitter.prototype.removeAllListeners = function removeAllListeners(name) {
+    const events = eventsOf(this)
+    if (events.removeListener === undefined) {
+      if (name === undefined) {
+        this._events = Object.create(null)
+        this._eventsCount = 0
+      } else if (events[name] !== undefined) {
+        if (--this._eventsCount === 0) this._events = Object.create(null)
+        else delete events[name]
       }
       return this
     }
-    removeAllListeners(name) {
-      if (name === undefined) listenersOf(this).clear()
-      else listenersOf(this).delete(name)
+    if (name === undefined) {
+      for (const key of Reflect.ownKeys(events)) {
+        if (key === "removeListener") continue
+        this.removeAllListeners(key)
+      }
+      this.removeAllListeners("removeListener")
+      this._events = Object.create(null)
+      this._eventsCount = 0
       return this
     }
-    emit(name, ...args) {
-      const list = listenersOf(this).get(name)
-      if (!list || list.length === 0) {
-        if (name === "error") {
-          const err = args[0]
-          if (err instanceof Error) throw err
-          const e = new Error(`Unhandled error. (${typeof err === "string" ? `'${err}'` : String(err)})`)
-          e.context = err
-          throw e
-        }
-        return false
+    const list = events[name]
+    if (typeof list === "function") this.removeListener(name, list)
+    else if (list !== undefined) for (let i = list.length - 1; i >= 0; i--) this.removeListener(name, list[i])
+    return this
+  }
+  const listenersImpl = (self, name, unwrap) => {
+    const events = self._events
+    if (events === undefined || events === null) return []
+    const list = events[name]
+    if (list === undefined) return []
+    if (typeof list === "function") return unwrap ? [list.listener ?? list] : [list]
+    return unwrap ? list.map((l) => l.listener ?? l) : list.slice()
+  }
+  EventEmitter.prototype.listeners = function listeners(name) {
+    return listenersImpl(this, name, true)
+  }
+  EventEmitter.prototype.rawListeners = function rawListeners(name) {
+    return listenersImpl(this, name, false)
+  }
+  EventEmitter.prototype.listenerCount = function listenerCount(name, listener) {
+    const events = this._events
+    if (events === undefined || events === null) return 0
+    const list = events[name]
+    if (list === undefined) return 0
+    if (typeof list === "function") return listener === undefined || list === listener || list.listener === listener ? 1 : 0
+    if (listener === undefined) return list.length
+    return list.filter((l) => l === listener || l.listener === listener).length
+  }
+  EventEmitter.prototype.eventNames = function eventNames() {
+    return this._eventsCount > 0 && this._events ? Reflect.ownKeys(this._events) : []
+  }
+  EventEmitter.listenerCount = (emitter, name) => emitter.listenerCount(name)
+  EventEmitter.getEventListeners = (target, name) => (typeof target.listeners === "function" ? target.listeners(name) : [])
+  EventEmitter.getMaxListeners = (target) => (typeof target.getMaxListeners === "function" ? target.getMaxListeners() : EventEmitter.defaultMaxListeners)
+  EventEmitter.setMaxListeners = (n, ...targets) => {
+    if (targets.length === 0) EventEmitter.defaultMaxListeners = n
+    else for (const t of targets) t.setMaxListeners?.(n)
+  }
+  EventEmitter.once = function once(emitter, name, options) {
+    return new Promise((resolve, reject) => {
+      const signal = options?.signal
+      if (signal?.aborted) return reject(new DOMException("The operation was aborted", "AbortError"))
+      const cleanup = () => {
+        emitter.removeListener(name, onEvent)
+        if (name !== "error" && typeof emitter.removeListener === "function") emitter.removeListener("error", onError)
+        if (signal) signal.removeEventListener("abort", onAbort)
       }
-      for (const l of [...list]) {
-        if (l.once) this.removeListener(name, l.fn)
-        l.fn.apply(this, args)
+      const onError = (err) => {
+        cleanup()
+        reject(err)
       }
-      return true
-    }
-    listenerCount(name) {
-      return listenersOf(this).get(name)?.length ?? 0
-    }
-    listeners(name) {
-      return (listenersOf(this).get(name) ?? []).map((l) => l.fn)
-    }
-    rawListeners(name) {
-      return this.listeners(name)
-    }
-    eventNames() {
-      return [...listenersOf(this).keys()]
-    }
-    setMaxListeners() {
-      return this
-    }
-    getMaxListeners() {
-      return EventEmitter.defaultMaxListeners
-    }
-    static once(emitter, name) {
-      return new Promise((resolve, reject) => {
-        const onError = (err) => {
-          emitter.removeListener(name, onEvent)
-          reject(err)
-        }
-        const onEvent = (...args) => {
-          if (name !== "error") emitter.removeListener("error", onError)
-          resolve(args)
-        }
+      const onEvent = (...args) => {
+        cleanup()
+        resolve(args)
+      }
+      const onAbort = () => {
+        cleanup()
+        reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError"))
+      }
+      if (typeof emitter.addEventListener === "function" && typeof emitter.once !== "function") {
+        emitter.addEventListener(name, (ev) => onEvent(ev), { once: true })
+      } else {
         emitter.once(name, onEvent)
         if (name !== "error") emitter.once("error", onError)
-      })
-    }
-    static async *on(emitter, name) {
-      const queue = []
-      let wake = null
-      emitter.on(name, (...args) => {
-        queue.push(args)
-        if (wake) wake()
-      })
-      while (true) {
-        if (queue.length === 0) await new Promise((r) => (wake = r))
-        wake = null
-        yield queue.shift()
       }
+      if (signal) signal.addEventListener("abort", onAbort, { once: true })
+    })
+  }
+  EventEmitter.on = function on(emitter, name, options) {
+    const queue = []
+    let wake = null
+    let error = null
+    let done = false
+    const push = (...args) => {
+      queue.push(args)
+      if (wake) wake()
     }
-    static listenerCount(emitter, name) {
-      return emitter.listenerCount(name)
+    emitter.on(name, push)
+    if (name !== "error") emitter.on("error", (e) => {
+      error = e
+      if (wake) wake()
+    })
+    const signal = options?.signal
+    if (signal) signal.addEventListener("abort", () => {
+      error = signal.reason ?? new DOMException("The operation was aborted", "AbortError")
+      if (wake) wake()
+    }, { once: true })
+    const iterator = {
+      async next() {
+        if (queue.length) return { value: queue.shift(), done: false }
+        if (error) throw error
+        if (done) return { value: undefined, done: true }
+        await new Promise((r) => (wake = r))
+        wake = null
+        return iterator.next()
+      },
+      async return() {
+        done = true
+        emitter.removeListener(name, push)
+        return { value: undefined, done: true }
+      },
+      [Symbol.asyncIterator]() {
+        return this
+      },
     }
+    return iterator
   }
 
   function encodingOf(options) {
@@ -737,7 +915,40 @@ const NODE_SRC: &str = r##"
     isUint8Array: (v) => v instanceof Uint8Array,
     isArrayBuffer: (v) => v instanceof ArrayBuffer,
     isNativeError: (v) => v instanceof Error,
-    isAsyncFunction: (v) => typeof v === "function" && Object.prototype.toString.call(v) === "[object AsyncFunction]",
+    isAsyncFunction: (v) => typeof v === "function" && /^\[object Async(Generator)?Function\]$/.test(Object.prototype.toString.call(v)),
+    isGeneratorFunction: (v) => typeof v === "function" && /GeneratorFunction\]$/.test(Object.prototype.toString.call(v)),
+    isGeneratorObject: (v) => /^\[object (Async)?Generator\]$/.test(Object.prototype.toString.call(v)),
+    isAnyArrayBuffer: (v) => v instanceof ArrayBuffer || (typeof SharedArrayBuffer === "function" && v instanceof SharedArrayBuffer),
+    isSharedArrayBuffer: (v) => typeof SharedArrayBuffer === "function" && v instanceof SharedArrayBuffer,
+    isArrayBufferView: (v) => ArrayBuffer.isView(v),
+    isDataView: (v) => v instanceof DataView,
+    isArgumentsObject: (v) => Object.prototype.toString.call(v) === "[object Arguments]",
+    isBoxedPrimitive: (v) => v instanceof Number || v instanceof String || v instanceof Boolean || v instanceof Symbol || v instanceof BigInt,
+    isNumberObject: (v) => v instanceof Number,
+    isStringObject: (v) => v instanceof String,
+    isBooleanObject: (v) => v instanceof Boolean,
+    isSymbolObject: (v) => v instanceof Symbol,
+    isBigIntObject: (v) => v instanceof BigInt,
+    isMapIterator: (v) => Object.prototype.toString.call(v) === "[object Map Iterator]",
+    isSetIterator: (v) => Object.prototype.toString.call(v) === "[object Set Iterator]",
+    isWeakMap: (v) => v instanceof WeakMap,
+    isWeakSet: (v) => v instanceof WeakSet,
+    isModuleNamespaceObject: (v) => Object.prototype.toString.call(v) === "[object Module]",
+    isProxy: () => false,
+    isExternal: () => false,
+    isKeyObject: () => false,
+    isCryptoKey: (v) => typeof CryptoKey === "function" && v instanceof CryptoKey,
+    isUint8ClampedArray: (v) => v instanceof Uint8ClampedArray,
+    isUint16Array: (v) => v instanceof Uint16Array,
+    isUint32Array: (v) => v instanceof Uint32Array,
+    isInt8Array: (v) => v instanceof Int8Array,
+    isInt16Array: (v) => v instanceof Int16Array,
+    isInt32Array: (v) => v instanceof Int32Array,
+    isFloat16Array: (v) => typeof Float16Array === "function" && v instanceof Float16Array,
+    isFloat32Array: (v) => v instanceof Float32Array,
+    isFloat64Array: (v) => v instanceof Float64Array,
+    isBigInt64Array: (v) => v instanceof BigInt64Array,
+    isBigUint64Array: (v) => v instanceof BigUint64Array,
   }
 
   const stdin = new EventEmitter()
@@ -2846,6 +3057,445 @@ const NODE_SRC: &str = r##"
     ucs2: { decode: (s) => [...String(s)].map((c) => c.codePointAt(0)), encode: (cps) => String.fromCodePoint(...cps) },
   }
 
+  const consoleMethods = ["log", "info", "debug", "warn", "error", "dir", "dirxml", "table", "group", "groupCollapsed", "groupEnd", "assert", "time", "timeEnd", "timeLog", "count", "countReset", "trace", "clear"]
+  class Console {
+    #out
+    #err
+    #indent = ""
+    #timers = new Map()
+    #counts = new Map()
+    #ignoreErrors
+    constructor(stdout, stderr, ignoreErrors) {
+      const options = stdout && typeof stdout.write !== "function" ? stdout : { stdout, stderr, ignoreErrors }
+      const out = options.stdout
+      if (!out || typeof out.write !== "function") {
+        const e = new TypeError("Console expects a writable stream instance for stdout")
+        e.code = "ERR_CONSOLE_WRITABLE_STREAM"
+        throw e
+      }
+      this.#out = out
+      this.#err = options.stderr && typeof options.stderr.write === "function" ? options.stderr : out
+      this.#ignoreErrors = options.ignoreErrors !== false
+      this.#indent = " ".repeat(options.groupIndentation ?? 0).slice(0, 0)
+      Object.defineProperty(this, "_stdout", { value: out, writable: true, enumerable: false, configurable: true })
+      Object.defineProperty(this, "_stderr", { value: this.#err, writable: true, enumerable: false, configurable: true })
+      for (const key of consoleMethods) {
+        Object.defineProperty(this, key, { value: Console.prototype[key].bind(this), writable: true, enumerable: true, configurable: true })
+      }
+    }
+    #write(stream, args) {
+      const text = native.format(...args)
+      const line = this.#indent ? text.split("\n").map((l) => this.#indent + l).join("\n") : text
+      try {
+        stream.write(line + "\n")
+      } catch (e) {
+        if (!this.#ignoreErrors) throw e
+      }
+    }
+    log(...args) {
+      this.#write(this.#out, args)
+    }
+    info(...args) {
+      this.#write(this.#out, args)
+    }
+    debug(...args) {
+      this.#write(this.#out, args)
+    }
+    dirxml(...args) {
+      this.#write(this.#out, args)
+    }
+    warn(...args) {
+      this.#write(this.#err, args)
+    }
+    error(...args) {
+      this.#write(this.#err, args)
+    }
+    dir(value) {
+      this.#write(this.#out, [value])
+    }
+    table(data, columns) {
+      const text = globalThis["%renderTable%"](data, columns)
+      this.#write(this.#out, [text === null ? data : text])
+    }
+    group(...args) {
+      if (args.length) this.log(...args)
+      this.#indent += "  "
+    }
+    groupCollapsed(...args) {
+      this.group(...args)
+    }
+    groupEnd() {
+      this.#indent = this.#indent.slice(0, -2)
+    }
+    assert(condition, ...args) {
+      if (condition) return
+      if (args.length && typeof args[0] === "string") args[0] = `Assertion failed: ${args[0]}`
+      else args.unshift("Assertion failed")
+      this.warn(...args)
+    }
+    time(label = "default") {
+      label = String(label)
+      if (this.#timers.has(label)) this.warn(`Warning: Label '${label}' already exists for console.time()`)
+      else this.#timers.set(label, performance.now())
+    }
+    timeLog(label = "default", ...rest) {
+      label = String(label)
+      if (!this.#timers.has(label)) this.warn(`Warning: No such label '${label}' for console.timeLog()`)
+      else this.log(`${label}: ${(performance.now() - this.#timers.get(label)).toFixed(3)}ms`, ...rest)
+    }
+    timeEnd(label = "default") {
+      label = String(label)
+      if (!this.#timers.has(label)) this.warn(`Warning: No such label '${label}' for console.timeEnd()`)
+      else {
+        this.log(`${label}: ${(performance.now() - this.#timers.get(label)).toFixed(3)}ms`)
+        this.#timers.delete(label)
+      }
+    }
+    count(label = "default") {
+      label = String(label)
+      const n = (this.#counts.get(label) ?? 0) + 1
+      this.#counts.set(label, n)
+      this.log(`${label}: ${n}`)
+    }
+    countReset(label = "default") {
+      label = String(label)
+      if (!this.#counts.has(label)) this.warn(`Warning: Count for '${label}' does not exist`)
+      else this.#counts.set(label, 0)
+    }
+    trace(...args) {
+      const stack = (new Error().stack ?? "").split("\n").slice(1).filter((l) => !l.includes("<squirt:")).join("\n")
+      this.error(args.length ? "Trace:" : "Trace", ...args)
+      if (stack) this.error(stack)
+    }
+    clear() {}
+  }
+
+  const consumeChunks = async (source) => {
+    const chunks = []
+    for await (const chunk of source) {
+      if (typeof chunk === "string") chunks.push(Buffer.from(chunk))
+      else if (chunk instanceof ArrayBuffer) chunks.push(Buffer.from(chunk))
+      else if (ArrayBuffer.isView(chunk)) chunks.push(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength))
+      else {
+        const e = new TypeError("Received a chunk that is not a string, Buffer, TypedArray or ArrayBuffer")
+        e.code = "ERR_INVALID_ARG_TYPE"
+        throw e
+      }
+    }
+    return Buffer.concat(chunks)
+  }
+  const streamConsumers = {
+    buffer: consumeChunks,
+    arrayBuffer: async (source) => {
+      const b = await consumeChunks(source)
+      return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)
+    },
+    text: async (source) => (await consumeChunks(source)).toString("utf8"),
+    json: async (source) => JSON.parse((await consumeChunks(source)).toString("utf8")),
+    blob: async (source) => new Blob([await consumeChunks(source)]),
+  }
+
+  const abortReason = (signal) => signal.reason ?? new DOMException("The operation was aborted", "AbortError")
+  const timersPromises = {
+    setTimeout: (ms = 1, value, options) =>
+      new Promise((resolve, reject) => {
+        const signal = options?.signal
+        if (signal?.aborted) return reject(abortReason(signal))
+        const t = setTimeout(() => resolve(value), ms)
+        if (options?.ref === false) t.unref?.()
+        signal?.addEventListener(
+          "abort",
+          () => {
+            clearTimeout(t)
+            reject(abortReason(signal))
+          },
+          { once: true },
+        )
+      }),
+    setImmediate: (value, options) =>
+      new Promise((resolve, reject) => {
+        const signal = options?.signal
+        if (signal?.aborted) return reject(abortReason(signal))
+        const t = setImmediate(() => resolve(value))
+        signal?.addEventListener(
+          "abort",
+          () => {
+            clearImmediate(t)
+            reject(abortReason(signal))
+          },
+          { once: true },
+        )
+      }),
+    setInterval: async function* (ms = 1, value, options) {
+      const signal = options?.signal
+      while (true) {
+        if (signal?.aborted) throw abortReason(signal)
+        await timersPromises.setTimeout(ms, undefined, options)
+        yield value
+      }
+    },
+  }
+  timersPromises.scheduler = {
+    wait: (ms, options) => timersPromises.setTimeout(ms, undefined, options),
+    yield: () => timersPromises.setImmediate(),
+  }
+
+  class Domain extends EventEmitter {
+    constructor() {
+      super()
+      this.members = []
+    }
+    run(fn, ...args) {
+      return fn.apply(this, args)
+    }
+    add(emitter) {
+      if (!this.members.includes(emitter)) this.members.push(emitter)
+    }
+    remove(emitter) {
+      const i = this.members.indexOf(emitter)
+      if (i >= 0) this.members.splice(i, 1)
+    }
+    bind(fn) {
+      return fn
+    }
+    intercept(fn) {
+      return (err, ...args) => {
+        if (err) this.emit("error", err)
+        else fn(...args)
+      }
+    }
+    enter() {}
+    exit() {}
+    dispose() {
+      this.members.length = 0
+    }
+  }
+  const domain = { Domain, create: () => new Domain(), createDomain: () => new Domain(), active: null }
+
+  const traceEvents = {
+    createTracing: (options) => {
+      if (!options || !Array.isArray(options.categories)) throw new TypeError('The "options.categories" property must be of type Array')
+      const tracing = {
+        categories: options.categories.join(","),
+        enabled: false,
+        enable() {
+          this.enabled = true
+        },
+        disable() {
+          this.enabled = false
+        },
+      }
+      return tracing
+    },
+    getEnabledCategories: () => undefined,
+  }
+
+  class Recoverable extends SyntaxError {
+    constructor(err) {
+      super(err?.message)
+      this.err = err
+    }
+  }
+  class REPLServer extends EventEmitter {
+    constructor(options = {}) {
+      super()
+      this.commands = Object.create(null)
+      this.context = globalThis
+      this.input = options.input ?? process.stdin
+      this.output = options.output ?? process.stdout
+      this.useGlobal = true
+      this._prompt = options.prompt ?? "> "
+    }
+    defineCommand(keyword, cmd) {
+      this.commands[keyword] = typeof cmd === "function" ? { action: cmd } : cmd
+    }
+    displayPrompt() {
+      this.output.write(this._prompt)
+    }
+    setPrompt(prompt) {
+      this._prompt = prompt
+    }
+    getPrompt() {
+      return this._prompt
+    }
+    clearBufferedCommand() {}
+    setupHistory(path, cb) {
+      cb?.(null, this)
+    }
+    close() {
+      this.emit("exit")
+    }
+  }
+  const repl = {
+    start: (options) => new REPLServer(typeof options === "string" ? { prompt: options } : options),
+    REPLServer,
+    Recoverable,
+    REPL_MODE_SLOPPY: Symbol("repl-sloppy"),
+    REPL_MODE_STRICT: Symbol("repl-strict"),
+    builtinModules: [],
+  }
+
+  const seaError = () => {
+    const e = new Error("Single executable application is not available")
+    e.code = "ERR_NOT_IN_SINGLE_EXECUTABLE_APPLICATION"
+    return e
+  }
+  const sea = {
+    isSea: () => false,
+    getAsset: () => {
+      throw seaError()
+    },
+    getAssetAsBlob: () => {
+      throw seaError()
+    },
+    getRawAsset: () => {
+      throw seaError()
+    },
+  }
+
+  class WASI {
+    constructor(options = {}) {
+      this.wasiImport = {}
+      this.version = options.version ?? "preview1"
+    }
+    getImportObject() {
+      return { wasi_snapshot_preview1: this.wasiImport }
+    }
+    start() {
+      throw new Error("WASI is not supported in this runtime")
+    }
+    initialize() {}
+  }
+  const wasi = { WASI }
+
+  const makeNodeTest = (base) => {
+    const normalize = (name, options, fn) => {
+      if (typeof name === "function") return [name.name || "<anonymous>", name]
+      if (typeof options === "function") return [String(name), options]
+      return [String(name), fn ?? (() => {})]
+    }
+    const test = (name, options, fn) => {
+      const [title, body] = normalize(name, options, fn)
+      return base.test(title, body)
+    }
+    const describe = (name, options, fn) => {
+      const [title, body] = normalize(name, options, fn)
+      return base.describe(title, body)
+    }
+    const skip = () => undefined
+    const mockFn = (original, implementation, options) => {
+      if (typeof original !== "function") original = () => {}
+      let impl = implementation ?? original
+      const calls = []
+      const queue = []
+      const f = function (...args) {
+        const next = queue.shift()
+        const target = next ?? impl
+        let result
+        let error
+        try {
+          result = new.target ? new target(...args) : target.apply(this, args)
+        } catch (e) {
+          error = e
+          throw e
+        } finally {
+          calls.push({ arguments: args, result, error, this: this, target: new.target, stack: new Error().stack })
+        }
+        return result
+      }
+      f.mock = {
+        calls,
+        callCount: () => calls.length,
+        mockImplementation(fn) {
+          impl = fn
+        },
+        mockImplementationOnce(fn) {
+          queue.push(fn)
+        },
+        resetCalls() {
+          calls.length = 0
+        },
+        restore() {
+          impl = original
+        },
+      }
+      if (options?.times !== undefined) {
+        let left = options.times
+        const chosen = impl
+        impl = function (...args) {
+          if (left-- > 0) return chosen.apply(this, args)
+          return original.apply(this, args)
+        }
+      }
+      return f
+    }
+    const mock = {
+      fn: mockFn,
+      method(object, name, implementation, options) {
+        const original = object[name]
+        const f = mockFn(original, implementation, options)
+        const restore = f.mock.restore
+        f.mock.restore = () => {
+          restore()
+          object[name] = original
+        }
+        object[name] = f
+        return f
+      },
+      getter(object, name, implementation) {
+        const f = mockFn(() => Reflect.get(object, name), implementation)
+        Object.defineProperty(object, name, { get: f, configurable: true })
+        return f
+      },
+      setter(object, name, implementation) {
+        const f = mockFn((v) => Reflect.set(object, name, v), implementation)
+        Object.defineProperty(object, name, { set: f, configurable: true })
+        return f
+      },
+      module() {
+        throw new Error("mock.module is not supported")
+      },
+      reset() {},
+      restoreAll() {},
+      timers: { enable() {}, reset() {}, tick() {}, runAll() {}, setTime() {} },
+    }
+    const before = (fn) => {
+      let done = false
+      base.beforeEach(async () => {
+        if (done) return
+        done = true
+        await fn()
+      })
+    }
+    const after = (fn) => {
+      process.on("exit", () => fn())
+    }
+    Object.assign(test, {
+      test,
+      it: test,
+      describe,
+      suite: describe,
+      before,
+      after,
+      beforeEach: base.beforeEach,
+      afterEach: base.afterEach,
+      skip,
+      todo: skip,
+      only: test,
+      mock,
+      run: () => new EventEmitter(),
+      snapshot: { setDefaultSnapshotSerializers() {}, setResolveSnapshotPath() {} },
+    })
+    test.describe.skip = skip
+    test.describe.todo = skip
+    test.describe.only = describe
+    test.it.skip = skip
+    test.it.todo = skip
+    test.it.only = test
+    Object.defineProperty(test, "default", { value: test, writable: true, enumerable: false, configurable: true })
+    return test
+  }
+
   const nodeConstants = { O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, S_IFMT: 61440, S_IFREG: 32768, S_IFDIR: 16384, S_IFLNK: 40960, F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, SIGINT: 2, SIGTERM: 15, SIGKILL: 9, SIGHUP: 1, E2BIG: 7, EACCES: 13, EEXIST: 17, ENOENT: 2, ENOTDIR: 20, EISDIR: 21, EINVAL: 22, ENOTEMPTY: 39, UV_UDP_REUSEADDR: 4 }
 
   return {
@@ -2874,6 +3524,16 @@ const NODE_SRC: &str = r##"
     tty,
     PerformanceObserver,
     Buffer,
+    bufferModule,
+    Console,
+    streamConsumers,
+    timersPromises,
+    domain,
+    traceEvents,
+    repl,
+    sea,
+    wasi,
+    makeNodeTest,
     EventEmitter,
     fs,
     promises,
@@ -2954,7 +3614,7 @@ fn pick(vm: &mut Vm, src: &Value, names: &[&str]) -> Result<Value, Value> {
         let v = vm.get_prop(src, name)?;
         o.set_own(*name, v);
     }
-    o.set_own("default", Value::Object(o.clone()));
+    o.set_hidden("default", Value::Object(o.clone()));
     Ok(Value::Object(o))
 }
 
@@ -2967,7 +3627,7 @@ fn with_default(vm: &mut Vm, v: Value) -> Result<Value, Value> {
         for (k, x) in vm.own_entries(&v) {
             copy.set_own(k, x);
         }
-        copy.set_own("default", v.clone());
+        copy.set_hidden("default", v.clone());
         return Ok(Value::Object(copy));
     }
     Ok(v)
@@ -3005,7 +3665,7 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                             h.set_own(k, v);
                         }
                     }
-                    h.set_own("default", Value::Object(h.clone()));
+                    h.set_hidden("default", Value::Object(h.clone()));
                 }
                 h
             }
@@ -3013,7 +3673,7 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 let n = load(vm)?;
                 let s = vm.get_prop(&n, "stream")?;
                 if let Value::Object(o) = &s {
-                    o.set_own("default", s.clone());
+                    o.set_hidden("default", s.clone());
                 }
                 s
             }
@@ -3027,10 +3687,71 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 let z = vm.get_prop(&n, "zlib")?;
                 with_default(vm, z)?
             }
-            "net" | "tls" | "http2" | "v8" | "cluster" | "inspector" | "punycode" => {
+            "net" | "tls" | "http2" | "v8" | "cluster" | "inspector" | "punycode" | "domain"
+            | "repl" | "sea" | "wasi" => {
                 let n = load(vm)?;
                 let m = vm.get_prop(&n, name)?;
                 with_default(vm, m)?
+            }
+            "trace_events" => {
+                let n = load(vm)?;
+                let m = vm.get_prop(&n, "traceEvents")?;
+                with_default(vm, m)?
+            }
+            "stream/consumers" => {
+                let n = load(vm)?;
+                let m = vm.get_prop(&n, "streamConsumers")?;
+                with_default(vm, m)?
+            }
+            "stream/web" => {
+                let o = vm.new_object();
+                for key in [
+                    "ReadableStream",
+                    "ReadableStreamDefaultReader",
+                    "ReadableStreamBYOBReader",
+                    "ReadableStreamDefaultController",
+                    "ReadableByteStreamController",
+                    "ReadableStreamBYOBRequest",
+                    "WritableStream",
+                    "WritableStreamDefaultWriter",
+                    "WritableStreamDefaultController",
+                    "TransformStream",
+                    "TransformStreamDefaultController",
+                    "ByteLengthQueuingStrategy",
+                    "CountQueuingStrategy",
+                    "TextEncoderStream",
+                    "TextDecoderStream",
+                    "CompressionStream",
+                    "DecompressionStream",
+                ] {
+                    vm.load_lazy_global(key)?;
+                    if let Some(v) = vm.globals.get(key).cloned() {
+                        o.set_own(key, v);
+                    }
+                }
+                o.set_hidden("default", Value::Object(o.clone()));
+                Value::Object(o)
+            }
+            "util/types" => {
+                let n = load(vm)?;
+                let t = vm.get_prop(&n, "types")?;
+                with_default(vm, t)?
+            }
+            "console" => {
+                let n = load(vm)?;
+                let console = vm.globals.get("console").cloned().unwrap_or_default();
+                let class = vm.get_prop(&n, "Console")?;
+                if let Value::Object(c) = &console {
+                    c.set_hidden("Console", class);
+                    c.set_hidden("default", console.clone());
+                }
+                console
+            }
+            "test" => {
+                let n = load(vm)?;
+                let make = vm.get_prop(&n, "makeNodeTest")?;
+                let base = vm.import_builtin("test")?;
+                vm.call_value(&make, Value::Undefined, &[base])?
             }
             "worker_threads" => {
                 let n = load(vm)?;
@@ -3083,7 +3804,7 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 let list = vm.new_array(names);
                 o.set_own("builtinModules", list);
                 o.set_own("require", require);
-                o.set_own("default", Value::Object(o.clone()));
+                o.set_hidden("default", Value::Object(o.clone()));
                 Value::Object(o)
             }
             "events" => {
@@ -3099,7 +3820,8 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
             }
             "buffer" => {
                 let n = load(vm)?;
-                pick(vm, &n, &["Buffer"])?
+                let b = vm.get_prop(&n, "bufferModule")?;
+                with_default(vm, b)?
             }
             "assert" | "assert/strict" => {
                 let n = load(vm)?;
@@ -3109,6 +3831,7 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 }
                 a
             }
+            "sys" => vm.import_node("util")?.unwrap_or_default(),
             "util" => {
                 let n = load(vm)?;
                 let base = vm.import_builtin("util")?;
@@ -3144,7 +3867,7 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 let td = vm.globals.get("TextDecoder").cloned().unwrap_or_default();
                 o.set_own("TextEncoder", te);
                 o.set_own("TextDecoder", td);
-                o.set_own("default", Value::Object(o.clone()));
+                o.set_hidden("default", Value::Object(o.clone()));
                 Value::Object(o)
             }
             "url" => {
@@ -3159,7 +3882,7 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                     let v = vm.get_prop(&n, key)?;
                     o.set_own(key, v);
                 }
-                o.set_own("default", Value::Object(o.clone()));
+                o.set_hidden("default", Value::Object(o.clone()));
                 Value::Object(o)
             }
             "readline" => {
@@ -3171,7 +3894,7 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 }
                 let p = vm.get_prop(&n, "readlinePromises")?;
                 o.set_own("promises", p);
-                o.set_own("default", Value::Object(o.clone()));
+                o.set_hidden("default", Value::Object(o.clone()));
                 Value::Object(o)
             }
             "readline/promises" => {
@@ -3184,12 +3907,22 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 with_default(vm, p)?
             }
             "timers" => {
+                let n = load(vm)?;
                 let o = vm.new_object();
-                for key in ["setTimeout", "setInterval", "clearTimeout", "clearInterval"] {
+                for key in [
+                    "setTimeout",
+                    "setInterval",
+                    "setImmediate",
+                    "clearTimeout",
+                    "clearInterval",
+                    "clearImmediate",
+                ] {
                     let v = vm.globals.get(key).cloned().unwrap_or_default();
                     o.set_own(key, v);
                 }
-                o.set_own("default", Value::Object(o.clone()));
+                let p = vm.get_prop(&n, "timersPromises")?;
+                o.set_own("promises", p);
+                o.set_hidden("default", Value::Object(o.clone()));
                 Value::Object(o)
             }
             "crypto" => {
@@ -3218,15 +3951,13 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 o.set_own("performance", p);
                 let po = vm.get_prop(&n, "PerformanceObserver")?;
                 o.set_own("PerformanceObserver", po);
-                o.set_own("default", Value::Object(o.clone()));
+                o.set_hidden("default", Value::Object(o.clone()));
                 Value::Object(o)
             }
             "timers/promises" => {
-                let o = vm.new_object();
-                let f = native_fn(vm, "setTimeout", 2, timers_set_timeout);
-                o.set_own("setTimeout", f);
-                o.set_own("default", Value::Object(o.clone()));
-                Value::Object(o)
+                let n = load(vm)?;
+                let p = vm.get_prop(&n, "timersPromises")?;
+                with_default(vm, p)?
             }
             _ => return Ok(None),
         }))
@@ -3369,18 +4100,20 @@ fn zlib_crc32(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(Value::Number(h.finalize() as f64))
 }
 
-pub const BUILTIN_MODULES: [&str; 43] = [
+pub const BUILTIN_MODULES: [&str; 55] = [
     "assert",
     "assert/strict",
     "async_hooks",
     "buffer",
     "child_process",
     "cluster",
+    "console",
     "constants",
     "crypto",
     "diagnostics_channel",
     "dns",
     "dns/promises",
+    "domain",
     "events",
     "fs",
     "fs/promises",
@@ -3388,6 +4121,7 @@ pub const BUILTIN_MODULES: [&str; 43] = [
     "http2",
     "https",
     "inspector",
+    "inspector/promises",
     "module",
     "net",
     "os",
@@ -3400,20 +4134,31 @@ pub const BUILTIN_MODULES: [&str; 43] = [
     "querystring",
     "readline",
     "readline/promises",
+    "repl",
+    "sea",
     "stream",
+    "stream/consumers",
     "stream/promises",
+    "stream/web",
     "string_decoder",
+    "sys",
+    "test",
     "timers",
     "timers/promises",
     "tls",
+    "trace_events",
     "tty",
     "url",
     "util",
+    "util/types",
     "v8",
     "vm",
+    "wasi",
     "worker_threads",
     "zlib",
 ];
+
+pub const PREFIX_ONLY: [&str; 2] = ["sea", "test"];
 
 fn module_create_require(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
     Ok(vm.globals.get("require").cloned().unwrap_or_default())
@@ -3423,15 +4168,6 @@ fn module_is_builtin(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let name = vm.to_string(&arg(args, 0))?;
     let bare = name.strip_prefix("node:").unwrap_or(&name);
     Ok(Value::Bool(BUILTIN_MODULES.contains(&bare)))
-}
-
-fn timers_set_timeout(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    let ms = vm.to_number(&arg(args, 0))?;
-    let value = arg(args, 1);
-    let p = vm.new_promise();
-    let (resolve, _) = vm.resolving_functions(&p);
-    vm.add_timer(resolve, ms, vec![value], false);
-    Ok(Value::Object(p))
 }
 
 fn native_format(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

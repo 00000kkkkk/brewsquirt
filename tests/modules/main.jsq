@@ -12,3 +12,7 @@ console.log(exists(tmp), readFile(tmp))
 remove(tmp)
 console.log(exists(tmp))
 
+
+import { Kind, area, esm, cjs } from "shapes"
+import * as shapes from "shapes"
+console.log(Kind.Circle, Kind.default.Square, area(1), esm, cjs, Object.keys(shapes).join())

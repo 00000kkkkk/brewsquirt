@@ -313,7 +313,7 @@ pub fn util_module(vm: &mut Vm) -> Value {
     method(vm, &o, "inspect", 1, util_inspect);
     method(vm, &o, "format", 1, util_format);
     method(vm, &o, "isDeepStrictEqual", 2, util_deep_equal);
-    o.set_own("default", Value::Object(o.clone()));
+    o.set_hidden("default", Value::Object(o.clone()));
     Value::Object(o)
 }
 

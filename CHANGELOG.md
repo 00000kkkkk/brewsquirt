@@ -23,9 +23,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `node:diagnostics_channel`, `node:constants`, and loadable `node:http2`,
   `node:worker_threads`, `node:cluster`, `node:v8` and `node:inspector` whose unsupported
   operations throw `ENOTSUP`.
+- `Error.prepareStackTrace` receives an array of call sites with `getFileName`,
+  `getLineNumber`, `getFunctionName`, `isToplevel`, `isEval`, `isConstructor` and the other V8
+  methods, `Error.stackTraceLimit` bounds every stack, and `Error.captureStackTrace(obj, fn)`
+  hides the frames above `fn`.
+- Module paths on Windows no longer carry the `\\?\` prefix.
+- `require` resolves `exports` with the `require` condition and `import` with the `import`
+  condition, so dual packages load the right build; `http.createServer` servers have the full
+  EventEmitter surface, `setTimeout` and connection helpers; `http` exports `IncomingMessage` and
+  `ServerResponse`; the Node-style `EventEmitter` stores listeners in `_events`, can be called as
+  a plain function from `util.inherits` subclasses and mixed into other objects, and offers
+  `errorMonitor`, `getEventListeners`, `EventEmitter.on` with abort signals.
+- `process.version`, `process.versions.node` and `process.release.name` report a Node 22
+  compatible runtime so that packages checking the Node version work; the JavaSquirt version
+  stays in `process.versions.jsq` and `process.release.javasquirt`.
 - A regular expression literal may follow `export default`.
 - Package entry resolution honours `exports` conditions (`import`, `require`, `node`,
   `module-sync`, `default`), subpath exports with `*` patterns, and the `module` field.
+- `process` is an event emitter: `on`, `once`, `off`, `emit`, `listenerCount` and friends work,
+  `exit` fires with the exit code when the program ends or `process.exit` is called,
+  `beforeExit` fires when the event loop drains and may schedule more work, `uncaughtException`
+  and `unhandledRejection` listeners receive errors that would otherwise end the program, and
+  `process.emitWarning` emits `warning` and prints `(jsq:pid) Name: message` to stderr unless
+  `NODE_NO_WARNINGS=1`.
+- `MessageChannel`, `MessagePort`, `BroadcastChannel`, `MessageEvent`, `CloseEvent` and
+  `ErrorEvent` globals; ports deliver structured clones asynchronously and accept both
+  `onmessage` and `on("message")`.
+- `node:console` with the `Console` class that writes to any pair of streams,
+  `node:util/types` with the full set of `is*` checks, `node:stream/web`,
+  `node:stream/consumers` (`text`, `json`, `buffer`, `arrayBuffer`, `blob`), `node:test`
+  (`test`, `describe`, `it`, hooks and `mock.fn`/`mock.method` on top of `squirt:test`),
+  `node:timers/promises` with `setImmediate`, `setInterval` and `scheduler`, plus `node:sys`,
+  `node:domain`, `node:trace_events`, `node:repl`, `node:sea` and `node:wasi` so that packages
+  importing them load.
+- `node:buffer` exports `SlowBuffer`, `kMaxLength`, `kStringMaxLength`, `constants`,
+  `INSPECT_MAX_BYTES`, `atob`, `btoa`, `isUtf8`, `isAscii`, `transcode`, `Blob` and `File`, and
+  the `Buffer` statics are enumerable like Node's so that `safer-buffer` style wrappers copy them.
+
+### Fixed
+
+- `export * as name from "pkg"`, `export { x } from "pkg"` and `export * from "pkg"` now link
+  when the source is a package or a CommonJS file; previously only relative ES modules were
+  re-exported, which broke `htmlparser2`, `cheerio` and similar packages.
+- `http` request objects report `readable` and `complete` correctly and expose a `socket` with
+  the usual methods, so `body-parser` and `express.json()` read request bodies.
+- `require()` of a built-in module no longer exposes an enumerable `default` key.
 
 ## [1.1.0] - 2026-10-22
 

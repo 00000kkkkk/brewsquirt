@@ -1,0 +1,19 @@
+const { port1, port2 } = new MessageChannel()
+port2.on("message", (m) => {
+  console.log("port2", JSON.stringify(m))
+  port2.close()
+})
+port1.on("close", () => console.log("port1 closed"))
+port1.postMessage({ a: [1, { b: 2 }] })
+const x = new BroadcastChannel("ch")
+const y = new BroadcastChannel("ch")
+y.onmessage = (ev) => {
+  console.log("y", ev.data, ev instanceof MessageEvent, ev.type)
+  x.close()
+  y.close()
+}
+x.postMessage("hello")
+const close = new CloseEvent("close", { code: 1000, reason: "bye", wasClean: true })
+console.log(close.code, close.reason, close.wasClean)
+const err = new ErrorEvent("error", { message: "m", lineno: 3 })
+console.log(err.message, err.lineno, new MessageEvent("message", { data: 1 }).data)
