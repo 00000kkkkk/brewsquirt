@@ -102,7 +102,9 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
         out.push_str(&format!("(?{inline})"));
     }
     let dot_all = flags.contains('s');
+    let unicode = flags.contains('u') || flags.contains('v');
     let mut in_class = false;
+    let mut groups_open: Vec<Option<usize>> = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
@@ -117,8 +119,20 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                     'D' if !in_class => out.push_str("[^0-9]"),
                     'w' if !in_class => out.push_str("[A-Za-z0-9_]"),
                     'W' if !in_class => out.push_str("[^A-Za-z0-9_]"),
-                    'd' => out.push_str("0-9"),
-                    'w' => out.push_str("A-Za-z0-9_"),
+                    'd' | 'w' | 's' | 'S' | 'D' | 'W' if in_class => {
+                        match e {
+                            'd' => out.push_str("0-9"),
+                            'w' => out.push_str("A-Za-z0-9_"),
+                            _ => {
+                                out.push('\\');
+                                out.push(e);
+                            }
+                        }
+                        if chars.get(i + 1) == Some(&'-') && chars.get(i + 2) != Some(&']') {
+                            out.push_str("\\-");
+                            i += 1;
+                        }
+                    }
                     'b' if in_class => out.push_str("\\x08"),
                     's' | 'S' | 'b' | 'B' | 'n' | 'r' | 't' | 'f' | 'v' | 'D' | 'W' => {
                         out.push('\\');
@@ -235,7 +249,9 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                         i += 1 + end;
                     }
                     'p' | 'P' => {
-                        out.push('\\');
+                        if unicode {
+                            out.push('\\');
+                        }
                         out.push(e);
                     }
                     '/' => out.push('/'),
@@ -283,6 +299,37 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                     out.push_str("(?s:.)");
                 } else {
                     out.push_str("[^\\n\\r\\x{2028}\\x{2029}]");
+                }
+            }
+            '(' if !in_class => {
+                let lookahead = chars.get(i + 1) == Some(&'?')
+                    && matches!(chars.get(i + 2), Some('=') | Some('!'));
+                groups_open.push(if lookahead { Some(out.len()) } else { None });
+                out.push('(');
+            }
+            ')' if !in_class => {
+                out.push(')');
+                if let Some(Some(start)) = groups_open.pop() {
+                    if !unicode {
+                        let q_end = match chars.get(i + 1) {
+                            Some('*') | Some('+') | Some('?') => Some(i + 1),
+                            Some('{') => is_quantifier(&chars, i + 1),
+                            _ => None,
+                        };
+                        if let Some(mut q_end) = q_end {
+                            let q: String = chars[i + 1..=q_end].iter().collect();
+                            if chars.get(q_end + 1) == Some(&'?') {
+                                q_end += 1;
+                            }
+                            let optional =
+                                q.starts_with('*') || q.starts_with('?') || q.starts_with("{0");
+                            if optional {
+                                out.insert_str(start, "(?:");
+                                out.push_str("|)");
+                            }
+                            i = q_end;
+                        }
+                    }
                 }
             }
             '{' if !in_class => match is_quantifier(&chars, i) {

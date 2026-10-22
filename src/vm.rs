@@ -5283,6 +5283,14 @@ impl Vm {
                 Op::TryEnd => {
                     self.handlers.pop();
                 }
+                Op::ThrowRef(k) => {
+                    throw!(self.make_error_at(
+                        ErrorKind::ReferenceError,
+                        name!(k).to_string(),
+                        fi,
+                        ip
+                    ));
+                }
                 Op::ThrowConstAssign(_) => {
                     throw!(self.make_error_at(
                         ErrorKind::TypeError,

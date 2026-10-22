@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `with` statement: identifiers, calls, `typeof` and `delete` inside the body and in closures
+  created there resolve through the object first, honouring `Symbol.unscopables`, and strict code
+  throws a `ReferenceError` when a binding disappears between lookup and use.
+- Sloppy mode semantics: assigning to an undeclared name creates a global, failed assignments and
+  deletes are ignored instead of throwing, `this` in a plain call is `globalThis`, `arguments`
+  has `callee`, `caller` and `arguments` on plain functions read as `null`, legacy octal literals
+  and escapes parse, `yield`, `let` and `await` work as identifiers, duplicate parameters and
+  block-level duplicate functions are accepted, `if (x) function f() {}` and labelled function
+  declarations work, and block-level functions hoist to the enclosing function following the
+  Annex B rules for conflicting `let`, `const`, `class`, parameter and catch bindings.
+- Direct `eval` declarations: `var` and function declarations inside a sloppy direct `eval` join
+  the calling function's scope or the global object, including from nested evals, parameter
+  default expressions and arrow functions; declaring a name that collides with a `let` or `const`
+  of the caller, or `arguments` from a parameter expression, is a `SyntaxError`.
+- Global declarations follow the specification: `var` and function declarations create
+  non-configurable properties, `eval` creates configurable ones, redeclaring a non-configurable
+  global function throws before anything is declared, `let undefined` is rejected and `delete`
+  of a global reports its configurability.
+- Early errors: legacy octal escapes and literals in strict code, numeric separators in legacy
+  literals, `??` mixed with `||` or `&&`, rest elements that are not last, private names after
+  `super` or in object patterns, `await` and `arguments` inside static blocks, `yield` and `await`
+  in generator and async parameters, duplicate arrow and method parameters, duplicate catch
+  bindings, `for (let x;;) { var x }`, `eval` or `arguments` as names of strict functions and
+  generator or async functions as `if` bodies.
+- Destructuring assignment evaluates target references before stepping iterators or reading
+  properties, closes iterators when a generator is returned from inside a pattern and excludes
+  computed keys from object rest.
+- `super` property references evaluate their base before the key, throw a `TypeError` on a null
+  base, support `++` and compound assignment, and a second `super()` call constructs the parent
+  before throwing.
+- `Array.fromAsync` follows the specification, the `RegExp` constructor honours `Symbol.match`
+  objects, `RegExp.prototype.toString` reads `source` and `flags`, match results carry `indices`
+  under the `d` flag, forward references and Annex B `\k` escapes compile, and the lexer
+  re-tokenizes `/` as division or a regular expression from parser context.
+- Class heritage is checked with IsConstructor and the `prototype` getter, bound and proxied
+  functions work as super constructors, `"prototype" in method` is `false`, accessors from
+  computed keys and functions in private fields get names, and functions list `length`, `name`
+  and `prototype` first in `Object.getOwnPropertyNames`.
+
+### Fixed
+
+- JSON: the reviver deletes and defines through the ordinary operations, array holders are read
+  with `Get`, replacer arrays accept `String` and `Number` objects and coerce the `space`
+  argument, and getters that throw propagate.
+- Object spread and rest read proxy traps in specification order; assignments to own accessor
+  properties call their setters; `Object.prototype.__proto__` is immutable; `padStart` and
+  `padEnd` report length 1; `String.prototype[Symbol.iterator]` rejects `null`; years before 0
+  format with four digits; `Promise` rejects a second initialization and defines result slots
+  with define semantics.
+- Array `includes` and `indexOf` check the length before coercing `fromIndex`, `fill` and
+  `reverse` only throw on frozen arrays when they would write, and `Array.prototype.toString`
+  falls back correctly when `join` is not callable.
+
 ## [0.9.0] - 2026-10-22
 
 ### Added

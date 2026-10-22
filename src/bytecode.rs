@@ -36,6 +36,7 @@ pub enum Op {
     CanDeclareGlobalFn(u32),
     WithGet(u32),
     WithSet(u32),
+    ThrowRef(u32),
     TypeofGlobal(u32),
     GetProp(u32),
     SetProp(u32),
@@ -340,6 +341,7 @@ impl FunctionProto {
                 | Op::CanDeclareGlobalFn(c)
                 | Op::WithGet(c)
                 | Op::WithSet(c)
+                | Op::ThrowRef(c)
                 | Op::TypeofGlobal(c)
                 | Op::GetProp(c)
                 | Op::SetProp(c)

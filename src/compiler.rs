@@ -3851,6 +3851,22 @@ impl Compiler {
                         }
                     }
                     ExprKind::Ident(n) => self.delete_ident_static(n),
+                    ExprKind::SuperMember(_) => {
+                        self.super_info(false)?;
+                        let msg: Rc<str> = "Unsupported reference to 'super'".into();
+                        let k = self.str_const(&msg);
+                        self.emit(Op::ThrowRef(k));
+                        self.emit(Op::Undefined);
+                    }
+                    ExprKind::SuperIndex(key) => {
+                        self.super_info(false)?;
+                        self.expr(key)?;
+                        self.emit(Op::Pop);
+                        let msg: Rc<str> = "Unsupported reference to 'super'".into();
+                        let k = self.str_const(&msg);
+                        self.emit(Op::ThrowRef(k));
+                        self.emit(Op::Undefined);
+                    }
                     ExprKind::Member { obj, name, .. } => {
                         self.expr(obj)?;
                         let k = self.str_const(name);

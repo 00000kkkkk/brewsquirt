@@ -5,9 +5,9 @@ supported feature, a program should print the same output under `jsq` as under N
 that are not implemented yet are listed in [Not yet supported](#not-yet-supported).
 
 JavaSquirt is checked against [test262](https://github.com/tc39/test262), the official
-ECMAScript conformance suite. JavaSquirt 0.9.0 passes 95% of the strict mode tests it runs
-(about 39,500 of 41,500). Most remaining failures are edge cases; the larger gaps are listed in
-[Not yet supported](#not-yet-supported).
+ECMAScript conformance suite. JavaSquirt passes 97% of the tests it runs, in both strict and
+sloppy mode (about 42,700 of 44,000). Most remaining failures are edge cases; the larger gaps are
+listed in [Not yet supported](#not-yet-supported).
 
 ## Contents
 
@@ -912,8 +912,10 @@ Java Squirt { first: 'Java', last: 'Squirt', full: [Getter] }
 Every property has the `writable`, `enumerable` and `configurable` attributes. Properties made
 with `Object.defineProperty` default to `false` for all three, class methods and builtin methods
 are not enumerable, and `Object.keys`, `for...in`, spread, `JSON.stringify` and `console.log` only
-see enumerable properties. Programs run in strict mode, so writing a read-only property or adding
-one to a non-extensible object throws a `TypeError`.
+see enumerable properties. Modules, classes and code under a `"use strict"` directive run in
+strict mode, so writing a read-only property or adding one to a non-extensible object throws a
+`TypeError`; scripts, `Function` bodies and `eval` code without the directive follow sloppy
+mode rules, where such writes are silently ignored.
 
 ```js
 const point = Object.freeze({ x: 1, y: 2 })
@@ -1987,14 +1989,15 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
   handful of locales; dates are formatted in English
 - Regular expressions: the `v` flag's set operations, most `\p{...}` property escapes, lookbehind
   containing back-references, duplicate named groups and some early errors for invalid patterns
-- Direct `eval` sees the calling function's locals, but `var` declarations inside it stay in the
-  `eval` instead of joining the caller's scope
-- Sloppy mode: scripts and `Function` bodies parse with sloppy rules, but run with strict
-  semantics: assigning to an undeclared name throws, `this` in a plain call is `undefined`, and
-  `with` is not supported. Functions created with the `Function` constructor receive
-  `globalThis` as `this`
-- Module namespace objects are ordinary objects: they are extensible and their properties are
-  configurable
+- The sloppy mode `arguments` object is not mapped to the parameters: writing `arguments[0]`
+  does not change the first parameter
+- Top-level `let`, `const` and `class` declarations in scripts live on the global object instead
+  of a separate global lexical environment, and declarations spread over several scripts are not
+  checked for collisions
+- Arrays are dense: writing an index far beyond the end or setting `length` to a huge value
+  throws a `RangeError` instead of creating a sparse array
+- Private names are shared by all evaluations of a class body, so instances of two classes made
+  by the same factory can access each other's private members
 - Several realms in one process; `Atomics.wait` never blocks because there is one thread
 - `Temporal`, `ShadowRealm`, decorators and `using` declarations
 - Tracing garbage collection
