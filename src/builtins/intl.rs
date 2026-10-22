@@ -66,7 +66,11 @@ const INTL_SRC: &str = r##"
   }
   const resolve = (locales) => localeList(locales)[0] ?? "en-US"
   const lang = (locale) => locale.split("-")[0]
-  const numberData = (locale) => NUMBER_DATA[lang(locale)] ?? NUMBER_DATA.en
+  const numberData = (locale) => {
+    const tag = String(locale)
+    if (/^(en|hi|bn|ta|te|mr|gu|kn|ml)-IN$/i.test(tag)) return { ...(NUMBER_DATA[lang(locale)] ?? NUMBER_DATA.en), indian: true }
+    return NUMBER_DATA[lang(locale)] ?? NUMBER_DATA.en
+  }
 
   const getOpt = (options, key, allowed, fallback) => {
     const v = options[key]
@@ -90,11 +94,13 @@ const INTL_SRC: &str = r##"
     return s
   }
 
-  const groupDigits = (int, sep, minGroup) => {
+  const groupDigits = (int, sep, minGroup, indian = false) => {
     if (int.length < 4 + (minGroup - 1)) return int
     let out = ""
     for (let i = 0; i < int.length; i++) {
-      if (i > 0 && (int.length - i) % 3 === 0) out += sep
+      const fromEnd = int.length - i
+      const boundary = indian ? fromEnd === 3 || (fromEnd > 3 && (fromEnd - 3) % 2 === 0) : fromEnd % 3 === 0
+      if (i > 0 && boundary) out += sep
       out += int[i]
     }
     return out
@@ -211,7 +217,7 @@ const INTL_SRC: &str = r##"
       if (!Number.isFinite(abs)) {
         return this.#decorate([{ type: "infinity", value: "∞" }], suffix, negative, x, data, exponent)
       }
-      const text = exponent !== null && o.maximumSignificantDigits === undefined && o.maximumFractionDigits === 3 ? Number(abs.toPrecision(4)).toString() : this.#digits(abs)
+      const text = exponent !== null && o.maximumSignificantDigits === undefined && o.maximumFractionDigits === 3 ? Number(abs.toFixed(3)).toString() : this.#digits(abs)
       let [int, frac = ""] = text.split(".")
       int = int.padStart(o.minimumIntegerDigits, "0")
       const grouped = this.#withGroup(int, data)
@@ -228,7 +234,7 @@ const INTL_SRC: &str = r##"
     #withGroup(int, data) {
       const g = this.#o.useGrouping
       if (g === false) return int
-      return groupDigits(int, data.group, g === "min2" ? 2 : g === "always" ? 1 : data.minGroup)
+      return groupDigits(int, data.group, g === "min2" ? 2 : g === "always" ? 1 : data.minGroup, data.indian === true)
     }
     #decorate(parts, suffix, negative, x, data, exponent) {
       const o = this.#o
@@ -268,7 +274,13 @@ const INTL_SRC: &str = r##"
           out.push(...body, { type: "literal", value: " " }, { type: "currency", value: info[2] })
           return out
         }
-        const symbol = o.currencyDisplay === "code" ? o.currency : o.currencyDisplay === "narrowSymbol" ? info[0].replace(/^[A-Z]+(?=[^A-Z])/, "") : info[0]
+        const localSymbol = lang(o.locale) === "ja" && o.currency === "JPY" ? "￥" : lang(o.locale) === "zh" && o.currency === "CNY" ? "¥" : info[0]
+        const symbol = o.currencyDisplay === "code" ? o.currency : o.currencyDisplay === "narrowSymbol" ? localSymbol.replace(/^[A-Z]+(?=[^A-Z])/, "") : localSymbol
+        const accounting = o.currencySign === "accounting" && out.length > 0 && out[0].type === "minusSign"
+        if (accounting) {
+          out.length = 0
+          out.push({ type: "literal", value: "(" })
+        }
         const [before, after] = data.currency.split("{n}")
         if (before) {
           const sym = before.replace("{s}", symbol)
@@ -280,6 +292,7 @@ const INTL_SRC: &str = r##"
           out.push({ type: "literal", value: after.slice(0, after.indexOf("{s}")) })
           out.push({ type: "currency", value: symbol })
         }
+        if (accounting) out.push({ type: "literal", value: ")" })
         return out
       }
       if (o.style === "unit") {
@@ -334,7 +347,7 @@ const INTL_SRC: &str = r##"
   }
   const DATE_DATA = {
     en: EN_DATES,
-    "en-GB": { ...EN_DATES, order: "dmy", pad: true, h12: false, full: "{weekday} {day} {month} {year}", long: "{day} {month} {year}", medium: "{day} {short} {year}", shortDate: "{dd}/{MM}/{year}", md: "{day} {month}", mdy: "{day} {month} {year}", wsep: " " },
+    "en-GB": { ...EN_DATES, order: "dmy", pad: true, h12: false, full: "{weekday}, {day} {month} {year}", long: "{day} {month} {year}", medium: "{day} {short} {year}", shortDate: "{dd}/{MM}/{year}", md: "{day} {month}", mdy: "{day} {month} {year}", wsep: " " },
     "en-AU": { ...EN_DATES, order: "dmy", pad: true, h12: true, full: "{weekday} {day} {month} {year}", long: "{day} {month} {year}", medium: "{day} {short} {year}", shortDate: "{dd}/{MM}/{year}", md: "{day} {month}", mdy: "{day} {month} {year}", wsep: " ", am: "am", pm: "pm" },
     "en-CA": { ...EN_DATES, order: "ymd", sep: "-", pad: true, shortDate: "{year}-{MM}-{dd}" },
     uk: {
@@ -399,7 +412,7 @@ const INTL_SRC: &str = r##"
       days: ["domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado"],
       daysShort: ["dom.", "seg.", "ter.", "qua.", "qui.", "sex.", "sáb."],
       order: "dmy", sep: "/", pad: true, h12: false, am: "AM", pm: "PM",
-      full: "{weekday}, {day} de {month} de {year}", long: "{day} de {month} de {year}", medium: "{day} de {short} de {year}", shortDate: "{dd}/{MM}/{year}",
+      full: "{weekday}, {day} de {month} de {year}", long: "{day} de {month} de {year}", medium: "{day} de {short} de {year}", shortDate: "{dd}/{MM}/{fullYear}",
       md: "{day} de {month}", mdy: "{day} de {month} de {year}", my: "{month} de {year}", wsep: ", ", dtsep: ", ", at: " às ",
     },
     pl: {
@@ -501,15 +514,20 @@ const INTL_SRC: &str = r##"
       const m = a % 60
       return long ? `GMT${sign}${pad2(h)}:${pad2(m)}` : `GMT${sign}${h}${m ? ":" + pad2(m) : ""}`
     }
-    if (tz === "UTC") return style === "long" || style === "longGeneric" ? "Coordinated Universal Time" : "UTC"
+    if (tz === "UTC") {
+      if (style === "shortOffset") return "GMT+0"
+      if (style === "longOffset") return "GMT+00:00"
+      return style === "long" || style === "longGeneric" ? "Coordinated Universal Time" : "UTC"
+    }
     if (style === "shortOffset") return gmt(false)
     if (style === "longOffset") return gmt(true)
     if (parseZoneOffset(tz) !== undefined) return gmt(style === "long")
     const info = tzInfo(tz, date.getTime())
-    const abbreviation = info !== undefined && info[1] !== "" && !/^[+-]?\d/.test(info[1]) ? info[1] : undefined
+    const abbreviation = info !== undefined && KNOWN_ABBREVIATIONS.includes(info[1]) ? info[1] : undefined
     if ((style === "short" || style === "shortGeneric") && abbreviation !== undefined) return abbreviation
     return gmt(style === "long" || style === "longGeneric")
   }
+  const KNOWN_ABBREVIATIONS = ["EST", "EDT", "CST", "CDT", "MST", "MDT", "PST", "PDT", "AKST", "AKDT", "HST", "HDT", "GMT", "UTC"]
 
   const fields = (date, offset) => {
     const d = new Date(date.getTime() + offset * 60000)
@@ -554,11 +572,12 @@ const INTL_SRC: &str = r##"
         second: pick("second", ["numeric", "2-digit"]),
         fractionalSecondDigits: opts.fractionalSecondDigits === undefined ? undefined : Number(opts.fractionalSecondDigits),
         timeZoneName: pick("timeZoneName", ["short", "long", "shortOffset", "longOffset", "shortGeneric", "longGeneric"]),
+        dayPeriod: pick("dayPeriod", ["narrow", "short", "long"]),
         hour12: opts.hour12 === undefined ? (opts.hourCycle === undefined ? undefined : opts.hourCycle === "h12" || opts.hourCycle === "h11") : Boolean(opts.hour12),
         dateStyle: pick("dateStyle", ["full", "long", "medium", "short"]),
         timeStyle: pick("timeStyle", ["full", "long", "medium", "short"]),
       }
-      const anyField = ["weekday", "year", "month", "day", "hour", "minute", "second", "fractionalSecondDigits"].some((k) => o[k] !== undefined)
+      const anyField = ["weekday", "era", "year", "month", "day", "dayPeriod", "hour", "minute", "second", "fractionalSecondDigits"].some((k) => o[k] !== undefined)
       if ((o.dateStyle || o.timeStyle) && anyField) throw new TypeError("Can't set option dateStyle when other date-time options are set")
       if (!anyField && !o.dateStyle && !o.timeStyle) {
         o.year = "numeric"
@@ -594,7 +613,7 @@ const INTL_SRC: &str = r##"
       const weekdayName = (style) => (style === "long" ? L.days[f.weekday] : style === "short" ? L.daysShort[f.weekday] : [...L.days[f.weekday]][0])
       const values = (monthStyle, dayStyle, yearStyle, weekdayStyle) => ({
         weekday: weekdayStyle ? weekdayName(weekdayStyle) : "",
-        month: monthStyle === "numeric" || monthStyle === "2-digit" ? String(f.month + 1) : monthName(monthStyle === "narrow" ? "narrow" : "long"),
+        month: monthStyle === "numeric" || monthStyle === "2-digit" ? String(f.month + 1) : monthName(monthStyle),
         gen: monthStyle === "short" ? L.short[f.month] : monthStyle === "narrow" ? [...L.months[f.month]][0] : (L.gen ?? L.months)[f.month],
         short: L.short[f.month],
         day: dayStyle === "2-digit" ? pad2(f.day) : String(f.day),
@@ -604,8 +623,9 @@ const INTL_SRC: &str = r##"
         M: String(f.month + 1),
         year: yearStyle === "2-digit" ? pad2(f.year % 100) : String(f.year),
         yy: pad2(f.year % 100),
+        fullYear: String(f.year),
       })
-      const typeOf = { weekday: "weekday", month: "month", gen: "month", short: "month", day: "day", dd: "day", d: "day", MM: "month", M: "month", year: "year", yy: "year" }
+      const typeOf = { weekday: "weekday", month: "month", gen: "month", short: "month", day: "day", dd: "day", d: "day", MM: "month", M: "month", year: "year", yy: "year", fullYear: "year" }
       const render = (template, v) => {
         const re = /\{(\w+)\}/g
         let last = 0
@@ -688,6 +708,19 @@ const INTL_SRC: &str = r##"
         if (o.year || o.month || o.day) lit(L.wsep)
         parts.push({ type: "weekday", value: weekdayName(o.weekday) })
       }
+      if (o.era) {
+        const names = o.era === "long" ? ["Before Christ", "Anno Domini"] : o.era === "narrow" ? ["B", "A"] : ["BC", "AD"]
+        if (hasDate) lit(" ")
+        parts.push({ type: "era", value: names[f.year > 0 ? 1 : 0] })
+      }
+      const dayPeriodName = () => {
+        const h = f.hour
+        if (h === 12) return "noon"
+        if (h < 6 || h >= 21) return "at night"
+        if (h < 12) return "in the morning"
+        if (h < 18) return "in the afternoon"
+        return "in the evening"
+      }
       const hasTime = o.hour || o.minute || o.second
       if (hasTime) {
         if (hasDate) lit(L.dtsep)
@@ -705,7 +738,7 @@ const INTL_SRC: &str = r##"
         }
         if (o.hour && h12) {
           lit(" ")
-          parts.push({ type: "dayPeriod", value: f.hour < 12 ? L.am : L.pm })
+          parts.push({ type: "dayPeriod", value: o.dayPeriod ? dayPeriodName() : f.hour < 12 ? L.am : L.pm })
         }
       }
       if (o.timeZoneName) {
@@ -725,9 +758,16 @@ const INTL_SRC: &str = r##"
       return `${this.format(a)} – ${this.format(b)}`
     }
     resolvedOptions() {
-      const out = {}
-      for (const [k, v] of Object.entries(this.#o)) if (v !== undefined && k !== "defaulted") out[k] = v
-      out.timeZone ??= tzSystem()
+      const o = this.#o
+      const out = { locale: o.locale, calendar: o.calendar, numberingSystem: o.numberingSystem, timeZone: o.timeZone ?? tzSystem() }
+      if (o.hour !== undefined || o.timeStyle !== undefined) {
+        const h12 = o.hour12 === undefined ? dateData(o.locale).h12 : o.hour12
+        out.hourCycle = h12 ? "h12" : "h23"
+        out.hour12 = h12
+      }
+      for (const k of ["weekday", "era", "year", "month", "day", "dayPeriod", "hour", "minute", "second", "fractionalSecondDigits", "timeZoneName", "dateStyle", "timeStyle"]) {
+        if (o[k] !== undefined) out[k] = o[k]
+      }
       return out
     }
     static supportedLocalesOf(locales) {
@@ -809,6 +849,21 @@ const INTL_SRC: &str = r##"
       case "fr":
       case "pt":
         return i === 0 || i === 1 ? "one" : "other"
+      case "ar": {
+        if (n === 0) return "zero"
+        if (n === 1) return "one"
+        if (n === 2) return "two"
+        const m100 = i % 100
+        if (v === 0 && m100 >= 3 && m100 <= 10) return "few"
+        if (v === 0 && m100 >= 11 && m100 <= 99) return "many"
+        return "other"
+      }
+      case "he":
+        return n === 1 ? "one" : n === 2 && v === 0 ? "two" : "other"
+      case "cs":
+      case "sk":
+        if (v !== 0) return "many"
+        return i === 1 ? "one" : i >= 2 && i <= 4 ? "few" : "other"
       case "uk":
       case "ru":
         if (v !== 0) return "other"
@@ -883,6 +938,59 @@ const INTL_SRC: &str = r##"
     minute: { 0: "this minute" },
     second: { 0: "now" },
   }
+  const RT_LOCALES = {
+    uk: {
+      future: "через {n} {u}",
+      past: "{n} {u} тому",
+      units: { year: ["рік", "роки", "років"], quarter: ["квартал", "квартали", "кварталів"], month: ["місяць", "місяці", "місяців"], week: ["тиждень", "тижні", "тижнів"], day: ["день", "дні", "днів"], hour: ["годину", "години", "годин"], minute: ["хвилину", "хвилини", "хвилин"], second: ["секунду", "секунди", "секунд"] },
+      short: { year: "р.", quarter: "кв.", month: "міс.", week: "тиж.", day: "дн.", hour: "год.", minute: "хв.", second: "с" },
+      auto: { day: { "-2": "позавчора", "-1": "вчора", 0: "сьогодні", 1: "завтра", 2: "післязавтра" }, year: { "-1": "минулого року", 0: "цього року", 1: "наступного року" }, month: { "-1": "минулого місяця", 0: "цього місяця", 1: "наступного місяця" }, week: { "-1": "минулого тижня", 0: "цього тижня", 1: "наступного тижня" }, quarter: { "-1": "минулого кварталу", 0: "цього кварталу", 1: "наступного кварталу" }, hour: { 0: "цієї години" }, minute: { 0: "цієї хвилини" }, second: { 0: "зараз" } },
+    },
+    ru: {
+      future: "через {n} {u}",
+      past: "{n} {u} назад",
+      units: { year: ["год", "года", "лет"], quarter: ["квартал", "квартала", "кварталов"], month: ["месяц", "месяца", "месяцев"], week: ["неделю", "недели", "недель"], day: ["день", "дня", "дней"], hour: ["час", "часа", "часов"], minute: ["минуту", "минуты", "минут"], second: ["секунду", "секунды", "секунд"] },
+      short: { year: "г.", quarter: "кв.", month: "мес.", week: "нед.", day: "дн.", hour: "ч.", minute: "мин.", second: "с" },
+      auto: { day: { "-2": "позавчера", "-1": "вчера", 0: "сегодня", 1: "завтра", 2: "послезавтра" }, year: { "-1": "в прошлом году", 0: "в этом году", 1: "в следующем году" }, month: { "-1": "в прошлом месяце", 0: "в этом месяце", 1: "в следующем месяце" }, week: { "-1": "на прошлой неделе", 0: "на этой неделе", 1: "на следующей неделе" }, second: { 0: "сейчас" } },
+    },
+    de: {
+      future: "in {n} {u}",
+      past: "vor {n} {u}",
+      units: { year: ["Jahr", "Jahren", "Jahren"], quarter: ["Quartal", "Quartalen", "Quartalen"], month: ["Monat", "Monaten", "Monaten"], week: ["Woche", "Wochen", "Wochen"], day: ["Tag", "Tagen", "Tagen"], hour: ["Stunde", "Stunden", "Stunden"], minute: ["Minute", "Minuten", "Minuten"], second: ["Sekunde", "Sekunden", "Sekunden"] },
+      short: { year: "J.", quarter: "Quart.", month: "Mon.", week: "Wo.", day: "Tg.", hour: "Std.", minute: "Min.", second: "Sek." },
+      auto: { day: { "-2": "vorgestern", "-1": "gestern", 0: "heute", 1: "morgen", 2: "übermorgen" }, year: { "-1": "letztes Jahr", 0: "dieses Jahr", 1: "nächstes Jahr" }, month: { "-1": "letzten Monat", 0: "diesen Monat", 1: "nächsten Monat" }, week: { "-1": "letzte Woche", 0: "diese Woche", 1: "nächste Woche" }, second: { 0: "jetzt" } },
+    },
+    fr: {
+      future: "dans {n} {u}",
+      past: "il y a {n} {u}",
+      units: { year: ["an", "ans", "ans"], quarter: ["trimestre", "trimestres", "trimestres"], month: ["mois", "mois", "mois"], week: ["semaine", "semaines", "semaines"], day: ["jour", "jours", "jours"], hour: ["heure", "heures", "heures"], minute: ["minute", "minutes", "minutes"], second: ["seconde", "secondes", "secondes"] },
+      short: { year: "a", quarter: "trim.", month: "m.", week: "sem.", day: "j", hour: "h", minute: "min", second: "s" },
+      auto: { day: { "-2": "avant-hier", "-1": "hier", 0: "aujourd’hui", 1: "demain", 2: "après-demain" }, year: { "-1": "l’année dernière", 0: "cette année", 1: "l’année prochaine" }, month: { "-1": "le mois dernier", 0: "ce mois-ci", 1: "le mois prochain" }, week: { "-1": "la semaine dernière", 0: "cette semaine", 1: "la semaine prochaine" }, second: { 0: "maintenant" } },
+    },
+    es: {
+      future: "dentro de {n} {u}",
+      past: "hace {n} {u}",
+      units: { year: ["año", "años", "años"], quarter: ["trimestre", "trimestres", "trimestres"], month: ["mes", "meses", "meses"], week: ["semana", "semanas", "semanas"], day: ["día", "días", "días"], hour: ["hora", "horas", "horas"], minute: ["minuto", "minutos", "minutos"], second: ["segundo", "segundos", "segundos"] },
+      short: { year: "a", quarter: "trim.", month: "m", week: "sem.", day: "d", hour: "h", minute: "min", second: "s" },
+      auto: { day: { "-2": "anteayer", "-1": "ayer", 0: "hoy", 1: "mañana", 2: "pasado mañana" }, year: { "-1": "el año pasado", 0: "este año", 1: "el próximo año" }, month: { "-1": "el mes pasado", 0: "este mes", 1: "el próximo mes" }, week: { "-1": "la semana pasada", 0: "esta semana", 1: "la próxima semana" }, second: { 0: "ahora" } },
+    },
+    pl: {
+      future: "za {n} {u}",
+      past: "{n} {u} temu",
+      units: { year: ["rok", "lata", "lat"], quarter: ["kwartał", "kwartały", "kwartałów"], month: ["miesiąc", "miesiące", "miesięcy"], week: ["tydzień", "tygodnie", "tygodni"], day: ["dzień", "dni", "dni"], hour: ["godzinę", "godziny", "godzin"], minute: ["minutę", "minuty", "minut"], second: ["sekundę", "sekundy", "sekund"] },
+      short: { year: "rok", quarter: "kw.", month: "mies.", week: "tyg.", day: "dzień", hour: "godz.", minute: "min", second: "s" },
+      auto: { day: { "-2": "przedwczoraj", "-1": "wczoraj", 0: "dzisiaj", 1: "jutro", 2: "pojutrze" }, year: { "-1": "w zeszłym roku", 0: "w tym roku", 1: "w przyszłym roku" }, month: { "-1": "w zeszłym miesiącu", 0: "w tym miesiącu", 1: "w przyszłym miesiącu" }, week: { "-1": "w zeszłym tygodniu", 0: "w tym tygodniu", 1: "w przyszłym tygodniu" }, second: { 0: "teraz" } },
+    },
+  }
+  const slavicForm = (n) => {
+    const i = Math.trunc(Math.abs(n))
+    if (i !== Math.abs(n)) return 1
+    const m10 = i % 10
+    const m100 = i % 100
+    if (m10 === 1 && m100 !== 11) return 0
+    if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return 1
+    return 2
+  }
   class RelativeTimeFormat {
     #o
     constructor(locales, options) {
@@ -899,14 +1007,23 @@ const INTL_SRC: &str = r##"
       let u = String(unit)
       if (u.endsWith("s")) u = u.slice(0, -1)
       if (!RT_UNITS.includes(u)) throw new RangeError(`Invalid unit argument for format() '${unit}'`)
+      const l = lang(this.#o.locale)
+      const data = RT_LOCALES[l]
       if (this.#o.numeric === "auto") {
-        const t = RT_AUTO[u]?.[String(n)]
+        const t = (data ? data.auto : RT_AUTO)[u]?.[String(n)]
         if (t) return t
       }
       const abs = Math.abs(n)
       const num = new NumberFormat(this.#o.locale).format(abs)
+      const past = n < 0 || Object.is(n, -0)
+      if (data) {
+        const forms = data.units[u]
+        const form = l === "uk" || l === "ru" || l === "pl" ? slavicForm(abs) : abs === 1 ? 0 : 1
+        const label = this.#o.style === "long" ? forms[form] : data.short[u]
+        return (past ? data.past : data.future).replace("{n}", num).replace("{u}", label)
+      }
       const label = this.#o.style === "long" ? (abs === 1 ? u : u + "s") : RT_SHORT[u] === "day" ? (abs === 1 ? "day" : "days") : RT_SHORT[u]
-      return n < 0 || Object.is(n, -0) ? `${num} ${label} ago` : `in ${num} ${label}`
+      return past ? `${num} ${label} ago` : `in ${num} ${label}`
     }
     formatToParts(value, unit) {
       return [{ type: "literal", value: this.format(value, unit) }]
@@ -919,6 +1036,23 @@ const INTL_SRC: &str = r##"
     }
   }
 
+  const LIST_WORDS = {
+    en: { and: "and", or: "or", sep: ", " },
+    de: { and: "und", or: "oder", sep: ", " },
+    fr: { and: "et", or: "ou", sep: ", " },
+    es: { and: "y", or: "o", sep: ", " },
+    it: { and: "e", or: "o", sep: ", " },
+    pt: { and: "e", or: "ou", sep: ", " },
+    nl: { and: "en", or: "of", sep: ", " },
+    uk: { and: "і", or: "або", sep: ", " },
+    ru: { and: "и", or: "или", sep: ", " },
+    pl: { and: "i", or: "lub", sep: ", " },
+    sv: { and: "och", or: "eller", sep: ", " },
+    tr: { and: "ve", or: "veya", sep: ", " },
+    ko: { and: "및", or: "또는", sep: ", " },
+    ja: { and: "、", or: "、または", sep: "、" },
+    zh: { and: "和", or: "或", sep: "、" },
+  }
   class ListFormat {
     #o
     constructor(locales, options) {
@@ -932,12 +1066,19 @@ const INTL_SRC: &str = r##"
     format(list) {
       const items = [...list].map(String)
       const o = this.#o
-      const word = o.type === "disjunction" ? "or" : o.type === "unit" ? "" : o.style === "long" ? "and" : "&"
+      const l = lang(o.locale)
+      const words = LIST_WORDS[l] ?? LIST_WORDS.en
       if (items.length === 0) return ""
       if (items.length === 1) return items[0]
-      if (o.type === "unit") return items.join(o.style === "narrow" ? " " : ", ")
+      if (o.type === "unit") return items.join(o.style === "narrow" ? " " : words.sep)
+      if (l === "ja" || l === "zh") {
+        if (o.type === "disjunction") return items.slice(0, -1).join(words.sep) + words.or + items[items.length - 1]
+        return l === "zh" ? items.slice(0, -1).join(words.sep) + words.and + items[items.length - 1] : items.join(words.sep)
+      }
+      const word = o.type === "disjunction" ? words.or : o.style === "long" || l !== "en" ? words.and : "&"
+      const oxford = l === "en" && o.type !== "unit"
       if (items.length === 2) return `${items[0]} ${word} ${items[1]}`
-      return `${items.slice(0, -1).join(", ")}, ${word} ${items[items.length - 1]}`
+      return `${items.slice(0, -1).join(words.sep)}${oxford ? "," : ""} ${word} ${items[items.length - 1]}`
     }
     formatToParts(list) {
       return [{ type: "literal", value: this.format(list) }]

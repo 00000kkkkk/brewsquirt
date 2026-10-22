@@ -1,0 +1,69 @@
+[Function: named] [AsyncFunction (anonymous)] [GeneratorFunction: gen] [AsyncGeneratorFunction: agen] [class K]
+<Buffer > <Buffer 01 ff> SharedArrayBuffer { [Uint8Contents]: <00 00>, [byteLength]: 2 } WeakRef {}
+URL {
+  href: 'https://user:pw@example.com:8080/p/a?q=1&q=2#h',
+  origin: 'https://example.com:8080',
+  protocol: 'https:',
+  username: 'user',
+  password: 'pw',
+  host: 'example.com:8080',
+  hostname: 'example.com',
+  port: '8080',
+  pathname: '/p/a',
+  search: '?q=1&q=2',
+  searchParams: URLSearchParams { 'q' => '1', 'q' => '2' },
+  hash: '#h'
+}
+URLSearchParams { 'a' => '1', 'b' => '2' } URLSearchParams {} Headers { b: '2', 'x-a': '1' } Headers {}
+{ a: [Object] } {
+  a: { b: { c: { d: {} } } }
+} true
+{
+  a: 1,
+  b: 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+  c: [ 1, 2 ]
+}
+[
+  1,
+  2,
+  3
+]
+custom|10n|7n|2 [ 1, [Array] ] { a: [Object] } {
+  a: { b: { c: { d: 1 } } }
+} NaN NaN
+0.1111111111111111111111111111111112 5v1j4f4ds7c000 ff.8 -0.000110011 54 173.3513615237574734 0.3lllllllllm
+Expected property name or '}' in JSON at position 1 (line 1 column 2)
+Unexpected token ']', "[1,]" is not valid JSON
+Expected property name or '}' in JSON at position 1 (line 1 column 2)
+Unexpected number in JSON at position 1 (line 1 column 2)
+Unterminated fractional number in JSON at position 2 (line 1 column 3)
+Unexpected token '.', ".5" is not valid JSON
+"NaN" is not valid JSON
+Expected double-quoted property name in JSON at position 7 (line 1 column 8)
+Expected ',' or ']' after array element in JSON at position 3 (line 1 column 4)
+Bad control character in string literal in JSON at position 1 (line 1 column 2)
+Unexpected end of JSON input
+Unexpected end of JSON input
+Exponent part is missing a number in JSON at position 2 (line 1 column 3)
+Expected ':' after property name in JSON at position 5 (line 1 column 6)
+Unexpected end of JSON input
+Unexpected end of JSON input
+Unexpected token 'x', "{"a":1}x" is not valid JSON
+Unexpected end of JSON input
+DataCloneError DOMException true 25
+RangeError ERR_OUT_OF_RANGE The value of "offset" is out of range. It must be >= 0 and <= 0. Received 2
+RangeError ERR_OUT_OF_RANGE The value of "size" is out of range. It must be >= 0 && <= 9007199254740991. Received -1
+TypeError ERR_INVALID_ARG_TYPE The first argument must be of type string or an instance of Buffer, ArrayBuffer, or Array or an Array-like Object. Received type number (5)
+TypeError ERR_INVALID_ARG_TYPE The "offset" argument must be of type number. Received type string ('x')
+\\?\C:\a\b \\?\UNC\srv\share\x rel /a/b
+A%zz x https://a.com null true false
+micro > after-await > tick
+4,6 6 true 3,4 2
+["€A"]
+Wed, Jul 1 Jul 1, 2026 2026 AD July 2026 Anno Domini 12 noon 12:34 noon
+7/1/2026, GMT+0 7/1/2026, GMT+00:00 Wednesday, 1 July 2026 01/07/2026 7/1/2026, GMT+2 7/1/2026, CDT
+h12 true locale,calendar,numberingSystem,timeZone,hourCycle,hour12,hour,minute h23
+zero two few many few two
+через 2 години 1 день тому вчора через 5 хв. in 3 Monaten il y a 2 semaines za 5 lat завтра
+a, b und c a або b a、b、c a、b和c a, b et c a, b, & c
+12,34,567.891 ￥1,235 ($5.00) $5.00 123.456E3 1.235E5

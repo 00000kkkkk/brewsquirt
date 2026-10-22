@@ -15,8 +15,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   abbreviations and GMT offsets, `resolvedOptions().timeZone` reports the system zone, and
   `Intl.supportedValuesOf("timeZone")` lists the canonical zones.
 
+- `util.inspect` honours `depth` (including `null` and `Infinity`), `breakLength` and
+  `compact`, prints `[AsyncFunction]`, `[GeneratorFunction]` and `[AsyncGeneratorFunction]`
+  tags, `SharedArrayBuffer`, `WeakRef {}` and `<Buffer >` like Node, and calls
+  `Symbol.for("nodejs.util.inspect.custom")` methods; `URL`, `URLSearchParams` and `Headers`
+  implement them, so `console.log(new URL(...))` shows every component.
+- `util.format` follows Node for `%s` (user-defined `toString` wins, objects are inspected one
+  level deep), `%o` (depth 4) and BigInt arguments to `%d`, `%i` and `%f`.
+- `Readable.prototype.map`, `filter`, `flatMap`, `take`, `drop`, `forEach`, `reduce`, `some`,
+  `every` and `find`; `setEncoding` decodes multi-byte characters split across chunks with a
+  `StringDecoder`.
+- `Intl.DateTimeFormat` gained `era`, `dayPeriod`, `hourCycle`/`hour12` in `resolvedOptions`,
+  Node's GMT offset names for zones without a well-known abbreviation, and corrected `en-GB`
+  and `pt-BR` patterns; `Intl.RelativeTimeFormat` speaks Ukrainian, Russian, German, French,
+  Spanish and Polish; `Intl.ListFormat` knows the conjunctions of fifteen locales;
+  `Intl.PluralRules` covers Arabic, Hebrew, Czech and Slovak; `Intl.NumberFormat` supports
+  `currencySign: "accounting"`, Indian digit grouping for `en-IN`, the full-width yen sign in
+  Japanese and three fraction digits in engineering notation.
+- `path.toNamespacedPath`, `util.types.isProxy`, lenient `querystring.unescape`, `blob:`
+  origins in `URL`, and `ERR_OUT_OF_RANGE`/`ERR_INVALID_ARG_TYPE` codes on `Buffer` errors.
+
 ### Fixed
 
+- `Number.prototype.toString(radix)` uses V8's digit generation, so `(0.5).toString(3)` and
+  `(1e21).toString(36)` match Node exactly instead of printing extra digits.
+- `JSON.parse` reports V8's messages: `Unexpected end of JSON input`, `Unexpected token ']',
+  "[1,]" is not valid JSON`, `Expected property name or '}' in JSON at position 1 (line 1
+  column 2)` and the rest.
+- `structuredClone` rejects uncloneable values with a real `DOMException` named
+  `DataCloneError`; the month in `weekday: "short", month: "short"` formats is abbreviated.
+- `process.nextTick` callbacks run after the microtask queue drains, as in Node ES modules, so
+  `await` continuations are not interleaved with ticks.
 - `Date.parse` accepts the slash-separated legacy formats V8 understands, such as
   `7/1/2026, 9:00:00 PM`, `2026/07/01 21:00:00` and `12/31/99`, so `new Date(date.toLocaleString("en-US", { timeZone }))`
   round-trips and the `dayjs` and `luxon` time zone plugins work.

@@ -111,20 +111,25 @@ const NODE_SRC: &str = r##"
       if (value != null && (Array.isArray(value) || typeof value[Symbol.iterator] === "function" || typeof value.length === "number")) {
         return new Buffer(value)
       }
-      throw new TypeError("The first argument must be of type string or an instance of Buffer, ArrayBuffer, or Array or an Array-like Object.")
+      const e = new TypeError(`The first argument must be of type string or an instance of Buffer, ArrayBuffer, or Array or an Array-like Object. Received ${describeReceived(value)}`)
+      e.code = "ERR_INVALID_ARG_TYPE"
+      throw e
     }
     static #wrap(u8) {
       return new Buffer(u8.buffer, u8.byteOffset, u8.byteLength)
     }
     static alloc(size, fill, encoding) {
+      checkSize(size)
       const b = new Buffer(size)
       if (fill !== undefined && fill !== 0) b.fill(fill, 0, b.length, encoding)
       return b
     }
     static allocUnsafe(size) {
+      checkSize(size)
       return new Buffer(size)
     }
     static allocUnsafeSlow(size) {
+      checkSize(size)
       return new Buffer(size)
     }
     static byteLength(value, encoding) {
@@ -202,37 +207,79 @@ const NODE_SRC: &str = r##"
     includes(value, byteOffset, encoding) {
       return this.indexOf(value, byteOffset, encoding) !== -1
     }
-    #view() {
+    #view(o, size) {
+      if (typeof o !== "number") {
+        const e = new TypeError(`The "offset" argument must be of type number. Received ${describeReceived(o)}`)
+        e.code = "ERR_INVALID_ARG_TYPE"
+        throw e
+      }
+      if (!Number.isInteger(o)) {
+        const e = new RangeError(`The value of "offset" is out of range. It must be an integer. Received ${o}`)
+        e.code = "ERR_OUT_OF_RANGE"
+        throw e
+      }
+      if (o < 0 || o + size > this.length) {
+        const e = new RangeError(`The value of "offset" is out of range. It must be >= 0 and <= ${this.length - size}. Received ${o}`)
+        e.code = "ERR_OUT_OF_RANGE"
+        throw e
+      }
       return new DataView(this.buffer, this.byteOffset, this.byteLength)
     }
-    readUInt8(o = 0) { return this.#view().getUint8(o) }
-    readInt8(o = 0) { return this.#view().getInt8(o) }
-    readUInt16LE(o = 0) { return this.#view().getUint16(o, true) }
-    readUInt16BE(o = 0) { return this.#view().getUint16(o) }
-    readInt16LE(o = 0) { return this.#view().getInt16(o, true) }
-    readInt16BE(o = 0) { return this.#view().getInt16(o) }
-    readUInt32LE(o = 0) { return this.#view().getUint32(o, true) }
-    readUInt32BE(o = 0) { return this.#view().getUint32(o) }
-    readInt32LE(o = 0) { return this.#view().getInt32(o, true) }
-    readInt32BE(o = 0) { return this.#view().getInt32(o) }
-    readFloatLE(o = 0) { return this.#view().getFloat32(o, true) }
-    readFloatBE(o = 0) { return this.#view().getFloat32(o) }
-    readDoubleLE(o = 0) { return this.#view().getFloat64(o, true) }
-    readDoubleBE(o = 0) { return this.#view().getFloat64(o) }
-    writeUInt8(v, o = 0) { this.#view().setUint8(o, v); return o + 1 }
-    writeInt8(v, o = 0) { this.#view().setInt8(o, v); return o + 1 }
-    writeUInt16LE(v, o = 0) { this.#view().setUint16(o, v, true); return o + 2 }
-    writeUInt16BE(v, o = 0) { this.#view().setUint16(o, v); return o + 2 }
-    writeInt16LE(v, o = 0) { this.#view().setInt16(o, v, true); return o + 2 }
-    writeInt16BE(v, o = 0) { this.#view().setInt16(o, v); return o + 2 }
-    writeUInt32LE(v, o = 0) { this.#view().setUint32(o, v, true); return o + 4 }
-    writeUInt32BE(v, o = 0) { this.#view().setUint32(o, v); return o + 4 }
-    writeInt32LE(v, o = 0) { this.#view().setInt32(o, v, true); return o + 4 }
-    writeInt32BE(v, o = 0) { this.#view().setInt32(o, v); return o + 4 }
-    writeFloatLE(v, o = 0) { this.#view().setFloat32(o, v, true); return o + 4 }
-    writeFloatBE(v, o = 0) { this.#view().setFloat32(o, v); return o + 4 }
-    writeDoubleLE(v, o = 0) { this.#view().setFloat64(o, v, true); return o + 8 }
-    writeDoubleBE(v, o = 0) { this.#view().setFloat64(o, v); return o + 8 }
+    readUInt8(o = 0) { return this.#view(o, 1).getUint8(o) }
+    readInt8(o = 0) { return this.#view(o, 1).getInt8(o) }
+    readUInt16LE(o = 0) { return this.#view(o, 2).getUint16(o, true) }
+    readUInt16BE(o = 0) { return this.#view(o, 2).getUint16(o) }
+    readInt16LE(o = 0) { return this.#view(o, 2).getInt16(o, true) }
+    readInt16BE(o = 0) { return this.#view(o, 2).getInt16(o) }
+    readUInt32LE(o = 0) { return this.#view(o, 4).getUint32(o, true) }
+    readUInt32BE(o = 0) { return this.#view(o, 4).getUint32(o) }
+    readInt32LE(o = 0) { return this.#view(o, 4).getInt32(o, true) }
+    readInt32BE(o = 0) { return this.#view(o, 4).getInt32(o) }
+    readFloatLE(o = 0) { return this.#view(o, 4).getFloat32(o, true) }
+    readFloatBE(o = 0) { return this.#view(o, 4).getFloat32(o) }
+    readDoubleLE(o = 0) { return this.#view(o, 8).getFloat64(o, true) }
+    readDoubleBE(o = 0) { return this.#view(o, 8).getFloat64(o) }
+    writeUInt8(v, o = 0) { this.#view(o, 1).setUint8(o, v); return o + 1 }
+    writeInt8(v, o = 0) { this.#view(o, 1).setInt8(o, v); return o + 1 }
+    writeUInt16LE(v, o = 0) { this.#view(o, 2).setUint16(o, v, true); return o + 2 }
+    writeUInt16BE(v, o = 0) { this.#view(o, 2).setUint16(o, v); return o + 2 }
+    writeInt16LE(v, o = 0) { this.#view(o, 2).setInt16(o, v, true); return o + 2 }
+    writeInt16BE(v, o = 0) { this.#view(o, 2).setInt16(o, v); return o + 2 }
+    writeUInt32LE(v, o = 0) { this.#view(o, 4).setUint32(o, v, true); return o + 4 }
+    writeUInt32BE(v, o = 0) { this.#view(o, 4).setUint32(o, v); return o + 4 }
+    writeInt32LE(v, o = 0) { this.#view(o, 4).setInt32(o, v, true); return o + 4 }
+    writeInt32BE(v, o = 0) { this.#view(o, 4).setInt32(o, v); return o + 4 }
+    writeFloatLE(v, o = 0) { this.#view(o, 4).setFloat32(o, v, true); return o + 4 }
+    writeFloatBE(v, o = 0) { this.#view(o, 4).setFloat32(o, v); return o + 4 }
+    writeDoubleLE(v, o = 0) { this.#view(o, 8).setFloat64(o, v, true); return o + 8 }
+    writeDoubleBE(v, o = 0) { this.#view(o, 8).setFloat64(o, v); return o + 8 }
+  }
+  const describeReceived = (v) => {
+    if (v === null) return "null"
+    if (v === undefined) return "undefined"
+    if (typeof v === "function") return `function ${v.name}`
+    if (typeof v === "object") return v.constructor?.name ? `an instance of ${v.constructor.name}` : inspectLike(v)
+    const text = typeof v === "string" && v.length > 28 ? `${v.slice(0, 25)}...` : String(v)
+    return `type ${typeof v} (${typeof v === "string" ? `'${text}'` : text})`
+  }
+  const inspectLike = (v) => {
+    try {
+      return JSON.stringify(v)
+    } catch {
+      return String(v)
+    }
+  }
+  const checkSize = (size) => {
+    if (typeof size !== "number") {
+      const e = new TypeError(`The "size" argument must be of type number. Received ${describeReceived(size)}`)
+      e.code = "ERR_INVALID_ARG_TYPE"
+      throw e
+    }
+    if (!(size >= 0 && size <= 9007199254740991)) {
+      const e = new RangeError(`The value of "size" is out of range. It must be >= 0 && <= 9007199254740991. Received ${size}`)
+      e.code = "ERR_OUT_OF_RANGE"
+      throw e
+    }
   }
   for (const key of ["from", "alloc", "allocUnsafe", "allocUnsafeSlow", "byteLength", "concat", "isBuffer", "isEncoding", "compare"]) {
     const impl = Buffer[key]
@@ -1486,7 +1533,7 @@ const NODE_SRC: &str = r##"
     isWeakMap: (v) => v instanceof WeakMap,
     isWeakSet: (v) => v instanceof WeakSet,
     isModuleNamespaceObject: (v) => Object.prototype.toString.call(v) === "[object Module]",
-    isProxy: () => false,
+    isProxy: (v) => native.isProxy(v),
     isExternal: () => false,
     isKeyObject: () => false,
     isCryptoKey: (v) => typeof CryptoKey === "function" && v instanceof CryptoKey,
@@ -2207,11 +2254,17 @@ const NODE_SRC: &str = r##"
 
   const qsEscape = (s) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase())
   const qsUnescape = (s) => {
+    const text = String(s).replace(/\+/g, " ")
     try {
-      return decodeURIComponent(s.replace(/\+/g, " "))
-    } catch {
-      return s
-    }
+      return decodeURIComponent(text)
+    } catch {}
+    return text.replace(/(?:%[0-9a-fA-F]{2})+/g, (m) => {
+      try {
+        return decodeURIComponent(m)
+      } catch {
+        return m
+      }
+    })
   }
   const qsValue = (v) => {
     if (typeof v === "string") return v
@@ -2465,11 +2518,22 @@ const NODE_SRC: &str = r##"
       if (r.destroyed) return false
       if (chunk === null) {
         r.ended = true
+        if (r.decoder) {
+          const tail = r.decoder.end()
+          if (tail) r.buffer.push(tail)
+        }
         maybeEndRead(this)
         return false
       }
       let c = toChunk(this, chunk, encoding, r.objectMode)
-      if (!r.objectMode && r.encoding && typeof c !== "string") c = c.toString(r.encoding)
+      if (!r.objectMode && r.encoding && typeof c !== "string") {
+        r.decoder ??= new StringDecoder(r.encoding)
+        c = r.decoder.write(c)
+        if (c === "") {
+          scheduleRead(this)
+          return this.readableLength < r.highWaterMark
+        }
+      }
       r.buffer.push(c)
       scheduleRead(this)
       return this.readableLength < r.highWaterMark
@@ -2527,7 +2591,8 @@ const NODE_SRC: &str = r##"
     setEncoding(encoding) {
       const r = this[kRead]
       r.encoding = encoding ?? "utf8"
-      r.buffer = r.buffer.map((c) => (typeof c === "string" ? c : c.toString(r.encoding)))
+      r.decoder = new StringDecoder(r.encoding)
+      r.buffer = r.buffer.map((c) => (typeof c === "string" ? c : r.decoder.write(c))).filter((c) => c !== "")
       return this
     },
     pipe(dest, options) {
@@ -2592,6 +2657,74 @@ const NODE_SRC: &str = r##"
       const out = []
       for await (const c of this) out.push(c)
       return out
+    },
+    map(fn, options) {
+      const src = this
+      return Readable.from((async function* () {
+        for await (const c of src) yield await fn(c, { signal: options?.signal })
+      })())
+    },
+    filter(fn, options) {
+      const src = this
+      return Readable.from((async function* () {
+        for await (const c of src) if (await fn(c, { signal: options?.signal })) yield c
+      })())
+    },
+    flatMap(fn, options) {
+      const src = this
+      return Readable.from((async function* () {
+        for await (const c of src) {
+          const r = await fn(c, { signal: options?.signal })
+          if (r !== null && typeof r === "object" && (typeof r[Symbol.asyncIterator] === "function" || typeof r[Symbol.iterator] === "function")) {
+            for await (const x of r) yield x
+          } else yield r
+        }
+      })())
+    },
+    take(n) {
+      const src = this
+      return Readable.from((async function* () {
+        let count = 0
+        if (n <= 0) return
+        for await (const c of src) {
+          yield c
+          if (++count >= n) return
+        }
+      })())
+    },
+    drop(n) {
+      const src = this
+      return Readable.from((async function* () {
+        let count = 0
+        for await (const c of src) if (count++ >= n) yield c
+      })())
+    },
+    async forEach(fn, options) {
+      for await (const c of this) await fn(c, { signal: options?.signal })
+    },
+    async reduce(fn, initial) {
+      let acc = initial
+      let first = arguments.length < 2
+      for await (const c of this) {
+        if (first) {
+          acc = c
+          first = false
+        } else acc = await fn(acc, c)
+      }
+      if (first) throw new TypeError("Reduce of an empty stream requires an initial value")
+      return acc
+    },
+    async some(fn, options) {
+      for await (const c of this) if (await fn(c, { signal: options?.signal })) return true
+      return false
+    },
+    async every(fn, options) {
+      for await (const c of this) if (!(await fn(c, { signal: options?.signal }))) return false
+      return true
+    },
+    async find(fn, options) {
+      for await (const c of this) if (await fn(c, { signal: options?.signal })) return c
+      return undefined
     },
   })
   Readable.from = function from(iterable, options = {}) {
@@ -5818,7 +5951,8 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let n = vm.new_object();
-    let natives: [(&str, u32, crate::object::NativeFn); 55] = [
+    let natives: [(&str, u32, crate::object::NativeFn); 56] = [
+        ("isProxy", 1, is_proxy),
         ("watchStart", 4, super::netio::watch_start),
         ("watchClose", 1, super::netio::watch_close),
         ("watchRef", 2, super::netio::watch_ref),
@@ -6421,6 +6555,13 @@ fn crypto_random_bytes(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     ))
 }
 
+fn is_proxy(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    Ok(Value::Bool(matches!(
+        arg(args, 0),
+        Value::Object(o) if matches!(o.kind, crate::object::ObjKind::Proxy(_))
+    )))
+}
+
 pub(crate) fn gunzip_members(data: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut rest = data;
@@ -6621,8 +6762,31 @@ fn dns_lookup(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(vm.new_array(out))
 }
 
-fn native_inspect(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    Ok(crate::inspect::inspect_plain(&arg(args, 0)).into())
+pub(crate) fn native_inspect(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let mut options = crate::inspect::InspectOptions::default();
+    let opts = arg(args, 1);
+    if opts.is_object() {
+        match vm.get_prop(&opts, "depth")? {
+            Value::Null => options.depth = usize::MAX,
+            Value::Number(n) if n.is_finite() && n >= 0.0 => options.depth = n as usize,
+            Value::Number(n) if n.is_infinite() && n > 0.0 => options.depth = usize::MAX,
+            _ => {}
+        }
+        if let Value::Number(n) = vm.get_prop(&opts, "breakLength")? {
+            options.break_length = if n.is_finite() && n >= 0.0 {
+                n as usize
+            } else {
+                usize::MAX
+            };
+        }
+        match vm.get_prop(&opts, "compact")? {
+            Value::Bool(false) => options.compact = 0,
+            Value::Bool(true) => options.compact = 3,
+            Value::Number(n) if n.is_finite() && n >= 0.0 => options.compact = n as usize,
+            _ => {}
+        }
+    }
+    Ok(crate::inspect::inspect_with(vm, &arg(args, 0), options).into())
 }
 
 fn is_tty(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {

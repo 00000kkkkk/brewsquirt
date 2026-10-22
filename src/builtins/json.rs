@@ -293,15 +293,162 @@ fn stringify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 pub fn json_parse(vm: &mut Vm, text: &str) -> R {
     match serde_json::from_str::<serde_json::Value>(text) {
         Ok(j) => Ok(from_json(vm, &j)),
-        Err(e) => Err(vm.make_error(
-            ErrorKind::SyntaxError,
-            format!(
-                "Unexpected token in JSON at line {} column {}",
-                e.line(),
-                e.column()
-            ),
-        )),
+        Err(e) => Err(vm.make_error(ErrorKind::SyntaxError, json_error_message(text, &e))),
     }
+}
+
+fn json_error_message(text: &str, e: &serde_json::Error) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let line = e.line().max(1);
+    let column = e.column();
+    let mut position = 0usize;
+    for (i, l) in text.split('\n').enumerate() {
+        if i + 1 == line {
+            position += column.saturating_sub(1).min(l.chars().count());
+            break;
+        }
+        position += l.chars().count() + 1;
+    }
+    let position = position.min(chars.len());
+    let detail = e.to_string();
+    let detail = detail.split(" at line ").next().unwrap_or("").to_string();
+    let at = |p: usize| {
+        let mut line = 1;
+        let mut col = 1;
+        for &c in &chars[..p.min(chars.len())] {
+            if c == '\n' {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        format!("in JSON at position {p} (line {line} column {col})")
+    };
+    let current = chars.get(position).copied();
+    let previous = position.checked_sub(1).and_then(|i| chars.get(i)).copied();
+    let unexpected_token = |p: usize, c: char| {
+        let source: String = chars.iter().collect();
+        if chars.len() <= 40 {
+            format!("Unexpected token '{c}', \"{source}\" is not valid JSON")
+        } else {
+            let start = p.saturating_sub(10);
+            let end = (p + 10).min(chars.len());
+            let snippet: String = chars[start..end].iter().collect();
+            let head = if start > 0 { "..." } else { "" };
+            let tail = if end < chars.len() { "..." } else { "" };
+            format!("Unexpected token '{c}', {head}\"{snippet}\"{tail} is not valid JSON")
+        }
+    };
+    if detail.contains("EOF while parsing a string") {
+        return format!("Unterminated string {}", at(position));
+    }
+    if detail.contains("EOF") || current.is_none() {
+        let trimmed_len = chars
+            .iter()
+            .rposition(|c| !c.is_whitespace())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let last = trimmed_len
+            .checked_sub(1)
+            .and_then(|i| chars.get(i))
+            .copied();
+        let before_last = trimmed_len
+            .checked_sub(2)
+            .and_then(|i| chars.get(i))
+            .copied();
+        if last == Some('{') {
+            return format!("Expected property name or '}}' {}", at(trimmed_len));
+        }
+        if last == Some('.') && before_last.is_some_and(|c| c.is_ascii_digit()) {
+            return format!("Unterminated fractional number {}", at(trimmed_len));
+        }
+        if matches!(last, Some('e') | Some('E') | Some('+') | Some('-'))
+            && before_last.is_some_and(|c| c.is_ascii_digit() || c == 'e' || c == 'E')
+        {
+            return format!("Exponent part is missing a number {}", at(trimmed_len));
+        }
+        return "Unexpected end of JSON input".to_string();
+    }
+    let c = current.unwrap_or(' ');
+    if detail.contains("control character") {
+        let p = (0..position)
+            .rev()
+            .find(|&i| chars[i].is_control())
+            .unwrap_or(position);
+        return format!("Bad control character in string literal {}", at(p));
+    }
+    if detail.contains("invalid escape") {
+        return format!("Bad escaped character {}", at(position));
+    }
+    if detail.contains("unicode") || detail.contains("surrogate") {
+        return format!("Bad Unicode escape {}", at(position));
+    }
+    if detail.contains("key must be a string") {
+        return if previous == Some(',') {
+            format!("Expected double-quoted property name {}", at(position))
+        } else {
+            format!("Expected property name or '}}' {}", at(position))
+        };
+    }
+    if detail.contains("trailing comma") {
+        return if c == '}' {
+            format!("Expected double-quoted property name {}", at(position))
+        } else {
+            unexpected_token(position, c)
+        };
+    }
+    if detail.contains("expected `:`") {
+        return format!("Expected ':' after property name {}", at(position));
+    }
+    if detail.contains("expected `,` or `}`") {
+        return format!("Expected ',' or '}}' after property value {}", at(position));
+    }
+    if detail.contains("expected `,` or `]`") {
+        return format!("Expected ',' or ']' after array element {}", at(position));
+    }
+    if detail.contains("invalid number") || detail.contains("number out of range") {
+        return match previous {
+            Some('.') => format!("Unterminated fractional number {}", at(position)),
+            Some('e') | Some('E') | Some('+') => {
+                format!("Exponent part is missing a number {}", at(position))
+            }
+            Some('-') => format!("No number after minus sign {}", at(position)),
+            _ => format!("Unexpected number {}", at(position)),
+        };
+    }
+    if detail.contains("trailing characters") {
+        return if c.is_ascii_digit() {
+            format!("Unexpected number {}", at(position))
+        } else if c == '"' || c.is_alphabetic() || c == '.' || c == '-' {
+            unexpected_token(position, c)
+        } else {
+            format!(
+                "Unexpected non-whitespace character after JSON {}",
+                at(position)
+            )
+        };
+    }
+    if c.is_alphabetic() {
+        let word: String = chars[position..]
+            .iter()
+            .take_while(|ch| ch.is_alphanumeric())
+            .collect();
+        let truncated = ["true", "false", "null"]
+            .iter()
+            .any(|w| w.starts_with(word.as_str()) && word.len() < w.len());
+        if truncated && position + word.chars().count() == chars.len() {
+            return "Unexpected end of JSON input".to_string();
+        }
+        if position == 0 && position + word.chars().count() == chars.len() {
+            return format!("\"{word}\" is not valid JSON");
+        }
+        return unexpected_token(position, c);
+    }
+    if c.is_ascii_digit() && position > 0 {
+        return format!("Unexpected number {}", at(position));
+    }
+    unexpected_token(position, c)
 }
 
 fn from_json(vm: &mut Vm, j: &serde_json::Value) -> Value {

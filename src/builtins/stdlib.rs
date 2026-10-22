@@ -256,6 +256,24 @@ fn p_is_absolute(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     Ok(Value::Bool(is_absolute_with(&p[0], sep)))
 }
 
+fn p_to_namespaced(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let sep = sep_of(&this);
+    let input = arg(args, 0);
+    if !matches!(input, Value::Str(_)) {
+        return Ok(input);
+    }
+    let p = strings(vm, &[input])?;
+    let path = p[0].as_str();
+    if sep != '\\' || path.is_empty() || !is_absolute_with(path, sep) || path.starts_with("\\\\?\\")
+    {
+        return Ok(path.into());
+    }
+    if let Some(rest) = path.strip_prefix("\\\\") {
+        return Ok(format!("\\\\?\\UNC\\{rest}").into());
+    }
+    Ok(format!("\\\\?\\{path}").into())
+}
+
 fn p_relative(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let sep = sep_of(&this);
     let p = strings(vm, &[arg(args, 0), arg(args, 1)])?;
@@ -328,6 +346,7 @@ fn path_object(vm: &mut Vm, sep: char) -> Rc<Obj> {
         ("relative", 2, p_relative),
         ("parse", 1, p_parse),
         ("format", 1, p_format),
+        ("toNamespacedPath", 1, p_to_namespaced),
     ];
     for (name, arity, f) in fns {
         method(vm, &o, name, *arity, *f);

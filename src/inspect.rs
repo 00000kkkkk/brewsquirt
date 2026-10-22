@@ -8,16 +8,97 @@ const MAX_ITEMS: usize = 100;
 const BREAK_LENGTH: usize = 80;
 const COMPACT: usize = 3;
 
-struct Ctx {
+struct Ctx<'a> {
+    vm: Option<&'a mut crate::vm::Vm>,
+    max_depth: usize,
+    break_length: usize,
+    compact: usize,
     indent: usize,
     current_depth: usize,
     seen: Vec<*const Obj>,
     circular: Vec<*const Obj>,
 }
 
-impl Ctx {
-    fn new() -> Ctx {
+pub fn inspect_top_vm(vm: &mut crate::vm::Vm, v: &Value) -> String {
+    match v {
+        Value::Str(s) => s.to_string(),
+        _ => {
+            let mut ctx = Ctx::new();
+            ctx.vm = Some(vm);
+            format_value(&mut ctx, v, 0, true)
+        }
+    }
+}
+
+pub fn inspect_plain_vm(vm: &mut crate::vm::Vm, v: &Value) -> String {
+    let mut ctx = Ctx::new();
+    ctx.vm = Some(vm);
+    format_value(&mut ctx, v, 0, false)
+}
+
+pub struct InspectOptions {
+    pub depth: usize,
+    pub break_length: usize,
+    pub compact: usize,
+}
+
+impl Default for InspectOptions {
+    fn default() -> Self {
+        InspectOptions {
+            depth: MAX_DEPTH,
+            break_length: BREAK_LENGTH,
+            compact: COMPACT,
+        }
+    }
+}
+
+pub fn inspect_with(vm: &mut crate::vm::Vm, v: &Value, options: InspectOptions) -> String {
+    let mut ctx = Ctx::new();
+    ctx.vm = Some(vm);
+    ctx.max_depth = options.depth;
+    ctx.break_length = options.break_length;
+    ctx.compact = options.compact;
+    format_value(&mut ctx, v, 0, false)
+}
+
+fn custom_inspect(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize) -> Option<String> {
+    let depth = Value::Number((ctx.max_depth as f64 - rt as f64).max(0.0));
+    let vm = ctx.vm.as_deref_mut()?;
+    let key = match vm.symbol_registry.get("nodejs.util.inspect.custom") {
+        Some(Value::Symbol(s)) => s.key.clone(),
+        _ => return None,
+    };
+    let f = o.get_chain(&key)?;
+    if !f.is_callable() {
+        return None;
+    }
+    let options = vm.new_object();
+    let result = vm
+        .call_value(
+            &f,
+            Value::Object(o.clone()),
+            &[depth, Value::Object(options)],
+        )
+        .ok()?;
+    let text = match &result {
+        Value::Str(s) => s.to_string(),
+        Value::Object(r) if Rc::ptr_eq(r, o) => return None,
+        other => format_value(ctx, other, rt, false),
+    };
+    if ctx.indent > 0 && text.contains('\n') {
+        let pad = " ".repeat(ctx.indent);
+        return Some(text.replace('\n', &format!("\n{pad}")));
+    }
+    Some(text)
+}
+
+impl Ctx<'_> {
+    fn new() -> Ctx<'static> {
         Ctx {
+            vm: None,
+            max_depth: MAX_DEPTH,
+            break_length: BREAK_LENGTH,
+            compact: COMPACT,
             indent: 0,
             current_depth: 0,
             seen: Vec::new(),
@@ -106,7 +187,7 @@ pub fn quote(s: &str) -> String {
 
 fn format_string(ctx: &Ctx, s: &str) -> String {
     let n = len16(s);
-    if n > 16 && n > BREAK_LENGTH.saturating_sub(ctx.indent + 4) && s.contains('\n') {
+    if n > 16 && n > ctx.break_length.saturating_sub(ctx.indent + 4) && s.contains('\n') {
         let mut pieces = Vec::new();
         let mut start = 0;
         for (i, c) in s.char_indices() {
@@ -183,10 +264,18 @@ pub fn function_desc(o: &Obj) -> String {
         }
         _ => {
             let name = o.function_name().unwrap_or_else(|| "".into());
+            let kind = match &o.kind {
+                ObjKind::Function(c) if c.proto.is_async && c.proto.is_generator => {
+                    "AsyncGeneratorFunction"
+                }
+                ObjKind::Function(c) if c.proto.is_async => "AsyncFunction",
+                ObjKind::Function(c) if c.proto.is_generator => "GeneratorFunction",
+                _ => "Function",
+            };
             if name.is_empty() {
-                "[Function (anonymous)]".to_string()
+                format!("[{kind} (anonymous)]")
             } else {
-                format!("[Function: {name}]")
+                format!("[{kind}: {name}]")
             }
         }
     }
@@ -284,14 +373,14 @@ fn own_props(o: &Obj, skip_function_keys: bool) -> Vec<(Rc<str>, Value)> {
     props
 }
 
-fn below_break_length(output: &[String], start: usize, base: &str) -> bool {
+fn below_break_length(output: &[String], start: usize, base: &str, break_length: usize) -> bool {
     let mut total = output.len() + start;
-    if total + output.len() > BREAK_LENGTH {
+    if total + output.len() > break_length {
         return false;
     }
     for item in output {
         total += len16(item);
-        if total > BREAK_LENGTH {
+        if total > break_length {
             return false;
         }
     }
@@ -338,7 +427,7 @@ fn group_array_elements(
         max_length = max_length.max(len);
     }
     let actual_max = max_length + sep_space;
-    if actual_max * 3 + ctx.indent < BREAK_LENGTH
+    if actual_max * 3 + ctx.indent < ctx.break_length
         && (total_length as f64 / actual_max as f64 > 5.0 || max_length <= 6)
     {
         let approx_char_heights = 2.5;
@@ -346,7 +435,7 @@ fn group_array_elements(
         let biased_max = (actual_max as f64 - 3.0 - average_bias).max(1.0);
         let columns = ((approx_char_heights * biased_max * output_len as f64).sqrt() / biased_max)
             .round()
-            .min(((BREAK_LENGTH - ctx.indent) / actual_max) as f64)
+            .min(((ctx.break_length - ctx.indent) / actual_max) as f64)
             .min((COMPACT * 4) as f64)
             .min(15.0) as usize;
         if columns <= 1 {
@@ -414,9 +503,12 @@ fn reduce(ctx: &Ctx, mut output: Vec<String>, shape: Shape<'_>, rt: usize) -> St
     } else {
         format!("{} ", shape.base)
     };
-    if ctx.current_depth.saturating_sub(rt) < COMPACT && entries == output.len() {
+    if ctx.compact > 0
+        && ctx.current_depth.saturating_sub(rt) < ctx.compact
+        && entries == output.len()
+    {
         let start = output.len() + ctx.indent + len16(&shape.open) + len16(&shape.base) + 10;
-        if below_break_length(&output, start, &shape.base) {
+        if below_break_length(&output, start, &shape.base, ctx.break_length) {
             let joined = output.join(", ");
             if !joined.contains('\n') {
                 return format!("{base_prefix}{} {joined} {}", shape.open, shape.close);
@@ -471,6 +563,9 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
         }
         return "[Circular *1]".to_string();
     }
+    if let Some(custom) = custom_inspect(ctx, o, rt) {
+        return custom;
+    }
     match &o.kind {
         ObjKind::Function(_) | ObjKind::Native(_) | ObjKind::Bound(_) => {
             let desc = function_desc(o);
@@ -478,7 +573,7 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             if props.is_empty() {
                 return desc;
             }
-            if rt > MAX_DEPTH {
+            if rt > ctx.max_depth {
                 return desc;
             }
             let inner = enter(ctx, ptr, rt);
@@ -523,7 +618,7 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             if props.is_empty() && cause.is_none() && errors.is_none() {
                 return base;
             }
-            if rt > MAX_DEPTH {
+            if rt > ctx.max_depth {
                 return format!("[{}]", error_header(o));
             }
             let inner = enter(ctx, ptr, rt);
@@ -557,7 +652,7 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             if total == 0 && props.is_empty() {
                 return "[]".to_string();
             }
-            if rt > MAX_DEPTH {
+            if rt > ctx.max_depth {
                 return "[Array]".to_string();
             }
             let inner = enter(ctx, ptr, rt);
@@ -622,7 +717,7 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             if entries.is_empty() {
                 return format!("{prefix} {{}}");
             }
-            if rt > MAX_DEPTH {
+            if rt > ctx.max_depth {
                 return "[Map]".to_string();
             }
             let inner = enter(ctx, ptr, rt);
@@ -656,7 +751,7 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             if vals.is_empty() {
                 return format!("{prefix} {{}}");
             }
-            if rt > MAX_DEPTH {
+            if rt > ctx.max_depth {
                 return "[Set]".to_string();
             }
             let inner = enter(ctx, ptr, rt);
@@ -720,29 +815,9 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
         }
         ObjKind::WeakMap(_) => "WeakMap { <items unknown> }".to_string(),
         ObjKind::WeakSet(_) => "WeakSet { <items unknown> }".to_string(),
-        ObjKind::WeakRef(w) => match w.upgrade() {
-            Some(target) if rt <= MAX_DEPTH => {
-                let inner = enter(ctx, ptr, rt);
-                let s = child(ctx, &Value::Object(target), inner);
-                let mut base = String::new();
-                leave(ctx, ptr, &mut base);
-                reduce(
-                    ctx,
-                    vec![s],
-                    Shape {
-                        base,
-                        open: "WeakRef {".to_string(),
-                        close: "}",
-                        array: None,
-                    },
-                    inner,
-                )
-            }
-            Some(_) => "[WeakRef]".to_string(),
-            None => "WeakRef { <cleared> }".to_string(),
-        },
+        ObjKind::WeakRef(_) => "WeakRef {}".to_string(),
         ObjKind::Promise(p) => {
-            if rt > MAX_DEPTH {
+            if rt > ctx.max_depth {
                 return "[Promise]".to_string();
             }
             let inner = enter(ctx, ptr, rt);
@@ -781,6 +856,9 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
         ObjKind::Typed(t) if class_name(o).as_deref() == Some("Buffer") => {
             let bytes = t.bytes();
             let mut s = String::from("<Buffer");
+            if bytes.is_empty() {
+                s.push(' ');
+            }
             for b in bytes.iter().take(50) {
                 s.push_str(&format!(" {b:02x}"));
             }
@@ -803,7 +881,7 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             if total == 0 && props.is_empty() {
                 return format!("{name}(0) []");
             }
-            if rt > MAX_DEPTH {
+            if rt > ctx.max_depth {
                 return format!("[{name}]");
             }
             let inner = enter(ctx, ptr, rt);
@@ -844,7 +922,7 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             )
         }
         ObjKind::ArrayBuffer(b) => {
-            if rt > MAX_DEPTH {
+            if rt > ctx.max_depth {
                 return "[ArrayBuffer]".to_string();
             }
             let bytes = b.borrow();
@@ -878,7 +956,11 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
                 output,
                 Shape {
                     base,
-                    open: "ArrayBuffer {".to_string(),
+                    open: if b.shared {
+                        "SharedArrayBuffer {".to_string()
+                    } else {
+                        "ArrayBuffer {".to_string()
+                    },
                     close: "}",
                     array: None,
                 },
@@ -886,7 +968,7 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             )
         }
         ObjKind::DataView(t) => {
-            if rt > MAX_DEPTH {
+            if rt > ctx.max_depth {
                 return "[DataView]".to_string();
             }
             let inner = enter(ctx, ptr, rt);
@@ -914,7 +996,15 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             let arguments = o.flags.get() & crate::object::ARGUMENTS != 0;
             let cname = if arguments { None } else { class_name(o) };
             let tag = match o.get_chain(crate::object::TO_STRING_TAG_KEY) {
-                Some(Value::Str(t)) if !t.is_empty() && cname.as_deref() != Some(&*t) => Some(t),
+                Some(Value::Str(t))
+                    if !t.is_empty()
+                        && cname.as_deref() != Some(&*t)
+                        && !own_props(o, false)
+                            .iter()
+                            .any(|(k, _)| &**k == crate::object::TO_STRING_TAG_KEY) =>
+                {
+                    Some(t)
+                }
                 _ => None,
             };
             let prefix = match (&cname, o.proto.borrow().is_none(), &tag) {
@@ -933,7 +1023,7 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             if props.is_empty() {
                 return format!("{prefix}{{}}");
             }
-            if rt > MAX_DEPTH {
+            if rt > ctx.max_depth {
                 return depth_name(o);
             }
             let inner = enter(ctx, ptr, rt);

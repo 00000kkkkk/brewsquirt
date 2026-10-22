@@ -1,5 +1,5 @@
 use super::{arg, expect_fn, method, native_fn, to_integer};
-use crate::inspect::{inspect_plain, inspect_top};
+use crate::inspect::{inspect_plain, inspect_plain_vm, inspect_top_vm};
 use crate::value::Value;
 use crate::vm::{ErrorKind, Vm};
 use std::path::Path;
@@ -243,22 +243,62 @@ pub fn format_args(vm: &mut Vm, args: &[Value]) -> Result<String, Value> {
                         match spec {
                             's' => match a {
                                 Value::Str(s) => out.push_str(s),
-                                _ => out.push_str(&inspect_plain(a)),
+                                Value::Object(o) if !o.is_callable() => {
+                                    let custom = matches!(
+                                        vm.get_prop(a, "toString"),
+                                        Ok(Value::Object(f)) if matches!(
+                                            f.kind,
+                                            crate::object::ObjKind::Function(_)
+                                                | crate::object::ObjKind::Bound(_)
+                                        )
+                                    );
+                                    if custom {
+                                        let text = vm.to_string(a)?;
+                                        out.push_str(&text);
+                                    } else {
+                                        let options = crate::inspect::InspectOptions {
+                                            depth: 0,
+                                            ..Default::default()
+                                        };
+                                        out.push_str(&crate::inspect::inspect_with(vm, a, options));
+                                    }
+                                }
+                                _ => out.push_str(&inspect_plain_vm(vm, a)),
                             },
+                            'o' => {
+                                let options = crate::inspect::InspectOptions {
+                                    depth: 4,
+                                    ..Default::default()
+                                };
+                                out.push_str(&crate::inspect::inspect_with(vm, a, options));
+                            }
+                            'd' | 'i' if matches!(a, Value::BigInt(_)) => {
+                                out.push_str(&inspect_plain(a));
+                            }
                             'd' | 'i' => {
-                                let n = vm.to_number(a)?;
+                                let n = match a {
+                                    Value::Object(_) => f64::NAN,
+                                    _ => vm.to_number(a)?,
+                                };
                                 let n = if spec == 'i' { n.trunc() } else { n };
                                 out.push_str(&crate::number::number_to_string(n));
                             }
                             'f' => {
-                                let n = vm.to_number(a)?;
+                                let n = match a {
+                                    Value::BigInt(_) => inspect_plain(a)
+                                        .trim_end_matches('n')
+                                        .parse::<f64>()
+                                        .unwrap_or(f64::NAN),
+                                    Value::Object(_) => f64::NAN,
+                                    _ => vm.to_number(a)?,
+                                };
                                 out.push_str(&crate::number::number_to_string(n));
                             }
                             'j' => match super::json_stringify(vm, a, "")? {
                                 Some(s) => out.push_str(&s),
                                 None => out.push_str("undefined"),
                             },
-                            _ => out.push_str(&inspect_plain(a)),
+                            _ => out.push_str(&inspect_plain_vm(vm, a)),
                         }
                     }
                     _ => out.push('%'),
@@ -269,7 +309,7 @@ pub fn format_args(vm: &mut Vm, args: &[Value]) -> Result<String, Value> {
         }
     }
     for a in rest {
-        parts.push(inspect_top(a));
+        parts.push(inspect_top_vm(vm, a));
     }
     Ok(parts.join(" "))
 }
@@ -491,7 +531,8 @@ fn chdir(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 fn next_tick(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let f = arg(args, 0);
     expect_fn(vm, &f)?;
-    vm.queue_microtask(f, args.get(1..).unwrap_or(&[]).to_vec());
+    vm.ticks
+        .push_back((f, args.get(1..).unwrap_or(&[]).to_vec()));
     Ok(Value::Undefined)
 }
 

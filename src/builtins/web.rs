@@ -770,6 +770,14 @@ const WEB_SRC: &str = r##"
       this.#parse(String(v), String(v))
     }
     get origin() {
+      if (this.#protocol === "blob:") {
+        try {
+          const inner = new URL(this.pathname)
+          return inner.protocol === "http:" || inner.protocol === "https:" ? inner.origin : "null"
+        } catch {
+          return "null"
+        }
+      }
       return this.#protocol in DEFAULT_PORTS ? `${this.#protocol}//${this.host}` : "null"
     }
     get protocol() {
@@ -2680,6 +2688,27 @@ const WEB_SRC: &str = r##"
   }
 
   const STATUS_CODES = native.statusCodes
+
+  const inspectCustom = Symbol.for("nodejs.util.inspect.custom")
+  const quoteInspect = (v) => {
+    const s = String(v)
+    if (!s.includes("'")) return `'${s}'`
+    if (!s.includes('"')) return `"${s}"`
+    return `\`${s}\``
+  }
+  const defineInspect = (proto, fn) => Object.defineProperty(proto, inspectCustom, { value: fn, writable: true, configurable: true })
+  defineInspect(URLSearchParams.prototype, function () {
+    const items = [...this].map(([k, v]) => `${quoteInspect(k)} => ${quoteInspect(v)}`)
+    return items.length === 0 ? "URLSearchParams {}" : `URLSearchParams { ${items.join(", ")} }`
+  })
+  defineInspect(URL.prototype, function () {
+    const q = quoteInspect
+    return `URL {\n  href: ${q(this.href)},\n  origin: ${q(this.origin)},\n  protocol: ${q(this.protocol)},\n  username: ${q(this.username)},\n  password: ${q(this.password)},\n  host: ${q(this.host)},\n  hostname: ${q(this.hostname)},\n  port: ${q(this.port)},\n  pathname: ${q(this.pathname)},\n  search: ${q(this.search)},\n  searchParams: ${this.searchParams[inspectCustom]()},\n  hash: ${q(this.hash)}\n}`
+  })
+  defineInspect(Headers.prototype, function () {
+    const items = [...this].map(([k, v]) => `${/^[a-z_$][\w$]*$/i.test(k) ? k : quoteInspect(k)}: ${quoteInspect(v)}`)
+    return items.length === 0 ? "Headers {}" : `Headers { ${items.join(", ")} }`
+  })
 
   return {
     Headers,

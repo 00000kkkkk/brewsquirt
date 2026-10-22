@@ -2,7 +2,7 @@
 08:00
 17:30
 12:00 UTC
-7/1/2026, EEST 7/1/2026, GMT+3 7/1/2026, GMT+03:00
+7/1/2026, GMT+3 7/1/2026, GMT+3 7/1/2026, GMT+03:00
 1/14/2026, GMT-05:00
 7/1/2026, 8:00:00 AM 02/07/2026 5:30:00 PM
 Asia/Tokyo UTC -03:30
@@ -11,5 +11,5 @@ RangeError +25:00
 RangeError Europe
 true true false true true
 string true true
-Wednesday, July 1, 2026 at 10:00:00 PM AEST
+Wednesday, July 1, 2026 at 10:00:00 PM GMT+10
 hour,literal,dayPeriod,literal,timeZoneName

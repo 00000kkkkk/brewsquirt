@@ -1,0 +1,62 @@
+const util = require("node:util")
+const path = require("node:path")
+const querystring = require("node:querystring")
+const { Readable } = require("node:stream")
+
+console.log(function named() {}, async () => {}, function* gen() {}, async function* agen() {}, class K {})
+console.log(Buffer.alloc(0), Buffer.from([1, 255]), new SharedArrayBuffer(2), new WeakRef({}))
+console.log(new URL("https://user:pw@example.com:8080/p/a?q=1&q=2#h"))
+console.log(new URLSearchParams("a=1&b=2"), new URLSearchParams(), new Headers({ "x-a": "1", b: "2" }), new Headers())
+const deep = { a: { b: { c: { d: {} } } } }
+console.log(util.inspect(deep, { depth: 0 }), util.inspect(deep, { depth: null }), util.inspect(deep, { depth: Infinity }) === util.inspect(deep, { depth: null }))
+console.log(util.inspect({ a: 1, b: "x".repeat(30), c: [1, 2] }, { breakLength: 20 }))
+console.log(util.inspect([1, 2, 3], { compact: false }))
+console.log(util.format("%s|%d|%i|%f", { toString: () => "custom" }, 10n, 7n, 2n), util.format("%s %s", [1, [2, [3]]], { a: { b: 1 } }), util.format("%o", { a: { b: { c: { d: 1 } } } }), util.format("%d %i", "x", {}))
+console.log((0.5).toString(3), (1e21).toString(36), (255.5).toString(16), (-0.1).toString(2).slice(0, 12), (2 ** 53).toString(2).length, (123.456).toString(8), (0.1).toString(36))
+for (const bad of ["{", "[1,]", "{'a':1}", "01", "1.", ".5", "NaN", '{"a":1,}', "[1 2]", '"\n"', "tru", "", "1e", '{"a" 1}', "[1,2", "-", '{"a":1}x', "nul"]) {
+  try {
+    JSON.parse(bad)
+  } catch (e) {
+    console.log(e.message)
+  }
+}
+try {
+  structuredClone(() => {})
+} catch (e) {
+  console.log(e.name, e.constructor.name, e instanceof DOMException, e.code)
+}
+for (const fn of [() => Buffer.alloc(4).readUInt32BE(2), () => Buffer.alloc(-1), () => Buffer.from(5), () => Buffer.alloc(2).writeInt8(1, "x")]) {
+  try {
+    fn()
+  } catch (e) {
+    console.log(e.constructor.name, e.code, e.message)
+  }
+}
+console.log(path.win32.toNamespacedPath("C:\\a\\b"), path.win32.toNamespacedPath("\\\\srv\\share\\x"), path.win32.toNamespacedPath("rel"), path.posix.toNamespacedPath("/a/b"))
+console.log(querystring.unescape("%41%zz+x"), new URL("blob:https://a.com/uuid").origin, new URL("blob:foo").origin, util.types.isProxy(new Proxy({}, {})), util.types.isProxy({}))
+const order = []
+Promise.resolve().then(() => order.push("micro"))
+process.nextTick(() => order.push("tick"))
+;(async () => {
+  await null
+  order.push("after-await")
+  await new Promise((resolve) => setTimeout(resolve, 1))
+  console.log(order.join(" > "))
+  console.log((await Readable.from([1, 2, 3, 4]).map((n) => n * 2).filter((n) => n > 2).take(2).toArray()).join(), await Readable.from([1, 2, 3]).reduce((a, b) => a + b), await Readable.from([1, 2, 3]).some((n) => n > 2), (await Readable.from([1, 2, 3, 4]).drop(2).toArray()).join(), await Readable.from([1, 2]).find((n) => n === 2))
+  const rs = new Readable({ read() {} })
+  rs.setEncoding("utf8")
+  rs.push(Buffer.from([0xe2, 0x82]))
+  rs.push(Buffer.from([0xac, 0x41]))
+  rs.push(null)
+  console.log(JSON.stringify(await rs.toArray()))
+  const d = new Date(Date.UTC(2026, 6, 1, 12, 34, 56))
+  const f = (loc, o) => new Intl.DateTimeFormat(loc, { timeZone: "UTC", ...o }).format(d)
+  console.log(f("en-US", { weekday: "short", month: "short", day: "numeric" }), f("en-US", { month: "short", day: "numeric", year: "numeric" }), f("en-US", { era: "short", year: "numeric" }), f("en-US", { era: "long", year: "numeric", month: "long" }), f("en-US", { hour: "numeric", dayPeriod: "short" }), f("en-US", { hour: "numeric", minute: "2-digit", dayPeriod: "long" }))
+  console.log(f("en-US", { timeZoneName: "shortOffset" }), f("en-US", { timeZoneName: "longOffset" }), f("en-GB", { dateStyle: "full" }), f("pt-BR", { dateStyle: "short" }), new Intl.DateTimeFormat("en-US", { timeZone: "Europe/Berlin", timeZoneName: "short" }).format(d), new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", timeZoneName: "short" }).format(d))
+  const resolved = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", hour: "numeric", minute: "numeric" }).resolvedOptions()
+  console.log(resolved.hourCycle, resolved.hour12, Object.keys(resolved).join(), new Intl.DateTimeFormat("en-GB", { timeZone: "UTC", hour: "numeric" }).resolvedOptions().hourCycle)
+  console.log(new Intl.PluralRules("ar").select(0), new Intl.PluralRules("ar").select(2), new Intl.PluralRules("ar").select(5), new Intl.PluralRules("ar").select(25), new Intl.PluralRules("cs").select(3), new Intl.PluralRules("he").select(2))
+  console.log(new Intl.RelativeTimeFormat("uk").format(2, "hour"), new Intl.RelativeTimeFormat("uk").format(-1, "day"), new Intl.RelativeTimeFormat("uk", { numeric: "auto" }).format(-1, "day"), new Intl.RelativeTimeFormat("uk", { style: "short" }).format(5, "minute"), new Intl.RelativeTimeFormat("de").format(3, "month"), new Intl.RelativeTimeFormat("fr").format(-2, "week"), new Intl.RelativeTimeFormat("pl").format(5, "year"), new Intl.RelativeTimeFormat("ru", { numeric: "auto" }).format(1, "day"))
+  console.log(new Intl.ListFormat("de").format(["a", "b", "c"]), new Intl.ListFormat("uk", { type: "disjunction" }).format(["a", "b"]), new Intl.ListFormat("ja").format(["a", "b", "c"]), new Intl.ListFormat("zh").format(["a", "b", "c"]), new Intl.ListFormat("fr").format(["a", "b", "c"]), new Intl.ListFormat("en", { style: "short" }).format(["a", "b", "c"]))
+  console.log((1234567.891).toLocaleString("en-IN"), (1234.5).toLocaleString("ja-JP", { style: "currency", currency: "JPY" }), (-5).toLocaleString("en-US", { style: "currency", currency: "USD", currencySign: "accounting" }), (5).toLocaleString("en-US", { style: "currency", currency: "USD", currencySign: "accounting" }), new Intl.NumberFormat("en-US", { notation: "engineering" }).format(123456), new Intl.NumberFormat("en-US", { notation: "scientific" }).format(123456))
+})()

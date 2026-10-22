@@ -492,6 +492,14 @@ pub fn base64_decode(s: &str, url: bool) -> Option<Vec<u8>> {
 }
 
 fn dom_error(vm: &mut Vm, name: &str, msg: &str) -> Value {
+    let _ = vm.load_lazy_global("DOMException");
+    if let Some(ctor) = vm.globals.get("DOMException").cloned() {
+        if ctor.is_callable() {
+            if let Ok(e) = vm.construct(&ctor, &[msg.into(), name.into()]) {
+                return e;
+            }
+        }
+    }
     let e = vm.make_error(ErrorKind::Error, msg);
     if let Value::Object(o) = &e {
         o.set_hidden("name", name.into());

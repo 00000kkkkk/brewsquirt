@@ -589,10 +589,21 @@ impl Vm {
     }
 
     pub fn run_microtasks(&mut self) -> Result<(), Value> {
-        while let Some(job) = self.microtasks.pop_front() {
-            self.run_job(job)?;
+        loop {
+            if let Some(job) = self.microtasks.pop_front() {
+                self.run_job(job)?;
+                continue;
+            }
+            if let Some((f, args)) = self.ticks.pop_front() {
+                self.run_job(Job::Callback(f, args))?;
+                continue;
+            }
+            return Ok(());
         }
-        Ok(())
+    }
+
+    pub fn has_microtasks(&self) -> bool {
+        !self.microtasks.is_empty() || !self.ticks.is_empty()
     }
 
     fn check_rejections(&mut self) -> Result<(), Value> {
@@ -652,7 +663,7 @@ impl Vm {
     }
 
     pub fn has_pending_work(&self) -> bool {
-        !self.microtasks.is_empty()
+        self.has_microtasks()
             || self.io.pending > 0
             || self.has_refed_timers()
             || !self.pending_rejections.is_empty()
@@ -841,7 +852,7 @@ impl Vm {
                 PromiseState::Rejected(e) => return Err(e.clone()),
                 PromiseState::Pending => {}
             }
-            if !self.microtasks.is_empty() {
+            if self.has_microtasks() {
                 self.run_microtasks()?;
                 continue;
             }

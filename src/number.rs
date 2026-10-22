@@ -55,29 +55,61 @@ pub fn number_to_radix_string(n: f64, radix: u32) -> String {
         return "0".to_string();
     }
     let negative = n < 0.0;
-    let mut x = n.abs();
-    let mut int_part = x.trunc();
-    x -= int_part;
-    let mut int_digits = Vec::new();
-    if int_part == 0.0 {
+    let value = n.abs();
+    let radix_f = radix as f64;
+    let mut integer = value.floor();
+    let mut fraction = value - integer;
+    let next_double = |x: f64| f64::from_bits(x.to_bits() + 1);
+    let mut delta = (0.5 * (next_double(value) - value)).max(next_double(0.0));
+    let mut fraction_digits: Vec<u32> = Vec::new();
+    if fraction >= delta {
+        loop {
+            fraction *= radix_f;
+            delta *= radix_f;
+            let digit = fraction as u32;
+            fraction_digits.push(digit);
+            fraction -= digit as f64;
+            if (fraction > 0.5 || (fraction == 0.5 && (digit & 1) == 1)) && fraction + delta > 1.0 {
+                loop {
+                    match fraction_digits.pop() {
+                        None => {
+                            integer += 1.0;
+                            break;
+                        }
+                        Some(d) if d + 1 < radix => {
+                            fraction_digits.push(d + 1);
+                            break;
+                        }
+                        Some(_) => {}
+                    }
+                }
+                break;
+            }
+            if fraction < delta {
+                break;
+            }
+        }
+    }
+    let exponent_of = |x: f64| ((x.to_bits() >> 52) & 0x7ff) as i32 - 1075;
+    let mut int_digits: Vec<char> = Vec::new();
+    while exponent_of(integer / radix_f) > 0 {
+        integer /= radix_f;
         int_digits.push('0');
     }
-    while int_part >= 1.0 {
-        let d = (int_part % radix as f64) as u32;
-        int_digits.push(std::char::from_digit(d, radix).unwrap_or('0'));
-        int_part = (int_part / radix as f64).trunc();
+    loop {
+        let remainder = integer % radix_f;
+        int_digits.push(std::char::from_digit(remainder as u32, radix).unwrap_or('0'));
+        integer = (integer - remainder) / radix_f;
+        if integer <= 0.0 {
+            break;
+        }
     }
     int_digits.reverse();
     let mut s: String = int_digits.into_iter().collect();
-    if x > 0.0 {
+    if !fraction_digits.is_empty() {
         s.push('.');
-        let mut count = 0;
-        while x > 0.0 && count < 52 {
-            x *= radix as f64;
-            let d = x.trunc() as u32;
+        for d in fraction_digits {
             s.push(std::char::from_digit(d, radix).unwrap_or('0'));
-            x -= d as f64;
-            count += 1;
         }
     }
     if negative { format!("-{s}") } else { s }

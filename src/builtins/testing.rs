@@ -317,7 +317,14 @@ pub fn util_module(vm: &mut Vm) -> Value {
     Value::Object(o)
 }
 
-fn util_inspect(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+fn util_inspect(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    if vm.node.is_some() || arg(args, 1).is_object() {
+        return super::node::native_inspect(vm, this, args);
+    }
+    legacy_inspect(vm, this, args)
+}
+
+fn legacy_inspect(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(inspect_plain(&arg(args, 0)).into())
 }
 
