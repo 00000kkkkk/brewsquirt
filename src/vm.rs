@@ -302,6 +302,7 @@ pub struct Vm {
     pub(crate) next_new_target: Option<Rc<Obj>>,
     pub(crate) eval_fn: Option<Rc<Obj>>,
     pub(crate) gen_return_pending: bool,
+    pub(crate) silent_fail: bool,
     pub(crate) pending_ns: Option<Value>,
     pub(crate) import_metas: FxHashMap<Rc<str>, Value>,
     pub rejection: bool,
@@ -381,6 +382,7 @@ impl Vm {
             next_new_target: None,
             eval_fn: None,
             gen_return_pending: false,
+            silent_fail: false,
             pending_ns: None,
             import_metas: FxHashMap::default(),
             rejection: false,
@@ -1281,6 +1283,11 @@ impl Vm {
         self.make_error(ErrorKind::TypeError, msg)
     }
 
+    pub fn assign_error(&mut self, msg: impl Into<String>) -> Value {
+        self.silent_fail = true;
+        self.make_error(ErrorKind::TypeError, msg)
+    }
+
     pub fn range_error(&mut self, msg: impl Into<String>) -> Value {
         self.make_error(ErrorKind::RangeError, msg)
     }
@@ -1480,7 +1487,7 @@ impl Vm {
         let p = &c.proto;
         let np = p.num_params as usize;
         let ci = self.stack.len() - argc - 2;
-        if p.sloppy && !construct {
+        if p.sloppy && p.kind != ProtoKind::Arrow && !construct {
             match &self.stack[ci + 1] {
                 Value::Undefined | Value::Null => self.stack[ci + 1] = self.global_this(),
                 Value::Object(_) => {}
@@ -1775,12 +1782,12 @@ impl Vm {
                     self.call_value(&setter, Value::Undefined, &[val])?;
                     return Ok(());
                 }
-                return Err(self.type_error(format!(
+                return Err(self.assign_error(format!(
                     "Cannot set property {key} of #<Object> which has only a getter"
                 )));
             }
             if self.globals.attrs_of(&key) & crate::object::READ_ONLY != 0 {
-                return Err(self.type_error(format!(
+                return Err(self.assign_error(format!(
                     "Cannot assign to read only property '{key}' of object '#<Object>'"
                 )));
             }
@@ -2213,7 +2220,7 @@ impl Vm {
                 match &o.kind {
                     ObjKind::Proxy(_) => {
                         if !self.op_set(o, key.clone(), val, target)? {
-                            return Err(self.type_error(format!(
+                            return Err(self.assign_error(format!(
                                 "'set' on proxy: trap returned falsish for property '{}'",
                                 crate::props::key_text(&key)
                             )));
@@ -2222,7 +2229,7 @@ impl Vm {
                     }
                     ObjKind::Global => return self.set_global_prop(key, val),
                     ObjKind::Namespace => {
-                        return Err(self.type_error(format!(
+                        return Err(self.assign_error(format!(
                             "Cannot assign to read only property '{}' of object '[object Module]'",
                             crate::props::key_text(&key)
                         )));
@@ -2231,20 +2238,23 @@ impl Vm {
                 }
                 if self.proxies_used && proxy_in_chain(o) {
                     if !self.op_set(o, key.clone(), val, target)? {
-                        return Err(self.type_error(format!(
+                        return Err(self.assign_error(format!(
                             "Cannot assign to property '{}'",
                             crate::props::key_text(&key)
                         )));
                     }
                     return Ok(());
                 }
-                if self.accessors_used || o.is_callable() {
+                if self.accessors_used
+                    || o.is_callable()
+                    || !matches!(o.kind, ObjKind::Ordinary | ObjKind::Array(_))
+                {
                     if let Some(setter) = self.accessor_setter(o, &key) {
                         if setter.is_callable() {
                             self.call_value(&setter, target.clone(), &[val])?;
                             return Ok(());
                         }
-                        return Err(self.type_error(format!(
+                        return Err(self.assign_error(format!(
                             "Cannot set property {key} of {} which has only a getter",
                             inspect_plain(target)
                         )));
@@ -2277,7 +2287,7 @@ impl Vm {
                     if matches!(&*key, "length" | "byteLength" | "byteOffset" | "buffer")
                         && !o.props.borrow().contains_key(&key)
                     {
-                        return Err(self.type_error(format!(
+                        return Err(self.assign_error(format!(
                             "Cannot set property {key} of {} which has only a getter",
                             inspect_plain(target)
                         )));
@@ -2293,7 +2303,7 @@ impl Vm {
                                     self.call_value(&setter, target.clone(), &[val])?;
                                     return Ok(());
                                 }
-                                return Err(self.type_error(format!(
+                                return Err(self.assign_error(format!(
                                     "Cannot set property {key} of {} which has only a getter",
                                     inspect_plain(target)
                                 )));
@@ -3400,6 +3410,36 @@ impl Vm {
         }
     }
 
+    fn super_base(&mut self, cl: &Closure, is_static: bool) -> Result<Option<Rc<Obj>>, Value> {
+        let home = self.super_home(cl)?;
+        Ok(if is_static {
+            home.proto.borrow().clone()
+        } else if home.is_callable() {
+            self.function_prototype(&home)
+                .and_then(|p| p.proto.borrow().clone())
+        } else {
+            home.proto.borrow().clone()
+        })
+    }
+
+    fn super_get_from(
+        &mut self,
+        base: Option<Rc<Obj>>,
+        key: &str,
+        this: &Value,
+    ) -> Result<Value, Value> {
+        match base {
+            Some(s) => {
+                let raw = self.get_obj(&s, key);
+                self.resolve_accessor(raw, this)
+            }
+            None => Err(self.type_error(format!(
+                "Cannot read properties of null (reading '{}')",
+                crate::props::key_text(key)
+            ))),
+        }
+    }
+
     fn super_lookup(
         &mut self,
         cl: &Closure,
@@ -3407,20 +3447,33 @@ impl Vm {
         is_static: bool,
         this: &Value,
     ) -> Result<Value, Value> {
-        let home = self.super_home(cl)?;
-        let start = if is_static {
-            home.proto.borrow().clone()
-        } else if home.is_callable() {
-            self.function_prototype(&home)
-                .and_then(|p| p.proto.borrow().clone())
-        } else {
-            home.proto.borrow().clone()
+        let base = self.super_base(cl, is_static)?;
+        self.super_get_from(base, key, this)
+    }
+
+    fn super_set_to(
+        &mut self,
+        base: Option<Rc<Obj>>,
+        key: Rc<str>,
+        this: &Value,
+        val: Value,
+    ) -> Result<(), Value> {
+        let ok = match base {
+            Some(s) => self.op_set(&s, key.clone(), val, this)?,
+            None => {
+                return Err(self.type_error(format!(
+                    "Cannot set properties of null (setting '{}')",
+                    crate::props::key_text(&key)
+                )));
+            }
         };
-        let raw = match start {
-            Some(s) => self.get_obj(&s, key),
-            None => Value::Undefined,
-        };
-        self.resolve_accessor(raw, this)
+        if !ok {
+            return Err(self.assign_error(format!(
+                "Cannot assign to read only property '{}' of object",
+                crate::props::key_text(&key)
+            )));
+        }
+        Ok(())
     }
 
     fn super_store(
@@ -3431,31 +3484,8 @@ impl Vm {
         this: &Value,
         val: Value,
     ) -> Result<(), Value> {
-        let home = self.super_home(cl)?;
-        let start = if is_static {
-            home.proto.borrow().clone()
-        } else if home.is_callable() {
-            self.function_prototype(&home)
-                .and_then(|p| p.proto.borrow().clone())
-        } else {
-            home.proto.borrow().clone()
-        };
-        let ok = match start {
-            Some(s) => self.op_set(&s, key.clone(), val, this)?,
-            None => {
-                return Err(self.type_error(format!(
-                    "Cannot set properties of null (setting '{}')",
-                    crate::props::key_text(&key)
-                )));
-            }
-        };
-        if !ok {
-            return Err(self.type_error(format!(
-                "Cannot assign to read only property '{}' of object",
-                crate::props::key_text(&key)
-            )));
-        }
-        Ok(())
+        let base = self.super_base(cl, is_static)?;
+        self.super_set_to(base, key, this, val)
     }
 
     pub fn run(&mut self, stop: usize) -> Result<Value, Value> {
@@ -3748,7 +3778,12 @@ impl Vm {
                             self.flush_builder(abs);
                         }
                         let obj = self.stack[abs].clone();
-                        tri!(self.set_prop(&obj, name!(k), val));
+                        self.silent_fail = false;
+                        if let Err(e) = self.set_prop(&obj, name!(k), val) {
+                            if !(proto.sloppy && self.silent_fail) {
+                                throw!(e);
+                            }
+                        }
                     }
                 }
                 Op::GetUpval(i) => {
@@ -3822,11 +3857,23 @@ impl Vm {
                                 throw!(self.tdz_error(&proto, k));
                             }
                             if self.global_accessors || self.globals.readonly {
-                                tri!(self.set_global_prop(n.clone(), v));
+                                self.silent_fail = false;
+                                if let Err(e) = self.set_global_prop(n.clone(), v) {
+                                    if !(proto.sloppy && self.silent_fail) {
+                                        throw!(e);
+                                    }
+                                }
                                 continue;
                             }
                             proto.global_cache[k as usize].set(slot);
                             *self.globals.at_mut(slot) = v;
+                        }
+                        None if proto.sloppy => {
+                            if tri!(self.load_lazy_global(&n)) {
+                                tri!(self.set_global_prop(n, v));
+                            } else {
+                                self.globals.insert(n, v);
+                            }
                         }
                         None => throw!(self.make_error_at(
                             ErrorKind::ReferenceError,
@@ -3905,7 +3952,12 @@ impl Vm {
                         _ => false,
                     };
                     if !done {
-                        tri!(self.set_prop(&obj, name!(k), val.clone()));
+                        self.silent_fail = false;
+                        if let Err(e) = self.set_prop(&obj, name!(k), val.clone()) {
+                            if !(proto.sloppy && self.silent_fail) {
+                                throw!(e);
+                            }
+                        }
                     }
                     self.stack.push(val);
                 }
@@ -3919,20 +3971,35 @@ impl Vm {
                     let val = pop!();
                     let key = pop!();
                     let obj = pop!();
-                    tri!(self.set_index(&obj, &key, val.clone()));
+                    self.silent_fail = false;
+                    if let Err(e) = self.set_index(&obj, &key, val.clone()) {
+                        if !(proto.sloppy && self.silent_fail) {
+                            throw!(e);
+                        }
+                    }
                     self.stack.push(val);
                 }
                 Op::DeleteProp(k) => {
                     let obj = pop!();
                     let n = name!(k);
-                    let r = tri!(self.delete_prop(&obj, &n));
+                    self.silent_fail = false;
+                    let r = match self.delete_prop(&obj, &n) {
+                        Ok(r) => r,
+                        Err(_) if proto.sloppy && self.silent_fail => false,
+                        Err(e) => throw!(e),
+                    };
                     self.stack.push(Value::Bool(r));
                 }
                 Op::DeleteIndex => {
                     let key = pop!();
                     let obj = pop!();
                     let n = tri!(self.to_property_key(&key));
-                    let r = tri!(self.delete_prop(&obj, &n));
+                    self.silent_fail = false;
+                    let r = match self.delete_prop(&obj, &n) {
+                        Ok(r) => r,
+                        Err(_) if proto.sloppy && self.silent_fail => false,
+                        Err(e) => throw!(e),
+                    };
                     self.stack.push(Value::Bool(r));
                 }
                 Op::GetMethod(k) => {
@@ -4087,6 +4154,7 @@ impl Vm {
                 Op::InitPrivate(k) => {
                     let val = pop!();
                     let key = name!(k);
+                    name_anonymous(&val, &key, "");
                     if let Some(Value::Object(o)) = self.stack.last().cloned() {
                         if o.props.borrow().contains_key(&key) {
                             throw!(self.type_error(format!(
@@ -4115,6 +4183,7 @@ impl Vm {
                 Op::DefineField(k) => {
                     let val = pop!();
                     let key = name!(k);
+                    name_anonymous(&val, &key, "");
                     if let Some(Value::Object(o)) = self.stack.last().cloned() {
                         let d = crate::props::PropDesc {
                             value: Some(val),
@@ -4178,15 +4247,17 @@ impl Vm {
                 Op::SuperGetIndex(is_static) => {
                     let key = pop!();
                     let this = pop!();
+                    let base = tri!(self.super_base(&cl, is_static));
                     let n = tri!(self.to_property_key(&key));
-                    let v = tri!(self.super_lookup(&cl, &n, is_static, &this));
+                    let v = tri!(self.super_get_from(base, &n, &this));
                     self.stack.push(v);
                 }
                 Op::SuperGetIndexMethod(is_static) => {
                     let key = pop!();
                     let this = pop!();
+                    let base = tri!(self.super_base(&cl, is_static));
                     let n = tri!(self.to_property_key(&key));
-                    let v = tri!(self.super_lookup(&cl, &n, is_static, &this));
+                    let v = tri!(self.super_get_from(base, &n, &this));
                     self.stack.push(v);
                     self.stack.push(this);
                 }
@@ -4194,15 +4265,26 @@ impl Vm {
                     let val = pop!();
                     let this = pop!();
                     let n = name!(k);
-                    tri!(self.super_store(&cl, n, is_static, &this, val.clone()));
+                    self.silent_fail = false;
+                    if let Err(e) = self.super_store(&cl, n, is_static, &this, val.clone()) {
+                        if !(proto.sloppy && self.silent_fail) {
+                            throw!(e);
+                        }
+                    }
                     self.stack.push(val);
                 }
                 Op::SuperSetIndex(is_static) => {
                     let val = pop!();
                     let key = pop!();
                     let this = pop!();
+                    let base = tri!(self.super_base(&cl, is_static));
                     let n = tri!(self.to_property_key(&key));
-                    tri!(self.super_store(&cl, n, is_static, &this, val.clone()));
+                    self.silent_fail = false;
+                    if let Err(e) = self.super_set_to(base, n, &this, val.clone()) {
+                        if !(proto.sloppy && self.silent_fail) {
+                            throw!(e);
+                        }
+                    }
                     self.stack.push(val);
                 }
                 Op::SuperCall(argc) => {
@@ -4239,12 +4321,7 @@ impl Vm {
                         None => self.stack[base - 1].as_object().cloned(),
                     };
                     let ti = self.stack.len() - argc - 1;
-                    if !matches!(self.stack[ti], Value::Uninit) {
-                        throw!(self.make_error(
-                            ErrorKind::ReferenceError,
-                            "Super constructor may only be called once",
-                        ));
-                    }
+                    self.stack[ti] = Value::Uninit;
                     {
                         let derived_sup = matches!(&sup.kind, ObjKind::Function(c) if c.proto.kind == ProtoKind::DerivedConstructor);
                         if !derived_sup {
@@ -4901,6 +4978,15 @@ impl Vm {
                     let v = self.stack[n - 1 - d as usize].clone();
                     self.stack.push(v);
                 }
+                Op::RequireUninit => {
+                    let raw = pop!();
+                    if !matches!(raw, Value::Uninit) {
+                        throw!(self.make_error(
+                            ErrorKind::ReferenceError,
+                            "Super constructor may only be called once",
+                        ));
+                    }
+                }
                 Op::YieldReturn(t) => {
                     if self.gen_return_pending {
                         self.gen_return_pending = false;
@@ -4944,7 +5030,7 @@ impl Vm {
                 }
                 Op::ObjSpread => {
                     let src = pop!();
-                    let pairs = tri!(self.own_entries_resolved(&src, true));
+                    let pairs = tri!(self.copy_data_entries(&src, &[]));
                     if let Some(Value::Object(o)) = self.stack.last() {
                         let mut props = o.props.borrow_mut();
                         for (k, v) in pairs {
@@ -4969,7 +5055,7 @@ impl Vm {
                         })
                         .collect();
                     let o = self.new_object();
-                    let pairs = tri!(self.own_entries_resolved(&src, true));
+                    let pairs = tri!(self.copy_data_entries(&src, &excluded));
                     for (k, v) in pairs {
                         if !excluded.contains(&k) {
                             o.set_own(k, v);
@@ -5173,7 +5259,12 @@ impl Vm {
                         _ => false,
                     };
                     if !done {
-                        tri!(self.set_prop(&obj, name!(k), val));
+                        self.silent_fail = false;
+                        if let Err(e) = self.set_prop(&obj, name!(k), val) {
+                            if !(proto.sloppy && self.silent_fail) {
+                                throw!(e);
+                            }
+                        }
                     }
                 }
                 Op::GetAsyncIter => {
@@ -5250,6 +5341,35 @@ impl Vm {
 
     pub fn own_entries(&self, v: &Value) -> Vec<(Rc<str>, Value)> {
         self.own_entries_raw(v, false)
+    }
+
+    pub fn copy_data_entries(
+        &mut self,
+        src: &Value,
+        excluded: &[Rc<str>],
+    ) -> Result<Vec<(Rc<str>, Value)>, Value> {
+        let Value::Object(o) = src else {
+            return self.own_entries_resolved(src, true);
+        };
+        if !matches!(o.kind, ObjKind::Proxy(_)) {
+            return self.own_entries_resolved(src, true);
+        }
+        let keys = self.op_own_keys(o)?;
+        let mut out = Vec::new();
+        for k in keys {
+            if excluded.contains(&k) {
+                continue;
+            }
+            let Some(d) = self.op_get_own_property(o, &k)? else {
+                continue;
+            };
+            if d.enumerable != Some(true) {
+                continue;
+            }
+            let v = self.op_get(o, &k, src)?;
+            out.push((k, v));
+        }
+        Ok(out)
     }
 
     pub fn own_entries_resolved(
@@ -5343,7 +5463,7 @@ impl Vm {
                             .unwrap_or_else(|| "Object".to_string())
                     ),
                 };
-                Err(self.type_error(format!(
+                Err(self.assign_error(format!(
                     "Cannot delete property '{}' of {target}",
                     crate::props::key_text(key)
                 )))
@@ -5517,7 +5637,9 @@ fn name_anonymous(f: &Value, key: &str, prefix: &str) {
     if !anonymous {
         return;
     }
-    let base = if crate::object::is_symbol_key(key) {
+    let base = if let Some(rest) = key.strip_prefix("\u{0}#") {
+        format!("#{}", rest.split('@').next().unwrap_or(rest))
+    } else if crate::object::is_symbol_key(key) {
         let d = crate::object::symbol_key_description(key);
         if d.is_empty() {
             String::new()

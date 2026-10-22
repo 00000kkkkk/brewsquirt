@@ -116,6 +116,7 @@ pub enum Op {
     ObjSpread,
     ObjRest(u32, u32),
     Pick(u32),
+    RequireUninit,
     MakeClass(u32, bool),
     DefineMethod(u32, bool),
     DefineMethodComputed(bool),

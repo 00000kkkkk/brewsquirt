@@ -150,6 +150,23 @@ pub fn match_array(vm: &mut Vm, data: &RegexData, s: &Rc<str>, m: &Match) -> Val
         o.set_own("index", Value::Number(utf16_index(s, m.start) as f64));
         o.set_own("input", Value::Str(s.clone()));
         o.set_own("groups", groups_object(vm, data, &items));
+        if data.flags.contains('d') {
+            let mut pairs = Vec::with_capacity(m.groups.len());
+            for g in &m.groups {
+                pairs.push(match g {
+                    Some((a, b)) => vm.new_array(vec![
+                        Value::Number(utf16_index(s, *a) as f64),
+                        Value::Number(utf16_index(s, *b) as f64),
+                    ]),
+                    None => Value::Undefined,
+                });
+            }
+            let indices = vm.new_array(pairs.clone());
+            if let Value::Object(io) = &indices {
+                io.set_own("groups", groups_object(vm, data, &pairs));
+            }
+            o.set_own("indices", indices);
+        }
     }
     arr
 }

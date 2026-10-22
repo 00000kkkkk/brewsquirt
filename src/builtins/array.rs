@@ -58,7 +58,7 @@ const METHODS: &[(&str, u32, crate::object::NativeFn, u8)] = &[
     ("keys", 0, keys, 2),
     ("values", 0, values, 2),
     ("entries", 0, entries, 2),
-    ("toString", 0, to_string, 0),
+    ("toString", 0, to_string, 2),
     ("copyWithin", 2, copy_within, 0),
     ("toSpliced", 2, to_spliced, 0),
     ("with", 2, with, 0),
@@ -466,7 +466,12 @@ fn to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
         .as_ref()
         .is_some_and(|p| f.strict_eq(&p.array_join));
     match &this {
-        Value::Object(o) if pristine && matches!(o.kind, ObjKind::Array(_)) => {
+        Value::Object(o)
+            if pristine
+                && matches!(o.kind, ObjKind::Array(_))
+                && !vm.proto_indices
+                && o.flags.get() & crate::object::SLOW_ELEMENTS == 0 =>
+        {
             let list = items(o).clone();
             Ok(join_values(vm, &list, ",")?.into())
         }
@@ -477,7 +482,9 @@ fn to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 
 fn reverse(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     let o = this_array(vm, &this, "reverse")?;
-    check_frozen(vm, &o)?;
+    if len(&o) > 1 {
+        check_frozen(vm, &o)?;
+    }
     o.clear_holes();
     items(&o).reverse();
     Ok(this)
@@ -500,6 +507,9 @@ fn from_index(vm: &mut Vm, args: &[Value], n: usize) -> Result<usize, Value> {
 fn index_of(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let o = this_array(vm, &this, "indexOf")?;
     let target = arg(args, 0);
+    if len(&o) == 0 {
+        return Ok(Value::Number(-1.0));
+    }
     let start = from_index(vm, args, len(&o))?;
     let pos = items(&o)
         .iter()
@@ -542,6 +552,9 @@ fn last_index_of(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 fn includes(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let o = this_array(vm, &this, "includes")?;
     let target = arg(args, 0);
+    if len(&o) == 0 {
+        return Ok(Value::Bool(false));
+    }
     let start = from_index(vm, args, len(&o))?;
     let found = items(&o)
         .iter()
@@ -893,10 +906,12 @@ fn flat_map(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 
 fn fill(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let o = this_array(vm, &this, "fill")?;
-    check_frozen(vm, &o)?;
-    o.clear_holes();
     let n = len(&o);
     let (start, end) = range_args(vm, args, n, 1)?;
+    if start < end {
+        check_frozen(vm, &o)?;
+    }
+    o.clear_holes();
     let v = arg(args, 0);
     let mut a = items(&o);
     for slot in a.iter_mut().take(end).skip(start) {

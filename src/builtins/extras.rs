@@ -1131,6 +1131,7 @@ define(globalThis, "SuppressedError", SuppressedError)
 "##;
 
 pub const ARRAY_GENERIC: &str = r##"
+const objectToString = Object.prototype.toString
 const MAX_LENGTH = 2 ** 53 - 1
 const toObj = (v, name) => {
   if (v === null || v === undefined) throw new TypeError(`Array.prototype.${name} called on null or undefined`)
@@ -1491,7 +1492,7 @@ const ArrayGeneric = {
   toString() {
     const O = toObj(this, "toString")
     const f = O.join
-    return typeof f === "function" ? f.call(O) : Object.prototype.toString.call(O)
+    return typeof f === "function" ? f.call(O) : objectToString.call(O)
   },
   toLocaleString(...args) {
     const O = toObj(this, "toLocaleString")

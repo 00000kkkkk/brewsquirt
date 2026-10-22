@@ -1092,6 +1092,7 @@ impl Parser {
         (self.in_async, self.in_generator) = saved;
         let (params, rest, body) = parsed?;
         check_strict_params(&params, &rest, &body, line, self.strict)?;
+        let strict = self.strict || body_use_strict(&body);
         Ok(Rc::new(FuncDef {
             name,
             params,
@@ -1101,6 +1102,7 @@ impl Parser {
             is_async,
             is_generator,
             uses_arguments,
+            strict,
             span: (start, end),
             line,
         }))
@@ -1490,6 +1492,7 @@ impl Parser {
                         is_async: false,
                         is_generator: false,
                         uses_arguments: false,
+                        strict: true,
                         line: mline,
                         span: (0, 0),
                     })));
@@ -1668,6 +1671,7 @@ impl Parser {
         if let FuncBody::Block(stmts) = &body {
             check_strict_params(&params, &rest, stmts, line, self.strict)?;
         }
+        let strict = self.strict || matches!(&body, FuncBody::Block(b) if body_use_strict(b));
         Ok(Expr {
             kind: ExprKind::Function(Rc::new(FuncDef {
                 name: None,
@@ -1678,6 +1682,7 @@ impl Parser {
                 is_async,
                 is_generator: false,
                 uses_arguments: false,
+                strict,
                 line,
                 span: (start, self.prev_end()),
             })),
@@ -2085,7 +2090,9 @@ impl Parser {
             }
             | ExprKind::Index {
                 optional: false, ..
-            } => Ok(()),
+            }
+            | ExprKind::SuperMember(_)
+            | ExprKind::SuperIndex(_) => Ok(()),
             _ => Err(SyntaxError::new(
                 "Invalid left-hand side expression in update operation",
                 e.line,
@@ -2862,7 +2869,7 @@ fn check_accessor_params(f: &FuncDef, setter: bool, line: u32) -> R<()> {
     ))
 }
 
-fn body_use_strict(body: &[Stmt]) -> bool {
+pub fn body_use_strict(body: &[Stmt]) -> bool {
     for s in body {
         match &s.kind {
             StmtKind::Expr(e) => match &e.kind {

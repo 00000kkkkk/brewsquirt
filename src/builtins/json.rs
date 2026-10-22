@@ -162,7 +162,9 @@ impl Ser<'_> {
                 self.newline(out, depth + 1);
                 let key = i.to_string();
                 let item = match &o.kind {
-                    ObjKind::Array(a) => a.borrow().get(i).cloned().unwrap_or_default(),
+                    ObjKind::Array(a) if o.flags.get() & crate::object::SLOW_ELEMENTS == 0 => {
+                        a.borrow().get(i).cloned().unwrap_or_default()
+                    }
                     _ => vm.get_prop(&holder, &key)?,
                 };
                 if !self.property(vm, &holder, &key, item, depth + 1, out)? {
@@ -226,7 +228,11 @@ pub fn json_stringify(vm: &mut Vm, v: &Value, indent: &str) -> Result<Option<Str
 
 fn stringify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let space = arg(args, 2);
-    let space = crate::object::unwrap_primitive(&space).unwrap_or(space);
+    let space = match crate::object::unwrap_primitive(&space) {
+        Some(Value::Number(_)) => Value::Number(vm.to_number(&space)?),
+        Some(Value::Str(_)) => Value::Str(vm.to_string(&space)?),
+        _ => space,
+    };
     let indent = match &space {
         Value::Number(_) => {
             let n = to_integer(vm, &space)?.clamp(0.0, 10.0) as usize;
@@ -247,11 +253,21 @@ fn stringify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     } else if let Value::Object(r) = &replacer {
         if Ser::is_array(r) {
             let mut list: Vec<Rc<str>> = Vec::new();
-            for item in vm.iterate(&replacer)? {
-                let item = crate::object::unwrap_primitive(&item).unwrap_or(item);
+            let len = vm.get_prop(&replacer, "length")?;
+            let len = to_integer(vm, &len)?.clamp(0.0, 9007199254740991.0) as usize;
+            for i in 0..len {
+                let item = vm.get_prop(&replacer, &i.to_string())?;
                 let key = match &item {
                     Value::Str(s) => Some(s.clone()),
                     Value::Number(n) => Some(number_to_string(*n).into()),
+                    Value::Object(_)
+                        if matches!(
+                            crate::object::unwrap_primitive(&item),
+                            Some(Value::Str(_) | Value::Number(_))
+                        ) =>
+                    {
+                        Some(vm.to_string(&item)?)
+                    }
                     _ => None,
                 };
                 if let Some(k) = key {

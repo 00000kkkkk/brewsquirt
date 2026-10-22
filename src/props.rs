@@ -100,14 +100,14 @@ impl Vm {
 
     pub fn read_only_error(&mut self, o: &Obj, key: &str) -> Value {
         let target = self.describe_target(o);
-        self.type_error(format!(
+        self.assign_error(format!(
             "Cannot assign to read only property '{}' of {target}",
             key_text(key)
         ))
     }
 
     pub fn not_extensible_error(&mut self, key: &str) -> Value {
-        self.type_error(format!(
+        self.assign_error(format!(
             "Cannot add property {}, object is not extensible",
             key_text(key)
         ))

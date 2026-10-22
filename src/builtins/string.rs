@@ -369,7 +369,7 @@ fn dispatch(
     sym: usize,
     rest: &[Value],
 ) -> Result<Dispatch, Value> {
-    if target.is_nullish() || matches!(target, Value::Str(_) | Value::Number(_) | Value::Bool(_)) {
+    if !target.is_object() {
         return Ok(Dispatch::Plain);
     }
     if let Some((o, data)) = super::regexp::pristine(vm, target, sym) {

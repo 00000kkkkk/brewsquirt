@@ -104,6 +104,7 @@ struct FnState {
     template_sites: u32,
     eval_upvals: Option<EvalUpvals>,
     evals: Vec<Rc<EvalScope>>,
+    strict: bool,
 }
 
 impl FnState {
@@ -135,6 +136,7 @@ impl FnState {
             template_sites: 0,
             eval_upvals: None,
             evals: Vec::new(),
+            strict: true,
         }
     }
 }
@@ -270,7 +272,9 @@ pub fn compile_eval(
     scope: &EvalScope,
 ) -> R<Rc<FunctionProto>> {
     let mut c = new_compiler(module, Mode::Module);
+    let strict = scope.ctx.strict || crate::parser::body_use_strict(stmts);
     let mut outer = FnState::new("<scope>".into(), scope.kind, 1, scope.is_static);
+    outer.strict = strict;
     outer.depth = 1;
     for (name, is_const) in &scope.locals {
         outer.locals.push(Local {
@@ -284,8 +288,9 @@ pub fn compile_eval(
     }
     outer.eval_upvals = Some(scope.upvals.clone());
     c.states.push(outer);
-    c.states
-        .push(FnState::new("eval".into(), ProtoKind::Arrow, 1, false));
+    let mut inner = FnState::new("eval".into(), ProtoKind::Arrow, 1, false);
+    inner.strict = strict;
+    c.states.push(inner);
     c.begin_scope();
     c.add_local("".into(), true);
     c.emit(Op::Undefined);
@@ -323,8 +328,9 @@ fn compile_unit(
 ) -> R<Rc<FunctionProto>> {
     let mut c = new_compiler(module, mode);
     c.script_eval = script_eval;
-    c.states
-        .push(FnState::new("<main>".into(), ProtoKind::Module, 1, false));
+    let mut main = FnState::new("<main>".into(), ProtoKind::Module, 1, false);
+    main.strict = mode == Mode::Module || script_eval == 2 || crate::parser::body_use_strict(stmts);
+    c.states.push(main);
     c.begin_scope();
     c.add_local("this".into(), true);
     if mode == Mode::Module {
@@ -488,7 +494,7 @@ impl Compiler {
             uses_arguments: st.uses_arguments,
             is_async: st.is_async,
             is_generator: st.is_generator,
-            sloppy: self.module.sloppy && st.kind != ProtoKind::Arrow,
+            sloppy: !st.strict,
             code: st.code,
             lines: st.lines,
             consts: st.consts,
@@ -933,6 +939,7 @@ impl Compiler {
         s: &'a Stmt,
         top: bool,
         names: &mut Vec<(Rc<str>, bool)>,
+        fn_idx: &mut Vec<usize>,
         funcs: &mut Vec<&'a Rc<FuncDef>>,
         imports: &mut Vec<&'a ImportDecl>,
     ) -> R<()> {
@@ -949,6 +956,7 @@ impl Compiler {
             }
             StmtKind::Function(f) => {
                 if let Some(n) = &f.name {
+                    fn_idx.push(names.len());
                     names.push((n.clone(), false));
                 }
                 funcs.push(f);
@@ -997,14 +1005,14 @@ impl Compiler {
                             }
                         }
                         let before = names.len();
-                        self.collect_decls(inner, top, names, funcs, imports)?;
+                        self.collect_decls(inner, top, names, fn_idx, funcs, imports)?;
                         for (n, _) in names[before..].iter() {
                             self.exports.push(ExportEntry::Local(n.clone(), n.clone()));
                         }
                     }
                     ExportDecl::DefaultDecl(inner) => {
                         let before = names.len();
-                        self.collect_decls(inner, top, names, funcs, imports)?;
+                        self.collect_decls(inner, top, names, fn_idx, funcs, imports)?;
                         if let Some((n, _)) = names.get(before) {
                             self.exports
                                 .push(ExportEntry::Local(n.clone(), "default".into()));
@@ -1067,11 +1075,12 @@ impl Compiler {
 
     fn hoist_list(&mut self, stmts: &[&Stmt], top: bool) -> R<()> {
         let mut names = Vec::new();
+        let mut fn_idx = Vec::new();
         let mut funcs = Vec::new();
         let mut imports = Vec::new();
         let mut reexports = Vec::new();
         for s in stmts {
-            self.collect_decls(s, top, &mut names, &mut funcs, &mut imports)?;
+            self.collect_decls(s, top, &mut names, &mut fn_idx, &mut funcs, &mut imports)?;
             if let StmtKind::Export(ExportDecl::From {
                 source,
                 names: list,
@@ -1098,7 +1107,17 @@ impl Compiler {
         let mut fresh = Vec::new();
         for (i, (n, c)) in names.iter().enumerate() {
             let is_fn = funcs.iter().any(|f| f.name.as_ref() == Some(n));
-            let dup_new = names[..i].iter().any(|(m, _)| m == n);
+            let earlier: Vec<usize> = names[..i]
+                .iter()
+                .enumerate()
+                .filter(|(_, (m, _))| m == n)
+                .map(|(j, _)| j)
+                .collect();
+            let redeclared_fn = var_scope
+                && !(top && self.mode == Mode::Module)
+                && fn_idx.contains(&i)
+                && earlier.iter().all(|j| fn_idx.contains(j));
+            let dup_new = !earlier.is_empty() && !redeclared_fn;
             let var_clash = self.st_ref().vars.contains(n)
                 && self
                     .st_ref()
@@ -2262,6 +2281,8 @@ impl Compiler {
         let name = f.name.clone().or(name_hint).unwrap_or_else(|| "".into());
         let name: Rc<str> = if &*name == "%default" {
             "default".into()
+        } else if let Some(rest) = name.strip_prefix("\u{0}#") {
+            format!("#{}", rest.split('@').next().unwrap_or(rest)).into()
         } else {
             name
         };
@@ -2273,6 +2294,7 @@ impl Compiler {
         st.fields = fields;
         st.is_async = f.is_async;
         st.is_generator = f.is_generator;
+        st.strict = f.strict;
         self.states.push(st);
         let saved_labels = std::mem::take(&mut self.pending_labels);
         let r = self.function_body(f, kind, self_name);
@@ -2551,6 +2573,7 @@ impl Compiler {
                     is_async: false,
                     is_generator: false,
                     uses_arguments: false,
+                    strict: true,
                     line: c.line,
                     span: c.span,
                 })
@@ -2759,6 +2782,7 @@ impl Compiler {
             is_async: false,
             is_generator: false,
             uses_arguments: false,
+            strict: true,
             line,
             span: (0, 0),
         };
@@ -3205,6 +3229,7 @@ impl Compiler {
                         }
                         PropDef::KeyValue(PropKey::Computed(ke), v) => {
                             self.expr(ke)?;
+                            self.emit(Op::ToPropertyKey);
                             self.expr(v)?;
                             self.emit(Op::InitIndex);
                         }
@@ -3287,6 +3312,7 @@ impl Compiler {
                         is_async: false,
                         is_generator: false,
                         uses_arguments: false,
+                        strict: true,
                         line: c.line,
                         span: (0, 0),
                     };
@@ -3413,6 +3439,43 @@ impl Compiler {
                             self.emit(Op::Pop);
                         }
                     }
+                    ExprKind::SuperMember(m) => {
+                        let is_static = self.super_info(false)?;
+                        let k = self.str_const(m);
+                        self.load_var(&"this".into());
+                        self.emit(Op::Dup);
+                        self.emit(Op::SuperGet(k, is_static));
+                        if *prefix {
+                            self.emit(step);
+                            self.emit(Op::SuperSet(k, is_static));
+                        } else {
+                            self.emit(Op::ToNumeric);
+                            self.emit(Op::Dup);
+                            self.emit(Op::Rot3);
+                            self.emit(step);
+                            self.emit(Op::SuperSet(k, is_static));
+                            self.emit(Op::Pop);
+                        }
+                    }
+                    ExprKind::SuperIndex(key) => {
+                        let is_static = self.super_info(false)?;
+                        self.load_var(&"this".into());
+                        self.expr(key)?;
+                        self.emit(Op::ToPropertyKey);
+                        self.emit(Op::Dup2);
+                        self.emit(Op::SuperGetIndex(is_static));
+                        if *prefix {
+                            self.emit(step);
+                            self.emit(Op::SuperSetIndex(is_static));
+                        } else {
+                            self.emit(Op::ToNumeric);
+                            self.emit(Op::Dup);
+                            self.emit(Op::Rot4);
+                            self.emit(step);
+                            self.emit(Op::SuperSetIndex(is_static));
+                            self.emit(Op::Pop);
+                        }
+                    }
                     _ => {
                         return Err(
                             self.err("Invalid left-hand side expression in update operation")
@@ -3515,6 +3578,8 @@ impl Compiler {
                     let n = self.plain_args(args)?;
                     self.emit(Op::SuperCall(n));
                 }
+                self.load_this_raw();
+                self.emit(Op::RequireUninit);
                 self.store_var(&"this".into(), true);
                 self.emit_field_inits()?;
             }

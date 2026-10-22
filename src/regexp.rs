@@ -34,6 +34,14 @@ fn hex_digits(chars: &[char], i: usize, n: usize) -> Option<u32> {
     Some(v)
 }
 
+fn group_defined_before(chars: &[char], open: usize, close: usize) -> bool {
+    let name: String = chars[open + 2..close].iter().collect();
+    let pat: Vec<char> = format!("(?<{name}>").chars().collect();
+    chars[..open]
+        .windows(pat.len())
+        .any(|w| w == pat.as_slice())
+}
+
 fn push_code_point(out: &mut String, cp: u32) {
     out.push_str(&format!("\\x{{{cp:X}}}"));
 }
@@ -78,7 +86,7 @@ fn octal_at(chars: &[char], i: usize) -> (u32, usize) {
 
 pub fn translate(source: &str, flags: &str) -> Result<String, String> {
     let chars: Vec<char> = source.chars().collect();
-    let (groups, _) = crate::regexp_syntax::prescan(&chars, flags.contains('v'));
+    let (groups, has_names) = crate::regexp_syntax::prescan(&chars, flags.contains('v'));
     let mut out = String::new();
     let mut inline = String::new();
     if flags.contains('i') {
@@ -127,8 +135,14 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                             j += 1;
                         }
                         if !in_class && e != '0' && n <= groups {
-                            out.push('\\');
-                            out.extend(chars[i..j].iter());
+                            let (before, _) =
+                                crate::regexp_syntax::prescan(&chars[..i - 1], flags.contains('v'));
+                            if n > before {
+                                out.push_str("(?:)");
+                            } else {
+                                out.push('\\');
+                                out.extend(chars[i..j].iter());
+                            }
                             i = j - 1;
                         } else if e == '8' || e == '9' {
                             out.push(e);
@@ -138,7 +152,22 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                             i += used - 1;
                         }
                     }
-                    'k' if chars.get(i + 1) == Some(&'<') => out.push_str("\\k"),
+                    'k' if chars.get(i + 1) == Some(&'<') => {
+                        let close = chars[i + 2..]
+                            .iter()
+                            .position(|c| *c == '>')
+                            .map(|p| i + 2 + p);
+                        if !has_names && !flags.contains('u') && !flags.contains('v') {
+                            out.push('k');
+                        } else if let Some(c) =
+                            close.filter(|c| !group_defined_before(&chars, i, *c))
+                        {
+                            out.push_str("(?:)");
+                            i = c;
+                        } else {
+                            out.push_str("\\k");
+                        }
+                    }
                     'x' => match hex_digits(&chars, i + 1, 2) {
                         Some(v) => {
                             push_code_point(&mut out, v);
