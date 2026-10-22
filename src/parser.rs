@@ -174,7 +174,23 @@ struct Parser {
 
 impl Parser {
     fn reserved(&self, name: &str) -> bool {
-        is_reserved(name) && (self.strict || !STRICT_RESERVED.contains(&name))
+        match name {
+            "let" => self.strict,
+            "yield" => self.strict || self.in_generator,
+            _ => is_reserved(name) && (self.strict || !STRICT_RESERVED.contains(&name)),
+        }
+    }
+
+    fn if_body(&mut self) -> R<Stmt> {
+        let s = self.statement()?;
+        if !self.strict && matches!(s.kind, StmtKind::Function(_)) {
+            let line = s.line;
+            return Ok(Stmt {
+                kind: StmtKind::Block(vec![s]),
+                line,
+            });
+        }
+        Ok(s)
     }
 
     fn prev_end(&self) -> u32 {
@@ -498,9 +514,9 @@ impl Parser {
                 self.expect(P::LParen)?;
                 let test = self.expression()?;
                 self.expect(P::RParen)?;
-                let cons = self.statement()?;
+                let cons = self.if_body()?;
                 let alt = if self.eat_kw("else") {
-                    Some(Box::new(self.statement()?))
+                    Some(Box::new(self.if_body()?))
                 } else {
                     None
                 };
@@ -650,12 +666,29 @@ impl Parser {
                 self.semicolon()?;
                 Ok(StmtKind::Empty)
             }
-            Some("with") => Err(self.error("'with' is not supported")),
+            Some("with") => {
+                if self.strict {
+                    return Err(self.error("Strict mode code may not include a with statement"));
+                }
+                self.advance();
+                self.expect(P::LParen)?;
+                let saved = self.no_in;
+                self.no_in = false;
+                let obj = self.expression();
+                self.no_in = saved;
+                let obj = obj?;
+                self.expect(P::RParen)?;
+                let body = self.statement()?;
+                Ok(StmtKind::With(obj, Box::new(body)))
+            }
             Some(w) if !self.reserved(w) && self.is_at(1, P::Colon) => {
                 let label: Rc<str> = w.into();
                 self.advance();
                 self.advance();
                 let body = self.statement()?;
+                if !self.strict && matches!(body.kind, StmtKind::Function(_)) {
+                    return Ok(body.kind);
+                }
                 Ok(StmtKind::Labeled(label, Box::new(body)))
             }
             _ => {
@@ -1293,6 +1326,9 @@ impl Parser {
                 Ok((PropKey::Named(s), false))
             }
             Tok::Num(n) => {
+                if self.strict && self.peek().escaped {
+                    return Err(self.error("Octal literals are not allowed in strict mode."));
+                }
                 let s: Rc<str> = number_to_string(*n).into();
                 self.advance();
                 Ok((PropKey::Named(s), false))
@@ -1794,7 +1830,9 @@ impl Parser {
             if self.in_generator {
                 return self.yield_expr();
             }
-            return Err(self.error("yield is only valid in generator functions"));
+            if self.strict {
+                return Err(self.error("yield is only valid in generator functions"));
+            }
         }
         let line = self.line();
         let lhs_start = self.pos;
@@ -2157,7 +2195,7 @@ impl Parser {
             if matches!(&inner.kind, ExprKind::Member { name, .. } if name.starts_with("\u{0}#")) {
                 return Err(self.error("Private fields can not be deleted"));
             }
-            if matches!(&inner.kind, ExprKind::Ident(_)) {
+            if self.strict && matches!(&inner.kind, ExprKind::Ident(_)) {
                 return Err(self.error("Delete of an unqualified identifier in strict mode."));
             }
         }
@@ -2488,6 +2526,9 @@ impl Parser {
                 ExprKind::BigInt(b)
             }
             Tok::Num(n) => {
+                if self.strict && self.peek().escaped {
+                    return Err(self.error("Octal literals are not allowed in strict mode."));
+                }
                 let n = *n;
                 self.advance();
                 ExprKind::Number(n)

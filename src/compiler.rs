@@ -105,6 +105,8 @@ struct FnState {
     eval_upvals: Option<EvalUpvals>,
     evals: Vec<Rc<EvalScope>>,
     strict: bool,
+    self_slot: Option<u32>,
+    annexb: Vec<Rc<str>>,
 }
 
 impl FnState {
@@ -137,6 +139,8 @@ impl FnState {
             eval_upvals: None,
             evals: Vec::new(),
             strict: true,
+            self_slot: None,
+            annexb: Vec::new(),
         }
     }
 }
@@ -149,6 +153,7 @@ pub struct Compiler {
     chain: Vec<usize>,
     exports: Vec<ExportEntry>,
     hidden: u32,
+    next_with: u32,
     self_bind: Option<Rc<str>>,
     repl_consts: Vec<Rc<str>>,
     var_scope_next: bool,
@@ -160,6 +165,68 @@ pub struct Compiler {
     link_imports: Vec<(Rc<str>, Vec<Rc<str>>)>,
     reexport_sources: Vec<(Rc<str>, Rc<str>)>,
     ns_imports: Vec<(Rc<str>, Rc<str>)>,
+}
+
+fn collect_annexb(s: &Stmt, out: &mut Vec<Rc<str>>, nested: bool) {
+    match &s.kind {
+        StmtKind::Function(f) => {
+            if nested && !f.is_async && !f.is_generator {
+                if let Some(n) = &f.name {
+                    if !out.contains(n) {
+                        out.push(n.clone());
+                    }
+                }
+            }
+        }
+        StmtKind::Block(list) => {
+            for x in list {
+                collect_annexb(x, out, true);
+            }
+        }
+        StmtKind::If(_, a, b) => {
+            collect_annexb(a, out, true);
+            if let Some(b) = b {
+                collect_annexb(b, out, true);
+            }
+        }
+        StmtKind::While(_, b) | StmtKind::DoWhile(b, _) | StmtKind::With(_, b) => {
+            collect_annexb(b, out, true);
+        }
+        StmtKind::Labeled(_, b) => collect_annexb(b, out, nested),
+        StmtKind::For { body, .. }
+        | StmtKind::ForOf { body, .. }
+        | StmtKind::ForIn { body, .. } => {
+            collect_annexb(body, out, true);
+        }
+        StmtKind::Try {
+            block,
+            handler,
+            finalizer,
+            ..
+        } => {
+            for x in block {
+                collect_annexb(x, out, true);
+            }
+            if let Some(h) = handler {
+                for x in h {
+                    collect_annexb(x, out, true);
+                }
+            }
+            if let Some(f) = finalizer {
+                for x in f {
+                    collect_annexb(x, out, true);
+                }
+            }
+        }
+        StmtKind::Switch(_, cases) => {
+            for c in cases {
+                for x in &c.body {
+                    collect_annexb(x, out, true);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn collect_var_names(s: &Stmt, out: &mut Vec<Rc<str>>) {
@@ -189,9 +256,10 @@ fn collect_var_names(s: &Stmt, out: &mut Vec<Rc<str>>) {
                 collect_var_names(x, out);
             }
         }
-        StmtKind::While(_, b) | StmtKind::DoWhile(b, _) | StmtKind::Labeled(_, b) => {
-            collect_var_names(b, out)
-        }
+        StmtKind::While(_, b)
+        | StmtKind::DoWhile(b, _)
+        | StmtKind::Labeled(_, b)
+        | StmtKind::With(_, b) => collect_var_names(b, out),
         StmtKind::For { init, body, .. } => {
             if let Some(i) = init {
                 collect_var_names(i, out);
@@ -252,6 +320,7 @@ fn new_compiler(module: Rc<ModuleInfo>, mode: Mode) -> Compiler {
         chain: Vec::new(),
         exports: Vec::new(),
         hidden: 0,
+        next_with: 0,
         self_bind: None,
         repl_consts: Vec::new(),
         var_scope_next: false,
@@ -823,7 +892,57 @@ impl Compiler {
         Var::Global
     }
 
+    fn dynamic_scopes(&self, name: &str) -> Vec<Rc<str>> {
+        if name.starts_with('%') || name == "this" {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let mut si = self.states.len() - 1;
+        loop {
+            let st = &self.states[si];
+            let bound = st.locals.iter().rposition(|l| &*l.name == name);
+            let from = bound.map_or(0, |i| i + 1);
+            for l in st.locals[from..].iter().rev() {
+                if l.name.starts_with("%with") {
+                    out.push(l.name.clone());
+                }
+            }
+            if bound.is_some() || si == 0 {
+                break;
+            }
+            si -= 1;
+        }
+        out
+    }
+
+    fn has_dynamic(&self, name: &str) -> bool {
+        !self.dynamic_scopes(name).is_empty()
+    }
+
     fn load_var(&mut self, name: &Rc<str>) {
+        let scopes = self.dynamic_scopes(name);
+        if scopes.is_empty() {
+            self.load_var_static(name);
+            return;
+        }
+        let k = self.str_const(name);
+        let mut ends = Vec::new();
+        for w in &scopes {
+            self.load_var_static(w);
+            self.emit(Op::WithHas(k));
+            let j = self.emit(Op::JumpIfFalse(0));
+            self.load_var_static(w);
+            self.emit(Op::GetProp(k));
+            ends.push(self.emit(Op::Jump(0)));
+            self.patch(j);
+        }
+        self.load_var_static(name);
+        for e in ends {
+            self.patch(e);
+        }
+    }
+
+    fn load_var_static(&mut self, name: &Rc<str>) {
         match self.resolve(name) {
             Var::Local(s, _) => {
                 self.emit(Op::GetLocal(s));
@@ -871,8 +990,37 @@ impl Compiler {
     }
 
     fn store_var(&mut self, name: &Rc<str>, init: bool) {
+        let scopes = self.dynamic_scopes(name);
+        if scopes.is_empty() {
+            self.store_var_static(name, init);
+            return;
+        }
+        let k = self.str_const(name);
+        let mut ends = Vec::new();
+        for w in &scopes {
+            self.load_var_static(w);
+            self.emit(Op::WithHas(k));
+            let j = self.emit(Op::JumpIfFalse(0));
+            self.load_var_static(w);
+            self.emit(Op::Swap);
+            self.emit(Op::SetProp(k));
+            ends.push(self.emit(Op::Jump(0)));
+            self.patch(j);
+        }
+        self.store_var_static(name, init);
+        for e in ends {
+            self.patch(e);
+        }
+    }
+
+    fn store_var_static(&mut self, name: &Rc<str>, init: bool) {
         match self.resolve(name) {
             Var::Local(s, c) => {
+                let silent =
+                    c && !init && Some(s) == self.st_ref().self_slot && !self.st_ref().strict;
+                if silent {
+                    return;
+                }
                 if c && !init {
                     let k = self.str_const(name);
                     self.emit(Op::ThrowConstAssign(k));
@@ -1042,6 +1190,40 @@ impl Compiler {
         for s in stmts {
             collect_var_names(s, &mut names);
         }
+        if !self.st_ref().strict {
+            let mut cands = Vec::new();
+            for s in stmts {
+                collect_annexb(s, &mut cands, false);
+            }
+            let mut lexical = Vec::new();
+            for s in stmts {
+                match &s.kind {
+                    StmtKind::Decl(k, decls) if *k != DeclKind::Var => {
+                        for (p, _) in decls {
+                            p.bound_names(&mut lexical);
+                        }
+                    }
+                    StmtKind::Class(c) => {
+                        if let Some(n) = &c.name {
+                            lexical.push(n.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for n in cands {
+                let bound = self.st_ref().locals.iter().any(|l| l.name == n);
+                if lexical.contains(&n) || bound {
+                    continue;
+                }
+                if !self.st_ref().annexb.contains(&n) {
+                    self.st().annexb.push(n.clone());
+                }
+                if !names.contains(&n) {
+                    names.push(n);
+                }
+            }
+        }
         let repl = self.is_repl_top() && self.script_eval != 2;
         for n in names {
             if self.st_ref().vars.contains(&n) {
@@ -1127,11 +1309,12 @@ impl Compiler {
             if var_clash && is_fn {
                 continue;
             }
-            let dup_old = self
-                .st_ref()
-                .locals
-                .iter()
-                .any(|l| l.depth == depth && &l.name == n);
+            let dup_old = &**n != "arguments"
+                && self
+                    .st_ref()
+                    .locals
+                    .iter()
+                    .any(|l| l.depth == depth && &l.name == n);
             if dup_new || dup_old {
                 return Err(self.err(format!("Identifier '{n}' has already been declared")));
             }
@@ -1258,11 +1441,35 @@ impl Compiler {
                 self.emit(Op::Closure(idx));
                 if let Some(n) = &f.name {
                     self.store_var(n, true);
+                    if !var_scope && self.st_ref().annexb.contains(n) {
+                        self.annexb_copy(n);
+                    }
                 }
                 self.emit(Op::Pop);
             }
         }
         Ok(())
+    }
+
+    fn annexb_copy(&mut self, n: &Rc<str>) {
+        let st = self.st_ref();
+        let inner = st.locals.iter().rposition(|l| &l.name == n);
+        let outer = st
+            .locals
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(i, l)| &l.name == n && Some(*i) != inner && l.depth <= 1)
+            .map(|(i, _)| i);
+        match outer {
+            Some(i) => {
+                self.emit(Op::SetLocal(i as u32));
+            }
+            None => {
+                let k = self.str_const(n);
+                self.emit(Op::SetGlobal(k));
+            }
+        }
     }
 
     fn import_binding(&self, local: &str) -> Option<(Rc<str>, Rc<str>)> {
@@ -1410,6 +1617,16 @@ impl Compiler {
                     self.mark_init(n);
                 }
                 self.emit(Op::Pop);
+            }
+            StmtKind::With(obj, body) => {
+                self.begin_scope();
+                self.expr(obj)?;
+                self.emit(Op::ToObject);
+                let id = self.next_with;
+                self.next_with += 1;
+                self.add_local(format!("%with{id}").into(), true);
+                self.sub_stmt(body)?;
+                self.end_scope();
             }
             StmtKind::Return(e) => self.return_stmt(e.as_ref())?,
             StmtKind::If(test, cons, alt) => {
@@ -2330,7 +2547,7 @@ impl Compiler {
     fn simple_params(&mut self, f: &FuncDef) -> R<()> {
         for p in &f.params {
             if let Pattern::Ident(n) = &p.pattern {
-                if !self.module.sloppy
+                if self.st_ref().strict
                     && self.resolve_local(self.states.len() - 1, n).is_some()
                     && &**n != "this"
                 {
@@ -2341,7 +2558,7 @@ impl Compiler {
         }
         self.param_counts(f);
         if let Some(Pattern::Ident(n)) = &f.rest {
-            if !self.module.sloppy && self.resolve_local(self.states.len() - 1, n).is_some() {
+            if self.st_ref().strict && self.resolve_local(self.states.len() - 1, n).is_some() {
                 return Err(self.err(format!("Duplicate parameter name '{n}'")));
             }
             self.add_local(n.clone(), false);
@@ -2433,7 +2650,8 @@ impl Compiler {
         if let Some(n) = self_name {
             if self.resolve_local(self.states.len() - 1, &n).is_none() {
                 self.emit(Op::GetCallee);
-                self.add_local(n, true);
+                let s = self.add_local(n, true);
+                self.st().self_slot = Some(s);
             }
         }
         if kind == ProtoKind::ClassConstructor {
@@ -2912,6 +3130,25 @@ impl Compiler {
                 self.expr(key)?;
                 self.emit(Op::SuperGetIndexMethod(is_static));
             }
+            ExprKind::Ident(n) if self.has_dynamic(n) => {
+                let scopes = self.dynamic_scopes(n);
+                let k = self.str_const(n);
+                let mut ends = Vec::new();
+                for w in &scopes {
+                    self.load_var_static(w);
+                    self.emit(Op::WithHas(k));
+                    let j = self.emit(Op::JumpIfFalse(0));
+                    self.load_var_static(w);
+                    self.emit(Op::GetMethod(k));
+                    ends.push(self.emit(Op::Jump(0)));
+                    self.patch(j);
+                }
+                self.load_var_static(n);
+                self.emit(Op::Undefined);
+                for e in ends {
+                    self.patch(e);
+                }
+            }
             _ => {
                 self.expr(callee)?;
                 self.emit(Op::Undefined);
@@ -2972,6 +3209,7 @@ impl Compiler {
 
     fn local_slot(&mut self, e: &Expr) -> Option<u32> {
         match &e.kind {
+            ExprKind::Ident(n) if self.has_dynamic(n) => None,
             ExprKind::Ident(n) => match self.resolve(n) {
                 Var::Local(s, _) => Some(s),
                 _ => None,
@@ -2985,7 +3223,7 @@ impl Compiler {
     }
 
     fn store_discard(&mut self, name: &Rc<str>) {
-        if self.is_export_binding(name) {
+        if self.is_export_binding(name) || self.has_dynamic(name) {
             self.store_var(name, false);
             self.emit(Op::Pop);
             return;
@@ -3016,9 +3254,11 @@ impl Compiler {
         match &e.kind {
             ExprKind::Update { inc, target, .. } => {
                 if let ExprKind::Ident(n) = &target.kind {
-                    if let (Var::Local(s, false), false) =
-                        (self.resolve(n), self.is_export_binding(n))
-                    {
+                    if let (Var::Local(s, false), false, false) = (
+                        self.resolve(n),
+                        self.is_export_binding(n),
+                        self.has_dynamic(n),
+                    ) {
                         self.emit(if *inc {
                             Op::IncLocal(s)
                         } else {
@@ -3049,7 +3289,8 @@ impl Compiler {
                 }
                 (ExprKind::Ident(n), Some(AssignOp::Bin(BinOp::Add)))
                     if matches!(self.resolve(n), Var::Local(_, false))
-                        && !self.is_export_binding(n) =>
+                        && !self.is_export_binding(n)
+                        && !self.has_dynamic(n) =>
                 {
                     let Var::Local(slot, _) = self.resolve(n) else {
                         unreachable!()
@@ -3336,16 +3577,52 @@ impl Compiler {
             ExprKind::Unary(op, x) => match op {
                 UnaryOp::Typeof => {
                     if let ExprKind::Ident(n) = &x.kind {
-                        if matches!(self.resolve(n), Var::Global) && self.alias(n).is_none() {
-                            let k = self.str_const(n);
-                            self.emit(Op::TypeofGlobal(k));
-                            return Ok(());
+                        let scopes = self.dynamic_scopes(n);
+                        let k = self.str_const(n);
+                        let mut ends = Vec::new();
+                        for w in &scopes {
+                            self.load_var_static(w);
+                            self.emit(Op::WithHas(k));
+                            let j = self.emit(Op::JumpIfFalse(0));
+                            self.load_var_static(w);
+                            self.emit(Op::GetProp(k));
+                            self.emit(Op::Typeof);
+                            ends.push(self.emit(Op::Jump(0)));
+                            self.patch(j);
                         }
+                        if matches!(self.resolve(n), Var::Global) && self.alias(n).is_none() {
+                            self.emit(Op::TypeofGlobal(k));
+                        } else {
+                            self.load_var_static(n);
+                            self.emit(Op::Typeof);
+                        }
+                        for e in ends {
+                            self.patch(e);
+                        }
+                        return Ok(());
                     }
                     self.expr(x)?;
                     self.emit(Op::Typeof);
                 }
                 UnaryOp::Delete => match &x.kind {
+                    ExprKind::Ident(n) if self.has_dynamic(n) => {
+                        let scopes = self.dynamic_scopes(n);
+                        let k = self.str_const(n);
+                        let mut ends = Vec::new();
+                        for w in &scopes {
+                            self.load_var_static(w);
+                            self.emit(Op::WithHas(k));
+                            let j = self.emit(Op::JumpIfFalse(0));
+                            self.load_var_static(w);
+                            self.emit(Op::DeleteProp(k));
+                            ends.push(self.emit(Op::Jump(0)));
+                            self.patch(j);
+                        }
+                        self.emit(Op::True);
+                        for e in ends {
+                            self.patch(e);
+                        }
+                    }
                     ExprKind::Member { obj, name, .. } => {
                         self.expr(obj)?;
                         let k = self.str_const(name);
@@ -3392,16 +3669,45 @@ impl Compiler {
                 let step = if *inc { Op::Inc } else { Op::Dec };
                 match &target.kind {
                     ExprKind::Ident(n) => {
-                        self.load_var(n);
+                        let scopes = self.dynamic_scopes(n);
+                        let mut ends = Vec::new();
+                        if !scopes.is_empty() {
+                            let k = self.str_const(n);
+                            for w in &scopes {
+                                self.load_var_static(w);
+                                self.emit(Op::WithHas(k));
+                                let j = self.emit(Op::JumpIfFalse(0));
+                                self.load_var_static(w);
+                                self.emit(Op::Dup);
+                                self.emit(Op::GetProp(k));
+                                if *prefix {
+                                    self.emit(step);
+                                    self.emit(Op::SetProp(k));
+                                } else {
+                                    self.emit(Op::ToNumeric);
+                                    self.emit(Op::Dup);
+                                    self.emit(Op::Rot3);
+                                    self.emit(step);
+                                    self.emit(Op::SetProp(k));
+                                    self.emit(Op::Pop);
+                                }
+                                ends.push(self.emit(Op::Jump(0)));
+                                self.patch(j);
+                            }
+                        }
+                        self.load_var_static(n);
                         if *prefix {
                             self.emit(step);
-                            self.store_var(n, false);
+                            self.store_var_static(n, false);
                         } else {
                             self.emit(Op::ToNumeric);
                             self.emit(Op::Dup);
                             self.emit(step);
-                            self.store_var(n, false);
+                            self.store_var_static(n, false);
                             self.emit(Op::Pop);
+                        }
+                        for e in ends {
+                            self.patch(e);
                         }
                     }
                     ExprKind::Member { obj, name, .. } => {
@@ -3663,25 +3969,71 @@ impl Compiler {
                 self.bind_pattern(p, BindMode::Assign)?;
             }
             AssignTarget::Simple(t) => match &t.kind {
-                ExprKind::Ident(n) => match op {
-                    None => {
-                        self.expr_named(value, Some(n))?;
-                        self.store_var(n, false);
+                ExprKind::Ident(n) => {
+                    let scopes = self.dynamic_scopes(n);
+                    let mut ends = Vec::new();
+                    if !scopes.is_empty() {
+                        let k = self.str_const(n);
+                        for w in &scopes {
+                            self.load_var_static(w);
+                            self.emit(Op::WithHas(k));
+                            let j = self.emit(Op::JumpIfFalse(0));
+                            match op {
+                                None => {
+                                    self.expr_named(value, Some(n))?;
+                                    self.load_var_static(w);
+                                    self.emit(Op::Swap);
+                                    self.emit(Op::SetProp(k));
+                                }
+                                Some(AssignOp::Bin(b)) => {
+                                    self.load_var_static(w);
+                                    self.emit(Op::Dup);
+                                    self.emit(Op::GetProp(k));
+                                    self.expr(value)?;
+                                    self.emit(bin_op(b));
+                                    self.emit(Op::SetProp(k));
+                                }
+                                Some(AssignOp::Logical(l)) => {
+                                    self.load_var_static(w);
+                                    self.emit(Op::Dup);
+                                    self.emit(Op::GetProp(k));
+                                    let j2 = self.emit(logical_jump(l));
+                                    self.expr_named(value, Some(n))?;
+                                    self.emit(Op::SetProp(k));
+                                    let e2 = self.emit(Op::Jump(0));
+                                    self.patch(j2);
+                                    self.emit(Op::Swap);
+                                    self.emit(Op::Pop);
+                                    self.patch(e2);
+                                }
+                            }
+                            ends.push(self.emit(Op::Jump(0)));
+                            self.patch(j);
+                        }
                     }
-                    Some(AssignOp::Bin(b)) => {
-                        self.load_var(n);
-                        self.expr(value)?;
-                        self.emit(bin_op(b));
-                        self.store_var(n, false);
+                    match op {
+                        None => {
+                            self.expr_named(value, Some(n))?;
+                            self.store_var_static(n, false);
+                        }
+                        Some(AssignOp::Bin(b)) => {
+                            self.load_var_static(n);
+                            self.expr(value)?;
+                            self.emit(bin_op(b));
+                            self.store_var_static(n, false);
+                        }
+                        Some(AssignOp::Logical(l)) => {
+                            self.load_var_static(n);
+                            let j = self.emit(logical_jump(l));
+                            self.expr_named(value, Some(n))?;
+                            self.store_var_static(n, false);
+                            self.patch(j);
+                        }
                     }
-                    Some(AssignOp::Logical(l)) => {
-                        self.load_var(n);
-                        let j = self.emit(logical_jump(l));
-                        self.expr_named(value, Some(n))?;
-                        self.store_var(n, false);
-                        self.patch(j);
+                    for e in ends {
+                        self.patch(e);
                     }
-                },
+                }
                 ExprKind::Member { obj, name, .. } => {
                     let k = self.str_const(name);
                     self.expr(obj)?;

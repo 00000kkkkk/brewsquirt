@@ -189,7 +189,7 @@ impl Lexer {
             };
             let escaped = match &tok {
                 Tok::Ident(_) => self.chars[begin..self.pos].contains(&'\\'),
-                Tok::Str(_) => std::mem::take(&mut self.legacy_escape),
+                Tok::Str(_) | Tok::Num(_) => std::mem::take(&mut self.legacy_escape),
                 _ => false,
             };
             out.push(Token {
@@ -372,11 +372,20 @@ impl Lexer {
         let leading_zero = self.peek() == Some('0');
         self.digits(&mut s);
         if leading_zero && s.len() > 1 {
-            return Err(self.err(if s.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
-                "Octal literals are not allowed in strict mode."
-            } else {
-                "Decimals with leading zeros are not allowed in strict mode."
-            }));
+            self.legacy_escape = true;
+            if s.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
+                if self.peek() == Some('n') {
+                    return Err(self.err("Invalid BigInt syntax"));
+                }
+                self.check_number_end()?;
+                let v = s
+                    .bytes()
+                    .fold(0f64, |acc, b| acc * 8.0 + f64::from(b - b'0'));
+                return Ok(Tok::Num(v));
+            }
+            if self.peek() == Some('n') {
+                return Err(self.err("Invalid BigInt syntax"));
+            }
         }
         if self.peek() == Some('n') && !s.is_empty() {
             self.bump();

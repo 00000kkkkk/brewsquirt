@@ -1518,6 +1518,11 @@ impl Vm {
         }
         if let Some(all) = all_args {
             let arr = self.new_arguments(all);
+            if p.sloppy {
+                if let Value::Object(a) = &arr {
+                    a.set_with_attrs("callee", self.stack[ci].clone(), crate::object::NON_ENUM);
+                }
+            }
             self.stack.push(arr);
         }
         self.frames.push(Frame {
@@ -2342,7 +2347,7 @@ impl Vm {
                             if limit < len {
                                 o.truncate_holes(limit);
                             }
-                            return Err(self.type_error(format!(
+                            return Err(self.assign_error(format!(
                                 "Cannot delete property '{}' of [object Array]",
                                 limit - 1
                             )));
@@ -4977,6 +4982,29 @@ impl Vm {
                     let n = self.stack.len();
                     let v = self.stack[n - 1 - d as usize].clone();
                     self.stack.push(v);
+                }
+                Op::WithHas(k) => {
+                    let obj = pop!();
+                    let n = name!(k);
+                    let mut has = match &obj {
+                        Value::Object(o) => tri!(self.op_has_property(o, &n)),
+                        _ => false,
+                    };
+                    if has {
+                        let u = tri!(self.get_prop(&obj, crate::object::UNSCOPABLES_KEY));
+                        if u.is_object() {
+                            let blocked = tri!(self.get_prop(&u, &n));
+                            if blocked.truthy() {
+                                has = false;
+                            }
+                        }
+                    }
+                    self.stack.push(Value::Bool(has));
+                }
+                Op::ToObject => {
+                    let v = pop!();
+                    let o = tri!(self.to_object(&v));
+                    self.stack.push(Value::Object(o));
                 }
                 Op::RequireUninit => {
                     let raw = pop!();

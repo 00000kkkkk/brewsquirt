@@ -331,6 +331,7 @@ pub enum StmtKind {
     Break(Option<Rc<str>>),
     Continue(Option<Rc<str>>),
     Labeled(Rc<str>, Box<Stmt>),
+    With(Expr, Box<Stmt>),
     Throw(Expr),
     Try {
         block: Vec<Stmt>,

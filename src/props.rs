@@ -369,7 +369,7 @@ impl Vm {
                         o.flags.set(o.flags.get() | ELEMENTS_FROZEN);
                     }
                     if limit > n as usize {
-                        return Err(self.type_error(format!(
+                        return Err(self.assign_error(format!(
                             "Cannot delete property '{}' of [object Array]",
                             limit - 1
                         )));
