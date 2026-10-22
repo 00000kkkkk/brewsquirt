@@ -355,19 +355,7 @@ fn compile_unit(
                 let k = c.str_const(exported);
                 c.emit(Op::InitProp(k));
             }
-            ExportEntry::All(hidden) => {
-                c.load_var(hidden);
-                c.emit(Op::ExportAll);
-            }
-            ExportEntry::Named(hidden, imported, exported) => {
-                c.load_var(hidden);
-                if &**imported != "*" {
-                    let i = c.str_const(imported);
-                    c.emit(Op::GetProp(i));
-                }
-                let k = c.str_const(exported);
-                c.emit(Op::InitProp(k));
-            }
+            ExportEntry::All(_) | ExportEntry::Named(..) => {}
         }
     }
     c.emit(Op::Return);
@@ -1156,8 +1144,10 @@ impl Compiler {
                 self.load_var(&"%ns".into());
                 if funcs.iter().any(|f| f.name.as_ref() == Some(local)) {
                     self.load_var(local);
-                } else {
+                } else if var_names.contains(local) {
                     self.emit(Op::Undefined);
+                } else {
+                    self.emit(Op::Uninit);
                 }
                 let k = self.str_const(exported);
                 self.emit(Op::SetProp(k));
@@ -2139,6 +2129,11 @@ impl Compiler {
             FuncKind::DerivedConstructor => ProtoKind::DerivedConstructor,
         };
         let name = f.name.clone().or(name_hint).unwrap_or_else(|| "".into());
+        let name: Rc<str> = if &*name == "%default" {
+            "default".into()
+        } else {
+            name
+        };
         let self_name = self.self_bind.take();
         let saved_line = self.line;
         self.line = f.line;

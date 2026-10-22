@@ -94,6 +94,7 @@ fn parse_goal(src: &str, script: bool) -> R<Vec<Stmt>> {
         nt_ok: false,
         strict: !script,
         static_block: false,
+        at_top: false,
     };
     parser.strict = !script || parser.has_use_strict_from(0);
     parser.program()
@@ -116,6 +117,7 @@ pub fn parse_eval(src: &str, ctx: &EvalCtx) -> R<Vec<Stmt>> {
         nt_ok: ctx.in_function,
         strict: ctx.strict,
         static_block: false,
+        at_top: false,
     };
     parser.strict = ctx.strict || parser.has_use_strict_from(0);
     parser.program()
@@ -151,6 +153,7 @@ struct Parser {
     nt_ok: bool,
     strict: bool,
     static_block: bool,
+    at_top: bool,
     args_used: Vec<bool>,
     span_start: Option<u32>,
 }
@@ -394,6 +397,7 @@ impl Parser {
     fn program(&mut self) -> R<Vec<Stmt>> {
         let mut out = Vec::new();
         while !self.is_eof() {
+            self.at_top = true;
             out.push(self.statement()?);
         }
         Ok(out)
@@ -418,6 +422,7 @@ impl Parser {
     }
 
     fn statement_kind(&mut self) -> R<StmtKind> {
+        let top = std::mem::take(&mut self.at_top);
         if self.is(P::LBrace) {
             return Ok(StmtKind::Block(self.block()?));
         }
@@ -594,13 +599,13 @@ impl Parser {
                 Ok(StmtKind::Switch(disc, cases))
             }
             Some("import") if !self.is_at(1, P::LParen) && !self.is_at(1, P::Dot) => {
-                if self.script {
+                if self.script || !top {
                     return Err(self.error("Cannot use import statement outside a module"));
                 }
                 self.import()
             }
             Some("export") => {
-                if self.script {
+                if self.script || !top {
                     return Err(self.error("Unexpected token 'export'"));
                 }
                 self.export()
@@ -834,7 +839,12 @@ impl Parser {
                 namespace = Some(self.binding_ident()?);
             } else if self.eat(P::LBrace) {
                 while !self.eat(P::RBrace) {
+                    let was_string = matches!(self.peek().tok, Tok::Str(_));
                     let imported = self.module_name()?;
+                    self.check_export_name(&imported)?;
+                    if was_string && !self.is_kw("as") {
+                        return Err(self.error("Unexpected string in import list"));
+                    }
                     let local = if self.eat_kw("as") {
                         self.binding_ident()?
                     } else {
@@ -869,40 +879,82 @@ impl Parser {
         }))
     }
 
-    fn export_names(&mut self) -> R<Vec<(Rc<str>, Rc<str>)>> {
+    fn export_names(&mut self) -> R<(Vec<(Rc<str>, Rc<str>)>, bool)> {
         let mut names = Vec::new();
+        let mut string_local = false;
         while !self.eat(P::RBrace) {
+            if matches!(self.peek().tok, Tok::Str(_)) {
+                string_local = true;
+            }
             let local = self.module_name()?;
+            self.check_export_name(&local)?;
             let exported = if self.eat_kw("as") {
                 self.module_name()?
             } else {
                 local.clone()
             };
+            self.check_export_name(&exported)?;
             names.push((local, exported));
             if !self.eat(P::Comma) {
                 self.expect(P::RBrace)?;
                 break;
             }
         }
-        Ok(names)
+        Ok((names, string_local))
+    }
+
+    fn check_export_name(&self, name: &str) -> R<()> {
+        if name.chars().any(crate::value::is_lone) {
+            return Err(self.error("Invalid module export name: contains unpaired surrogate"));
+        }
+        Ok(())
     }
 
     fn export(&mut self) -> R<StmtKind> {
         self.advance();
         if self.eat_kw("default") {
             let line = self.line();
-            if self.is_kw("function") && matches!(self.peek_at(1).tok, Tok::Ident(_)) {
-                let s = self.statement()?;
-                return Ok(StmtKind::Export(ExportDecl::DefaultDecl(Box::new(s))));
-            }
-            if self.is_kw("class")
-                && matches!(&self.peek_at(1).tok, Tok::Ident(n) if &**n != "extends")
-            {
-                let c = self.class(true)?;
+            let is_async =
+                self.is_kw("async") && self.is_kw_at(1, "function") && !self.peek_at(1).nl_before;
+            let fn_at = usize::from(is_async);
+            if self.is_kw_at(fn_at, "function") {
+                let star = self.is_at(fn_at + 1, P::Star);
+                let name_at = fn_at + 1 + usize::from(star);
+                if matches!(self.peek_at(name_at).tok, Tok::Ident(_)) {
+                    let s = self.statement()?;
+                    return Ok(StmtKind::Export(ExportDecl::DefaultDecl(Box::new(s))));
+                }
+                self.span_start = Some(self.peek().start);
+                if is_async {
+                    self.advance();
+                }
+                self.advance();
+                let is_generator = self.eat(P::Star);
+                let f = self.function_full(
+                    Some("%default".into()),
+                    FuncKind::Normal,
+                    line,
+                    is_async,
+                    is_generator,
+                )?;
                 return Ok(StmtKind::Export(ExportDecl::DefaultDecl(Box::new(Stmt {
-                    kind: StmtKind::Class(c),
+                    kind: StmtKind::Function(f),
                     line,
                 }))));
+            }
+            if self.is_kw("class") {
+                if matches!(&self.peek_at(1).tok, Tok::Ident(n) if &**n != "extends") {
+                    let c = self.class(true)?;
+                    return Ok(StmtKind::Export(ExportDecl::DefaultDecl(Box::new(Stmt {
+                        kind: StmtKind::Class(c),
+                        line,
+                    }))));
+                }
+                let c = self.class(false)?;
+                return Ok(StmtKind::Export(ExportDecl::Default(Expr {
+                    kind: ExprKind::Class(c),
+                    line,
+                })));
             }
             let e = self.assignment()?;
             self.semicolon()?;
@@ -911,6 +963,7 @@ impl Parser {
         if self.eat(P::Star) {
             if self.eat_kw("as") {
                 let exported = self.module_name()?;
+                self.check_export_name(&exported)?;
                 self.expect_kw("from")?;
                 let source = self.string_lit()?;
                 self.semicolon()?;
@@ -928,7 +981,7 @@ impl Parser {
             }));
         }
         if self.eat(P::LBrace) {
-            let names = self.export_names()?;
+            let (names, string_local) = self.export_names()?;
             if self.eat_kw("from") {
                 let source = self.string_lit()?;
                 self.semicolon()?;
@@ -936,6 +989,9 @@ impl Parser {
                     source,
                     names: Some(names),
                 }));
+            }
+            if string_local {
+                return Err(self.error("Unexpected string in export list"));
             }
             self.semicolon()?;
             return Ok(StmtKind::Export(ExportDecl::Names(names)));
@@ -2170,6 +2226,7 @@ impl Parser {
                         nt_ok: self.nt_ok,
                         strict: self.strict,
                         static_block: false,
+                        at_top: false,
                         args_used: vec![false],
                         span_start: None,
                     };

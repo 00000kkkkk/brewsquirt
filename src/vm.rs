@@ -275,6 +275,8 @@ pub struct Vm {
     pub realm: Realm,
     modules: FxHashMap<PathBuf, Value>,
     proto_cache: FxHashMap<PathBuf, Rc<FunctionProto>>,
+    ns_cache: FxHashMap<PathBuf, Value>,
+    ns_get_fn: Option<Value>,
     loading: Vec<PathBuf>,
     builtin_modules: FxHashMap<String, Value>,
     const_globals: Vec<Rc<str>>,
@@ -352,6 +354,8 @@ impl Vm {
             realm: Realm::new(),
             modules: FxHashMap::default(),
             proto_cache: FxHashMap::default(),
+            ns_cache: FxHashMap::default(),
+            ns_get_fn: None,
             loading: Vec::new(),
             builtin_modules: FxHashMap::default(),
             const_globals: Vec::new(),
@@ -780,7 +784,8 @@ impl Vm {
         };
         self.proto_cache.insert(abs.clone(), proto.clone());
         self.link_module(&abs, &proto)?;
-        let ns = self.new_namespace();
+        let ns = self.namespace_for(&abs);
+        self.install_reexports(&abs, &ns)?;
         self.modules.insert(abs.clone(), ns.clone());
         self.pending_ns = Some(ns.clone());
         self.loading.push(abs.clone());
@@ -1032,6 +1037,114 @@ impl Vm {
         }
     }
 
+    fn namespace_for(&mut self, path: &Path) -> Value {
+        if let Some(ns) = self.ns_cache.get(path) {
+            return ns.clone();
+        }
+        let ns = self.new_namespace();
+        self.ns_cache.insert(path.to_path_buf(), ns.clone());
+        ns
+    }
+
+    fn exported_names(
+        &mut self,
+        path: &PathBuf,
+        visited: &mut Vec<PathBuf>,
+    ) -> Result<Vec<Rc<str>>, Value> {
+        if visited.contains(path) {
+            return Ok(Vec::new());
+        }
+        visited.push(path.clone());
+        let spec = path.display().to_string();
+        let proto = self.load_proto(path, &spec)?;
+        let Some(link) = proto.link.clone() else {
+            return Ok(Vec::new());
+        };
+        let mut names: Vec<Rc<str>> = Vec::new();
+        for n in &link.local_exports {
+            if !names.contains(n) {
+                names.push(n.clone());
+            }
+        }
+        for (exported, _, _) in &link.indirect {
+            if !names.contains(exported) {
+                names.push(exported.clone());
+            }
+        }
+        for source in &link.stars {
+            let Some(dep) = self.link_target(path, source)? else {
+                continue;
+            };
+            for n in self.exported_names(&dep, visited)? {
+                if &*n != "default" && !names.contains(&n) {
+                    names.push(n);
+                }
+            }
+        }
+        Ok(names)
+    }
+
+    fn install_reexports(&mut self, path: &PathBuf, ns: &Value) -> Result<(), Value> {
+        let spec = path.display().to_string();
+        let proto = self.load_proto(path, &spec)?;
+        let Some(link) = proto.link.clone() else {
+            return Ok(());
+        };
+        if !link.esm {
+            return Ok(());
+        }
+        let mut visited = Vec::new();
+        let names = self.exported_names(path, &mut visited)?;
+        let Value::Object(nso) = ns else {
+            return Ok(());
+        };
+        for name in names {
+            if link.local_exports.contains(&name) {
+                continue;
+            }
+            let mut seen = Vec::new();
+            match self.resolve_export(path, &name, &mut seen)? {
+                Resolution::Found(target, local) => {
+                    if target == *path && local == name {
+                        continue;
+                    }
+                    let target_ns = self.namespace_for(&target);
+                    let getter = self.ns_getter(target_ns, &local);
+                    nso.set_with_attrs(
+                        name.clone(),
+                        crate::builtins::intrinsics::raw_accessor(getter, Value::Undefined),
+                        0,
+                    );
+                }
+                Resolution::Namespace(dep) => {
+                    let dep_ns = self.namespace_for(&dep);
+                    nso.set_own(name.clone(), dep_ns);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn ns_getter(&mut self, target_ns: Value, local: &str) -> Value {
+        let inner = match &self.ns_get_fn {
+            Some(f) => f.clone(),
+            None => {
+                let f = builtins::native_fn(self, "", 0, ns_get);
+                self.ns_get_fn = Some(f.clone());
+                f
+            }
+        };
+        Value::Object(Obj::new(
+            ObjKind::Bound(Box::new(crate::object::Bound {
+                target: inner,
+                this: target_ns,
+                args: vec![Value::Str(local.into())],
+            })),
+            Some(self.realm.function_proto.clone()),
+        ))
+    }
+
     fn link_module(&mut self, path: &Path, proto: &Rc<FunctionProto>) -> Result<(), Value> {
         let Some(link) = proto.link.clone() else {
             return Ok(());
@@ -1105,7 +1218,8 @@ impl Vm {
         let proto = self.load_proto(&path, spec)?;
         self.link_module(&path, &proto)?;
         let is_async = proto.is_async;
-        let ns = self.new_namespace();
+        let ns = self.namespace_for(&path);
+        self.install_reexports(&path, &ns)?;
         self.modules.insert(path.clone(), ns.clone());
         self.pending_ns = Some(ns.clone());
         self.loading.push(path.clone());
@@ -1968,6 +2082,12 @@ impl Vm {
     }
 
     pub fn resolve_accessor(&mut self, v: Value, receiver: &Value) -> Result<Value, Value> {
+        if matches!(v, Value::Uninit) {
+            return Err(self.make_error(
+                ErrorKind::ReferenceError,
+                "Cannot access binding before initialization",
+            ));
+        }
         if let Value::Object(a) = &v {
             if let ObjKind::Accessor(acc) = &a.kind {
                 let getter = acc.get.borrow().clone();
@@ -3533,7 +3653,10 @@ impl Vm {
                                 unreachable!()
                             };
                             match o.get_chain_plain(key) {
-                                Some(v) if !matches!(&v, Value::Object(a) if a.is_accessor()) => {
+                                Some(v)
+                                    if !matches!(&v, Value::Object(a) if a.is_accessor())
+                                        && !matches!(v, Value::Uninit) =>
+                                {
                                     Some(v)
                                 }
                                 _ => None,
@@ -3560,7 +3683,10 @@ impl Vm {
                                 unreachable!()
                             };
                             match o.get_chain_plain(key) {
-                                Some(v) if !matches!(&v, Value::Object(a) if a.is_accessor()) => {
+                                Some(v)
+                                    if !matches!(&v, Value::Object(a) if a.is_accessor())
+                                        && !matches!(v, Value::Uninit) =>
+                                {
                                     Some(v)
                                 }
                                 _ => None,
@@ -3723,7 +3849,10 @@ impl Vm {
                             let key = &proto.consts[k as usize];
                             let Value::Str(key) = key else { unreachable!() };
                             match o.get_chain_plain(key) {
-                                Some(v) if matches!(&v, Value::Object(a) if a.is_accessor()) => {
+                                Some(v)
+                                    if matches!(&v, Value::Object(a) if a.is_accessor())
+                                        || matches!(v, Value::Uninit) =>
+                                {
                                     tri!(self.resolve_accessor(v, &obj))
                                 }
                                 Some(v) => v,
@@ -5338,4 +5467,11 @@ enum Resolution {
     Namespace(PathBuf),
     Ambiguous,
     NotFound,
+}
+
+fn ns_get(vm: &mut Vm, this: Value, args: &[Value]) -> Result<Value, Value> {
+    let Some(Value::Str(key)) = args.first() else {
+        return Ok(Value::Undefined);
+    };
+    vm.get_prop(&this, key)
 }
