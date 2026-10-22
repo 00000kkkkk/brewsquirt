@@ -228,6 +228,16 @@ pub struct FunctionProto {
     pub span: (u32, u32),
     pub templates: Box<[std::cell::RefCell<Option<Value>>]>,
     pub evals: Vec<Rc<EvalScope>>,
+    pub link: Option<Rc<ModuleLink>>,
+}
+
+#[derive(Debug, Default)]
+pub struct ModuleLink {
+    pub esm: bool,
+    pub imports: Vec<(Rc<str>, Vec<Rc<str>>)>,
+    pub local_exports: Vec<Rc<str>>,
+    pub indirect: Vec<(Rc<str>, Rc<str>, Rc<str>)>,
+    pub stars: Vec<Rc<str>>,
 }
 
 pub type EvalUpvals = Rc<Vec<(Rc<str>, u32, bool)>>;

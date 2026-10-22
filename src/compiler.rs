@@ -139,6 +139,8 @@ pub struct Compiler {
     export_names: Vec<(Rc<str>, Rc<str>)>,
     completion: Option<(usize, u32)>,
     script_eval: u8,
+    link_imports: Vec<(Rc<str>, Vec<Rc<str>>)>,
+    reexport_sources: Vec<(Rc<str>, Rc<str>)>,
 }
 
 fn collect_var_names(s: &Stmt, out: &mut Vec<Rc<str>>) {
@@ -239,6 +241,8 @@ fn new_compiler(module: Rc<ModuleInfo>, mode: Mode) -> Compiler {
         export_names: Vec::new(),
         completion: None,
         script_eval: 0,
+        link_imports: Vec::new(),
+        reexport_sources: Vec::new(),
     }
 }
 
@@ -367,8 +371,32 @@ fn compile_unit(
         }
     }
     c.emit(Op::Return);
+    let source_of = |c: &Compiler, hidden: &Rc<str>| {
+        c.reexport_sources
+            .iter()
+            .find(|(h, _)| h == hidden)
+            .map(|(_, s)| s.clone())
+            .unwrap_or_else(|| "".into())
+    };
+    let mut link = ModuleLink {
+        esm: !exports.is_empty() || !c.link_imports.is_empty(),
+        imports: c.link_imports.clone(),
+        ..ModuleLink::default()
+    };
+    for entry in &exports {
+        match entry {
+            ExportEntry::Local(_, exported) => link.local_exports.push(exported.clone()),
+            ExportEntry::All(hidden) => link.stars.push(source_of(&c, hidden)),
+            ExportEntry::Named(hidden, imported, exported) => {
+                link.indirect
+                    .push((exported.clone(), source_of(&c, hidden), imported.clone()));
+            }
+        }
+    }
     let st = c.states.pop().expect("module state");
-    Ok(Rc::new(c.finish(st)))
+    let mut proto = c.finish(st);
+    proto.link = Some(Rc::new(link));
+    Ok(Rc::new(proto))
 }
 
 fn expr_text(e: &Expr) -> Option<String> {
@@ -459,6 +487,7 @@ impl Compiler {
                 .map(|_| std::cell::Cell::new(u32::MAX))
                 .collect(),
             evals: st.evals,
+            link: None,
         }
     }
 
@@ -1136,6 +1165,14 @@ impl Compiler {
             }
         }
         for (n, imp) in imports.iter().enumerate() {
+            let mut requested: Vec<Rc<str>> = Vec::new();
+            if imp.default.is_some() {
+                requested.push("default".into());
+            }
+            for (imported, _) in &imp.named {
+                requested.push(imported.clone());
+            }
+            self.link_imports.push((imp.source.clone(), requested));
             let src = self.str_const(&imp.source);
             self.emit(Op::Import(src));
             if let Some(ns) = &imp.namespace {
@@ -1147,6 +1184,7 @@ impl Compiler {
         }
         for (source, list) in reexports {
             let hidden = self.hidden_name("reexport");
+            self.reexport_sources.push((hidden.clone(), source.clone()));
             let src = self.str_const(&source);
             self.emit(Op::Import(src));
             self.add_local(hidden.clone(), true);

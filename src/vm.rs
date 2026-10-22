@@ -274,6 +274,7 @@ pub struct Vm {
     builders: Vec<(usize, String)>,
     pub realm: Realm,
     modules: FxHashMap<PathBuf, Value>,
+    proto_cache: FxHashMap<PathBuf, Rc<FunctionProto>>,
     loading: Vec<PathBuf>,
     builtin_modules: FxHashMap<String, Value>,
     const_globals: Vec<Rc<str>>,
@@ -350,6 +351,7 @@ impl Vm {
             builders: Vec::new(),
             realm: Realm::new(),
             modules: FxHashMap::default(),
+            proto_cache: FxHashMap::default(),
             loading: Vec::new(),
             builtin_modules: FxHashMap::default(),
             const_globals: Vec::new(),
@@ -776,6 +778,8 @@ impl Vm {
             Ok(p) => p,
             Err(e) => return Err(self.syntax_error_value(&e, &name)),
         };
+        self.proto_cache.insert(abs.clone(), proto.clone());
+        self.link_module(&abs, &proto)?;
         let ns = self.new_namespace();
         self.modules.insert(abs.clone(), ns.clone());
         self.pending_ns = Some(ns.clone());
@@ -923,6 +927,156 @@ impl Vm {
         Ok(v)
     }
 
+    fn load_proto(&mut self, path: &PathBuf, spec: &str) -> Result<Rc<FunctionProto>, Value> {
+        if let Some(p) = self.proto_cache.get(path) {
+            return Ok(p.clone());
+        }
+        let src = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(self.make_error(
+                    ErrorKind::Error,
+                    format!("Cannot read module '{spec}': {e}"),
+                ));
+            }
+        };
+        let name = module::display_path(path);
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let proto = match self.compile(&src, &name, dir, Mode::Module) {
+            Ok(p) => p,
+            Err(e) => return Err(self.syntax_error_value(&e, &name)),
+        };
+        self.proto_cache.insert(path.clone(), proto.clone());
+        Ok(proto)
+    }
+
+    fn link_target(&mut self, from: &Path, spec: &str) -> Result<Option<PathBuf>, Value> {
+        if spec.starts_with("squirt:")
+            || spec.starts_with("node:")
+            || (!spec.starts_with('.') && !spec.starts_with('/') && !spec.contains(':'))
+        {
+            return Ok(None);
+        }
+        let dir = from.parent().map(Path::to_path_buf).unwrap_or_default();
+        match module::resolve(spec, &dir) {
+            Ok(p) => Ok(Some(p)),
+            Err(msg) => Err(self.make_error(ErrorKind::Error, msg)),
+        }
+    }
+
+    fn resolve_export(
+        &mut self,
+        path: &PathBuf,
+        name: &str,
+        seen: &mut Vec<(PathBuf, Rc<str>)>,
+    ) -> Result<Resolution, Value> {
+        let key = (path.clone(), Rc::from(name));
+        if seen.contains(&key) {
+            return Ok(Resolution::NotFound);
+        }
+        seen.push(key);
+        let spec = path.display().to_string();
+        let proto = self.load_proto(path, &spec)?;
+        let Some(link) = proto.link.clone() else {
+            return Ok(Resolution::NotFound);
+        };
+        if !link.esm || link.local_exports.iter().any(|e| &**e == name) {
+            return Ok(Resolution::Found(path.clone(), name.into()));
+        }
+        for (exported, source, imported) in &link.indirect {
+            if &**exported == name {
+                let Some(dep) = self.link_target(path, source)? else {
+                    return Ok(Resolution::Found(path.clone(), name.into()));
+                };
+                if &**imported == "*" {
+                    return Ok(Resolution::Namespace(dep));
+                }
+                return self.resolve_export(&dep, imported, seen);
+            }
+        }
+        if name == "default" {
+            return Ok(Resolution::NotFound);
+        }
+        let mut star: Option<Resolution> = None;
+        for source in &link.stars {
+            let Some(dep) = self.link_target(path, source)? else {
+                continue;
+            };
+            match self.resolve_export(&dep, name, seen)? {
+                Resolution::Ambiguous => return Ok(Resolution::Ambiguous),
+                Resolution::NotFound => {}
+                found => match &star {
+                    None => star = Some(found),
+                    Some(prev) => {
+                        if *prev != found {
+                            return Ok(Resolution::Ambiguous);
+                        }
+                    }
+                },
+            }
+        }
+        Ok(star.unwrap_or(Resolution::NotFound))
+    }
+
+    fn link_error(&mut self, source: &str, name: &str, r: &Resolution) -> Option<Value> {
+        match r {
+            Resolution::NotFound => Some(self.make_error(
+                ErrorKind::SyntaxError,
+                format!("The requested module '{source}' does not provide an export named '{name}'"),
+            )),
+            Resolution::Ambiguous => Some(self.make_error(
+                ErrorKind::SyntaxError,
+                format!("The requested module '{source}' contains conflicting star exports for name '{name}'"),
+            )),
+            _ => None,
+        }
+    }
+
+    fn link_module(&mut self, path: &PathBuf, proto: &Rc<FunctionProto>) -> Result<(), Value> {
+        let Some(link) = proto.link.clone() else {
+            return Ok(());
+        };
+        for source in &link.stars {
+            if let Some(dep) = self.link_target(path, source)? {
+                self.load_proto(&dep, source)?;
+            }
+        }
+        for (source, names) in &link.imports {
+            let Some(dep) = self.link_target(path, source)? else {
+                continue;
+            };
+            let dep_proto = self.load_proto(&dep, source)?;
+            if !dep_proto.link.as_ref().is_some_and(|l| l.esm) {
+                continue;
+            }
+            for name in names {
+                let mut seen = Vec::new();
+                let r = self.resolve_export(&dep, name, &mut seen)?;
+                if let Some(e) = self.link_error(source, name, &r) {
+                    return Err(e);
+                }
+            }
+        }
+        for (_, source, imported) in &link.indirect {
+            if &**imported == "*" {
+                continue;
+            }
+            let Some(dep) = self.link_target(path, source)? else {
+                continue;
+            };
+            let dep_proto = self.load_proto(&dep, source)?;
+            if !dep_proto.link.as_ref().is_some_and(|l| l.esm) {
+                continue;
+            }
+            let mut seen = Vec::new();
+            let r = self.resolve_export(&dep, imported, &mut seen)?;
+            if let Some(e) = self.link_error(source, imported, &r) {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
     pub fn import_module(&mut self, spec: &str, from: &Rc<ModuleInfo>) -> Result<Value, Value> {
         if let Some(name) = spec.strip_prefix("squirt:") {
             return self.import_builtin(name);
@@ -948,21 +1102,8 @@ impl Vm {
         if let Some(v) = self.modules.get(&path) {
             return Ok(v.clone());
         }
-        let src = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(e) => {
-                return Err(self.make_error(
-                    ErrorKind::Error,
-                    format!("Cannot read module '{spec}': {e}"),
-                ));
-            }
-        };
-        let name = module::display_path(&path);
-        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-        let proto = match self.compile(&src, &name, dir, Mode::Module) {
-            Ok(p) => p,
-            Err(e) => return Err(self.syntax_error_value(&e, &name)),
-        };
+        let proto = self.load_proto(&path, spec)?;
+        self.link_module(&path, &proto)?;
         let is_async = proto.is_async;
         let ns = self.new_namespace();
         self.modules.insert(path.clone(), ns.clone());
@@ -5189,4 +5330,12 @@ pub(crate) fn proxy_in_chain(o: &Rc<Obj>) -> bool {
 
 fn function_proto_call(_vm: &mut Vm, _this: Value, _args: &[Value]) -> Result<Value, Value> {
     Ok(Value::Undefined)
+}
+
+#[derive(Clone, PartialEq)]
+enum Resolution {
+    Found(PathBuf, Rc<str>),
+    Namespace(PathBuf),
+    Ambiguous,
+    NotFound,
 }
