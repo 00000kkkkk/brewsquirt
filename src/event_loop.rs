@@ -377,6 +377,16 @@ impl Vm {
     }
 
     pub fn has_intrinsic_promise_ctor(&mut self, v: &Value) -> bool {
+        if let Value::Object(o) = v {
+            let plain_proto = o
+                .proto
+                .borrow()
+                .as_ref()
+                .is_some_and(|p| Rc::ptr_eq(p, &self.realm.promise_proto));
+            if plain_proto && o.get_own("constructor").is_none() {
+                return true;
+            }
+        }
         let intrinsic = self.realm.promise_proto.get_own("constructor");
         let ctor = match self.get_prop(v, "constructor") {
             Ok(c) => c,
