@@ -1,0 +1,6 @@
+fetch 200 plain /page
+upgrade GET /socket websocket 0 function
+open 1
+message echo:hi
+client closed 1000 bye true | server socket closed
+server closed

@@ -2158,7 +2158,7 @@ const WEB_SRC: &str = r##"
     handler ??= options.fetch
     if (typeof handler !== "function") throw new TypeError("serve() needs a handler function")
     const onError = options.error
-    const [id, port, address] = native.serve(String(options.hostname ?? "127.0.0.1"), Number(options.port ?? 3000), dispatch)
+    const [id, port, address] = native.serve(String(options.hostname ?? "127.0.0.1"), Number(options.port ?? 3000), dispatch, typeof options.upgrade === "function" ? options.upgrade : null)
     let open = true
     const server = {
       hostname: address,
@@ -2509,7 +2509,20 @@ const WEB_SRC: &str = r##"
       listen(port = 0, host, cb) {
         if (typeof port === "object" && port !== null) [port, host, cb] = [port.port ?? 0, port.host, host]
         if (typeof host === "function") [host, cb] = [undefined, host]
-        srv = serve({ port, hostname: host ?? "127.0.0.1" }, (req) =>
+        const onUpgrade = (raw, id, localAddress, localPort, remoteAddress, remotePort, head) => {
+          const socket = require("node:net")[Symbol.for("jsq.socketFromId")]({ id, localAddress, localPort, remoteAddress, remotePort })
+          if ((handlers.upgrade?.length ?? 0) === 0) {
+            socket.destroy()
+            return
+          }
+          const request = new Request(raw.url, { method: raw.method, headers: raw.headers })
+          request.remoteAddress = raw.remote
+          const req = new IncomingMessage(request)
+          req.socket = socket
+          req.connection = socket
+          emit("upgrade", req, socket, Buffer.from(head.buffer, head.byteOffset, head.byteLength))
+        }
+        srv = serve({ port, hostname: host ?? "127.0.0.1", upgrade: onUpgrade }, (req) =>
           new Promise((resolve) => {
             emit("request", new IncomingMessage(req), new ServerResponse(resolve))
           }),
@@ -2823,8 +2836,9 @@ fn native_serve(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         return Err(vm.range_error(format!("port should be >= 0 and < 65536. Received {port}")));
     }
     let dispatch = arg(args, 2);
+    let upgrade = arg(args, 3);
     let id = vm.io.next_id();
-    let handle = match io::listen(&host, port as u16, id, vm.io.tx.clone()) {
+    let handle = match io::listen(&host, port as u16, id, vm.io.ids.clone(), vm.io.tx.clone()) {
         Ok(h) => h,
         Err(e) => {
             return Err(vm.make_error(
@@ -2835,7 +2849,7 @@ fn native_serve(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     };
     let addr = handle.addr;
     vm.io.pending += 1;
-    vm.io_servers.insert(id, (dispatch, handle));
+    vm.io_servers.insert(id, (dispatch, upgrade, handle));
     Ok(vm.new_array(vec![
         (id as f64).into(),
         (addr.port() as f64).into(),
@@ -2863,7 +2877,7 @@ fn native_reply(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 
 fn native_close(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let id = vm.to_number(&arg(args, 0))? as u64;
-    if let Some((_, handle)) = vm.io_servers.remove(&id) {
+    if let Some((_, _, handle)) = vm.io_servers.remove(&id) {
         handle.close();
         vm.io.pending -= 1;
     }
@@ -2929,7 +2943,7 @@ pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
             request,
             reply,
         } => {
-            let Some((dispatch, _)) = vm.io_servers.get(&server) else {
+            let Some((dispatch, _, _)) = vm.io_servers.get(&server) else {
                 return Ok(());
             };
             let dispatch = dispatch.clone();
@@ -2937,6 +2951,47 @@ pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
             vm.io_replies.insert(id, reply);
             let raw = request_value(vm, request);
             vm.call_value(&dispatch, Value::Undefined, &[raw, (id as f64).into()])?;
+        }
+        IoEvent::Upgrade {
+            server,
+            id,
+            request,
+            local,
+            remote,
+            cmd,
+            head,
+        } => {
+            let upgrade = match vm.io_servers.get(&server) {
+                Some((_, upgrade, _)) if upgrade.is_callable() => upgrade.clone(),
+                _ => {
+                    let _ = cmd.send(crate::io::SocketCmd::Destroy);
+                    return Ok(());
+                }
+            };
+            vm.io_sockets.insert(
+                id,
+                super::netio::SocketEntry {
+                    cmd,
+                    handler: Value::Undefined,
+                    refed: true,
+                },
+            );
+            vm.io.pending += 1;
+            let raw = request_value(vm, request);
+            let head = super::binary::new_uint8(vm, head);
+            vm.call_value(
+                &upgrade,
+                Value::Undefined,
+                &[
+                    raw,
+                    Value::Number(id as f64),
+                    local.ip().to_string().into(),
+                    Value::Number(local.port() as f64),
+                    remote.ip().to_string().into(),
+                    Value::Number(remote.port() as f64),
+                    head,
+                ],
+            )?;
         }
     }
     Ok(())

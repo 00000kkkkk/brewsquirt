@@ -1788,8 +1788,11 @@ server.stop()
 
 `createServer` mirrors Node's `http.createServer` for code that uses `req`/`res` objects:
 `listen(port, host?, callback?)`, `close(callback?)`, `address()` and `on("request" | "listening" |
-"close")` on the server; `method`, `url`, `headers` and the `data`/`end` events on the request;
-`statusCode`, `setHeader`, `getHeader`, `writeHead`, `write` and `end` on the response.
+"close" | "upgrade")` on the server; `method`, `url`, `headers` and the `data`/`end` events on the
+request; `statusCode`, `setHeader`, `getHeader`, `writeHead`, `write` and `end` on the response.
+An `upgrade` listener receives the request, the raw `net.Socket` and any bytes already read, so
+WebSocket servers such as `ws` and `socket.io` attach to the server; without a listener the
+connection is closed.
 
 ```js
 import { createServer } from "squirt:http"
@@ -1845,7 +1848,7 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:tls`                     | `connect` opens a TLS 1.2/1.3 connection verified against the bundled Mozilla root store and emits `secureConnect`; `TLSSocket` reports `encrypted`, `authorized`, `getProtocol` and `getCipher`. `createServer` is not available |
 | `node:zlib`                    | `gzip`, `gunzip`, `deflate`, `inflate`, `deflateRaw`, `inflateRaw` and `unzip` as sync, callback and `create*` stream forms, `crc32` and `constants`; no brotli |
 | `node:stream`, `node:stream/promises` | The legacy callable `Stream` constructor, `Readable` (with `Readable.from`, `read`, `push`, `pipe`, async iteration and `toArray`), `Writable`, `Duplex`, `Transform`, `PassThrough`, `_readableState`/`_writableState`, `pipeline` and `finished` in callback and promise forms. The stream classes are function constructors, so `Readable.call(this, options)` in a `util.inherits` subclass initialises the stream |
-| `node:http`, `node:https`      | `request`, `get`, `Agent` and `ClientRequest` built on `fetch`, responses are readable streams with `statusCode` and `headers`; `createServer` and `STATUS_CODES`; requests have `on("data")`, `on("end")`, `setEncoding`, `pipe`, `text()` and `json()`, responses have `writeHead`, `setHeader`, `write`, `end` and `finish` events |
+| `node:http`, `node:https`      | `request`, `get`, `Agent` and `ClientRequest` built on `fetch`, responses are readable streams with `statusCode` and `headers`; `createServer` (with `upgrade` events for WebSocket servers) and `STATUS_CODES`; requests have `on("data")`, `on("end")`, `setEncoding`, `pipe`, `text()` and `json()`, responses have `writeHead`, `setHeader`, `write`, `end` and `finish` events |
 | `node:crypto`                  | `createHash` and `createHmac` (md5, sha1, sha224, sha256, sha384, sha512), `hash`, `randomBytes`, `randomInt`, `randomUUID`, `getRandomValues`, `timingSafeEqual`, `pbkdf2`/`pbkdf2Sync`, `hkdf`/`hkdfSync`, secret `KeyObject`s via `createSecretKey` and `generateKeySync`, `webcrypto` and `subtle.digest`; asymmetric keys, signatures, ciphers and scrypt throw errors with a `code` |
 | `node:timers`, `node:timers/promises` | Timers, and `setTimeout` as a promise                        |
 | `node:process`                 | `process`                                                           |

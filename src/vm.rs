@@ -374,7 +374,7 @@ pub struct Vm {
     pub(crate) io_sockets: FxHashMap<u64, builtins::netio::SocketEntry>,
     pub(crate) io_net_servers: FxHashMap<u64, builtins::netio::NetServerEntry>,
     pub(crate) io_children: FxHashMap<u64, builtins::netio::ChildEntry>,
-    pub(crate) io_servers: FxHashMap<u64, (Value, crate::io::ServerHandle)>,
+    pub(crate) io_servers: FxHashMap<u64, (Value, Value, crate::io::ServerHandle)>,
     pub(crate) io_replies: FxHashMap<u64, std::sync::mpsc::Sender<crate::io::HttpReply>>,
     pub(crate) web: Option<Value>,
     pub(crate) node: Option<Value>,

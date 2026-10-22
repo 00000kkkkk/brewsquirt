@@ -64,6 +64,15 @@ pub enum IoEvent {
         id: u64,
         event: ChildEvent,
     },
+    Upgrade {
+        server: u64,
+        id: u64,
+        request: HttpRequest,
+        local: SocketAddr,
+        remote: SocketAddr,
+        cmd: Sender<SocketCmd>,
+        head: Vec<u8>,
+    },
 }
 
 pub enum SocketEvent {
@@ -843,6 +852,7 @@ pub fn listen(
     host: &str,
     port: u16,
     server: u64,
+    ids: Arc<AtomicU64>,
     tx: Sender<IoEvent>,
 ) -> std::io::Result<ServerHandle> {
     let listener = TcpListener::bind((host, port))?;
@@ -857,7 +867,8 @@ pub fn listen(
             let Ok(stream) = conn else { continue };
             let tx = tx.clone();
             let flag = flag.clone();
-            std::thread::spawn(move || serve_connection(stream, server, tx, flag));
+            let ids = ids.clone();
+            std::thread::spawn(move || serve_connection(stream, server, tx, flag, ids));
         }
     });
     Ok(ServerHandle { addr, stop })
@@ -1030,7 +1041,22 @@ fn write_reply(
     w.flush()
 }
 
-fn serve_connection(stream: TcpStream, server: u64, tx: Sender<IoEvent>, stop: Arc<AtomicBool>) {
+fn wants_upgrade(headers: &Headers) -> bool {
+    headers
+        .iter()
+        .any(|(k, v)| k == "upgrade" && !v.trim().is_empty())
+        && headers
+            .iter()
+            .any(|(k, v)| k == "connection" && v.to_ascii_lowercase().contains("upgrade"))
+}
+
+fn serve_connection(
+    stream: TcpStream,
+    server: u64,
+    tx: Sender<IoEvent>,
+    stop: Arc<AtomicBool>,
+    ids: Arc<AtomicU64>,
+) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let (Ok(local), Ok(remote)) = (stream.local_addr(), stream.peer_addr()) else {
@@ -1044,6 +1070,32 @@ fn serve_connection(stream: TcpStream, server: u64, tx: Sender<IoEvent>, stop: A
         let Some(parsed) = read_request(&mut reader, &local, &remote) else {
             return;
         };
+        if wants_upgrade(&parsed.request.headers) {
+            let head = reader.buffer().to_vec();
+            let stream = reader.into_inner();
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
+            let Ok(tcp) = stream.try_clone() else {
+                return;
+            };
+            let id = ids.fetch_add(1, Ordering::SeqCst) + 1;
+            let (ctx, crx) = channel::<SocketCmd>();
+            if tx
+                .send(IoEvent::Upgrade {
+                    server,
+                    id,
+                    request: parsed.request,
+                    local,
+                    remote,
+                    cmd: ctx,
+                    head,
+                })
+                .is_err()
+            {
+                return;
+            }
+            socket_loop(tcp, stream, id, crx, tx);
+            return;
+        }
         let (reply_tx, reply_rx) = channel();
         if tx
             .send(IoEvent::Request {

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `http.createServer` servers emit `upgrade` with the request, the raw `net.Socket` and any
+  bytes already read when a client asks for an HTTP upgrade, so WebSocket servers such as `ws`
+  and `socket.io` run on top of them; connections without an `upgrade` listener are closed.
+
 ## [1.2.0] - 2026-10-22
 
 ### Added

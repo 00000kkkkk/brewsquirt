@@ -3505,6 +3505,11 @@ const NODE_SRC: &str = r##"
   const kTls = Symbol("tls")
   net.Socket = Socket
   net.Stream = Socket
+  Object.defineProperty(net, Symbol.for("jsq.socketFromId"), {
+    value: (o) => new Socket({ [kSocketId]: o.id, localAddress: o.localAddress, localPort: o.localPort, remoteAddress: o.remoteAddress, remotePort: o.remotePort }),
+    enumerable: false,
+    configurable: true,
+  })
   net.createConnection = (...args) => {
     const options = typeof args[0] === "object" && args[0] !== null ? args[0] : {}
     return new Socket(options).connect(...args)
