@@ -240,8 +240,11 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                                 .position(|&ch| ch == '}')
                                 .ok_or("Invalid Unicode escape")?;
                             let hex: String = chars[i + 2..i + 1 + end].iter().collect();
-                            let v = u32::from_str_radix(&hex, 16)
+                            let mut v = u32::from_str_radix(&hex, 16)
                                 .map_err(|_| "Invalid Unicode escape".to_string())?;
+                            if (0xd800..0xe000).contains(&v) {
+                                v = crate::value::LONE_BASE + (v - 0xd800);
+                            }
                             atom(&mut out, v);
                             push_code_point(&mut out, v);
                             i += 1 + end;
@@ -260,7 +263,7 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                                 }
                             }
                             if (0xd800..0xe000).contains(&cp) {
-                                cp = 0xfffd;
+                                cp = crate::value::LONE_BASE + (cp - 0xd800);
                             }
                             atom(&mut out, cp);
                             push_code_point(&mut out, cp);
@@ -498,6 +501,25 @@ impl RegexData {
 
     pub fn find_at(&self, text: &str, pos: usize) -> Result<Option<Match>, String> {
         self.find_from(text, pos, self.sticky)
+    }
+
+    pub fn find_whole(
+        &self,
+        text: &str,
+        pos: usize,
+        sticky: bool,
+    ) -> Result<Option<(usize, usize)>, String> {
+        if pos > text.len() {
+            return Ok(None);
+        }
+        let found = self
+            .re
+            .find_from_pos(text, pos)
+            .map_err(|e| format!("RegExp execution failed: {e}"))?;
+        Ok(match found {
+            Some(m) if !sticky || m.start() == pos => Some((m.start(), m.end())),
+            _ => None,
+        })
     }
 
     pub fn find_from(&self, text: &str, pos: usize, sticky: bool) -> Result<Option<Match>, String> {

@@ -1,0 +1,64 @@
+import make, { helper, VERSION } from "./fixtures/cjs_fn.js"
+console.log(make(21), helper("x"), VERSION)
+
+const { addAbortListener, EventEmitter } = require("node:events")
+const ac = new AbortController()
+const disposable = addAbortListener(ac.signal, (e) => console.log("abort", e.type))
+const unused = addAbortListener(ac.signal, () => console.log("never"))
+unused[Symbol.dispose]()
+ac.abort()
+console.log(typeof disposable[Symbol.dispose], typeof EventEmitter.addAbortListener)
+
+const stream = require("node:stream")
+console.log(stream.getDefaultHighWaterMark(false), stream.getDefaultHighWaterMark(true))
+stream.setDefaultHighWaterMark(true, 32)
+console.log(stream.getDefaultHighWaterMark(true))
+
+console.log(/\uD83D/.test("\uD83D"), /\u{D83D}/u.test("\uD83D"), "a\uD800b\uDFFFc".replace(/[\uD800-\uDFFF]/g, "?"), /^😀$/.test("😀"), /\uDE00/.test("\uDE00"))
+
+const zlib = require("node:zlib")
+const gz = new zlib.Gzip()
+console.log(typeof gz._handle.close, gz._processChunk(Buffer.from("hello "), zlib.constants.Z_NO_FLUSH).length)
+const packed = gz._processChunk(Buffer.from("world"), zlib.constants.Z_FINISH)
+console.log(zlib.gunzipSync(packed).toString())
+const gunzip = new zlib.Gunzip()
+console.log(gunzip._processChunk(packed, zlib.constants.Z_FINISH).toString())
+
+const nodeCrypto = require("node:crypto")
+;(async () => {
+  const enc = new TextEncoder()
+  const key = await crypto.subtle.importKey("raw", enc.encode("secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"])
+  console.log(key instanceof CryptoKey, Object.prototype.toString.call(key), key.type, key.extractable, key.algorithm.name, key.algorithm.hash.name, key.algorithm.length, key.usages.join())
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode("data"))
+  console.log(sig instanceof ArrayBuffer, Buffer.from(sig).toString("hex") === nodeCrypto.createHmac("sha256", "secret").update("data").digest("hex"))
+  console.log(await crypto.subtle.verify("HMAC", key, sig, enc.encode("data")), await crypto.subtle.verify("HMAC", key, sig, enc.encode("other")))
+  const jwkKey = await crypto.subtle.importKey("jwk", { kty: "oct", k: Buffer.from("secret").toString("base64url") }, { name: "HMAC", hash: "SHA-256" }, true, ["sign"])
+  console.log(Buffer.from(await crypto.subtle.sign("HMAC", jwkKey, enc.encode("data"))).equals(Buffer.from(sig)), (await crypto.subtle.exportKey("jwk", jwkKey)).alg, Buffer.from(await crypto.subtle.exportKey("raw", jwkKey)).toString())
+  const pb = await crypto.subtle.importKey("raw", enc.encode("pw"), "PBKDF2", false, ["deriveBits", "deriveKey"])
+  const params = { name: "PBKDF2", hash: "SHA-256", salt: enc.encode("salt"), iterations: 100 }
+  const bits = await crypto.subtle.deriveBits(params, pb, 128)
+  console.log(Buffer.from(bits).toString("hex") === nodeCrypto.pbkdf2Sync("pw", "salt", 100, 16, "sha256").toString("hex"))
+  const dk = await crypto.subtle.deriveKey(params, pb, { name: "HMAC", hash: "SHA-256", length: 128 }, true, ["sign"])
+  console.log(Buffer.from(await crypto.subtle.exportKey("raw", dk)).equals(Buffer.from(bits)))
+  const hk = await crypto.subtle.importKey("raw", enc.encode("ikm"), "HKDF", false, ["deriveBits"])
+  const hbits = await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt: enc.encode("s"), info: enc.encode("i") }, hk, 256)
+  console.log(Buffer.from(hbits).toString("hex") === Buffer.from(nodeCrypto.hkdfSync("sha256", "ikm", "s", "i", 32)).toString("hex"))
+  const gen = await crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-512" }, true, ["sign"])
+  console.log(gen.algorithm.length, (await crypto.subtle.exportKey("raw", gen)).byteLength)
+  const digest = await crypto.subtle.digest("SHA-256", enc.encode("abc"))
+  console.log(Buffer.from(digest).toString("hex").slice(0, 16))
+  const failures = [
+    () => crypto.subtle.sign("HMAC", pb, enc.encode("x")),
+    () => crypto.subtle.encrypt({ name: "AES-GCM" }, key, enc.encode("x")),
+    () => crypto.subtle.importKey("spki", new Uint8Array(4), { name: "RSA-PSS" }, false, ["verify"]),
+    () => crypto.subtle.exportKey("raw", key),
+  ]
+  for (const bad of failures) {
+    try {
+      await bad()
+      console.log("no error")
+    } catch (e) {
+      console.log(e.constructor.name, e.name)
+    }
+  }
+})()

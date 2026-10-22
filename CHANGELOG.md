@@ -7,11 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Named imports from a CommonJS module whose `module.exports` is a function (such as
+  `readable-stream`) now see the function's own properties, matching Node's lexer-based named
+  exports.
+- `\uD800`-style escapes and `\u{...}` surrogate code points in regular expressions match the
+  lone surrogates stored in strings instead of failing to compile.
+
 ### Added
 
+- `crypto.subtle` gained `importKey` (`raw` and `jwk` symmetric keys), `exportKey`,
+  `generateKey`, `sign`/`verify` with HMAC, `deriveBits`/`deriveKey` with PBKDF2 and HKDF, and
+  a global `CryptoKey`; encryption algorithms report `NotSupportedError`. `jose` signs and
+  verifies HS256 tokens.
+- `stream.getDefaultHighWaterMark` and `setDefaultHighWaterMark`; `events.addAbortListener`
+  (`execa` runs child processes).
+- The `zlib` stream classes expose the `_handle` and `_processChunk` internals that `minizlib`
+  drives synchronously, so `tar` creates and extracts `.tgz` archives.
+- File descriptor APIs in `fs`: `openSync`/`open`, `closeSync`/`close`, `readSync`/`read`,
+  `writeSync`/`write`, `fstatSync`/`fstat`, `ftruncateSync`, `fsyncSync`, the `O_*` and `S_IF*`
+  constants, and `fs.promises.open` returning a `FileHandle` with `read`, `write`, `readFile`,
+  `writeFile`, `stat`, `truncate`, `createReadStream`, `createWriteStream`, `readLines` and
+  `close`; packages such as `tar` that read and write through descriptors work.
 - `http.createServer` servers emit `upgrade` with the request, the raw `net.Socket` and any
   bytes already read when a client asks for an HTTP upgrade, so WebSocket servers such as `ws`
   and `socket.io` run on top of them; connections without an `upgrade` listener are closed.
+
+### Changed
+
+- `RegExp.prototype.test` matches without collecting capture groups, which makes validation
+  loops over large inputs noticeably faster.
 
 ## [1.2.0] - 2026-10-22
 

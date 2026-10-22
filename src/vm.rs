@@ -374,6 +374,8 @@ pub struct Vm {
     pub(crate) io_sockets: FxHashMap<u64, builtins::netio::SocketEntry>,
     pub(crate) io_net_servers: FxHashMap<u64, builtins::netio::NetServerEntry>,
     pub(crate) io_children: FxHashMap<u64, builtins::netio::ChildEntry>,
+    pub(crate) io_files: FxHashMap<u32, std::fs::File>,
+    pub(crate) next_fd: u32,
     pub(crate) io_servers: FxHashMap<u64, (Value, Value, crate::io::ServerHandle)>,
     pub(crate) io_replies: FxHashMap<u64, std::sync::mpsc::Sender<crate::io::HttpReply>>,
     pub(crate) web: Option<Value>,
@@ -458,6 +460,8 @@ impl Vm {
             io_sockets: FxHashMap::default(),
             io_net_servers: FxHashMap::default(),
             io_children: FxHashMap::default(),
+            io_files: FxHashMap::default(),
+            next_fd: 3,
             io_servers: FxHashMap::default(),
             io_replies: FxHashMap::default(),
             web: None,
@@ -1102,12 +1106,10 @@ impl Vm {
         }
         let ns = self.new_object();
         ns.set_own("default", exports.clone());
-        if let Value::Object(o) = &exports {
-            if !o.is_callable() {
-                for (k, v) in self.own_entries(&exports) {
-                    if &*k != "default" {
-                        ns.set_own(k, v);
-                    }
+        if exports.is_object() {
+            for (k, v) in self.own_entries(&exports) {
+                if &*k != "default" {
+                    ns.set_own(k, v);
                 }
             }
         }

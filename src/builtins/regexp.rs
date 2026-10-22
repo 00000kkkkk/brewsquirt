@@ -244,7 +244,26 @@ fn exec(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 fn test(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (o, data) = this_regexp(vm, &this)?;
     let s = vm.to_string(&arg(args, 0))?;
-    Ok(Value::Bool(exec_raw(vm, &o, &data, &s)?.is_some()))
+    let tracks = data.global || data.sticky;
+    let li = last_index(vm, &o)?;
+    let start16 = if tracks { li } else { 0.0 };
+    if start16 > len16(&s) as f64 {
+        if tracks {
+            set_last_index(vm, &o, 0.0)?;
+        }
+        return Ok(Value::Bool(false));
+    }
+    let pos = byte_index(&s, start16 as usize);
+    let found = data
+        .find_whole(&s, pos, data.sticky)
+        .map_err(|e| run_error(vm, e))?;
+    if tracks {
+        match found {
+            Some((_, end)) => set_last_index(vm, &o, utf16_index(&s, end) as f64)?,
+            None => set_last_index(vm, &o, 0.0)?,
+        }
+    }
+    Ok(Value::Bool(found.is_some()))
 }
 
 fn regexp_compile(vm: &mut Vm, this: Value, args: &[Value]) -> R {

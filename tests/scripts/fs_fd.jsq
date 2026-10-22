@@ -1,0 +1,101 @@
+const fs = require("node:fs")
+const path = require("node:path")
+const os = require("node:os")
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jsq-fd-"))
+const file = path.join(dir, "data.txt")
+
+const fd = fs.openSync(file, "w+")
+console.log(typeof fd, fd >= 3)
+console.log(fs.writeSync(fd, "hello world"))
+console.log(fs.writeSync(fd, Buffer.from("!!"), 0, 2, 11))
+const buf = Buffer.alloc(32)
+const n = fs.readSync(fd, buf, 0, 32, 0)
+console.log(n, buf.subarray(0, n).toString())
+console.log(fs.readSync(fd, buf, { offset: 1, length: 4, position: 6 }), buf.subarray(0, 5).toString())
+const st = fs.fstatSync(fd)
+console.log(st.size, st.isFile(), st.isDirectory(), st.mtime instanceof Date)
+fs.ftruncateSync(fd, 5)
+console.log(fs.fstatSync(fd).size)
+fs.fsyncSync(fd)
+fs.closeSync(fd)
+try {
+  fs.closeSync(fd)
+} catch (e) {
+  console.log(e.code, e.syscall)
+}
+try {
+  fs.openSync(file, "wx")
+} catch (e) {
+  console.log(e.code)
+}
+try {
+  fs.openSync(file, "q")
+} catch (e) {
+  console.log(e.code, e.message)
+}
+const a = fs.openSync(file, "a")
+fs.writeSync(a, " more")
+fs.closeSync(a)
+console.log(JSON.stringify(fs.readFileSync(file, "utf8")))
+console.log(fs.constants.O_CREAT | fs.constants.O_WRONLY | fs.constants.O_TRUNC, fs.constants.S_IFREG)
+const nf = fs.openSync(path.join(dir, "n.txt"), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC)
+fs.writeSync(nf, "num")
+fs.closeSync(nf)
+console.log(fs.readFileSync(path.join(dir, "n.txt"), "utf8"))
+
+const callbacks = new Promise((resolve) => {
+  fs.open(file, "r", (err, fd2) => {
+    console.log("open cb", err, typeof fd2)
+    fs.read(fd2, Buffer.alloc(5), 0, 5, 0, (err, bytes, b) => {
+      console.log("read cb", err, bytes, b.toString())
+      fs.read(fd2, (err, bytes, b) => {
+        console.log("read cb default", err, bytes, b.length)
+        fs.fstat(fd2, (err, s) => {
+          console.log("fstat cb", err, s.size)
+          fs.close(fd2, (err) => {
+            console.log("close cb", err)
+            resolve()
+          })
+        })
+      })
+    })
+  })
+})
+
+callbacks.then(async () => {
+  const fh = await fs.promises.open(file, "r+")
+  console.log(typeof fh.fd, (await fh.stat()).size)
+  const { bytesRead, buffer } = await fh.read(Buffer.alloc(4), 0, 4, 0)
+  console.log(bytesRead, buffer.toString())
+  const { bytesWritten } = await fh.write("HELLO", 0)
+  console.log(bytesWritten, await fh.readFile("utf8"))
+  await fh.truncate(5)
+  console.log((await fh.stat()).size)
+  await fh.close()
+  await fh.close()
+  try {
+    await fh.stat()
+  } catch (e) {
+    console.log("closed handle", e.code)
+  }
+  const fh2 = await fs.promises.open(file, "w+")
+  await fh2.writeFile("one\ntwo\nthree")
+  const lines = []
+  for await (const line of fh2.readLines({ start: 0 })) lines.push(line)
+  console.log(lines.join("|"))
+  await fh2.close()
+  const fh3 = await fs.promises.open(file, "w")
+  const ws = fh3.createWriteStream()
+  ws.write("abc")
+  ws.end("def")
+  await new Promise((resolve) => ws.on("finish", resolve))
+  await fh3.close()
+  console.log(fs.readFileSync(file, "utf8"))
+  const fh4 = await fs.promises.open(file)
+  const chunks = []
+  for await (const chunk of fh4.createReadStream({ start: 1, end: 4 })) chunks.push(chunk)
+  console.log(Buffer.concat(chunks).toString(), typeof fh4[Symbol.asyncDispose])
+  await fh4[Symbol.asyncDispose]()
+  fs.rmSync(dir, { recursive: true, force: true })
+  console.log("done", fs.existsSync(dir))
+})

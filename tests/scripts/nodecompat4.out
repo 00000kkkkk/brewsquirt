@@ -1,0 +1,22 @@
+42 helper:x 1.0
+abort abort
+function function
+65536 16
+32
+true true a?b?c true true
+function 0
+hello world
+hello world
+true [object CryptoKey] secret false HMAC SHA-256 48 sign,verify
+true true
+true false
+true HS256 secret
+true
+true
+true
+1024 128
+ba7816bf8f01cfea
+DOMException InvalidAccessError
+DOMException NotSupportedError
+DOMException NotSupportedError
+DOMException InvalidAccessError

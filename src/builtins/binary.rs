@@ -47,6 +47,22 @@ pub fn install(vm: &mut Vm) {
     method(vm, &crypto, "randomUUID", 0, random_uuid);
     let subtle = vm.new_object();
     method(vm, &subtle, "digest", 2, subtle_digest);
+    let delegates: [(&str, u32, crate::object::NativeFn); 11] = [
+        ("importKey", 5, subtle_import_key),
+        ("exportKey", 2, subtle_export_key),
+        ("generateKey", 3, subtle_generate_key),
+        ("sign", 3, subtle_sign),
+        ("verify", 4, subtle_verify),
+        ("deriveBits", 3, subtle_derive_bits),
+        ("deriveKey", 5, subtle_derive_key),
+        ("encrypt", 3, subtle_encrypt),
+        ("decrypt", 3, subtle_decrypt),
+        ("wrapKey", 4, subtle_wrap_key),
+        ("unwrapKey", 7, subtle_unwrap_key),
+    ];
+    for (name, arity, f) in delegates {
+        method(vm, &subtle, name, arity, f);
+    }
     crypto.set_own("subtle", Value::Object(subtle));
     vm.define_global("crypto", Value::Object(crypto));
 }
@@ -102,6 +118,37 @@ fn algorithm_name(vm: &mut Vm, v: &Value) -> Result<String, Value> {
         other => other.clone(),
     };
     vm.to_string(&name).map(|s| s.to_string())
+}
+
+fn subtle_call(vm: &mut Vm, name: &str, args: &[Value]) -> R {
+    let node = super::node::load(vm)?;
+    let subtle = vm.get_prop(&node, "subtleCrypto")?;
+    let f = vm.get_prop(&subtle, name)?;
+    vm.call_value(&f, subtle, args)
+}
+
+macro_rules! subtle_delegates {
+    ($($f:ident => $name:literal),* $(,)?) => {
+        $(
+            fn $f(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+                subtle_call(vm, $name, args)
+            }
+        )*
+    };
+}
+
+subtle_delegates! {
+    subtle_import_key => "importKey",
+    subtle_export_key => "exportKey",
+    subtle_generate_key => "generateKey",
+    subtle_sign => "sign",
+    subtle_verify => "verify",
+    subtle_derive_bits => "deriveBits",
+    subtle_derive_key => "deriveKey",
+    subtle_encrypt => "encrypt",
+    subtle_decrypt => "decrypt",
+    subtle_wrap_key => "wrapKey",
+    subtle_unwrap_key => "unwrapKey",
 }
 
 fn subtle_digest(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

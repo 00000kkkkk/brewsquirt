@@ -1,0 +1,27 @@
+number true
+11
+2
+13 hello world!!
+4 hworl
+13 true false true
+5
+EBADF close
+EEXIST
+ERR_INVALID_ARG_VALUE Unknown file open flag: q
+"hello more"
+577 32768
+num
+open cb null number
+read cb null 5 hello
+read cb default null 10 16384
+fstat cb null 10
+close cb null
+number 10
+4 hell
+5 HELLO more
+5
+closed handle EBADF
+one|two|three
+abcdef
+bcde function
+done false

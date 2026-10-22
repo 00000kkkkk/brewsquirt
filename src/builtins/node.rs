@@ -9,7 +9,7 @@ use std::path::Path;
 
 type R = Result<Value, Value>;
 
-pub const LAZY_GLOBALS: [&str; 2] = ["Buffer", "WebSocket"];
+pub const LAZY_GLOBALS: [&str; 3] = ["Buffer", "WebSocket", "CryptoKey"];
 
 const NODE_SRC: &str = r##"
 (native) => {
@@ -636,6 +636,18 @@ const NODE_SRC: &str = r##"
     if (targets.length === 0) EventEmitter.defaultMaxListeners = n
     else for (const t of targets) t.setMaxListeners?.(n)
   }
+  EventEmitter.addAbortListener = (signal, listener) => {
+    if (typeof listener !== "function") throw new TypeError('The "listener" argument must be of type function')
+    let active = true
+    if (signal.aborted) queueMicrotask(() => active && listener(signal.reason))
+    else signal.addEventListener("abort", listener, { once: true })
+    return {
+      [Symbol.dispose]() {
+        active = false
+        signal.removeEventListener("abort", listener)
+      },
+    }
+  }
   EventEmitter.once = function once(emitter, name, options) {
     return new Promise((resolve, reject) => {
       const signal = options?.signal
@@ -844,6 +856,44 @@ const NODE_SRC: &str = r##"
     realpathSync(path) {
       return native.realpath(pathOf(path))
     },
+    openSync(path, flags = "r", mode) {
+      return native.fsOpen(pathOf(path), flags, mode)
+    },
+    closeSync(fd) {
+      native.fsClose(fd)
+    },
+    readSync(fd, buffer, offset, length, position) {
+      if (typeof offset === "object" && offset !== null) [offset, length, position] = [offset.offset, offset.length, offset.position]
+      if (typeof position === "bigint") position = Number(position)
+      return native.fsReadFd(fd, buffer, offset ?? 0, length ?? buffer.byteLength - (offset ?? 0), position ?? null)
+    },
+    writeSync(fd, data, offsetOrPosition, lengthOrEncoding, position) {
+      if (typeof data === "string") {
+        const encoding = typeof lengthOrEncoding === "string" ? lengthOrEncoding : "utf8"
+        const buf = Buffer.from(data, encoding)
+        return native.fsWriteFd(fd, buf, 0, buf.length, typeof offsetOrPosition === "number" ? offsetOrPosition : null)
+      }
+      let offset = offsetOrPosition
+      let length = lengthOrEncoding
+      if (typeof offset === "object" && offset !== null) [offset, length, position] = [offset.offset, offset.length, offset.position]
+      if (typeof position === "bigint") position = Number(position)
+      return native.fsWriteFd(fd, data, offset ?? 0, length ?? data.byteLength - (offset ?? 0), position ?? null)
+    },
+    fstatSync(fd, options) {
+      return new Stats(native.fsFstat(fd))
+    },
+    ftruncateSync(fd, len = 0) {
+      native.fsFtruncate(fd, len)
+    },
+    fsyncSync(fd) {
+      native.fsFsync(fd)
+    },
+    fdatasyncSync(fd) {
+      native.fsFsync(fd)
+    },
+    fchmodSync() {},
+    fchownSync() {},
+    futimesSync() {},
     symlinkSync(target, path) {
       native.symlink(pathOf(target), pathOf(path))
     },
@@ -875,10 +925,162 @@ const NODE_SRC: &str = r##"
       }
     }
   }
+  fs.read = (fd, buffer, offset, length, position, cb) => {
+    if (typeof buffer === "function") [buffer, offset, length, position, cb] = [Buffer.alloc(16384), 0, 16384, null, buffer]
+    else if (typeof offset === "function") [offset, length, position, cb] = [0, buffer.byteLength, null, offset]
+    else if (typeof offset === "object" && offset !== null && typeof length === "function") [cb, length, position, offset] = [length, offset.length, offset.position, offset.offset]
+    else if (typeof length === "function") [length, position, cb] = [buffer.byteLength - offset, null, length]
+    else if (typeof position === "function") [position, cb] = [null, position]
+    let n
+    let error = null
+    try {
+      n = fs.readSync(fd, buffer, offset, length, position)
+    } catch (e) {
+      error = e
+    }
+    queueMicrotask(() => (error ? cb(error) : cb(null, n, buffer)))
+  }
+  fs.write = (fd, data, ...rest) => {
+    const cb = typeof rest[rest.length - 1] === "function" ? rest.pop() : null
+    let n
+    let error = null
+    try {
+      n = fs.writeSync(fd, data, ...rest)
+    } catch (e) {
+      error = e
+    }
+    if (cb) queueMicrotask(() => (error ? cb(error) : cb(null, n, data)))
+  }
+  class FileHandle extends EventEmitter {
+    #fd
+    constructor(fd) {
+      super()
+      this.#fd = fd
+    }
+    get fd() {
+      return this.#fd
+    }
+    #check() {
+      if (this.#fd < 0) {
+        const e = new Error("file closed")
+        e.code = "EBADF"
+        throw e
+      }
+    }
+    async read(buffer, offset, length, position) {
+      this.#check()
+      if (buffer == null || !ArrayBuffer.isView(buffer)) {
+        const options = buffer ?? {}
+        buffer = options.buffer ?? Buffer.alloc(16384)
+        offset = options.offset ?? 0
+        length = options.length ?? buffer.byteLength - offset
+        position = options.position ?? null
+      }
+      const bytesRead = fs.readSync(this.#fd, buffer, offset ?? 0, length ?? buffer.byteLength - (offset ?? 0), position ?? null)
+      return { bytesRead, buffer }
+    }
+    async write(data, ...rest) {
+      this.#check()
+      const bytesWritten = fs.writeSync(this.#fd, data, ...rest)
+      return { bytesWritten, buffer: data }
+    }
+    async readFile(options) {
+      this.#check()
+      const encoding = typeof options === "string" ? options : options?.encoding
+      const chunks = []
+      while (true) {
+        const buf = Buffer.alloc(65536)
+        const n = fs.readSync(this.#fd, buf, 0, buf.length, null)
+        if (n === 0) break
+        chunks.push(buf.subarray(0, n))
+      }
+      const all = Buffer.concat(chunks)
+      return encoding ? all.toString(encoding) : all
+    }
+    async writeFile(data, options) {
+      this.#check()
+      const encoding = typeof options === "string" ? options : options?.encoding ?? "utf8"
+      const buf = typeof data === "string" ? Buffer.from(data, encoding) : data
+      fs.writeSync(this.#fd, buf, 0, buf.byteLength, null)
+    }
+    async appendFile(data, options) {
+      return this.writeFile(data, options)
+    }
+    async stat(options) {
+      this.#check()
+      return fs.fstatSync(this.#fd, options)
+    }
+    async truncate(len = 0) {
+      this.#check()
+      fs.ftruncateSync(this.#fd, len)
+    }
+    async sync() {
+      this.#check()
+      fs.fsyncSync(this.#fd)
+    }
+    async datasync() {
+      return this.sync()
+    }
+    async chmod() {}
+    async chown() {}
+    async utimes() {}
+    createReadStream(options = {}) {
+      const fd = this.#fd
+      let position = options.start ?? null
+      const end = options.end ?? Infinity
+      const highWaterMark = options.highWaterMark ?? 65536
+      const stream = new Readable({
+        highWaterMark,
+        encoding: options.encoding,
+        read() {
+          if (position !== null && position > end) return this.push(null)
+          const want = Math.min(highWaterMark, position === null ? highWaterMark : end - position + 1)
+          const buf = Buffer.alloc(want)
+          const n = fs.readSync(fd, buf, 0, want, position)
+          if (position !== null) position += n
+          if (n === 0) this.push(null)
+          else this.push(buf.subarray(0, n))
+        },
+      })
+      stream.fd = fd
+      stream.bytesRead = 0
+      return stream
+    }
+    createWriteStream(options = {}) {
+      const fd = this.#fd
+      let position = options.start ?? null
+      const stream = new Writable({
+        write(chunk, encoding, cb) {
+          const buf = typeof chunk === "string" ? Buffer.from(chunk, encoding) : chunk
+          fs.writeSync(fd, buf, 0, buf.byteLength, position)
+          if (position !== null) position += buf.byteLength
+          cb()
+        },
+      })
+      stream.fd = fd
+      return stream
+    }
+    readLines(options) {
+      return createInterface({ input: this.createReadStream(options), crlfDelay: Infinity })
+    }
+    async close() {
+      if (this.#fd < 0) return
+      const fd = this.#fd
+      this.#fd = -1
+      fs.closeSync(fd)
+      this.emit("close")
+    }
+    async [Symbol.asyncDispose]() {
+      return this.close()
+    }
+  }
+  promises.open = async (path, flags = "r", mode) => new FileHandle(fs.openSync(path, flags, mode))
+  promises.FileHandle = FileHandle
   promises.constants = fs.constants
   fs.promises = promises
   fs.realpath.native = fs.realpath
   fs.realpathSync.native = fs.realpathSync
+  Object.assign(fs.constants, { O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_EXCL: 128, O_NOCTTY: 256, O_TRUNC: 512, O_APPEND: 1024, O_DIRECTORY: 65536, O_NOFOLLOW: 131072, O_SYNC: 1052672, O_DSYNC: 4096, O_NONBLOCK: 2048, S_IFMT: 61440, S_IFREG: 32768, S_IFDIR: 16384, S_IFCHR: 8192, S_IFBLK: 24576, S_IFIFO: 4096, S_IFLNK: 40960, S_IFSOCK: 49152, S_IRWXU: 448, S_IRUSR: 256, S_IWUSR: 128, S_IXUSR: 64, S_IRWXG: 56, S_IRGRP: 32, S_IWGRP: 16, S_IXGRP: 8, S_IRWXO: 7, S_IROTH: 4, S_IWOTH: 2, S_IXOTH: 1, UV_FS_O_FILEMAP: 0, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 })
 
   function fileURLToPath(url) {
     const u = typeof url === "string" ? new URL(url) : url
@@ -2530,6 +2732,12 @@ const NODE_SRC: &str = r##"
   }
 
   const stream = Object.assign(Stream, { Readable, Writable, Duplex, Transform, PassThrough, Stream, pipeline, finished, promises: streamPromises })
+  const defaultHighWaterMarks = { object: 16, bytes: 65536 }
+  stream.getDefaultHighWaterMark = (objectMode) => (objectMode ? defaultHighWaterMarks.object : defaultHighWaterMarks.bytes)
+  stream.setDefaultHighWaterMark = (objectMode, value) => {
+    if (objectMode) defaultHighWaterMarks.object = value
+    else defaultHighWaterMarks.bytes = value
+  }
   stream.isReadable = (s) => !!(s && s[kRead] && !s[kRead].destroyed && !s[kRead].endEmitted)
   stream.isWritable = (s) => !!(s && s[kWrite] && !s[kWrite].destroyed && !s[kWrite].ending)
   stream.isErrored = () => false
@@ -3082,6 +3290,159 @@ const NODE_SRC: &str = r##"
   }
   Object.defineProperty(WebSocket.prototype, Symbol.toStringTag, { value: "WebSocket", configurable: true })
 
+  const kKeyMaterial = Symbol("keyMaterial")
+  const subtleHashName = (h) => {
+    const name = typeof h === "string" ? h : h?.name
+    const map = { "SHA-1": "sha1", "SHA-256": "sha256", "SHA-384": "sha384", "SHA-512": "sha512" }
+    if (!map[name]) throw new DOMException(`Unrecognized algorithm name: ${name}`, "NotSupportedError")
+    return map[name]
+  }
+  const subtleBytes = (data, what = "data") => {
+    if (data instanceof ArrayBuffer) return new Uint8Array(data.slice(0))
+    if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength))
+    throw new TypeError(`The "${what}" argument must be an instance of ArrayBuffer or ArrayBufferView`)
+  }
+  const toArrayBuffer = (bytes) => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+  const base64urlDecode = (text) => Buffer.from(String(text).replace(/-/g, "+").replace(/_/g, "/"), "base64")
+  const base64urlEncode = (bytes) => Buffer.from(bytes).toString("base64url")
+  class CryptoKey {
+    #material
+    constructor(material, algorithm, extractable, usages, type = "secret") {
+      this.#material = material
+      Object.defineProperty(this, "type", { value: type, enumerable: true })
+      Object.defineProperty(this, "extractable", { value: !!extractable, enumerable: true })
+      Object.defineProperty(this, "algorithm", { value: Object.freeze(algorithm), enumerable: true })
+      Object.defineProperty(this, "usages", { value: Object.freeze([...usages]), enumerable: true })
+    }
+    get [kKeyMaterial]() {
+      return this.#material
+    }
+    get [Symbol.toStringTag]() {
+      return "CryptoKey"
+    }
+  }
+  const normalizeAlgorithm = (alg) => (typeof alg === "string" ? { name: alg } : { ...alg })
+  const algName = (alg) => String(normalizeAlgorithm(alg).name).toUpperCase().replace(/^SHA(\d)/, "SHA-$1")
+  const requireKey = (key, what = "key") => {
+    if (!(key instanceof CryptoKey)) throw new TypeError(`${what} is not a CryptoKey`)
+  }
+  const requireUsage = (key, usage) => {
+    if (!key.usages.includes(usage)) throw new DOMException(`The key does not support the '${usage}' operation`, "InvalidAccessError")
+  }
+  const hashBlockBits = { sha1: 512, sha256: 512, sha384: 1024, sha512: 1024 }
+  const deriveRaw = (algorithm, baseKey, bits) => {
+    const alg = normalizeAlgorithm(algorithm)
+    const name = algName(alg)
+    const material = baseKey[kKeyMaterial]
+    if (bits === null || bits === undefined) throw new DOMException("length is required", "OperationError")
+    const bytes = Math.ceil(bits / 8)
+    if (name === "PBKDF2") {
+      return native.pbkdf2(subtleHashName(alg.hash), material, subtleBytes(alg.salt, "salt"), alg.iterations, bytes)
+    }
+    if (name === "HKDF") {
+      return native.hkdf(subtleHashName(alg.hash), material, subtleBytes(alg.salt ?? new Uint8Array(0), "salt"), subtleBytes(alg.info ?? new Uint8Array(0), "info"), bytes)
+    }
+    throw new DOMException(`Unsupported derivation algorithm: ${name}`, "NotSupportedError")
+  }
+  const subtleCrypto = {
+    async importKey(format, keyData, algorithm, extractable, usages) {
+      const alg = normalizeAlgorithm(algorithm)
+      const name = algName(alg)
+      let material
+      if (format === "raw") material = subtleBytes(keyData, "keyData")
+      else if (format === "jwk") {
+        if (!keyData || keyData.kty !== "oct" || typeof keyData.k !== "string") throw new DOMException("Only symmetric (oct) JSON Web Keys are supported", "DataError")
+        material = new Uint8Array(base64urlDecode(keyData.k))
+      } else throw new DOMException(`Unsupported key format: ${format}`, "NotSupportedError")
+      if (name === "HMAC") {
+        const hash = normalizeAlgorithm(alg.hash)
+        subtleHashName(hash)
+        const length = alg.length ?? material.length * 8
+        return new CryptoKey(material, { name: "HMAC", hash: { name: algName(hash) }, length }, extractable, usages)
+      }
+      if (name === "PBKDF2" || name === "HKDF") return new CryptoKey(material, { name }, false, usages)
+      if (name.startsWith("AES-")) return new CryptoKey(material, { name, length: material.length * 8 }, extractable, usages)
+      throw new DOMException(`Unrecognized algorithm name: ${name}`, "NotSupportedError")
+    },
+    async exportKey(format, key) {
+      requireKey(key)
+      if (!key.extractable) throw new DOMException("key is not extractable", "InvalidAccessError")
+      const material = key[kKeyMaterial]
+      if (format === "raw") return toArrayBuffer(material)
+      if (format === "jwk") {
+        const jwk = { kty: "oct", k: base64urlEncode(material), ext: true, key_ops: [...key.usages] }
+        if (key.algorithm.name === "HMAC") jwk.alg = { "SHA-1": "HS1", "SHA-256": "HS256", "SHA-384": "HS384", "SHA-512": "HS512" }[key.algorithm.hash.name]
+        if (key.algorithm.name.startsWith("AES-")) jwk.alg = `A${key.algorithm.length}${key.algorithm.name.slice(4)}`
+        return jwk
+      }
+      throw new DOMException(`Unsupported key format: ${format}`, "NotSupportedError")
+    },
+    async generateKey(algorithm, extractable, usages) {
+      const alg = normalizeAlgorithm(algorithm)
+      const name = algName(alg)
+      if (name === "HMAC") {
+        const hash = normalizeAlgorithm(alg.hash)
+        const bits = alg.length ?? hashBlockBits[subtleHashName(hash)]
+        const material = native.randomBytes(Math.ceil(bits / 8))
+        return new CryptoKey(material, { name: "HMAC", hash: { name: algName(hash) }, length: bits }, extractable, usages)
+      }
+      if (name.startsWith("AES-")) {
+        const bits = alg.length ?? 256
+        return new CryptoKey(native.randomBytes(bits / 8), { name, length: bits }, extractable, usages)
+      }
+      throw new DOMException(`Unsupported algorithm for key generation: ${name}`, "NotSupportedError")
+    },
+    async sign(algorithm, key, data) {
+      requireKey(key)
+      requireUsage(key, "sign")
+      if (algName(algorithm) !== "HMAC" || key.algorithm.name !== "HMAC") throw new DOMException("Only HMAC signatures are supported", "NotSupportedError")
+      const out = native.hmac(subtleHashName(key.algorithm.hash), key[kKeyMaterial], subtleBytes(data))
+      return toArrayBuffer(out)
+    },
+    async verify(algorithm, key, signature, data) {
+      requireKey(key)
+      requireUsage(key, "verify")
+      if (algName(algorithm) !== "HMAC" || key.algorithm.name !== "HMAC") throw new DOMException("Only HMAC signatures are supported", "NotSupportedError")
+      const expected = native.hmac(subtleHashName(key.algorithm.hash), key[kKeyMaterial], subtleBytes(data))
+      const given = subtleBytes(signature, "signature")
+      if (expected.length !== given.length) return false
+      let diff = 0
+      for (let i = 0; i < expected.length; i++) diff |= expected[i] ^ given[i]
+      return diff === 0
+    },
+    async deriveBits(algorithm, baseKey, length) {
+      requireKey(baseKey, "baseKey")
+      requireUsage(baseKey, "deriveBits")
+      return toArrayBuffer(deriveRaw(algorithm, baseKey, length))
+    },
+    async deriveKey(algorithm, baseKey, derivedKeyAlgorithm, extractable, usages) {
+      requireKey(baseKey, "baseKey")
+      requireUsage(baseKey, "deriveKey")
+      const derived = normalizeAlgorithm(derivedKeyAlgorithm)
+      const name = algName(derived)
+      let bits = derived.length
+      if (!bits && name === "HMAC") bits = hashBlockBits[subtleHashName(normalizeAlgorithm(derived.hash))]
+      if (!bits) throw new DOMException("derivedKeyAlgorithm.length is required", "OperationError")
+      return subtleCrypto.importKey("raw", deriveRaw(algorithm, baseKey, bits), derived, extractable, usages)
+    },
+    async digest(algorithm, data) {
+      return toArrayBuffer(native.digest(subtleHashName(normalizeAlgorithm(algorithm).name), subtleBytes(data)))
+    },
+    async encrypt() {
+      throw new DOMException("encrypt is not supported in this runtime", "NotSupportedError")
+    },
+    async decrypt() {
+      throw new DOMException("decrypt is not supported in this runtime", "NotSupportedError")
+    },
+    async wrapKey() {
+      throw new DOMException("wrapKey is not supported in this runtime", "NotSupportedError")
+    },
+    async unwrapKey() {
+      throw new DOMException("unwrapKey is not supported in this runtime", "NotSupportedError")
+    },
+  }
+  Object.defineProperty(subtleCrypto, Symbol.toStringTag, { value: "SubtleCrypto", configurable: true })
+
   const zlibConstants = {
     Z_NO_FLUSH: 0, Z_PARTIAL_FLUSH: 1, Z_SYNC_FLUSH: 2, Z_FULL_FLUSH: 3, Z_FINISH: 4, Z_BLOCK: 5,
     Z_OK: 0, Z_STREAM_END: 1, Z_NEED_DICT: 2, Z_ERRNO: -1, Z_STREAM_ERROR: -2, Z_DATA_ERROR: -3,
@@ -3116,6 +3477,17 @@ const NODE_SRC: &str = r##"
     }
     queueMicrotask(() => (err ? cb(err) : cb(null, out)))
   }
+  const joinChunks = (chunks) => {
+    let total = 0
+    for (const c of chunks) total += c.byteLength
+    const out = Buffer.allocUnsafe(total)
+    let pos = 0
+    for (const c of chunks) {
+      out.set(c instanceof Uint8Array ? c : new Uint8Array(c.buffer, c.byteOffset, c.byteLength), pos)
+      pos += c.byteLength
+    }
+    return out
+  }
   class ZlibStream extends Transform {
     #op
     #options
@@ -3125,6 +3497,7 @@ const NODE_SRC: &str = r##"
       this.#op = op
       this.#options = options
       this.bytesWritten = 0
+      this._handle = { close() {} }
     }
     _transform(chunk, encoding, cb) {
       this.#chunks.push(chunk)
@@ -3133,10 +3506,20 @@ const NODE_SRC: &str = r##"
     }
     _flush(cb) {
       try {
-        cb(null, zlibRun(this.#op, Buffer.concat(this.#chunks), this.#options))
+        cb(null, zlibRun(this.#op, joinChunks(this.#chunks), this.#options))
       } catch (e) {
         cb(e)
       }
+    }
+    _processChunk(chunk, flushFlag) {
+      if (chunk && chunk.byteLength) {
+        this.#chunks.push(chunk)
+        this.bytesWritten += chunk.byteLength
+      }
+      if (flushFlag !== zlibConstants.Z_FINISH) return Buffer.alloc(0)
+      const input = joinChunks(this.#chunks)
+      this.#chunks = []
+      return zlibRun(this.#op, input, this.#options)
     }
     flush(kind, cb) {
       if (typeof kind === "function") cb = kind
@@ -5118,6 +5501,8 @@ const NODE_SRC: &str = r##"
     httpClient,
     httpsClient,
     WebSocket,
+    subtleCrypto,
+    CryptoKey,
     StringDecoder,
     querystring,
     tty,
@@ -5169,7 +5554,14 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let n = vm.new_object();
-    let natives: [(&str, u32, crate::object::NativeFn); 45] = [
+    let natives: [(&str, u32, crate::object::NativeFn); 52] = [
+        ("fsOpen", 3, fs_open),
+        ("fsClose", 1, fs_close),
+        ("fsReadFd", 5, fs_read_fd),
+        ("fsWriteFd", 5, fs_write_fd),
+        ("fsFstat", 1, fs_fstat),
+        ("fsFtruncate", 2, fs_ftruncate),
+        ("fsFsync", 1, fs_fsync),
         ("netConnect", 5, super::netio::net_connect),
         ("netAttach", 2, super::netio::net_attach),
         ("netWrite", 2, super::netio::net_write),
@@ -5224,6 +5616,8 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     vm.define_global("Buffer", buffer);
     let websocket = vm.get_prop(&exports, "WebSocket")?;
     vm.define_global("WebSocket", websocket);
+    let crypto_key = vm.get_prop(&exports, "CryptoKey")?;
+    vm.define_global("CryptoKey", crypto_key);
     vm.node = Some(exports.clone());
     Ok(exports)
 }
@@ -6084,15 +6478,7 @@ fn kind_name(ft: std::fs::FileType) -> &'static str {
     }
 }
 
-fn fs_stat(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    let p = path_of(vm, args, 0)?;
-    let follow = arg(args, 1).truthy();
-    let md = if follow {
-        std::fs::metadata(&p)
-    } else {
-        std::fs::symlink_metadata(&p)
-    };
-    let md = md.map_err(|e| fs_error(vm, &e, if follow { "stat" } else { "lstat" }, &p, None))?;
+fn stat_object(vm: &mut Vm, md: &std::fs::Metadata) -> Value {
     let o = vm.new_object();
     let kind = kind_name(md.file_type());
     let mode = match kind {
@@ -6118,7 +6504,312 @@ fn fs_stat(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         Value::Number(if birth == 0.0 { mtime } else { birth }),
     );
     o.set_own("kind", kind.into());
-    Ok(Value::Object(o))
+    Value::Object(o)
+}
+
+fn fs_stat(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let p = path_of(vm, args, 0)?;
+    let follow = arg(args, 1).truthy();
+    let md = if follow {
+        std::fs::metadata(&p)
+    } else {
+        std::fs::symlink_metadata(&p)
+    };
+    let md = md.map_err(|e| fs_error(vm, &e, if follow { "stat" } else { "lstat" }, &p, None))?;
+    Ok(stat_object(vm, &md))
+}
+
+const O_WRONLY: u32 = 1;
+const O_RDWR: u32 = 2;
+const O_CREAT: u32 = 0o100;
+const O_EXCL: u32 = 0o200;
+const O_TRUNC: u32 = 0o1000;
+const O_APPEND: u32 = 0o2000;
+
+fn open_flags(vm: &mut Vm, v: &Value) -> Result<std::fs::OpenOptions, Value> {
+    let mut opts = std::fs::OpenOptions::new();
+    let bits = match v {
+        Value::Undefined | Value::Null => None,
+        Value::Number(n) => Some(*n as u32),
+        other => {
+            let text = vm.to_string(other)?;
+            match text.replace('s', "").as_str() {
+                "r" => {
+                    opts.read(true);
+                }
+                "r+" => {
+                    opts.read(true).write(true);
+                }
+                "w" => {
+                    opts.write(true).create(true).truncate(true);
+                }
+                "wx" | "xw" => {
+                    opts.write(true).create_new(true);
+                }
+                "w+" => {
+                    opts.read(true).write(true).create(true).truncate(true);
+                }
+                "wx+" | "xw+" => {
+                    opts.read(true).write(true).create_new(true);
+                }
+                "a" => {
+                    opts.append(true).create(true);
+                }
+                "ax" | "xa" => {
+                    opts.append(true).create_new(true);
+                }
+                "a+" => {
+                    opts.read(true).append(true).create(true);
+                }
+                "ax+" | "xa+" => {
+                    opts.read(true).append(true).create_new(true);
+                }
+                _ => {
+                    let err = vm.type_error(format!("Unknown file open flag: {text}"));
+                    if let Value::Object(o) = &err {
+                        o.set_own("code", "ERR_INVALID_ARG_VALUE".into());
+                    }
+                    return Err(err);
+                }
+            }
+            return Ok(opts);
+        }
+    };
+    let bits = bits.unwrap_or(0);
+    let access = bits & 3;
+    opts.read(access != O_WRONLY);
+    opts.write(access == O_WRONLY || access == O_RDWR || bits & O_APPEND != 0);
+    if bits & O_APPEND != 0 {
+        opts.append(true);
+    }
+    if bits & O_CREAT != 0 {
+        if bits & O_EXCL != 0 {
+            opts.create_new(true);
+        } else {
+            opts.create(true);
+        }
+    }
+    if bits & O_TRUNC != 0 {
+        opts.truncate(true);
+    }
+    Ok(opts)
+}
+
+fn fs_open(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let p = path_of(vm, args, 0)?;
+    let opts = open_flags(vm, &arg(args, 1))?;
+    let file = opts
+        .open(&p)
+        .map_err(|e| fs_error(vm, &e, "open", &p, None))?;
+    let fd = vm.next_fd;
+    vm.next_fd += 1;
+    vm.io_files.insert(fd, file);
+    Ok(Value::Number(fd as f64))
+}
+
+fn bad_fd(vm: &mut Vm, syscall: &str) -> Value {
+    let err = vm.make_error(
+        ErrorKind::Error,
+        format!("EBADF: bad file descriptor, {syscall}"),
+    );
+    if let Value::Object(o) = &err {
+        o.set_own("errno", Value::Number(-9.0));
+        o.set_own("code", "EBADF".into());
+        o.set_own("syscall", syscall.into());
+    }
+    err
+}
+
+fn fd_arg(vm: &mut Vm, args: &[Value], syscall: &str) -> Result<u32, Value> {
+    match arg(args, 0) {
+        Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => Ok(n as u32),
+        _ => Err(bad_fd(vm, syscall)),
+    }
+}
+
+fn fs_close(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let fd = fd_arg(vm, args, "close")?;
+    if fd <= 2 {
+        return Ok(Value::Undefined);
+    }
+    match vm.io_files.remove(&fd) {
+        Some(_) => Ok(Value::Undefined),
+        None => Err(bad_fd(vm, "close")),
+    }
+}
+
+fn io_slice(vm: &mut Vm, args: &[Value]) -> Result<(Value, usize, usize), Value> {
+    let buffer = arg(args, 1);
+    let Some(total) = buffer_source_bytes(&buffer).map(|b| b.len()) else {
+        return Err(vm.type_error(
+            "The \"buffer\" argument must be an instance of Buffer, TypedArray, or DataView",
+        ));
+    };
+    let offset = match arg(args, 2) {
+        Value::Number(n) if n >= 0.0 => n as usize,
+        _ => 0,
+    };
+    let length = match arg(args, 3) {
+        Value::Number(n) if n >= 0.0 => n as usize,
+        _ => total.saturating_sub(offset),
+    };
+    if offset > total || offset + length > total {
+        return Err(vm.range_error(format!(
+            "The value of \"length\" is out of range. It must be >= 0 && <= {}. Received {length}",
+            total.saturating_sub(offset)
+        )));
+    }
+    Ok((buffer, offset, length))
+}
+
+fn write_into_view(target: &Value, offset: usize, data: &[u8]) {
+    let Value::Object(o) = target else {
+        return;
+    };
+    let (store, base) = match &o.kind {
+        crate::object::ObjKind::Typed(t) => (t.store(), t.offset),
+        crate::object::ObjKind::DataView(t) => (t.store(), t.offset),
+        crate::object::ObjKind::ArrayBuffer(b) => (&b.bytes, 0),
+        _ => return,
+    };
+    let mut store = store.borrow_mut();
+    let start = (base + offset).min(store.len());
+    let end = (start + data.len()).min(store.len());
+    store[start..end].copy_from_slice(&data[..end - start]);
+}
+
+fn position_arg(v: &Value) -> Option<u64> {
+    match v {
+        Value::Number(n) if *n >= 0.0 => Some(*n as u64),
+        _ => None,
+    }
+}
+
+fn read_full(file: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut total = 0;
+    while total < buf.len() {
+        let n = file.read(&mut buf[total..])?;
+        if n == 0 {
+            break;
+        }
+        total += n;
+    }
+    Ok(total)
+}
+
+fn fs_read_fd(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    use std::io::{Seek, SeekFrom};
+    let fd = fd_arg(vm, args, "read")?;
+    let (buffer, offset, length) = io_slice(vm, args)?;
+    let position = position_arg(&arg(args, 4));
+    let mut tmp = vec![0u8; length];
+    let n = if fd == 0 {
+        vm.flush();
+        std::io::stdin()
+            .read(&mut tmp)
+            .map_err(|e| fs_error(vm, &e, "read", "<stdin>", None))?
+    } else {
+        let Some(file) = vm.io_files.get_mut(&fd) else {
+            return Err(bad_fd(vm, "read"));
+        };
+        let result = (|| -> std::io::Result<usize> {
+            if let Some(pos) = position {
+                let saved = file.stream_position()?;
+                file.seek(SeekFrom::Start(pos))?;
+                let n = read_full(file, &mut tmp)?;
+                file.seek(SeekFrom::Start(saved))?;
+                Ok(n)
+            } else {
+                read_full(file, &mut tmp)
+            }
+        })();
+        result.map_err(|e| fs_error(vm, &e, "read", "", None))?
+    };
+    write_into_view(&buffer, offset, &tmp[..n]);
+    Ok(Value::Number(n as f64))
+}
+
+fn fs_write_fd(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    use std::io::{Seek, SeekFrom, Write};
+    let fd = fd_arg(vm, args, "write")?;
+    let (buffer, offset, length) = io_slice(vm, args)?;
+    let bytes = buffer_source_bytes(&buffer).unwrap_or_default();
+    let data = &bytes[offset..offset + length];
+    let position = position_arg(&arg(args, 4));
+    if fd == 1 || fd == 2 {
+        let text = String::from_utf8_lossy(data).into_owned();
+        if fd == 1 {
+            vm.write_out(&text);
+        } else {
+            vm.write_err(&text);
+        }
+        return Ok(Value::Number(data.len() as f64));
+    }
+    let Some(file) = vm.io_files.get_mut(&fd) else {
+        return Err(bad_fd(vm, "write"));
+    };
+    let result = (|| -> std::io::Result<usize> {
+        if let Some(pos) = position {
+            let saved = file.stream_position()?;
+            file.seek(SeekFrom::Start(pos))?;
+            file.write_all(data)?;
+            file.seek(SeekFrom::Start(saved))?;
+        } else {
+            file.write_all(data)?;
+        }
+        Ok(data.len())
+    })();
+    let n = result.map_err(|e| fs_error(vm, &e, "write", "", None))?;
+    Ok(Value::Number(n as f64))
+}
+
+fn fs_fstat(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let fd = fd_arg(vm, args, "fstat")?;
+    if fd <= 2 {
+        let o = vm.new_object();
+        o.set_own("mode", Value::Number(f64::from(0o20666)));
+        o.set_own("size", Value::Number(0.0));
+        o.set_own("atimeMs", Value::Number(0.0));
+        o.set_own("mtimeMs", Value::Number(0.0));
+        o.set_own("ctimeMs", Value::Number(0.0));
+        o.set_own("birthtimeMs", Value::Number(0.0));
+        o.set_own("kind", "char".into());
+        return Ok(Value::Object(o));
+    }
+    let md = match vm.io_files.get(&fd) {
+        Some(file) => file.metadata(),
+        None => return Err(bad_fd(vm, "fstat")),
+    };
+    let md = md.map_err(|e| fs_error(vm, &e, "fstat", "", None))?;
+    Ok(stat_object(vm, &md))
+}
+
+fn fs_ftruncate(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let fd = fd_arg(vm, args, "ftruncate")?;
+    let len = match arg(args, 1) {
+        Value::Number(n) if n >= 0.0 => n as u64,
+        _ => 0,
+    };
+    let Some(file) = vm.io_files.get(&fd) else {
+        return Err(bad_fd(vm, "ftruncate"));
+    };
+    file.set_len(len)
+        .map_err(|e| fs_error(vm, &e, "ftruncate", "", None))?;
+    Ok(Value::Undefined)
+}
+
+fn fs_fsync(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let fd = fd_arg(vm, args, "fsync")?;
+    if fd <= 2 {
+        vm.flush();
+        return Ok(Value::Undefined);
+    }
+    let Some(file) = vm.io_files.get(&fd) else {
+        return Err(bad_fd(vm, "fsync"));
+    };
+    file.sync_all()
+        .map_err(|e| fs_error(vm, &e, "fsync", "", None))?;
+    Ok(Value::Undefined)
 }
 
 fn list_dir(
