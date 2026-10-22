@@ -476,15 +476,7 @@ fn run_command(
             line.push(' ');
             line.push_str(a);
         }
-        if cfg!(windows) {
-            let mut c = std::process::Command::new("cmd");
-            c.arg("/C").arg(line);
-            c
-        } else {
-            let mut c = std::process::Command::new("sh");
-            c.arg("-c").arg(line);
-            c
-        }
+        shell_command(&line)
     } else {
         let mut c = std::process::Command::new(program);
         c.args(args);
@@ -531,6 +523,22 @@ fn run_command(
         stdout: String::from_utf8_lossy(&out.stdout).to_string(),
         stderr: String::from_utf8_lossy(&out.stderr).to_string(),
     })
+}
+
+#[cfg(windows)]
+fn shell_command(line: &str) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    let mut c = std::process::Command::new("cmd");
+    c.args(["/d", "/s", "/c"]);
+    c.raw_arg(format!("\"{line}\""));
+    c
+}
+
+#[cfg(not(windows))]
+fn shell_command(line: &str) -> std::process::Command {
+    let mut c = std::process::Command::new("sh");
+    c.arg("-c").arg(line);
+    c
 }
 
 fn exec_sync(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

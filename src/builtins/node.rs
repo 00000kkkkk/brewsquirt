@@ -807,6 +807,233 @@ const NODE_SRC: &str = r##"
     }
   }
 
+  class ReadStream extends EventEmitter {
+    #encoding = null
+    #destroyed = false
+    #paused = false
+    #started = false
+    #flowing = false
+    #chunks = []
+    constructor(path, options = {}) {
+      super()
+      if (typeof options === "string") options = { encoding: options }
+      this.path = path
+      this.bytesRead = 0
+      this.readable = true
+      this.highWaterMark = options.highWaterMark ?? 65536
+      if (options.encoding) this.#encoding = options.encoding
+      queueMicrotask(() => this.#open(options))
+    }
+    #open(options) {
+      if (this.#destroyed) return
+      let bytes
+      try {
+        bytes = native.read(pathOf(this.path))
+      } catch (e) {
+        this.destroy(e)
+        return
+      }
+      const start = options.start ?? 0
+      const end = options.end === undefined ? bytes.length : Math.min(bytes.length, options.end + 1)
+      bytes = bytes.subarray(start, end)
+      if (this.#encoding) {
+        if (bytes.length) this.#chunks.push(stringFromBytes(bytes, this.#encoding))
+      } else {
+        for (let i = 0; i < bytes.length; i += this.highWaterMark) {
+          const c = bytes.subarray(i, i + this.highWaterMark)
+          this.#chunks.push(Buffer.from(c.buffer, c.byteOffset, c.byteLength))
+        }
+      }
+      this.#started = true
+      this.emit("open", 0)
+      this.emit("ready")
+      this.#flow()
+    }
+    #flow() {
+      if (!this.#started || this.#paused || this.#destroyed || this.#flowing) return
+      if (this.listenerCount("data") === 0) return
+      this.#flowing = true
+      queueMicrotask(() => {
+        this.#flowing = false
+        while (this.#chunks.length && !this.#paused && !this.#destroyed) {
+          const c = this.#chunks.shift()
+          this.bytesRead += typeof c === "string" ? Buffer.byteLength(c, this.#encoding) : c.length
+          this.emit("data", c)
+        }
+        if (!this.#chunks.length && !this.#destroyed) {
+          this.readable = false
+          this.emit("end")
+          this.destroy()
+        }
+      })
+    }
+    on(event, fn) {
+      super.on(event, fn)
+      if (event === "data") this.#flow()
+      return this
+    }
+    setEncoding(encoding) {
+      this.#encoding = encoding ?? "utf8"
+      this.#chunks = this.#chunks.map((c) => (typeof c === "string" ? c : c.toString(this.#encoding)))
+      return this
+    }
+    pause() {
+      this.#paused = true
+      return this
+    }
+    resume() {
+      this.#paused = false
+      this.#flow()
+      return this
+    }
+    isPaused() {
+      return this.#paused
+    }
+    destroy(err) {
+      if (this.#destroyed) return this
+      this.#destroyed = true
+      this.readable = false
+      this.#chunks = []
+      queueMicrotask(() => {
+        if (err) this.emit("error", err)
+        this.emit("close")
+      })
+      return this
+    }
+    close(cb) {
+      if (typeof cb === "function") this.once("close", cb)
+      this.destroy()
+    }
+    pipe(dest, options) {
+      this.on("data", (chunk) => {
+        if (dest.write(chunk) === false && typeof dest.once === "function") {
+          this.pause()
+          dest.once("drain", () => this.resume())
+        }
+      })
+      if (options?.end !== false) this.on("end", () => dest.end())
+      return dest
+    }
+    async *[Symbol.asyncIterator]() {
+      const queue = []
+      let done = false
+      let error = null
+      let wake = null
+      this.on("data", (c) => {
+        queue.push(c)
+        if (wake) wake()
+      })
+      this.on("end", () => {
+        done = true
+        if (wake) wake()
+      })
+      this.on("error", (e) => {
+        error = e
+        if (wake) wake()
+      })
+      while (true) {
+        if (queue.length) {
+          yield queue.shift()
+          continue
+        }
+        if (error) throw error
+        if (done) return
+        await new Promise((r) => (wake = r))
+        wake = null
+      }
+    }
+  }
+
+  class WriteStream extends EventEmitter {
+    #ended = false
+    #destroyed = false
+    constructor(path, options = {}) {
+      super()
+      if (typeof options === "string") options = { encoding: options }
+      this.path = path
+      this.bytesWritten = 0
+      this.writable = true
+      this.pending = false
+      this.encoding = options.encoding ?? "utf8"
+      const append = String(options.flags ?? "w").startsWith("a")
+      try {
+        if (!append) native.write(pathOf(path), new Uint8Array(0), false)
+        else if (!fs.existsSync(path)) native.write(pathOf(path), new Uint8Array(0), false)
+      } catch (e) {
+        queueMicrotask(() => this.destroy(e))
+        return
+      }
+      queueMicrotask(() => {
+        this.emit("open", 1)
+        this.emit("ready")
+      })
+    }
+    write(chunk, encoding, cb) {
+      if (typeof encoding === "function") [encoding, cb] = [undefined, encoding]
+      if (this.#ended || this.#destroyed) {
+        const e = new Error("write after end")
+        e.code = "ERR_STREAM_WRITE_AFTER_END"
+        queueMicrotask(() => {
+          if (typeof cb === "function") cb(e)
+          this.emit("error", e)
+        })
+        return false
+      }
+      const data = toData(chunk, { encoding: encoding ?? this.encoding })
+      try {
+        native.write(pathOf(this.path), data, true)
+      } catch (e) {
+        queueMicrotask(() => {
+          if (typeof cb === "function") cb(e)
+          this.destroy(e)
+        })
+        return false
+      }
+      this.bytesWritten += typeof data === "string" ? Buffer.byteLength(data) : data.byteLength
+      if (typeof cb === "function") queueMicrotask(() => cb(null))
+      return true
+    }
+    end(chunk, encoding, cb) {
+      if (typeof chunk === "function") [chunk, encoding, cb] = [undefined, undefined, chunk]
+      if (typeof encoding === "function") [encoding, cb] = [undefined, encoding]
+      if (chunk != null) this.write(chunk, encoding)
+      if (typeof cb === "function") this.once("finish", cb)
+      if (!this.#ended) {
+        this.#ended = true
+        this.writable = false
+        queueMicrotask(() => {
+          this.emit("finish")
+          this.destroy()
+        })
+      }
+      return this
+    }
+    destroy(err) {
+      if (this.#destroyed) return this
+      this.#destroyed = true
+      this.writable = false
+      queueMicrotask(() => {
+        if (err) this.emit("error", err)
+        this.emit("close")
+      })
+      return this
+    }
+    close(cb) {
+      return this.end(cb)
+    }
+    cork() {}
+    uncork() {}
+    setDefaultEncoding(encoding) {
+      this.encoding = encoding
+      return this
+    }
+  }
+
+  fs.createReadStream = (path, options) => new ReadStream(path, options)
+  fs.createWriteStream = (path, options) => new WriteStream(path, options)
+  fs.ReadStream = ReadStream
+  fs.WriteStream = WriteStream
+
   class Interface extends EventEmitter {
     #input
     #closed = false
@@ -923,7 +1150,134 @@ const NODE_SRC: &str = r##"
     },
   }
 
+  const hashSizes = { md5: 16, sha1: 20, sha224: 28, sha256: 32, sha384: 48, sha512: 64 }
+  function hashName(alg) {
+    const key = String(alg).toLowerCase().replace(/-/g, "")
+    if (!(key in hashSizes)) throw new Error(`Digest method not supported: ${alg}`)
+    return key
+  }
+  function cryptoBytes(data, encoding, what = "data") {
+    if (typeof data === "string") return Buffer.from(data, encoding)
+    if (data instanceof ArrayBuffer) return new Uint8Array(data)
+    if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+    throw new TypeError(`The "${what}" argument must be of type string or an instance of Buffer, TypedArray, or DataView`)
+  }
+  function concatBytes(parts) {
+    if (parts.length === 1) return parts[0]
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0))
+    let at = 0
+    for (const p of parts) {
+      out.set(p, at)
+      at += p.length
+    }
+    return out
+  }
+  function encodeDigest(bytes, encoding) {
+    const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    return encoding === undefined || encoding === "buffer" ? buf : buf.toString(encoding)
+  }
+  class Hash {
+    #alg
+    #parts = []
+    #done = false
+    constructor(alg) {
+      this.#alg = hashName(alg)
+    }
+    update(data, encoding) {
+      if (this.#done) throw new Error("Digest already called")
+      this.#parts.push(cryptoBytes(data, encoding))
+      return this
+    }
+    digest(encoding) {
+      if (this.#done) throw new Error("Digest already called")
+      this.#done = true
+      return encodeDigest(native.digest(this.#alg, concatBytes(this.#parts)), encoding)
+    }
+    copy() {
+      if (this.#done) throw new Error("Digest already called")
+      const h = new Hash(this.#alg)
+      for (const p of this.#parts) h.update(p)
+      return h
+    }
+  }
+  class Hmac {
+    #alg
+    #key
+    #parts = []
+    #done = false
+    constructor(alg, key, encoding) {
+      this.#alg = hashName(alg)
+      this.#key = cryptoBytes(key, encoding, "key")
+    }
+    update(data, encoding) {
+      if (this.#done) throw new Error("Digest already called")
+      this.#parts.push(cryptoBytes(data, encoding))
+      return this
+    }
+    digest(encoding) {
+      if (this.#done) throw new Error("Digest already called")
+      this.#done = true
+      return encodeDigest(native.hmac(this.#alg, this.#key, concatBytes(this.#parts)), encoding)
+    }
+  }
+  function randomInt(min, max, cb) {
+    if (typeof max === "function" || max === undefined) [min, max, cb] = [0, min, max]
+    if (!Number.isSafeInteger(min)) throw new TypeError('The "min" argument must be a safe integer')
+    if (!Number.isSafeInteger(max)) throw new TypeError('The "max" argument must be a safe integer')
+    if (max <= min) throw new RangeError(`The value of "max" is out of range. It must be greater than the value of "min" (${min}). Received ${max}`)
+    const range = max - min
+    const limit = 2 ** 48 - (2 ** 48 % range)
+    let x
+    do {
+      const bytes = native.randomBytes(6)
+      x = 0
+      for (const b of bytes) x = x * 256 + b
+    } while (x >= limit)
+    const value = min + (x % range)
+    if (typeof cb === "function") {
+      queueMicrotask(() => cb(null, value))
+      return
+    }
+    return value
+  }
+  const crypto = {
+    createHash: (alg) => new Hash(alg),
+    createHmac: (alg, key, options) => new Hmac(alg, key, options?.encoding),
+    hash: (alg, data, encoding = "hex") => new Hash(alg).update(data).digest(encoding),
+    getHashes: () => Object.keys(hashSizes),
+    randomBytes(size, cb) {
+      const buf = Buffer.from(native.randomBytes(size).buffer)
+      if (typeof cb === "function") {
+        queueMicrotask(() => cb(null, buf))
+        return
+      }
+      return buf
+    },
+    randomFillSync(buffer, offset = 0, size) {
+      const view = cryptoBytes(buffer, undefined, "buffer")
+      const n = size ?? view.length - offset
+      view.set(native.randomBytes(n), offset)
+      return buffer
+    },
+    randomInt,
+    randomUUID: () => globalThis.crypto.randomUUID(),
+    getRandomValues: (array) => globalThis.crypto.getRandomValues(array),
+    timingSafeEqual(a, b) {
+      const x = cryptoBytes(a, undefined, "buf1")
+      const y = cryptoBytes(b, undefined, "buf2")
+      if (x.length !== y.length) throw new RangeError("Input buffers must have the same byte length")
+      let diff = 0
+      for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i]
+      return diff === 0
+    },
+    Hash,
+    Hmac,
+    webcrypto: globalThis.crypto,
+    subtle: globalThis.crypto.subtle,
+    constants: {},
+  }
   return {
+    crypto,
     Buffer,
     EventEmitter,
     fs,
@@ -958,7 +1312,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let n = vm.new_object();
-    let natives: [(&str, u32, crate::object::NativeFn); 22] = [
+    let natives: [(&str, u32, crate::object::NativeFn); 25] = [
         ("read", 1, fs_read),
         ("write", 3, fs_write),
         ("exists", 1, fs_exists),
@@ -981,6 +1335,9 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         ("isTTY", 1, is_tty),
         ("stdin", 1, stdin_start),
         ("stdinStop", 0, stdin_stop),
+        ("digest", 2, crypto_digest),
+        ("hmac", 3, crypto_hmac),
+        ("randomBytes", 1, crypto_random_bytes),
     ];
     for (name, arity, f) in natives {
         method(vm, &n, name, arity, f);
@@ -1128,6 +1485,11 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 o.set_own("default", Value::Object(o.clone()));
                 Value::Object(o)
             }
+            "crypto" => {
+                let n = load(vm)?;
+                let c = vm.get_prop(&n, "crypto")?;
+                with_default(vm, c)?
+            }
             "timers/promises" => {
                 let o = vm.new_object();
                 let f = native_fn(vm, "setTimeout", 2, timers_set_timeout);
@@ -1143,6 +1505,52 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
         Ok(None) => None,
         Err(e) => Some(Err(e)),
     }
+}
+
+fn crypto_input(vm: &mut Vm, v: &Value, what: &str) -> Result<Vec<u8>, Value> {
+    super::typed::buffer_source_bytes(v).ok_or_else(|| {
+        vm.type_error(format!(
+            "The \"{what}\" argument must be of type string or an instance of Buffer, TypedArray, or DataView"
+        ))
+    })
+}
+
+fn crypto_digest(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let alg = vm.to_string(&arg(args, 0))?;
+    let data = crypto_input(vm, &arg(args, 1), "data")?;
+    match super::binary::digest_bytes(&alg, &data) {
+        Some(out) => Ok(super::typed::new_uint8(vm, out)),
+        None => Err(vm.make_error(
+            ErrorKind::Error,
+            format!("Digest method not supported: {alg}"),
+        )),
+    }
+}
+
+fn crypto_hmac(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let alg = vm.to_string(&arg(args, 0))?;
+    let key = crypto_input(vm, &arg(args, 1), "key")?;
+    let data = crypto_input(vm, &arg(args, 2), "data")?;
+    match super::binary::hmac_bytes(&alg, &key, &data) {
+        Some(out) => Ok(super::typed::new_uint8(vm, out)),
+        None => Err(vm.make_error(
+            ErrorKind::Error,
+            format!("Digest method not supported: {alg}"),
+        )),
+    }
+}
+
+fn crypto_random_bytes(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let n = vm.to_number(&arg(args, 0))?;
+    if !(0.0..=2147483647.0).contains(&n) || n.fract() != 0.0 {
+        return Err(vm.range_error(
+            "The value of \"size\" is out of range. It must be >= 0 && <= 2147483647",
+        ));
+    }
+    Ok(super::typed::new_uint8(
+        vm,
+        super::binary::random_vec(n as usize),
+    ))
 }
 
 fn timers_set_timeout(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

@@ -810,27 +810,90 @@ const WEB_SRC: &str = r##"
   }
 
   class IncomingMessage {
-    #body
+    #bytes
+    #encoding = null
+    #listeners = {}
     constructor(req) {
       const u = new URL(req.url)
       this.method = req.method
       this.url = u.pathname + u.search
       this.headers = Object.fromEntries(req.headers)
+      this.rawHeaders = [...req.headers].flat()
       this.httpVersion = "1.1"
-      this.socket = { remoteAddress: req.remoteAddress }
+      this.httpVersionMajor = 1
+      this.httpVersionMinor = 1
+      this.complete = true
+      this.aborted = false
+      this.socket = { remoteAddress: req.remoteAddress, remotePort: 0, encrypted: false }
       const b = req.body
-      this.#body = b == null ? "" : typeof b === "string" ? b : decoder.decode(b)
+      this.#bytes = b == null ? new Uint8Array(0) : typeof b === "string" ? encoder.encode(b) : b
+    }
+    #chunk() {
+      if (this.#encoding !== null) return decoder.decode(this.#bytes)
+      return typeof Buffer === "function" ? Buffer.from(this.#bytes) : this.#bytes
+    }
+    setEncoding(encoding) {
+      this.#encoding = encoding ?? "utf8"
+      return this
     }
     on(event, fn) {
-      if (event === "data" && this.#body !== "") queueMicrotask(() => fn(this.#body))
+      ;(this.#listeners[event] ??= []).push(fn)
+      if (event === "data" && this.#bytes.length !== 0) queueMicrotask(() => fn(this.#chunk()))
       if (event === "end") queueMicrotask(() => queueMicrotask(() => fn()))
+      if (event === "close") queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => fn())))
       return this
     }
     once(event, fn) {
       return this.on(event, fn)
     }
+    addListener(event, fn) {
+      return this.on(event, fn)
+    }
+    off(event, fn) {
+      const list = this.#listeners[event]
+      if (list) this.#listeners[event] = list.filter((f) => f !== fn)
+      return this
+    }
+    removeListener(event, fn) {
+      return this.off(event, fn)
+    }
+    removeAllListeners(event) {
+      if (event === undefined) this.#listeners = {}
+      else delete this.#listeners[event]
+      return this
+    }
+    emit(event, ...args) {
+      const list = this.#listeners[event] ?? []
+      for (const fn of list) fn(...args)
+      return list.length > 0
+    }
+    pause() {
+      return this
+    }
+    resume() {
+      return this
+    }
+    destroy() {
+      return this
+    }
+    pipe(dest) {
+      queueMicrotask(() => {
+        if (this.#bytes.length !== 0) dest.write(this.#chunk())
+        queueMicrotask(() => dest.end())
+      })
+      return dest
+    }
+    text() {
+      return Promise.resolve(decoder.decode(this.#bytes))
+    }
+    json() {
+      return this.text().then((t) => JSON.parse(t))
+    }
+    arrayBuffer() {
+      return Promise.resolve(this.#bytes.slice().buffer)
+    }
     async *[Symbol.asyncIterator]() {
-      if (this.#body !== "") yield this.#body
+      if (this.#bytes.length !== 0) yield this.#chunk()
     }
   }
 
@@ -838,12 +901,47 @@ const WEB_SRC: &str = r##"
     #headers = new Headers()
     #chunks = []
     #done
+    #listeners = {}
     constructor(done) {
       this.#done = done
       this.statusCode = 200
       this.statusMessage = ""
       this.headersSent = false
       this.writableEnded = false
+      this.finished = false
+    }
+    on(event, fn) {
+      ;(this.#listeners[event] ??= []).push(fn)
+      return this
+    }
+    once(event, fn) {
+      return this.on(event, fn)
+    }
+    off(event, fn) {
+      const list = this.#listeners[event]
+      if (list) this.#listeners[event] = list.filter((f) => f !== fn)
+      return this
+    }
+    removeListener(event, fn) {
+      return this.off(event, fn)
+    }
+    emit(event, ...args) {
+      const list = this.#listeners[event] ?? []
+      for (const fn of list) fn(...args)
+      return list.length > 0
+    }
+    flushHeaders() {
+      this.headersSent = true
+    }
+    cork() {}
+    uncork() {}
+    setTimeout(ms, cb) {
+      if (typeof cb === "function") this.on("timeout", cb)
+      return this
+    }
+    status(code) {
+      this.statusCode = code
+      return this
     }
     setHeader(name, value) {
       this.#headers.delete(name)
@@ -880,6 +978,7 @@ const WEB_SRC: &str = r##"
       if (this.writableEnded) return this
       if (chunk != null) this.#chunks.push(chunk)
       this.writableEnded = true
+      this.finished = true
       this.headersSent = true
       const textual = this.#chunks.every((c) => typeof c !== "object")
       let body
@@ -901,6 +1000,10 @@ const WEB_SRC: &str = r##"
         internal = false
       }
       if (typeof cb === "function") queueMicrotask(cb)
+      queueMicrotask(() => {
+        this.emit("finish")
+        this.emit("close")
+      })
       return this
     }
   }

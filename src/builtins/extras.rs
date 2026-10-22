@@ -1235,6 +1235,113 @@ class SuppressedError extends Error {
 }
 define(SuppressedError.prototype, "name", "SuppressedError")
 define(globalThis, "SuppressedError", SuppressedError)
+
+{
+  const timers = new Map()
+  const counts = new Map()
+  const cell = (v) => {
+    if (typeof v === "string") return `'${v}'`
+    if (typeof v === "bigint") return `${v}n`
+    if (typeof v === "symbol") return v.toString()
+    if (typeof v === "function") return `[Function: ${v.name || "(anonymous)"}]`
+    if (v === null || typeof v !== "object") return String(v)
+    if (Array.isArray(v)) return `[ ${v.map(cell).join(", ")} ]`
+    if (v instanceof Date) return v.toISOString()
+    const keys = Object.keys(v)
+    return keys.length === 0 ? "{}" : `{ ${keys.map((k) => `${k}: ${cell(v[k])}`).join(", ")} }`
+  }
+  const table = (data, columns) => {
+    if (data === null || typeof data !== "object") {
+      console.log(data)
+      return
+    }
+    let rows
+    let indexName = "(index)"
+    let keyColumn = false
+    if (data instanceof Map) {
+      rows = [...data].map(([k, v], i) => [i, v, k])
+      indexName = "(iteration index)"
+      keyColumn = true
+    } else if (data instanceof Set) {
+      rows = [...data].map((v, i) => [i, v])
+      indexName = "(iteration index)"
+    } else if (Array.isArray(data)) {
+      rows = data.map((v, i) => [i, v])
+    } else {
+      rows = Object.keys(data).map((k) => [k, data[k]])
+    }
+    const header = [indexName]
+    if (keyColumn) header.push("Key")
+    const props = []
+    let hasValues = false
+    for (const row of rows) {
+      const v = row[1]
+      if (v !== null && typeof v === "object" && !(v instanceof Date)) {
+        for (const k of Object.keys(v)) if (!props.includes(k)) props.push(k)
+      } else hasValues = true
+    }
+    const picked = Array.isArray(columns) ? columns.map(String) : props
+    header.push(...picked)
+    if (hasValues && !Array.isArray(columns)) header.push("Values")
+    const body = rows.map((row) => {
+      const out = [String(row[0])]
+      if (keyColumn) out.push(cell(row[2]))
+      const v = row[1]
+      const isObj = v !== null && typeof v === "object" && !(v instanceof Date)
+      for (const k of picked) out.push(isObj && Object.hasOwn(v, k) ? cell(v[k]) : "")
+      if (hasValues && !Array.isArray(columns)) out.push(isObj ? "" : cell(v))
+      return out
+    })
+    const widths = header.map((h, i) => Math.max(h.length, ...body.map((r) => r[i].length)))
+    const line = (l, m, r) => l + widths.map((w) => "─".repeat(w + 2)).join(m) + r
+    const render = (cells) => "│" + cells.map((c, i) => ` ${c.padEnd(widths[i])} `).join("│") + "│"
+    const out = [line("┌", "┬", "┐"), render(header), line("├", "┼", "┤"), ...body.map(render), line("└", "┴", "┘")]
+    console.log(out.join("\n"))
+  }
+  defineAll(console, {
+    table,
+    dir(value) {
+      console.log(value)
+    },
+    dirxml(...args) {
+      console.log(...args)
+    },
+    time(label = "default") {
+      label = String(label)
+      if (timers.has(label)) console.warn(`Warning: Label '${label}' already exists for console.time()`)
+      else timers.set(label, performance.now())
+    },
+    timeLog(label = "default", ...rest) {
+      label = String(label)
+      if (!timers.has(label)) console.warn(`Warning: No such label '${label}' for console.timeLog()`)
+      else console.log(`${label}: ${(performance.now() - timers.get(label)).toFixed(3)}ms`, ...rest)
+    },
+    timeEnd(label = "default") {
+      label = String(label)
+      if (!timers.has(label)) console.warn(`Warning: No such label '${label}' for console.timeEnd()`)
+      else {
+        console.log(`${label}: ${(performance.now() - timers.get(label)).toFixed(3)}ms`)
+        timers.delete(label)
+      }
+    },
+    count(label = "default") {
+      label = String(label)
+      const n = (counts.get(label) ?? 0) + 1
+      counts.set(label, n)
+      console.log(`${label}: ${n}`)
+    },
+    countReset(label = "default") {
+      label = String(label)
+      if (!counts.has(label)) console.warn(`Warning: Count for '${label}' does not exist`)
+      else counts.set(label, 0)
+    },
+    trace(...args) {
+      const stack = (new Error().stack ?? "").split("\n").slice(1).filter((l) => !l.includes("<squirt:")).join("\n")
+      console.error(args.length ? "Trace:" : "Trace", ...args)
+      if (stack) console.error(stack)
+    },
+  })
+}
 "##;
 
 pub const ARRAY_GENERIC: &str = r##"

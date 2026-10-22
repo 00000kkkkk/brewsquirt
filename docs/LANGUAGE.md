@@ -1714,7 +1714,7 @@ Each one is backed by the same runtime as the `squirt:` modules.
 
 | Module                         | What is there                                                       |
 | ------------------------------ | ------------------------------------------------------------------- |
-| `node:fs`                      | `readFileSync`, `writeFileSync`, `appendFileSync`, `existsSync`, `statSync`, `lstatSync`, `readdirSync` (with `withFileTypes` and `recursive`), `mkdirSync`, `mkdtempSync`, `rmSync`, `rmdirSync`, `unlinkSync`, `renameSync`, `copyFileSync`, `cpSync`, `realpathSync`, `symlinkSync`, `readlinkSync`, `accessSync`, callback versions of each, and `fs.promises` |
+| `node:fs`                      | `readFileSync`, `writeFileSync`, `appendFileSync`, `existsSync`, `statSync`, `lstatSync`, `readdirSync` (with `withFileTypes` and `recursive`), `mkdirSync`, `mkdtempSync`, `rmSync`, `rmdirSync`, `unlinkSync`, `renameSync`, `copyFileSync`, `cpSync`, `realpathSync`, `symlinkSync`, `readlinkSync`, `accessSync`, callback versions of each, `fs.promises`, and `createReadStream` and `createWriteStream` with `data`, `end`, `finish`, `close` and `error` events, `pipe` and async iteration |
 | `node:fs/promises`             | The promise versions                                                |
 | `node:path`, `node:os`, `node:child_process` | As `squirt:path`, `squirt:os` and `squirt:child_process` |
 | `node:events`                  | `EventEmitter` with `on`, `once`, `off`, `emit`, `prependListener`, `listenerCount`, `eventNames`, and `events.once` |
@@ -1723,7 +1723,8 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:util`                    | `inspect`, `format`, `promisify`, `callbackify`, `inherits`, `types`, `isDeepStrictEqual` |
 | `node:url`                     | `URL`, `URLSearchParams`, `fileURLToPath`, `pathToFileURL`          |
 | `node:readline`, `node:readline/promises` | `createInterface` with `line` events, async iteration and `question` |
-| `node:http`                    | `createServer` and `STATUS_CODES`                                   |
+| `node:http`                    | `createServer` and `STATUS_CODES`; requests have `on("data")`, `on("end")`, `setEncoding`, `pipe`, `text()` and `json()`, responses have `writeHead`, `setHeader`, `write`, `end` and `finish` events |
+| `node:crypto`                  | `createHash` and `createHmac` (md5, sha1, sha224, sha256, sha384, sha512), `hash`, `randomBytes`, `randomInt`, `randomUUID`, `getRandomValues`, `timingSafeEqual`, `webcrypto` and `subtle.digest` |
 | `node:timers`, `node:timers/promises` | Timers, and `setTimeout` as a promise                        |
 | `node:process`                 | `process`                                                           |
 
@@ -1844,8 +1845,16 @@ Matchers: `toBe`, `toEqual`, `toStrictEqual`, `toBeTruthy`, `toBeFalsy`, `toBeNu
 | ---------------------- | ------ |
 | `console.log(...args)`   | stdout |
 | `console.info(...args)`  | stdout |
+| `console.debug(...args)` | stdout |
 | `console.warn(...args)`  | stderr |
 | `console.error(...args)` | stderr |
+| `console.assert(cond, ...args)` | stderr when `cond` is falsy |
+| `console.table(data, columns?)` | stdout, a box-drawn table of an array, object, `Map` or `Set` |
+| `console.group(...label)`, `console.groupCollapsed`, `console.groupEnd()` | indent everything printed until the group ends |
+| `console.time(label?)`, `console.timeLog`, `console.timeEnd` | stdout, elapsed milliseconds |
+| `console.count(label?)`, `console.countReset` | stdout |
+| `console.dir(value)`, `console.dirxml(...args)` | stdout |
+| `console.trace(...args)` | stderr, the message and the current stack |
 
 Arguments are separated by a single space. Strings print as is; every other value prints the
 way Node's `util.inspect` shows it, including line breaking at 80 columns, grouping of long
@@ -1935,7 +1944,8 @@ collections (default 200000). Small values are useful for stress testing.
 | ----------------------------- | ---------------------------------------------------------------- |
 | `jsq`                         | Starts the REPL. Each input is evaluated and its value printed.  |
 | `jsq <file.jsq> [args...]`    | Runs the file as the entry module. `args` are exposed through `process.argv`. |
-| `jsq -e "<code>"`             | Evaluates the code string as a module.                           |
+| `jsq -e "<code>"`             | Evaluates the code string as a script.                           |
+| `jsq -p "<code>"`             | Evaluates the code string and prints the resulting value.        |
 | `jsq --disasm <file.jsq>`     | Compiles the file and prints its bytecode without running it.    |
 | `jsq test [paths...] [--filter <text>]` | Runs test files, see [Testing](#testing).           |
 | `jsq --version`               | Prints the version.                                              |
@@ -1990,7 +2000,7 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
 
 - `Blob` and `FormData`
 - Streaming bodies, WebSockets and HTTPS servers
-- `node:net`, `node:worker_threads` and `node:crypto`
+- `node:net`, `node:worker_threads`, and ciphers, key pairs and signatures in `node:crypto`
 - `Intl` covers numbers, plural rules, lists, relative times, collation and segmentation in a
   handful of locales; dates are formatted in English
 - Regular expressions: the `v` flag's set operations, most `\p{...}` property escapes, lookbehind

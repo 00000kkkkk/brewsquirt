@@ -25,6 +25,13 @@ struct Cli {
         conflicts_with = "file"
     )]
     eval: Option<String>,
+    #[arg(
+        short = 'p',
+        long = "print",
+        value_name = "CODE",
+        conflicts_with_all = ["file", "eval"]
+    )]
+    print: Option<String>,
     #[arg(long, requires = "file")]
     disasm: bool,
     #[arg(long, requires = "file", hide = true)]
@@ -76,19 +83,14 @@ fn run(cli: Cli) -> ExitCode {
     argv.extend(cli.args.iter().cloned());
     let mut vm = Vm::new(argv);
 
-    if let Some(code) = &cli.eval {
+    if let Some(code) = cli.eval.as_ref().or(cli.print.as_ref()) {
+        let show = cli.print.is_some();
         let r = vm
             .eval("<eval>", code, Mode::Repl)
             .and_then(|v| vm.run_event_loop().map(|_| v));
         return finish(
             &mut vm,
-            r.map(|v| {
-                if !v.is_undefined() {
-                    println_value(&v)
-                } else {
-                    None
-                }
-            }),
+            r.map(|v| if show { println_value(&v) } else { None }),
         );
     }
 

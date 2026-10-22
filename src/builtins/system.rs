@@ -14,6 +14,9 @@ pub fn install(vm: &mut Vm) {
     method(vm, &console, "warn", 0, error);
     method(vm, &console, "error", 0, error);
     method(vm, &console, "assert", 0, assert);
+    method(vm, &console, "group", 0, group);
+    method(vm, &console, "groupCollapsed", 0, group);
+    method(vm, &console, "groupEnd", 0, group_end);
     vm.define_global("console", Value::Object(console));
 
     let process = vm.new_object();
@@ -222,17 +225,55 @@ pub fn format_args(vm: &mut Vm, args: &[Value]) -> Result<String, Value> {
     Ok(parts.join(" "))
 }
 
-fn log(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    let mut s = format_args(vm, args)?;
+fn indented(vm: &Vm, s: &str) -> String {
+    let pad = "  ".repeat(vm.console_indent);
+    let mut out = String::with_capacity(s.len() + pad.len() * 2);
+    for (i, line) in s.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if !line.is_empty() {
+            out.push_str(&pad);
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+fn console_line(vm: &mut Vm, args: &[Value]) -> Result<String, Value> {
+    let s = format_args(vm, args)?;
+    let mut s = if vm.console_indent > 0 {
+        indented(vm, &s)
+    } else {
+        s
+    };
     s.push('\n');
+    Ok(s)
+}
+
+fn log(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let s = console_line(vm, args)?;
     vm.write_out(&s);
     Ok(Value::Undefined)
 }
 
 fn error(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    let mut s = format_args(vm, args)?;
-    s.push('\n');
+    let s = console_line(vm, args)?;
     vm.write_err(&s);
+    Ok(Value::Undefined)
+}
+
+fn group(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    if !args.is_empty() {
+        let s = console_line(vm, args)?;
+        vm.write_out(&s);
+    }
+    vm.console_indent += 1;
+    Ok(Value::Undefined)
+}
+
+fn group_end(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    vm.console_indent = vm.console_indent.saturating_sub(1);
     Ok(Value::Undefined)
 }
 

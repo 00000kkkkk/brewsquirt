@@ -60,31 +60,38 @@ export function afterEach(fn) {
   afterHooks.push(fn)
 }
 
-export function isDeepEqual(a, b) {
+export function isDeepEqual(a, b, strict = false) {
   if (Object.is(a, b)) return true
   if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false
-  if (Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return false
-  if (a instanceof Date) return a.getTime() === b.getTime()
-  if (a instanceof RegExp) return String(a) === String(b)
-  if (a instanceof Map) {
-    if (a.size !== b.size) return false
-    for (const [k, v] of a) if (!b.has(k) || !isDeepEqual(v, b.get(k))) return false
+  if (strict && Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return false
+  if (a instanceof Date || b instanceof Date) return a instanceof Date && b instanceof Date && a.getTime() === b.getTime()
+  if (a instanceof RegExp || b instanceof RegExp) return a instanceof RegExp && b instanceof RegExp && String(a) === String(b)
+  if (a instanceof Map || b instanceof Map) {
+    if (!(a instanceof Map && b instanceof Map) || a.size !== b.size) return false
+    for (const [k, v] of a) if (!b.has(k) || !isDeepEqual(v, b.get(k), strict)) return false
     return true
   }
-  if (a instanceof Set) {
-    if (a.size !== b.size) return false
-    for (const v of a) if (!b.has(v)) return false
+  if (a instanceof Set || b instanceof Set) {
+    if (!(a instanceof Set && b instanceof Set) || a.size !== b.size) return false
+    for (const v of a) if (!b.has(v) && ![...b].some((w) => isDeepEqual(v, w, strict))) return false
     return true
   }
+  if (Array.isArray(a) !== Array.isArray(b)) return false
   if (Array.isArray(a)) {
     if (a.length !== b.length) return false
-    for (let i = 0; i < a.length; i++) if (!isDeepEqual(a[i], b[i])) return false
+    for (let i = 0; i < a.length; i++) if (!isDeepEqual(a[i], b[i], strict)) return false
     return true
   }
-  const ka = Object.keys(a)
-  const kb = Object.keys(b)
-  if (ka.length !== kb.length) return false
-  for (const k of ka) if (!Object.hasOwn(b, k) || !isDeepEqual(a[k], b[k])) return false
+  if (ArrayBuffer.isView(a) || ArrayBuffer.isView(b)) {
+    if (!(ArrayBuffer.isView(a) && ArrayBuffer.isView(b)) || a.length !== b.length) return false
+    for (let i = 0; i < a.length; i++) if (!Object.is(a[i], b[i])) return false
+    return true
+  }
+  const keys = (o) => (strict ? Object.keys(o) : Object.keys(o).filter((k) => o[k] !== undefined))
+  const ka = keys(a)
+  const kb = new Set(keys(b))
+  if (ka.length !== kb.size) return false
+  for (const k of ka) if (!kb.has(k) || !isDeepEqual(a[k], b[k], strict)) return false
   return true
 }
 
@@ -128,7 +135,7 @@ function makeMatchers(actual, negate, prefix) {
   return {
     toBe: (e) => check(Object.is(actual, e), `toBe(${inspect(e)})`, e),
     toEqual: (e) => check(isDeepEqual(actual, e), `toEqual(${inspect(e)})`, e),
-    toStrictEqual: (e) => check(isDeepEqual(actual, e), `toStrictEqual(${inspect(e)})`, e),
+    toStrictEqual: (e) => check(isDeepEqual(actual, e, true), `toStrictEqual(${inspect(e)})`, e),
     toBeTruthy: () => check(!!actual, "toBeTruthy()"),
     toBeFalsy: () => check(!actual, "toBeFalsy()"),
     toBeNull: () => check(actual === null, "toBeNull()"),
@@ -321,7 +328,8 @@ fn util_format(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 fn util_deep_equal(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let module = vm.import_builtin("test")?;
     let f = vm.get_prop(&module, "isDeepEqual")?;
-    vm.call_value(&f, Value::Undefined, args)
+    let strict = [arg(args, 0), arg(args, 1), Value::Bool(true)];
+    vm.call_value(&f, Value::Undefined, &strict)
 }
 
 pub fn test_module(vm: &mut Vm) -> Result<Value, Value> {

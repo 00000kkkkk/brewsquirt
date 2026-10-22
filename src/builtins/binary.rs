@@ -45,7 +45,88 @@ pub fn install(vm: &mut Vm) {
     let crypto = vm.new_object();
     method(vm, &crypto, "getRandomValues", 1, get_random_values);
     method(vm, &crypto, "randomUUID", 0, random_uuid);
+    let subtle = vm.new_object();
+    method(vm, &subtle, "digest", 2, subtle_digest);
+    crypto.set_own("subtle", Value::Object(subtle));
     vm.define_global("crypto", Value::Object(crypto));
+}
+
+pub(crate) fn hash_name(alg: &str) -> Option<&'static str> {
+    Some(match alg.to_ascii_lowercase().replace('-', "").as_str() {
+        "md5" => "md5",
+        "sha1" => "sha1",
+        "sha224" => "sha224",
+        "sha256" => "sha256",
+        "sha384" => "sha384",
+        "sha512" => "sha512",
+        _ => return None,
+    })
+}
+
+pub(crate) fn digest_bytes(alg: &str, data: &[u8]) -> Option<Vec<u8>> {
+    use sha2::Digest;
+    Some(match alg {
+        "md5" => md5::Md5::digest(data).to_vec(),
+        "sha1" => sha1::Sha1::digest(data).to_vec(),
+        "sha224" => sha2::Sha224::digest(data).to_vec(),
+        "sha256" => sha2::Sha256::digest(data).to_vec(),
+        "sha384" => sha2::Sha384::digest(data).to_vec(),
+        "sha512" => sha2::Sha512::digest(data).to_vec(),
+        _ => return None,
+    })
+}
+
+pub(crate) fn hmac_bytes(alg: &str, key: &[u8], data: &[u8]) -> Option<Vec<u8>> {
+    use hmac::{Hmac, Mac};
+    macro_rules! run {
+        ($d:ty) => {{
+            let mut m = <Hmac<$d> as Mac>::new_from_slice(key).ok()?;
+            m.update(data);
+            Some(m.finalize().into_bytes().to_vec())
+        }};
+    }
+    match alg {
+        "md5" => run!(md5::Md5),
+        "sha1" => run!(sha1::Sha1),
+        "sha224" => run!(sha2::Sha224),
+        "sha256" => run!(sha2::Sha256),
+        "sha384" => run!(sha2::Sha384),
+        "sha512" => run!(sha2::Sha512),
+        _ => None,
+    }
+}
+
+fn algorithm_name(vm: &mut Vm, v: &Value) -> Result<String, Value> {
+    let name = match v {
+        Value::Object(_) => vm.get_prop(v, "name")?,
+        other => other.clone(),
+    };
+    vm.to_string(&name).map(|s| s.to_string())
+}
+
+fn subtle_digest(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let name = algorithm_name(vm, &arg(args, 0))?;
+    let p = vm.new_promise();
+    let Some(alg) = hash_name(&name) else {
+        let e = dom_error(vm, "NotSupportedError", "Unrecognized algorithm name");
+        vm.reject_promise(&p, e);
+        return Ok(Value::Object(p));
+    };
+    let Some(data) = super::typed::buffer_source_bytes(&arg(args, 1)) else {
+        let e = vm.type_error("The data argument must be a BufferSource");
+        vm.reject_promise(&p, e);
+        return Ok(Value::Object(p));
+    };
+    let out = digest_bytes(alg, &data).unwrap_or_default();
+    let buf = Value::Object(super::typed::new_buffer(vm, out));
+    vm.resolve_promise(&p, buf);
+    Ok(Value::Object(p))
+}
+
+pub(crate) fn random_vec(n: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; n];
+    fill_random(&mut buf);
+    buf
 }
 
 fn this_u8(vm: &mut Vm, this: &Value, name: &str) -> Result<Vec<u8>, Value> {

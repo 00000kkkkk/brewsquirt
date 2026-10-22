@@ -130,6 +130,7 @@ Each archive has a matching `.sha256` checksum file. Unpack it and put `jsq` and
 | `jsq`                           | Start the REPL                                        |
 | `jsq app.jsq arg1 arg2`         | Run a file; extra arguments land in `process.argv`    |
 | `jsq -e "console.log(2 ** 10)"` | Evaluate a snippet                                    |
+| `jsq -p "2 ** 10"`              | Evaluate a snippet and print its value                |
 | `jsq --disasm app.jsq`          | Dump the compiled bytecode instead of running it      |
 | `jsq test`                      | Run every `*.test.jsq` file under the current directory |
 | `jsq --version`                 | Print the version                                     |

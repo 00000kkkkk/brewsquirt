@@ -14,6 +14,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   manifest in `bucket/` and a Homebrew formula in `Formula/` let the repository serve as a bucket
   and a tap; `scripts/update-manifests.sh` refreshes both from a release's checksums and the
   release workflow opens a pull request with that update.
+- `node:crypto`: `createHash`, `createHmac`, `hash`, `getHashes`, `randomBytes`,
+  `randomFillSync`, `randomInt`, `randomUUID`, `getRandomValues`, `timingSafeEqual` and
+  `webcrypto`, with md5, sha1, sha224, sha256, sha384 and sha512; `crypto.subtle.digest` on the
+  global `crypto`.
+- `node:http` requests gained `setEncoding`, `rawHeaders`, `off`, `removeListener`, `emit`,
+  `pause`, `resume`, `pipe`, `text()`, `json()` and `arrayBuffer()`, deliver body chunks as
+  `Buffer` until an encoding is set, and responses gained `on("finish")`, `on("close")`,
+  `flushHeaders`, `setTimeout` and `finished`.
+
+- `fs.createReadStream` and `fs.createWriteStream`: event-based file streams with `setEncoding`,
+  `pause`, `resume`, `pipe`, `destroy`, `start`/`end`/`flags` options and async iteration, so
+  `readline.createInterface({ input: fs.createReadStream(file) })` reads a file line by line.
+- `console.table`, `console.group`, `console.groupCollapsed`, `console.groupEnd`,
+  `console.time`, `console.timeLog`, `console.timeEnd`, `console.count`, `console.countReset`,
+  `console.dir`, `console.dirxml` and `console.trace`.
+
+- `jsq -p "<code>"` evaluates a snippet and prints its value.
+
+### Changed
+
+- `jsq -e` no longer prints the value of the last expression, matching `node -e`; use `-p`.
+- `child_process` with a shell on Windows runs `cmd /d /s /c` with the command line passed
+  verbatim, so quoted program paths and arguments work.
+- `expect(...).toEqual` follows Jest: it ignores prototypes and `undefined` properties, so
+  `Object.groupBy` results compare equal to plain object literals; `toStrictEqual` and
+  `util.isDeepStrictEqual` keep checking prototypes.
 
 ## [1.0.0] - 2026-10-22
 
