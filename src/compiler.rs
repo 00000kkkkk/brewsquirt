@@ -2355,6 +2355,7 @@ impl Compiler {
         self.emit(Op::GetCallee);
         self.emit(Op::CopyPrivates);
         self.emit(Op::Pop);
+        let mut instance_done = 0usize;
         for m in fields.iter() {
             if let ClassMember::Field {
                 key,
@@ -2379,15 +2380,19 @@ impl Compiler {
                             self.emit_raw(Op::DefineField(k));
                         }
                     }
-                    PropKey::Computed(e) => {
-                        self.expr(e)?;
+                    PropKey::Computed(_) => {
+                        let hidden: Rc<str> = format!("\u{0}#%ik{instance_done}@0").into();
+                        instance_done += 1;
+                        self.emit(Op::GetCallee);
+                        let k = self.str_const(&hidden);
+                        self.emit_raw(Op::GetProp(k));
                         match value {
                             Some(v) => self.expr(v)?,
                             None => {
                                 self.emit(Op::Undefined);
                             }
                         }
-                        self.emit(Op::SetIndex);
+                        self.emit(Op::DefineIndex);
                     }
                 }
                 self.emit(Op::Pop);
@@ -2492,7 +2497,29 @@ impl Compiler {
             self.emit(Op::SetLocal(s));
             self.st().locals[s as usize].tdz = false;
         }
+        let mut instance_keys = 0usize;
+        let mut static_keys = 0usize;
         for m in &c.members {
+            if let ClassMember::Field {
+                key: PropKey::Computed(e),
+                is_static,
+                ..
+            } = m
+            {
+                let hidden: Rc<str> = if *is_static {
+                    static_keys += 1;
+                    format!("\u{0}#%sk{}@0", static_keys - 1).into()
+                } else {
+                    instance_keys += 1;
+                    format!("\u{0}#%ik{}@0", instance_keys - 1).into()
+                };
+                self.emit(Op::Dup);
+                self.expr(e)?;
+                self.emit(Op::ToPropertyKey);
+                let k = self.str_const(&hidden);
+                self.emit_raw(Op::InitProp(k));
+                self.emit(Op::Pop);
+            }
             if let ClassMember::Method {
                 key,
                 func,
@@ -2540,6 +2567,7 @@ impl Compiler {
                 }
             }
         }
+        let mut static_done = 0usize;
         for m in &c.members {
             match m {
                 ClassMember::Field {
@@ -2567,9 +2595,13 @@ impl Compiler {
                         }
                         self.emit(Op::Pop);
                     }
-                    PropKey::Computed(e) => {
+                    PropKey::Computed(_) => {
+                        let hidden: Rc<str> = format!("\u{0}#%sk{static_done}@0").into();
+                        static_done += 1;
                         self.emit(Op::Dup);
-                        self.expr(e)?;
+                        self.emit(Op::Dup);
+                        let k = self.str_const(&hidden);
+                        self.emit_raw(Op::GetProp(k));
                         match value {
                             Some(v) => {
                                 self.emit(Op::Dup2);
@@ -2580,7 +2612,7 @@ impl Compiler {
                                 self.emit(Op::Undefined);
                             }
                         }
-                        self.emit(Op::SetIndex);
+                        self.emit(Op::DefineIndex);
                         self.emit(Op::Pop);
                     }
                 },

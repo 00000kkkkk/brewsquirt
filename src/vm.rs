@@ -4091,6 +4091,21 @@ impl Vm {
                         o.set_hidden(key, val);
                     }
                 }
+                Op::DefineIndex => {
+                    let val = pop!();
+                    let key = pop!();
+                    let key = tri!(self.to_property_key(&key));
+                    if let Some(Value::Object(o)) = self.stack.last().cloned() {
+                        let d = crate::props::PropDesc {
+                            value: Some(val),
+                            writable: Some(true),
+                            enumerable: Some(true),
+                            configurable: Some(true),
+                            ..Default::default()
+                        };
+                        tri!(self.op_define_own_property(&o, key, d, true));
+                    }
+                }
                 Op::DefineField(k) => {
                     let val = pop!();
                     let key = name!(k);

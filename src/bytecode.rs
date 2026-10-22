@@ -57,6 +57,7 @@ pub enum Op {
     InitPrivate(u32),
     CopyPrivates,
     DefineField(u32),
+    DefineIndex,
     SuperCall(u32),
     Add,
     Sub,
