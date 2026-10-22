@@ -128,7 +128,10 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                                 out.push(e);
                             }
                         }
-                        if chars.get(i + 1) == Some(&'-') && chars.get(i + 2) != Some(&']') {
+                        if !unicode
+                            && chars.get(i + 1) == Some(&'-')
+                            && chars.get(i + 2) != Some(&']')
+                        {
                             out.push_str("\\-");
                             i += 1;
                         }
