@@ -323,6 +323,142 @@ const INTL_SRC: &str = r##"
 
   const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"]
   const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+  const EN_DATES = {
+    months: MONTHS,
+    short: ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"],
+    days: DAYS,
+    daysShort: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+    order: "mdy", sep: "/", pad: false, h12: true, am: "AM", pm: "PM",
+    full: "{weekday}, {month} {day}, {year}", long: "{month} {day}, {year}", medium: "{short} {day}, {year}", shortDate: "{M}/{d}/{yy}",
+    md: "{month} {day}", mdy: "{month} {day}, {year}", my: "{month} {year}", wsep: ", ", dtsep: ", ", at: " at ",
+  }
+  const DATE_DATA = {
+    en: EN_DATES,
+    "en-GB": { ...EN_DATES, order: "dmy", pad: true, h12: false, full: "{weekday} {day} {month} {year}", long: "{day} {month} {year}", medium: "{day} {short} {year}", shortDate: "{dd}/{MM}/{year}", md: "{day} {month}", mdy: "{day} {month} {year}", wsep: " " },
+    "en-AU": { ...EN_DATES, order: "dmy", pad: true, h12: true, full: "{weekday} {day} {month} {year}", long: "{day} {month} {year}", medium: "{day} {short} {year}", shortDate: "{dd}/{MM}/{year}", md: "{day} {month}", mdy: "{day} {month} {year}", wsep: " ", am: "am", pm: "pm" },
+    "en-CA": { ...EN_DATES, order: "ymd", sep: "-", pad: true, shortDate: "{year}-{MM}-{dd}" },
+    uk: {
+      months: ["січень", "лютий", "березень", "квітень", "травень", "червень", "липень", "серпень", "вересень", "жовтень", "листопад", "грудень"],
+      gen: ["січня", "лютого", "березня", "квітня", "травня", "червня", "липня", "серпня", "вересня", "жовтня", "листопада", "грудня"],
+      short: ["січ.", "лют.", "бер.", "квіт.", "трав.", "черв.", "лип.", "серп.", "вер.", "жовт.", "лист.", "груд."],
+      days: ["неділя", "понеділок", "вівторок", "середа", "четвер", "пʼятниця", "субота"],
+      daysShort: ["нд", "пн", "вт", "ср", "чт", "пт", "сб"],
+      order: "dmy", sep: ".", pad: true, h12: false, am: "дп", pm: "пп",
+      full: "{weekday}, {day} {gen} {year} р.", long: "{day} {gen} {year} р.", medium: "{day} {short} {year} р.", shortDate: "{dd}.{MM}.{yy}",
+      md: "{day} {gen}", mdy: "{day} {gen} {year} р.", my: "{month} {year} р.", wsep: ", ", dtsep: ", ", at: " о ",
+    },
+    ru: {
+      months: ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"],
+      gen: ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"],
+      short: ["янв.", "февр.", "мар.", "апр.", "мая", "июн.", "июл.", "авг.", "сент.", "окт.", "нояб.", "дек."],
+      days: ["воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота"],
+      daysShort: ["вс", "пн", "вт", "ср", "чт", "пт", "сб"],
+      order: "dmy", sep: ".", pad: true, h12: false, am: "AM", pm: "PM",
+      full: "{weekday}, {day} {gen} {year} г.", long: "{day} {gen} {year} г.", medium: "{day} {short} {year} г.", shortDate: "{dd}.{MM}.{year}",
+      md: "{day} {gen}", mdy: "{day} {gen} {year} г.", my: "{month} {year} г.", wsep: ", ", dtsep: ", ", at: " в ",
+    },
+    de: {
+      months: ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"],
+      short: ["Jan.", "Feb.", "März", "Apr.", "Mai", "Juni", "Juli", "Aug.", "Sept.", "Okt.", "Nov.", "Dez."],
+      days: ["Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"],
+      daysShort: ["So.", "Mo.", "Di.", "Mi.", "Do.", "Fr.", "Sa."],
+      order: "dmy", sep: ".", pad: false, h12: false, am: "AM", pm: "PM",
+      full: "{weekday}, {day}. {month} {year}", long: "{day}. {month} {year}", medium: "{dd}.{MM}.{year}", shortDate: "{dd}.{MM}.{yy}",
+      md: "{day}. {month}", mdy: "{day}. {month} {year}", my: "{month} {year}", wsep: ", ", dtsep: ", ", at: " um ",
+    },
+    fr: {
+      months: ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"],
+      short: ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."],
+      days: ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"],
+      daysShort: ["dim.", "lun.", "mar.", "mer.", "jeu.", "ven.", "sam."],
+      order: "dmy", sep: "/", pad: true, h12: false, am: "AM", pm: "PM",
+      full: "{weekday} {day} {month} {year}", long: "{day} {month} {year}", medium: "{day} {short} {year}", shortDate: "{dd}/{MM}/{year}",
+      md: "{day} {month}", mdy: "{day} {month} {year}", my: "{month} {year}", wsep: " ", dtsep: " ", at: " à ",
+    },
+    es: {
+      months: ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"],
+      short: ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic"],
+      days: ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"],
+      daysShort: ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"],
+      order: "dmy", sep: "/", pad: false, h12: false, am: "a. m.", pm: "p. m.",
+      full: "{weekday}, {day} de {month} de {year}", long: "{day} de {month} de {year}", medium: "{day} {short} {year}", shortDate: "{d}/{M}/{yy}",
+      md: "{day} de {month}", mdy: "{day} de {month} de {year}", my: "{month} de {year}", wsep: ", ", dtsep: ", ", at: ", ",
+    },
+    it: {
+      months: ["gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre"],
+      short: ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"],
+      days: ["domenica", "lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato"],
+      daysShort: ["dom", "lun", "mar", "mer", "gio", "ven", "sab"],
+      order: "dmy", sep: "/", pad: false, h12: false, am: "AM", pm: "PM",
+      full: "{weekday} {day} {month} {year}", long: "{day} {month} {year}", medium: "{day} {short} {year}", shortDate: "{dd}/{MM}/{yy}",
+      md: "{day} {month}", mdy: "{day} {month} {year}", my: "{month} {year}", wsep: " ", dtsep: ", ", at: " alle ore ",
+    },
+    pt: {
+      months: ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"],
+      short: ["jan.", "fev.", "mar.", "abr.", "mai.", "jun.", "jul.", "ago.", "set.", "out.", "nov.", "dez."],
+      days: ["domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado"],
+      daysShort: ["dom.", "seg.", "ter.", "qua.", "qui.", "sex.", "sáb."],
+      order: "dmy", sep: "/", pad: true, h12: false, am: "AM", pm: "PM",
+      full: "{weekday}, {day} de {month} de {year}", long: "{day} de {month} de {year}", medium: "{day} de {short} de {year}", shortDate: "{dd}/{MM}/{year}",
+      md: "{day} de {month}", mdy: "{day} de {month} de {year}", my: "{month} de {year}", wsep: ", ", dtsep: ", ", at: " às ",
+    },
+    pl: {
+      months: ["styczeń", "luty", "marzec", "kwiecień", "maj", "czerwiec", "lipiec", "sierpień", "wrzesień", "październik", "listopad", "grudzień"],
+      gen: ["stycznia", "lutego", "marca", "kwietnia", "maja", "czerwca", "lipca", "sierpnia", "września", "października", "listopada", "grudnia"],
+      short: ["sty", "lut", "mar", "kwi", "maj", "cze", "lip", "sie", "wrz", "paź", "lis", "gru"],
+      days: ["niedziela", "poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota"],
+      daysShort: ["niedz.", "pon.", "wt.", "śr.", "czw.", "pt.", "sob."],
+      order: "dmy", sep: ".", pad: "month", h12: false, am: "AM", pm: "PM",
+      full: "{weekday}, {day} {gen} {year}", long: "{day} {gen} {year}", medium: "{day} {short} {year}", shortDate: "{d}.{MM}.{year}",
+      md: "{day} {gen}", mdy: "{day} {gen} {year}", my: "{month} {year}", wsep: ", ", dtsep: ", ", at: " o ",
+    },
+    nl: {
+      months: ["januari", "februari", "maart", "april", "mei", "juni", "juli", "augustus", "september", "oktober", "november", "december"],
+      short: ["jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec"],
+      days: ["zondag", "maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag"],
+      daysShort: ["zo", "ma", "di", "wo", "do", "vr", "za"],
+      order: "dmy", sep: "-", pad: false, h12: false, am: "a.m.", pm: "p.m.",
+      full: "{weekday} {day} {month} {year}", long: "{day} {month} {year}", medium: "{day} {short} {year}", shortDate: "{dd}-{MM}-{year}",
+      md: "{day} {month}", mdy: "{day} {month} {year}", my: "{month} {year}", wsep: " ", dtsep: ", ", at: " om ",
+    },
+    sv: {
+      months: ["januari", "februari", "mars", "april", "maj", "juni", "juli", "augusti", "september", "oktober", "november", "december"],
+      short: ["jan.", "feb.", "mars", "apr.", "maj", "juni", "juli", "aug.", "sep.", "okt.", "nov.", "dec."],
+      days: ["söndag", "måndag", "tisdag", "onsdag", "torsdag", "fredag", "lördag"],
+      daysShort: ["sön", "mån", "tis", "ons", "tors", "fre", "lör"],
+      order: "ymd", sep: "-", pad: true, h12: false, am: "fm", pm: "em",
+      full: "{weekday} {day} {month} {year}", long: "{day} {month} {year}", medium: "{day} {short} {year}", shortDate: "{year}-{MM}-{dd}",
+      md: "{day} {month}", mdy: "{day} {month} {year}", my: "{month} {year}", wsep: " ", dtsep: " ", at: " kl. ",
+    },
+    tr: {
+      months: ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"],
+      short: ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"],
+      days: ["Pazar", "Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi"],
+      daysShort: ["Paz", "Pzt", "Sal", "Çar", "Per", "Cum", "Cmt"],
+      order: "dmy", sep: ".", pad: true, h12: false, am: "ÖÖ", pm: "ÖS",
+      full: "{day} {month} {year} {weekday}", long: "{day} {month} {year}", medium: "{day} {short} {year}", shortDate: "{dd}.{MM}.{year}",
+      md: "{day} {month}", mdy: "{day} {month} {year}", my: "{month} {year}", wsep: " ", dtsep: " ", at: " ", weekdayAfter: true,
+    },
+    ja: {
+      months: ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"],
+      short: ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"],
+      days: ["日曜日", "月曜日", "火曜日", "水曜日", "木曜日", "金曜日", "土曜日"],
+      daysShort: ["日", "月", "火", "水", "木", "金", "土"],
+      order: "ymd", sep: "/", pad: false, h12: false, am: "午前", pm: "午後",
+      full: "{year}年{M}月{d}日{weekday}", long: "{year}年{M}月{d}日", medium: "{year}/{MM}/{dd}", shortDate: "{year}/{MM}/{dd}",
+      md: "{M}月{d}日", mdy: "{year}年{M}月{d}日", my: "{year}年{M}月", wsep: "", dtsep: " ", at: " ", weekdayAfter: true,
+    },
+    zh: {
+      months: ["一月", "二月", "三月", "四月", "五月", "六月", "七月", "八月", "九月", "十月", "十一月", "十二月"],
+      short: ["1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月"],
+      days: ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"],
+      daysShort: ["周日", "周一", "周二", "周三", "周四", "周五", "周六"],
+      order: "ymd", sep: "/", pad: false, h12: false, am: "上午", pm: "下午",
+      full: "{year}年{M}月{d}日{weekday}", long: "{year}年{M}月{d}日", medium: "{year}年{M}月{d}日", shortDate: "{year}/{M}/{d}",
+      md: "{M}月{d}日", mdy: "{year}年{M}月{d}日", my: "{year}年{M}月", wsep: "", dtsep: " ", at: " ", weekdayAfter: true,
+    },
+  }
+  const dateData = (locale) => DATE_DATA[locale] ?? DATE_DATA[lang(locale)] ?? EN_DATES
 
   const zoneOffset = (tz, date) => {
     if (tz === undefined) return -date.getTimezoneOffset()
@@ -394,11 +530,14 @@ const INTL_SRC: &str = r##"
       const d = date === undefined ? new Date() : new Date(typeof date === "object" ? date.getTime() : Number(date))
       if (Number.isNaN(d.getTime())) throw new RangeError("Invalid time value")
       const o = this.#o
+      const L = dateData(o.locale)
       const offset = zoneOffset(o.timeZone, d)
       const f = fields(d, offset)
       const parts = []
-      const lit = (v) => parts.push({ type: "literal", value: v })
-      const h12 = o.hour12 !== false
+      const lit = (v) => {
+        if (v !== "") parts.push({ type: "literal", value: v })
+      }
+      const h12 = o.hour12 === undefined ? L.h12 : o.hour12
       const hourText = (style) => {
         let h = f.hour
         if (h12) h = h % 12 === 0 ? 12 : h % 12
@@ -410,33 +549,65 @@ const INTL_SRC: &str = r##"
         const a = Math.abs(offset)
         return `GMT${sign}${Math.floor(a / 60)}${a % 60 ? ":" + pad2(a % 60) : ""}`
       }
+      const monthName = (style) => {
+        if (style === "short") return L.short[f.month]
+        if (style === "narrow") return [...L.months[f.month]][0]
+        return L.months[f.month]
+      }
+      const weekdayName = (style) => (style === "long" ? L.days[f.weekday] : style === "short" ? L.daysShort[f.weekday] : [...L.days[f.weekday]][0])
+      const values = (monthStyle, dayStyle, yearStyle, weekdayStyle) => ({
+        weekday: weekdayStyle ? weekdayName(weekdayStyle) : "",
+        month: monthStyle === "numeric" || monthStyle === "2-digit" ? String(f.month + 1) : monthName(monthStyle === "narrow" ? "narrow" : "long"),
+        gen: monthStyle === "short" ? L.short[f.month] : monthStyle === "narrow" ? [...L.months[f.month]][0] : (L.gen ?? L.months)[f.month],
+        short: L.short[f.month],
+        day: dayStyle === "2-digit" ? pad2(f.day) : String(f.day),
+        dd: pad2(f.day),
+        d: String(f.day),
+        MM: pad2(f.month + 1),
+        M: String(f.month + 1),
+        year: yearStyle === "2-digit" ? pad2(f.year % 100) : String(f.year),
+        yy: pad2(f.year % 100),
+      })
+      const typeOf = { weekday: "weekday", month: "month", gen: "month", short: "month", day: "day", dd: "day", d: "day", MM: "month", M: "month", year: "year", yy: "year" }
+      const render = (template, v) => {
+        const re = /\{(\w+)\}/g
+        let last = 0
+        let m
+        while ((m = re.exec(template))) {
+          lit(template.slice(last, m.index))
+          const val = v[m[1]]
+          if (val !== undefined && val !== "") parts.push({ type: typeOf[m[1]] ?? "literal", value: val })
+          last = re.lastIndex
+        }
+        lit(template.slice(last))
+      }
+      const trimParts = () => {
+        while (parts.length && parts[0].type === "literal" && parts[0].value.trim() === "") parts.shift()
+        if (parts.length && parts[0].type === "literal") parts[0].value = parts[0].value.replace(/^[,\s]+/, "")
+        if (parts.length && parts[parts.length - 1].type === "literal" && parts[parts.length - 1].value.trim() === "") parts.pop()
+      }
+      const numericDate = (monthStyle, dayStyle, yearStyle) => {
+        const segs = []
+        const padMonth = monthStyle === "2-digit" || L.pad === true || L.pad === "month"
+        const padDay = dayStyle === "2-digit" || L.pad === true
+        for (const k of L.order) {
+          if (k === "m" && monthStyle) segs.push({ type: "month", value: padMonth ? pad2(f.month + 1) : String(f.month + 1) })
+          if (k === "d" && dayStyle) segs.push({ type: "day", value: padDay ? pad2(f.day) : String(f.day) })
+          if (k === "y" && yearStyle) segs.push({ type: "year", value: yearStyle === "2-digit" ? pad2(f.year % 100) : String(f.year) })
+        }
+        segs.forEach((seg, i) => {
+          if (i > 0) lit(L.sep)
+          parts.push(seg)
+        })
+      }
       const datePart = (style) => {
-        if (style === "full") {
-          parts.push({ type: "weekday", value: DAYS[f.weekday] })
-          lit(", ")
-        }
-        if (style === "full" || style === "long") {
-          parts.push({ type: "month", value: MONTHS[f.month] })
-          lit(" ")
-          parts.push({ type: "day", value: String(f.day) })
-          lit(", ")
-          parts.push({ type: "year", value: String(f.year) })
-        } else if (style === "medium") {
-          parts.push({ type: "month", value: MONTHS[f.month].slice(0, 3) })
-          lit(" ")
-          parts.push({ type: "day", value: String(f.day) })
-          lit(", ")
-          parts.push({ type: "year", value: String(f.year) })
-        } else {
-          parts.push({ type: "month", value: String(f.month + 1) })
-          lit("/")
-          parts.push({ type: "day", value: String(f.day) })
-          lit("/")
-          parts.push({ type: "year", value: String(f.year % 100).padStart(2, "0") })
-        }
+        if (style === "full") render(L.full, values("long", "numeric", "numeric", "long"))
+        else if (style === "long") render(L.long, values("long", "numeric", "numeric"))
+        else if (style === "medium") render(L.medium, values("short", "numeric", "numeric"))
+        else render(L.shortDate, values("numeric", "numeric", "2-digit"))
       }
       const timePart = (style) => {
-        parts.push({ type: "hour", value: hourText("numeric") })
+        parts.push({ type: "hour", value: hourText(h12 ? "numeric" : "2-digit") })
         lit(":")
         parts.push({ type: "minute", value: pad2(f.minute) })
         if (style !== "short") {
@@ -445,7 +616,7 @@ const INTL_SRC: &str = r##"
         }
         if (h12) {
           lit(" ")
-          parts.push({ type: "dayPeriod", value: f.hour < 12 ? "AM" : "PM" })
+          parts.push({ type: "dayPeriod", value: f.hour < 12 ? L.am : L.pm })
         }
         if (style === "full" || style === "long") {
           lit(" ")
@@ -454,47 +625,42 @@ const INTL_SRC: &str = r##"
       }
       if (o.dateStyle || o.timeStyle) {
         if (o.dateStyle) datePart(o.dateStyle)
-        if (o.dateStyle && o.timeStyle) lit(o.dateStyle === "full" || o.dateStyle === "long" ? " at " : ", ")
+        if (o.dateStyle && o.timeStyle) lit(o.dateStyle === "full" || o.dateStyle === "long" ? L.at : L.dtsep)
         if (o.timeStyle) timePart(o.timeStyle)
         return parts
       }
       const hasDate = o.year || o.month || o.day || o.weekday
       const textMonth = o.month === "long" || o.month === "short" || o.month === "narrow"
-      if (o.weekday) {
-        parts.push({ type: "weekday", value: o.weekday === "long" ? DAYS[f.weekday] : o.weekday === "short" ? DAYS[f.weekday].slice(0, 3) : DAYS[f.weekday][0] })
-        if (o.year || o.month || o.day) lit(", ")
+      const weekdayFirst = o.weekday && !L.weekdayAfter
+      if (weekdayFirst) {
+        parts.push({ type: "weekday", value: weekdayName(o.weekday) })
+        if (o.year || o.month || o.day) lit(L.wsep)
       }
       if (textMonth) {
-        const m = o.month === "long" ? MONTHS[f.month] : o.month === "short" ? MONTHS[f.month].slice(0, 3) : MONTHS[f.month][0]
-        parts.push({ type: "month", value: m })
-        if (o.day) {
-          lit(" ")
-          parts.push({ type: "day", value: o.day === "2-digit" ? pad2(f.day) : String(f.day) })
-        }
-        if (o.year) {
-          lit(o.day ? ", " : " ")
-          parts.push({ type: "year", value: o.year === "2-digit" ? pad2(f.year % 100) : String(f.year) })
-        }
-      } else {
-        const segs = []
-        if (o.month) segs.push({ type: "month", value: o.month === "2-digit" ? pad2(f.month + 1) : String(f.month + 1) })
-        if (o.day) segs.push({ type: "day", value: o.day === "2-digit" ? pad2(f.day) : String(f.day) })
-        if (o.year) segs.push({ type: "year", value: o.year === "2-digit" ? pad2(f.year % 100) : String(f.year) })
-        segs.forEach((s, i) => {
-          if (i > 0) lit("/")
-          parts.push(s)
-        })
+        const v = values(o.month, o.day, o.year)
+        if (o.day && o.year) render(L.mdy, v)
+        else if (o.day) render(L.md, v)
+        else if (o.year) render(L.my, v)
+        else parts.push({ type: "month", value: monthName(o.month) })
+      } else if (o.year || o.month || o.day) {
+        if (L.textNumeric && o.year && o.month && o.day) render(L.long, values("numeric", o.day, o.year))
+        else if (L.textNumeric && o.month && o.day) render(L.md, values("numeric", o.day, o.year))
+        else numericDate(o.month, o.day, o.year)
+      }
+      if (o.weekday && L.weekdayAfter) {
+        if (o.year || o.month || o.day) lit(L.wsep)
+        parts.push({ type: "weekday", value: weekdayName(o.weekday) })
       }
       const hasTime = o.hour || o.minute || o.second
       if (hasTime) {
-        if (hasDate) lit(", ")
+        if (hasDate) lit(L.dtsep)
         const items = []
         if (o.hour) items.push({ type: "hour", value: hourText(o.hour === "2-digit" || (!h12 && o.minute) ? "2-digit" : "numeric") })
         if (o.minute) items.push({ type: "minute", value: o.hour || o.second ? pad2(f.minute) : String(f.minute) })
         if (o.second) items.push({ type: "second", value: o.minute ? pad2(f.second) : String(f.second) })
-        items.forEach((s, i) => {
+        items.forEach((seg, i) => {
           if (i > 0) lit(":")
-          parts.push(s)
+          parts.push(seg)
         })
         if (o.fractionalSecondDigits) {
           lit(".")
@@ -502,13 +668,14 @@ const INTL_SRC: &str = r##"
         }
         if (o.hour && h12) {
           lit(" ")
-          parts.push({ type: "dayPeriod", value: f.hour < 12 ? "AM" : "PM" })
+          parts.push({ type: "dayPeriod", value: f.hour < 12 ? L.am : L.pm })
         }
       }
       if (o.timeZoneName) {
-        lit(hasDate && !hasTime ? ", " : " ")
+        lit(hasDate && !hasTime ? L.dtsep : " ")
         parts.push({ type: "timeZoneName", value: tzName() })
       }
+      trimParts()
       return parts
     }
     get format() {
@@ -843,8 +1010,19 @@ const INTL_SRC: &str = r##"
     }
   }
 
+  const callable = (C) => {
+    const f = function (...args) {
+      return new.target && new.target !== f ? Reflect.construct(C, args, new.target) : new C(...args)
+    }
+    Object.defineProperty(f, "name", { value: C.name, configurable: true })
+    Object.defineProperty(f, "length", { value: 0, configurable: true })
+    Object.defineProperty(f, "prototype", { value: C.prototype, writable: false, enumerable: false, configurable: false })
+    Object.defineProperty(C.prototype, "constructor", { value: f, writable: true, configurable: true })
+    for (const k of Object.getOwnPropertyNames(C)) if (!["length", "name", "prototype"].includes(k)) Object.defineProperty(f, k, Object.getOwnPropertyDescriptor(C, k))
+    return f
+  }
   const Intl = {}
-  for (const [name, value] of Object.entries({ NumberFormat, DateTimeFormat, Collator, PluralRules, RelativeTimeFormat, ListFormat, Segmenter, DisplayNames, Locale })) {
+  for (const [name, value] of Object.entries({ NumberFormat: callable(NumberFormat), DateTimeFormat: callable(DateTimeFormat), Collator: callable(Collator), PluralRules, RelativeTimeFormat, ListFormat, Segmenter, DisplayNames, Locale })) {
     Object.defineProperty(Intl, name, { value, writable: true, configurable: true, enumerable: false })
     Object.defineProperty(value.prototype, Symbol.toStringTag, { value: `Intl.${name}`, configurable: true })
   }
