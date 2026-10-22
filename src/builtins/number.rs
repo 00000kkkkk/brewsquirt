@@ -265,7 +265,7 @@ fn bigint_to_string(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         v => to_integer(vm, &v)?,
     };
     if !(2.0..=36.0).contains(&radix) {
-        return Err(vm.range_error("toString() radix must be between 2 and 36"));
+        return Err(vm.range_error("toString() radix argument must be between 2 and 36"));
     }
     Ok(crate::bigint::to_string_radix(&b, radix as u32).into())
 }
@@ -311,7 +311,7 @@ fn to_string(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         v => to_integer(vm, &v)? as i64,
     };
     if !(2..=36).contains(&radix) {
-        return Err(vm.range_error("toString() radix must be between 2 and 36"));
+        return Err(vm.range_error("toString() radix argument must be between 2 and 36"));
     }
     Ok(number_to_radix_string(n, radix as u32).into())
 }

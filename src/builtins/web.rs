@@ -672,6 +672,12 @@ const WEB_SRC: &str = r##"
 
   const DEFAULT_PORTS = { "http:": "80", "https:": "443", "ws:": "80", "wss:": "443", "ftp:": "21" }
   const URL_RE = /^([a-zA-Z][a-zA-Z0-9+.\-]*):(?:\/\/(?:([^:@\/?#]*)(?::([^@\/?#]*))?@)?(\[[^\]]*\]|[^:\/?#]*)(?::([0-9]*))?)?([^?#]*)(\?[^#]*)?(#.*)?$/
+  const invalidUrl = (input) => {
+    const e = new TypeError("Invalid URL")
+    e.code = "ERR_INVALID_URL"
+    e.input = input
+    return e
+  }
   const SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.\-]*:/
 
   const isSpecial = (protocol) => protocol in DEFAULT_PORTS || protocol === "file:"
@@ -736,10 +742,10 @@ const WEB_SRC: &str = r##"
     }
     #parse(s, original) {
       const m = URL_RE.exec(s)
-      if (!m) throw new TypeError(`Invalid URL: ${original}`)
+      if (!m) throw invalidUrl(original)
       const protocol = m[1].toLowerCase() + ":"
       const special = isSpecial(protocol)
-      if (special && protocol !== "file:" && !m[4]) throw new TypeError(`Invalid URL: ${original}`)
+      if (special && protocol !== "file:" && !m[4]) throw invalidUrl(original)
       this.#protocol = protocol
       this.#username = m[2] ? encodeSet(m[2], USER_SET) : ""
       this.#password = m[3] ? encodeSet(m[3], USER_SET) : ""
@@ -747,7 +753,7 @@ const WEB_SRC: &str = r##"
       let port = m[5] ?? ""
       if (port !== "") {
         const n = Number(port)
-        if (n > 65535) throw new TypeError(`Invalid URL: ${original}`)
+        if (n > 65535) throw invalidUrl(original)
         port = String(n)
       }
       this.#port = port === DEFAULT_PORTS[protocol] ? "" : port

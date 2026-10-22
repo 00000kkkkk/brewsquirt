@@ -1088,8 +1088,41 @@ fn spawn_sync(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     }
     let options = arg(args, 2);
     let shell = options.is_object() && vm.get_prop(&options, "shell")?.truthy();
-    let r = run_command(vm, &program, &argv, &options, shell)?;
     let o = vm.new_object();
+    let r = match run_command(vm, &program, &argv, &options, shell) {
+        Ok(r) => r,
+        Err(e) => {
+            let text = match &e {
+                Value::Object(err) => match err.get_own("message") {
+                    Some(Value::Str(s)) => s.to_string(),
+                    _ => String::new(),
+                },
+                _ => String::new(),
+            };
+            if !(text.contains("not found") || text.contains("os error 2)")) {
+                return Err(e);
+            }
+            let err = vm.make_error(ErrorKind::Error, format!("spawnSync {program} ENOENT"));
+            if let Value::Object(eo) = &err {
+                eo.set_own("code", "ENOENT".into());
+                eo.set_own(
+                    "errno",
+                    Value::Number(if cfg!(windows) { -4058.0 } else { -2.0 }),
+                );
+                eo.set_own("syscall", format!("spawnSync {program}").into());
+                eo.set_own("path", Value::from(program.to_string()));
+                let spawnargs = argv.iter().map(|a| Value::from(a.clone())).collect();
+                let spawnargs = vm.new_array(spawnargs);
+                eo.set_own("spawnargs", spawnargs);
+            }
+            o.set_own("error", err);
+            o.set_own("status", Value::Null);
+            o.set_own("signal", Value::Null);
+            o.set_own("output", Value::Null);
+            o.set_own("pid", Value::Number(0.0));
+            return Ok(Value::Object(o));
+        }
+    };
     o.set_own(
         "status",
         r.status

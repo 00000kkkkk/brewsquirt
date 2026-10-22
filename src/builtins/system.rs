@@ -104,7 +104,10 @@ pub fn install(vm: &mut Vm) {
         } else {
             std::io::stderr().is_terminal()
         };
-        stream.set_own("isTTY", Value::Bool(tty));
+        if tty {
+            stream.set_own("isTTY", Value::Bool(true));
+        }
+        stream.set_own("writable", Value::Bool(true));
         stream.set_own("fd", Value::Number(fd));
         method(vm, &stream, "on", 2, process_on);
         method(vm, &stream, "once", 2, process_on);

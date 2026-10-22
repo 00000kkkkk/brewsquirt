@@ -37,6 +37,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Readable.toWeb`/`fromWeb`, `Writable.toWeb`/`fromWeb` and `Duplex.toWeb`/`fromWeb` bridge
   Node streams and WHATWG streams; `fs` streams report `writableEnded`, `writableFinished`,
   `readableEnded`, `destroyed` and `closed`.
+- `node:child_process` returns Buffers from `execSync`, `spawnSync` and the new `execFileSync`
+  unless an `encoding` is given, `spawnSync` reports a missing program through `error.code`
+  `ENOENT` instead of throwing, and `spawnSync` results carry `output`, `signal` and `pid`.
+- `Intl.Collator` sorts `å`, `ä`, `ö` (Swedish, Finnish) and `æ`, `ø`, `å` (Danish, Norwegian)
+  after `z`; `supportedLocalesOf` drops unknown languages and unknown locales resolve to
+  `en-US`.
+- `process.memoryUsage.rss()`, `process.stdout.writable`, and `isTTY` is only defined when the
+  stream is a terminal, as in Node.
 - `toLocaleUpperCase`/`toLocaleLowerCase` apply the Turkish and Azerbaijani dotted and dotless
   `i` rules, and `BigInt.prototype.toLocaleString` formats every digit instead of rounding
   through a `Number`.
@@ -54,6 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `await` continuations are not interleaved with ticks.
 - `toFixed` and `toPrecision` round exact ties up and everything else by the exact binary value,
   so `(1.45).toFixed(1)` is `1.4` and `(2.5).toPrecision(1)` is `3`, matching V8.
+- Error messages match V8 for destructuring `null` (`Cannot destructure property 'a' of
+  'null'`), invalid `URL`s (`Invalid URL` with `code` and `input`), `atob`, radix and weak map
+  keys, strict-mode reserved words, and Map/Set methods called on the wrong receiver; assigning
+  an error's `name` or `message` updates the first line of its `stack`, and `util.inspect`
+  prints a custom `stack` string as is.
 - `Array.prototype.flat` skips holes, `Writable.prototype.write` reports back-pressure from the
   buffered byte count, and `stream.pipeline` settles when a `PassThrough` destination finishes
   even if nobody reads it.

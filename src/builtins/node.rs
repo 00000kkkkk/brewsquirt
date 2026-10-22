@@ -1557,7 +1557,7 @@ const NODE_SRC: &str = r##"
   const stdinChunks = []
   let stdinWake = null
   stdin.fd = 0
-  stdin.isTTY = native.isTTY(0)
+  if (native.isTTY(0)) stdin.isTTY = true
   stdin.setEncoding = (enc) => {
     stdinEncoding = enc
     return stdin
@@ -4844,6 +4844,44 @@ const NODE_SRC: &str = r##"
     return child
   }
   const childProcessAsync = { spawn, exec, execFile, fork, ChildProcess }
+  const childProcessSync = (base) => {
+    const wantsText = (options) => options?.encoding !== undefined && options.encoding !== null && options.encoding !== "buffer"
+    const output = (text, options) => (text === null || text === undefined ? text : wantsText(options) ? text : Buffer.from(text, "utf8"))
+    const execSync = (command, options) => {
+      try {
+        return output(base.execSync(command, options), options)
+      } catch (e) {
+        if (e && typeof e === "object" && "stdout" in e) {
+          e.stdout = output(e.stdout, options)
+          e.stderr = output(e.stderr, options)
+          e.output = [null, e.stdout, e.stderr]
+          e.pid = 0
+          e.signal = null
+        }
+        throw e
+      }
+    }
+    const spawnSync = (file, args, options) => {
+      if (!Array.isArray(args)) [args, options] = [[], args]
+      const r = base.spawnSync(file, args, options)
+      if (r.error) return r
+      const stdout = output(r.stdout, options)
+      const stderr = output(r.stderr, options)
+      return { pid: 0, output: [null, stdout, stderr], stdout, stderr, status: r.status, signal: null }
+    }
+    const execFileSync = (file, args, options) => {
+      if (!Array.isArray(args)) [args, options] = [[], args]
+      const r = spawnSync(file, args, options)
+      if (r.error) throw r.error
+      if (r.status !== 0) {
+        const e = new Error(`Command failed: ${[file, ...args].join(" ")}`)
+        Object.assign(e, { status: r.status, signal: null, stdout: r.stdout, stderr: r.stderr, output: r.output, pid: 0 })
+        throw e
+      }
+      return r.stdout
+    }
+    return { execSync, spawnSync, execFileSync }
+  }
 
   const dnsLookupAll = (host) => native.dnsLookup(host).map(([address, family]) => ({ address, family }))
   const dnsPromises = {
@@ -5996,6 +6034,7 @@ const NODE_SRC: &str = r##"
     makeNodeTest,
     urlLegacy,
     childProcessAsync,
+    childProcessSync,
     setupIpc,
     EventEmitter,
     fs,
@@ -6160,14 +6199,17 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 let cp = vm.import_builtin("child_process")?;
                 let n = load(vm)?;
                 let extra = vm.get_prop(&n, "childProcessAsync")?;
-                if let Value::Object(o) = &cp {
-                    for (k, v) in vm.own_entries(&extra) {
-                        if o.get_own(&k).is_none() {
-                            o.set_own(k, v);
-                        }
+                let make_sync = vm.get_prop(&n, "childProcessSync")?;
+                let sync =
+                    vm.call_value(&make_sync, Value::Undefined, std::slice::from_ref(&cp))?;
+                let o = vm.new_object();
+                for source in [&cp, &extra, &sync] {
+                    for (k, v) in vm.own_entries(source) {
+                        o.set_own(k, v);
                     }
                 }
-                cp
+                o.set_hidden("default", Value::Object(o.clone()));
+                Value::Object(o)
             }
             "http" => {
                 let h = vm.import_builtin("http")?;

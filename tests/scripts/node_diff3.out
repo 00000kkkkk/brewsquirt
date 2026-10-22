@@ -1,0 +1,19 @@
+Cannot destructure property 'a' of 'null' as it is null.
+Cannot destructure 'undefined' as it is undefined.
+Invalid value used as weak map key
+Method Set.prototype.add called on incompatible receiver #<Object>
+TypeError Invalid URL ERR_INVALID_URL not a url
+InvalidCharacterError Invalid character
+toString() radix argument must be between 2 and 36
+Unexpected strict mode reserved word
+Renamed: changed Renamed: changed
+[custom stack]
+a,z,å,ä,ö a,ä,z a,z,æ,ø,å
+en-US,de,uk-UA 0 en-US
+true hi text
+true child 0 null true
+true
+ENOENT null undefined
+42
+3 true
+number true true

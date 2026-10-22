@@ -598,7 +598,7 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
         ObjKind::Error => {
             let _ = top;
             let mut base = match o.get_own("stack") {
-                Some(Value::Str(st)) if st.starts_with(&*error_header(o)) => st.to_string(),
+                Some(Value::Str(st)) if !st.is_empty() => st.to_string(),
                 _ => error_full(o),
             };
             if !base.contains("\n    at ") {

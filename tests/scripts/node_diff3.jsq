@@ -1,0 +1,68 @@
+const { execSync, spawnSync, execFileSync } = require("node:child_process")
+const util = require("node:util")
+
+try {
+  const { a } = null
+} catch (e) {
+  console.log(e.message)
+}
+try {
+  const { [1 + 1]: b } = undefined
+} catch (e) {
+  console.log(e.message)
+}
+try {
+  new WeakMap().set(1, 1)
+} catch (e) {
+  console.log(e.message)
+}
+try {
+  new Set().add.call({})
+} catch (e) {
+  console.log(e.message)
+}
+try {
+  new URL("not a url")
+} catch (e) {
+  console.log(e.constructor.name, e.message, e.code, e.input)
+}
+try {
+  atob("!")
+} catch (e) {
+  console.log(e.name, e.message)
+}
+try {
+  ;(123).toString(1)
+} catch (e) {
+  console.log(e.message)
+}
+try {
+  Function("'use strict'; let let = 1")
+} catch (e) {
+  console.log(e.message)
+}
+const e = new Error("orig")
+e.message = "changed"
+e.name = "Renamed"
+console.log(e.stack.split("\n")[0], String(e))
+const custom = new Error("ss")
+custom.stack = "custom stack"
+console.log(util.inspect(custom))
+
+console.log(["z", "ä", "a", "å", "ö"].sort(new Intl.Collator("sv").compare).join(), ["z", "ä", "a"].sort(new Intl.Collator("de").compare).join(), ["ø", "z", "a", "æ", "å"].sort(new Intl.Collator("da").compare).join())
+console.log(Intl.DateTimeFormat.supportedLocalesOf(["en-US", "xx-YY", "de", "uk-UA"]).join(), Intl.NumberFormat.supportedLocalesOf("zz").length, new Intl.NumberFormat("xx").resolvedOptions().locale)
+
+const out = execSync("echo hi")
+console.log(Buffer.isBuffer(out), out.toString().trim(), execSync("echo text", { encoding: "utf8" }).trim())
+const res = spawnSync(process.execPath, ["-e", "console.log('child')"])
+console.log(Buffer.isBuffer(res.stdout), res.stdout.toString().trim(), res.status, res.signal, Array.isArray(res.output))
+console.log(spawnSync(process.execPath, ["-e", "1"], { encoding: "utf8" }).stdout === "")
+const missing = spawnSync("definitely-not-a-command-xyz")
+console.log(missing.error.code, missing.status, missing.stdout)
+console.log(execFileSync(process.execPath, ["-p", "6*7"], { encoding: "utf8" }).trim())
+try {
+  execFileSync(process.execPath, ["-e", "process.exit(3)"])
+} catch (err) {
+  console.log(err.status, Buffer.isBuffer(err.stdout))
+}
+console.log(typeof process.memoryUsage.rss(), process.stdout.writable, process.stdin.isTTY === undefined || process.stdin.isTTY === true)

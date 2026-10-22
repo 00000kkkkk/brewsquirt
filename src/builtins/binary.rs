@@ -528,11 +528,7 @@ fn atob(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             .map(|b| b as char)
             .collect::<String>()
             .into()),
-        None => Err(dom_error(
-            vm,
-            "InvalidCharacterError",
-            "The string to be decoded is not correctly encoded.",
-        )),
+        None => Err(dom_error(vm, "InvalidCharacterError", "Invalid character")),
     }
 }
 

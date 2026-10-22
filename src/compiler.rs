@@ -2892,7 +2892,11 @@ impl Compiler {
                 _ => return Err(self.err("Invalid destructuring assignment target")),
             },
             Pattern::Object { props, rest } => {
-                self.emit(Op::RequireObject);
+                let first = match props.first().map(|p| &p.key) {
+                    Some(PropKey::Named(k)) => self.str_const(k),
+                    _ => NO_NAME,
+                };
+                self.emit(Op::RequireObject(first));
                 let mut saved = 0u32;
                 for prop in props {
                     let named = match &prop.key {

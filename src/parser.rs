@@ -425,6 +425,22 @@ impl Parser {
             return Err(self.error("Unexpected reserved word 'await'"));
         }
         if self.reserved(s) && !(s == "await" && self.script && !self.in_async) {
+            if self.strict
+                && matches!(
+                    s,
+                    "let"
+                        | "static"
+                        | "implements"
+                        | "interface"
+                        | "package"
+                        | "private"
+                        | "protected"
+                        | "public"
+                        | "yield"
+                )
+            {
+                return Err(self.error("Unexpected strict mode reserved word"));
+            }
             return Err(self.error(format!("Unexpected reserved word '{s}'")));
         }
         Ok(())

@@ -128,22 +128,32 @@ pub fn install(vm: &mut Vm) {
     }
 }
 
-fn this_map(vm: &mut Vm, this: &Value) -> Result<Rc<Obj>, Value> {
+pub fn receiver_desc(v: &Value) -> String {
+    match v {
+        Value::Object(o) => format!(
+            "#<{}>",
+            crate::inspect::class_name(o).unwrap_or_else(|| "Object".into())
+        ),
+        other => inspect_plain(other),
+    }
+}
+
+fn this_map(vm: &mut Vm, this: &Value, method: &str) -> Result<Rc<Obj>, Value> {
     match this {
         Value::Object(o) if matches!(o.kind, ObjKind::Map(_)) => Ok(o.clone()),
         _ => Err(vm.type_error(format!(
-            "Method Map.prototype called on incompatible receiver {}",
-            inspect_plain(this)
+            "Method Map.prototype{method} called on incompatible receiver {}",
+            receiver_desc(this)
         ))),
     }
 }
 
-fn this_set(vm: &mut Vm, this: &Value) -> Result<Rc<Obj>, Value> {
+fn this_set(vm: &mut Vm, this: &Value, method: &str) -> Result<Rc<Obj>, Value> {
     match this {
         Value::Object(o) if matches!(o.kind, ObjKind::Set(_)) => Ok(o.clone()),
         _ => Err(vm.type_error(format!(
-            "Method Set.prototype called on incompatible receiver {}",
-            inspect_plain(this)
+            "Method Set.prototype{method} called on incompatible receiver {}",
+            receiver_desc(this)
         ))),
     }
 }
@@ -167,7 +177,7 @@ macro_rules! set_of {
 }
 
 fn map_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let Ok(o) = this_map(vm, &this) else {
+    let Ok(o) = this_map(vm, &this, "") else {
         return Err(vm.type_error("Constructor Map requires 'new'"));
     };
     let src = arg(args, 0);
@@ -219,26 +229,26 @@ fn map_entry(
 }
 
 fn map_get(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let o = this_map(vm, &this)?;
+    let o = this_map(vm, &this, ".get")?;
     let k = MapKey::from_value(&arg(args, 0));
     Ok(map_of!(o).borrow().get(&k).cloned().unwrap_or_default())
 }
 
 fn map_set(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let o = this_map(vm, &this)?;
+    let o = this_map(vm, &this, ".set")?;
     let k = MapKey::from_value(&arg(args, 0));
     map_of!(o).borrow_mut().insert(k, arg(args, 1));
     Ok(this)
 }
 
 fn map_has(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let o = this_map(vm, &this)?;
+    let o = this_map(vm, &this, ".has")?;
     let k = MapKey::from_value(&arg(args, 0));
     Ok(Value::Bool(map_of!(o).borrow().contains_key(&k)))
 }
 
 fn map_delete(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let o = this_map(vm, &this)?;
+    let o = this_map(vm, &this, ".delete")?;
     let k = MapKey::from_value(&arg(args, 0));
     Ok(Value::Bool(
         map_of!(o).borrow_mut().shift_remove(&k).is_some(),
@@ -246,13 +256,13 @@ fn map_delete(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 }
 
 fn map_clear(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let o = this_map(vm, &this)?;
+    let o = this_map(vm, &this, ".clear")?;
     map_of!(o).borrow_mut().clear();
     Ok(Value::Undefined)
 }
 
 fn map_for_each(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let o = this_map(vm, &this)?;
+    let o = this_map(vm, &this, ".forEach")?;
     let f = arg(args, 0);
     expect_fn(vm, &f)?;
     let mut i = 0;
@@ -271,22 +281,22 @@ fn map_for_each(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 }
 
 fn map_keys(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let o = this_map(vm, &this)?;
+    let o = this_map(vm, &this, ".keys")?;
     Ok(vm.new_iter(IterState::MapKeys(o, 0)))
 }
 
 fn map_values(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let o = this_map(vm, &this)?;
+    let o = this_map(vm, &this, ".values")?;
     Ok(vm.new_iter(IterState::MapValues(o, 0)))
 }
 
 fn map_entries(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let o = this_map(vm, &this)?;
+    let o = this_map(vm, &this, ".entries")?;
     Ok(vm.new_iter(IterState::MapEntries(o, 0)))
 }
 
 fn set_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let Ok(o) = this_set(vm, &this) else {
+    let Ok(o) = this_set(vm, &this, "") else {
         return Err(vm.type_error("Constructor Set requires 'new'"));
     };
     let src = arg(args, 0);
@@ -320,7 +330,7 @@ fn set_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 }
 
 fn set_add(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let o = this_set(vm, &this)?;
+    let o = this_set(vm, &this, ".add")?;
     set_of!(o)
         .borrow_mut()
         .insert(MapKey::from_value(&arg(args, 0)));
@@ -328,25 +338,25 @@ fn set_add(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 }
 
 fn set_has(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let o = this_set(vm, &this)?;
+    let o = this_set(vm, &this, ".has")?;
     let k = MapKey::from_value(&arg(args, 0));
     Ok(Value::Bool(set_of!(o).borrow().contains(&k)))
 }
 
 fn set_delete(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let o = this_set(vm, &this)?;
+    let o = this_set(vm, &this, ".delete")?;
     let k = MapKey::from_value(&arg(args, 0));
     Ok(Value::Bool(set_of!(o).borrow_mut().shift_remove(&k)))
 }
 
 fn set_clear(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let o = this_set(vm, &this)?;
+    let o = this_set(vm, &this, ".clear")?;
     set_of!(o).borrow_mut().clear();
     Ok(Value::Undefined)
 }
 
 fn set_for_each(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let o = this_set(vm, &this)?;
+    let o = this_set(vm, &this, ".forEach")?;
     let f = arg(args, 0);
     expect_fn(vm, &f)?;
     let mut i = 0;
@@ -362,12 +372,12 @@ fn set_for_each(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 }
 
 fn set_values(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let o = this_set(vm, &this)?;
+    let o = this_set(vm, &this, ".values")?;
     Ok(vm.new_iter(IterState::SetValues(o, 0)))
 }
 
 fn set_entries(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let o = this_set(vm, &this)?;
+    let o = this_set(vm, &this, ".entries")?;
     Ok(vm.new_iter(IterState::SetEntries(o, 0)))
 }
 
@@ -413,8 +423,7 @@ fn weak_ptr(vm: &Vm, v: &Value) -> Option<(usize, WeakHold)> {
 }
 
 fn weak_key(vm: &mut Vm, v: &Value, what: &str) -> Result<(usize, WeakHold), Value> {
-    weak_ptr(vm, v)
-        .ok_or_else(|| vm.type_error(format!("Invalid value used {what}: {}", inspect_plain(v))))
+    weak_ptr(vm, v).ok_or_else(|| vm.type_error(format!("Invalid value used {what}")))
 }
 
 fn this_weakmap(vm: &mut Vm, this: &Value) -> Result<Rc<Obj>, Value> {

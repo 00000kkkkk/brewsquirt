@@ -1338,6 +1338,14 @@ define(globalThis, "global", globalThis)
     getReport: () => ({ header: { nodejsVersion: process.version, platform: process.platform, arch: process.arch } }),
     writeReport: () => "",
   }
+  {
+    const memoryUsage = process.memoryUsage
+    if (typeof memoryUsage === "function" && typeof memoryUsage.rss !== "function") {
+      define(memoryUsage, "rss", named("rss", function rss() {
+        return memoryUsage().rss
+      }))
+    }
+  }
   defineAll(process, {
     umask() {
       return 0o22

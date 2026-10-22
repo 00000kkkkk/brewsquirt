@@ -64,7 +64,9 @@ const INTL_SRC: &str = r##"
     }
     return out
   }
-  const resolve = (locales) => localeList(locales)[0] ?? "en-US"
+  const KNOWN_LANGUAGES = new Set("af am ar as az be bg bn bo br bs ca ce chr cs cy da de dsb dz ee el en eo es et eu fa ff fi fil fo fr fy ga gd gl gu gv ha haw he hi hr hsb hu hy ia id ig is it ja jv ka kk kl km kn ko kok ks ku kw ky lb lg ln lo lt lu lv mg mi mk ml mn mr ms mt my nb nd ne nl nn no om or os pa pl ps pt qu rm rn ro ru rw sa sc sd se sg si sk sl sn so sq sr su sv sw ta te tg th ti tk to tr tt ug uk ur uz vi wo xh yi yo yue zh zu".split(" "))
+  const supportedList = (locales) => localeList(locales).filter((l) => KNOWN_LANGUAGES.has(l.split("-")[0].toLowerCase()))
+  const resolve = (locales) => supportedList(locales)[0] ?? "en-US"
   const lang = (locale) => locale.split("-")[0]
   const numberData = (locale) => {
     const tag = String(locale)
@@ -341,7 +343,7 @@ const INTL_SRC: &str = r##"
       return out
     }
     static supportedLocalesOf(locales) {
-      return localeList(locales)
+      return supportedList(locales)
     }
   }
 
@@ -782,11 +784,23 @@ const INTL_SRC: &str = r##"
       return out
     }
     static supportedLocalesOf(locales) {
-      return localeList(locales)
+      return supportedList(locales)
     }
   }
 
   const fold = (s) => s.normalize("NFD").replace(/[̀-ͯ]/g, "")
+  const tailoring = (letters) => {
+    const map = {}
+    letters.forEach((c, i) => {
+      const tail = String.fromCharCode(0x7b + i)
+      map[c] = "z" + tail
+      map[c.toUpperCase()] = "Z" + tail
+    })
+    return { re: new RegExp(`[${Object.keys(map).join("")}]`, "g"), map }
+  }
+  const NORDIC_SV = tailoring(["å", "ä", "ö"])
+  const NORDIC_DA = tailoring(["æ", "ø", "å"])
+  const COLLATION_TAILORING = { sv: NORDIC_SV, fi: NORDIC_SV, da: NORDIC_DA, nb: NORDIC_DA, nn: NORDIC_DA, no: NORDIC_DA }
   class Collator {
     #o
     constructor(locales, options) {
@@ -810,7 +824,12 @@ const INTL_SRC: &str = r##"
           x = x.replace(/[\p{P}\s]/gu, "")
           y = y.replace(/[\p{P}\s]/gu, "")
         }
-        const base = (s) => fold(s).toLowerCase()
+        const tailor = COLLATION_TAILORING[lang(o.locale)]
+        const base = (s) => fold(tailor ? s.replace(tailor.re, (c) => tailor.map[c]) : s).toLowerCase()
+        if (tailor) {
+          x = x.replace(tailor.re, (c) => tailor.map[c])
+          y = y.replace(tailor.re, (c) => tailor.map[c])
+        }
         const cmpStr = (p, q) => {
           if (o.numeric) {
             const re = /(\d+)|(\D+)/g
@@ -851,7 +870,7 @@ const INTL_SRC: &str = r##"
       return { ...this.#o }
     }
     static supportedLocalesOf(locales) {
-      return localeList(locales)
+      return supportedList(locales)
     }
   }
 
@@ -933,7 +952,7 @@ const INTL_SRC: &str = r##"
       return { ...this.#o, pluralCategories: [...this.#o.pluralCategories] }
     }
     static supportedLocalesOf(locales) {
-      return localeList(locales)
+      return supportedList(locales)
     }
   }
 
@@ -1043,7 +1062,7 @@ const INTL_SRC: &str = r##"
       return { ...this.#o }
     }
     static supportedLocalesOf(locales) {
-      return localeList(locales)
+      return supportedList(locales)
     }
   }
 
@@ -1098,7 +1117,7 @@ const INTL_SRC: &str = r##"
       return { ...this.#o }
     }
     static supportedLocalesOf(locales) {
-      return localeList(locales)
+      return supportedList(locales)
     }
   }
 
@@ -1144,7 +1163,7 @@ const INTL_SRC: &str = r##"
       return { ...this.#o }
     }
     static supportedLocalesOf(locales) {
-      return localeList(locales)
+      return supportedList(locales)
     }
   }
 
@@ -1167,7 +1186,7 @@ const INTL_SRC: &str = r##"
       return { ...this.#o }
     }
     static supportedLocalesOf(locales) {
-      return localeList(locales)
+      return supportedList(locales)
     }
   }
 

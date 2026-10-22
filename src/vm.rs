@@ -2620,6 +2620,25 @@ impl Vm {
     }
 
     pub fn set_prop(&mut self, target: &Value, key: Rc<str>, val: Value) -> Result<(), Value> {
+        if let Value::Object(o) = target {
+            if matches!(o.kind, ObjKind::Error) && matches!(&*key, "name" | "message") {
+                let old = crate::inspect::error_header(o);
+                self.set_prop_inner(target, key, val)?;
+                let new = crate::inspect::error_header(o);
+                if old != new {
+                    if let Some(Value::Str(stack)) = o.get_own("stack") {
+                        if let Some(rest) = stack.strip_prefix(&*old) {
+                            o.set_hidden("stack", format!("{new}{rest}").into());
+                        }
+                    }
+                }
+                return Ok(());
+            }
+        }
+        self.set_prop_inner(target, key, val)
+    }
+
+    fn set_prop_inner(&mut self, target: &Value, key: Rc<str>, val: Value) -> Result<(), Value> {
         match target {
             Value::Object(o) => {
                 self.note_proto_index(o, &key);
@@ -5007,7 +5026,7 @@ impl Vm {
                     };
                     self.stack.push(v);
                 }
-                Op::RequireObject => {
+                Op::RequireObject(name) => {
                     if let Some(v) = self.stack.last() {
                         if v.is_nullish() {
                             let t = if v.is_undefined() {
@@ -5015,9 +5034,16 @@ impl Vm {
                             } else {
                                 "null"
                             };
-                            throw!(
-                                self.type_error(format!("Cannot destructure '{t}' as it is {t}."))
-                            );
+                            let msg = if name != NO_NAME {
+                                let key = cl.proto.consts[name as usize].clone();
+                                format!(
+                                    "Cannot destructure property '{}' of '{t}' as it is {t}.",
+                                    inspect_top(&key)
+                                )
+                            } else {
+                                format!("Cannot destructure '{t}' as it is {t}.")
+                            };
+                            throw!(self.type_error(msg));
                         }
                     }
                 }
