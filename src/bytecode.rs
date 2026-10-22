@@ -153,6 +153,7 @@ pub enum Op {
     InitMethodComputed,
     InitProto,
     NewTarget,
+    DirectEval(u32, u32),
     SetHome,
     YieldReturn(u32),
     IterClose(u32),
@@ -223,6 +224,18 @@ pub struct FunctionProto {
     pub global_cache: Box<[std::cell::Cell<u32>]>,
     pub span: (u32, u32),
     pub templates: Box<[std::cell::RefCell<Option<Value>>]>,
+    pub evals: Vec<Rc<EvalScope>>,
+}
+
+pub type EvalUpvals = Rc<Vec<(Rc<str>, u32, bool)>>;
+
+#[derive(Debug)]
+pub struct EvalScope {
+    pub locals: Vec<(Rc<str>, bool)>,
+    pub upvals: EvalUpvals,
+    pub kind: ProtoKind,
+    pub is_static: bool,
+    pub ctx: Rc<crate::ast::EvalCtx>,
 }
 
 impl FunctionProto {

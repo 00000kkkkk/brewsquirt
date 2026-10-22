@@ -272,6 +272,11 @@ fn node_edges(n: &Node, f: &mut dyn FnMut(Edge<'_>)) {
                     f(Edge::Obj(h));
                 }
             }
+            if let Ok(t) = c.new_target.try_borrow() {
+                if let Some(t) = &*t {
+                    value_edge(t, f);
+                }
+            }
         }
         Node::Cell(c) => {
             if let Ok(u) = c.value.try_borrow() {
@@ -376,6 +381,11 @@ fn clear(n: &Node, grave: &mut Graveyard) {
             if let Ok(mut h) = c.home.try_borrow_mut() {
                 if let Some(h) = h.take() {
                     grave.objs.push(h);
+                }
+            }
+            if let Ok(mut t) = c.new_target.try_borrow_mut() {
+                if let Some(t) = t.take() {
+                    grave.values.push(t);
                 }
             }
         }

@@ -918,6 +918,7 @@ pub struct Closure {
     pub proto: Rc<FunctionProto>,
     pub upvalues: Box<[Rc<UpCell>]>,
     pub home: RefCell<Option<Rc<Obj>>>,
+    pub new_target: RefCell<Option<Value>>,
 }
 
 pub struct UpCell {

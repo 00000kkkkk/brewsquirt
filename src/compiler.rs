@@ -86,6 +86,8 @@ struct FnState {
     vars: Vec<Rc<str>>,
     span: (u32, u32),
     template_sites: u32,
+    eval_upvals: Option<EvalUpvals>,
+    evals: Vec<Rc<EvalScope>>,
 }
 
 impl FnState {
@@ -115,6 +117,8 @@ impl FnState {
             vars: Vec::new(),
             span: (0, 0),
             template_sites: 0,
+            eval_upvals: None,
+            evals: Vec::new(),
         }
     }
 }
@@ -133,6 +137,8 @@ pub struct Compiler {
     pending_labels: Vec<Rc<str>>,
     import_aliases: Vec<(Rc<str>, Rc<str>, Rc<str>)>,
     export_names: Vec<(Rc<str>, Rc<str>)>,
+    completion: Option<(usize, u32)>,
+    script_eval: u8,
 }
 
 fn collect_var_names(s: &Stmt, out: &mut Vec<Rc<str>>) {
@@ -216,8 +222,8 @@ fn collect_var_names(s: &Stmt, out: &mut Vec<Rc<str>>) {
     }
 }
 
-pub fn compile_module(stmts: &[Stmt], module: Rc<ModuleInfo>, mode: Mode) -> R<Rc<FunctionProto>> {
-    let mut c = Compiler {
+fn new_compiler(module: Rc<ModuleInfo>, mode: Mode) -> Compiler {
+    Compiler {
         states: Vec::new(),
         module,
         mode,
@@ -231,7 +237,70 @@ pub fn compile_module(stmts: &[Stmt], module: Rc<ModuleInfo>, mode: Mode) -> R<R
         pending_labels: Vec::new(),
         import_aliases: Vec::new(),
         export_names: Vec::new(),
-    };
+        completion: None,
+        script_eval: 0,
+    }
+}
+
+pub fn compile_eval(
+    stmts: &[Stmt],
+    module: Rc<ModuleInfo>,
+    scope: &EvalScope,
+) -> R<Rc<FunctionProto>> {
+    let mut c = new_compiler(module, Mode::Module);
+    let mut outer = FnState::new("<scope>".into(), scope.kind, 1, scope.is_static);
+    outer.depth = 1;
+    for (name, is_const) in &scope.locals {
+        outer.locals.push(Local {
+            name: name.clone(),
+            depth: 1,
+            captured: true,
+            is_const: *is_const,
+            tdz: true,
+            sticky: true,
+        });
+    }
+    outer.eval_upvals = Some(scope.upvals.clone());
+    c.states.push(outer);
+    c.states
+        .push(FnState::new("eval".into(), ProtoKind::Arrow, 1, false));
+    c.begin_scope();
+    c.add_local("".into(), true);
+    c.emit(Op::Undefined);
+    let slot = c.add_local("%completion".into(), false);
+    c.completion = Some((1, slot));
+    c.declare_vars(stmts);
+    c.var_scope_next = true;
+    c.hoist(stmts)?;
+    for s in stmts {
+        c.stmt(s)?;
+    }
+    c.emit(Op::GetLocal(slot));
+    c.emit(Op::Return);
+    let st = c.states.pop().expect("eval state");
+    Ok(Rc::new(c.finish(st)))
+}
+
+pub fn compile_indirect_eval(
+    stmts: &[Stmt],
+    module: Rc<ModuleInfo>,
+    strict: bool,
+) -> R<Rc<FunctionProto>> {
+    compile_unit(stmts, module, Mode::Repl, if strict { 2 } else { 1 })
+}
+
+pub fn compile_module(stmts: &[Stmt], module: Rc<ModuleInfo>, mode: Mode) -> R<Rc<FunctionProto>> {
+    compile_unit(stmts, module, mode, 0)
+}
+
+fn compile_unit(
+    stmts: &[Stmt],
+    module: Rc<ModuleInfo>,
+    mode: Mode,
+    script_eval: u8,
+) -> R<Rc<FunctionProto>> {
+    let mut c = new_compiler(module, mode);
+    c.script_eval = script_eval;
     c.states
         .push(FnState::new("<main>".into(), ProtoKind::Module, 1, false));
     c.begin_scope();
@@ -239,24 +308,19 @@ pub fn compile_module(stmts: &[Stmt], module: Rc<ModuleInfo>, mode: Mode) -> R<R
     if mode == Mode::Module {
         c.emit(Op::ModuleNamespace);
         c.add_local("%ns".into(), true);
+    } else {
+        c.emit(Op::Undefined);
+        let slot = c.add_local("%completion".into(), false);
+        c.completion = Some((0, slot));
     }
     c.declare_vars(stmts);
     let refs: Vec<&Stmt> = stmts.iter().collect();
     c.hoist_list(&refs, true)?;
-    let last = stmts.len().wrapping_sub(1);
-    for (i, s) in stmts.iter().enumerate() {
-        if mode == Mode::Repl && i == last {
-            if let StmtKind::Expr(e) = &s.kind {
-                c.line = s.line;
-                c.expr(e)?;
-                c.emit(Op::Return);
-                continue;
-            }
-        }
+    for s in stmts {
         c.stmt(s)?;
     }
-    if mode == Mode::Repl {
-        c.emit(Op::Undefined);
+    if let Some((_, slot)) = c.completion {
+        c.emit(Op::GetLocal(slot));
         c.emit(Op::Return);
         let st = c.states.pop().expect("module state");
         return Ok(Rc::new(c.finish(st)));
@@ -394,6 +458,7 @@ impl Compiler {
             global_cache: (0..cache_len)
                 .map(|_| std::cell::Cell::new(u32::MAX))
                 .collect(),
+            evals: st.evals,
         }
     }
 
@@ -542,8 +607,82 @@ impl Compiler {
             if let Some((slot, _)) = self.resolve_local(i, name) {
                 return self.local_tdz(i, slot);
             }
+            if self.states[i]
+                .eval_upvals
+                .as_ref()
+                .is_some_and(|u| u.iter().any(|(n, _, _)| &**n == name))
+            {
+                return true;
+            }
         }
         false
+    }
+
+    fn completion_slot(&self) -> Option<u32> {
+        match self.completion {
+            Some((si, slot)) if si + 1 == self.states.len() => Some(slot),
+            _ => None,
+        }
+    }
+
+    fn finally_block(&mut self, f: &[Stmt]) -> R<()> {
+        let saved = self.completion.take();
+        let r = self.block(f);
+        self.completion = saved;
+        r
+    }
+
+    fn eval_scope(&mut self, ctx: Rc<EvalCtx>) -> u32 {
+        let si = self.states.len() - 1;
+        let mut outer: Vec<Rc<str>> = Vec::new();
+        for i in (0..si).rev() {
+            let st = &self.states[i];
+            let names = st.locals.iter().rev().map(|l| l.name.clone()).chain(
+                st.eval_upvals
+                    .iter()
+                    .flat_map(|u| u.iter().map(|(n, _, _)| n.clone())),
+            );
+            for n in names {
+                if !n.is_empty() && !n.starts_with('%') && !outer.contains(&n) {
+                    outer.push(n);
+                }
+            }
+        }
+        let mut upvals = Vec::new();
+        for n in outer {
+            if self.resolve_local(si, &n).is_some() {
+                continue;
+            }
+            if let Some((idx, c)) = self.resolve_upvalue(si, &n) {
+                upvals.push((n, idx, c));
+            }
+        }
+        let (kind, is_static) = match self.method_state() {
+            Some(s) => (s.kind, s.is_static),
+            None => (ProtoKind::Module, false),
+        };
+        let kind = if ctx.field_init && kind == ProtoKind::DerivedConstructor {
+            ProtoKind::Method
+        } else {
+            kind
+        };
+        let st = self.st();
+        for l in st.locals.iter_mut() {
+            l.captured = true;
+        }
+        let locals = st
+            .locals
+            .iter()
+            .map(|l| (l.name.clone(), l.is_const))
+            .collect();
+        st.evals.push(Rc::new(EvalScope {
+            locals,
+            upvals: Rc::new(upvals),
+            kind,
+            is_static,
+            ctx,
+        }));
+        (st.evals.len() - 1) as u32
     }
 
     fn begin_scope(&mut self) {
@@ -603,6 +742,10 @@ impl Compiler {
         if let Some((slot, c)) = self.resolve_local(si - 1, name) {
             self.states[si - 1].locals[slot as usize].captured = true;
             return Some((self.add_upvalue(si, true, slot), c));
+        }
+        if let Some(ups) = self.states[si - 1].eval_upvals.clone() {
+            let (_, idx, c) = ups.iter().find(|(n, _, _)| &**n == name)?;
+            return Some((self.add_upvalue(si, false, *idx), *c));
         }
         if let Some((idx, c)) = self.resolve_upvalue(si - 1, name) {
             return Some((self.add_upvalue(si, false, idx), c));
@@ -830,7 +973,7 @@ impl Compiler {
         for s in stmts {
             collect_var_names(s, &mut names);
         }
-        let repl = self.is_repl_top();
+        let repl = self.is_repl_top() && self.script_eval != 2;
         for n in names {
             if self.st_ref().vars.contains(&n) {
                 continue;
@@ -915,14 +1058,14 @@ impl Compiler {
             fresh.push((n.clone(), *c));
         }
         let names = fresh;
-        let repl = self.is_repl_top();
+        let repl = self.is_repl_top() && self.script_eval != 2;
         let import_names: Vec<Rc<str>> =
             imports.iter().filter_map(|i| i.namespace.clone()).collect();
         for (n, c) in &names {
             let lexical_kind = !funcs.iter().any(|f| f.name.as_ref() == Some(n))
                 && !n.starts_with("%import")
                 && !import_names.contains(n);
-            let lexical = !repl && lexical_kind;
+            let lexical = (!repl || self.script_eval == 1) && lexical_kind;
             if lexical {
                 self.emit(Op::Uninit);
                 self.add_lexical(n.clone(), *c);
@@ -1081,10 +1224,32 @@ impl Compiler {
 
     fn stmt(&mut self, s: &Stmt) -> R<()> {
         self.line = s.line;
-        match &s.kind {
-            StmtKind::Expr(e) => {
-                self.expr_discard(e)?;
+        if let Some(slot) = self.completion_slot() {
+            if matches!(
+                s.kind,
+                StmtKind::If(..)
+                    | StmtKind::While(..)
+                    | StmtKind::DoWhile(..)
+                    | StmtKind::For { .. }
+                    | StmtKind::ForOf { .. }
+                    | StmtKind::ForIn { .. }
+                    | StmtKind::Switch(..)
+                    | StmtKind::Try { .. }
+            ) {
+                self.emit(Op::Undefined);
+                self.emit(Op::SetLocal(slot));
+                self.emit(Op::Pop);
             }
+        }
+        match &s.kind {
+            StmtKind::Expr(e) => match self.completion_slot() {
+                Some(slot) => {
+                    self.expr(e)?;
+                    self.emit(Op::SetLocal(slot));
+                    self.emit(Op::Pop);
+                }
+                None => self.expr_discard(e)?,
+            },
             StmtKind::Decl(DeclKind::Var, decls) => {
                 for (pattern, init) in decls {
                     if let Some(e) = init {
@@ -1556,7 +1721,7 @@ impl Compiler {
             }
             if let Some(f) = &t.finally {
                 let saved = self.st().tries.split_off(to_depth + i);
-                let r = self.block(f);
+                let r = self.finally_block(f);
                 self.st().tries.extend(saved);
                 r?;
             }
@@ -1688,14 +1853,14 @@ impl Compiler {
             self.begin_scope();
             let exc = self.hidden_name("exc");
             let slot = self.add_local(exc, true);
-            self.block(f)?;
+            self.finally_block(f)?;
             self.emit(Op::GetLocal(slot));
             self.emit(Op::Throw);
             self.scope_cut();
             for j in normal {
                 self.patch(j);
             }
-            self.block(f)?;
+            self.finally_block(f)?;
         } else {
             for j in normal {
                 self.patch(j);
@@ -3007,6 +3172,13 @@ impl Compiler {
                 args,
                 optional,
             } => self.call(callee, args, *optional)?,
+            ExprKind::DirectEval(args, ctx) => {
+                self.load_var(&"eval".into());
+                self.emit(Op::Undefined);
+                let idx = self.eval_scope(ctx.clone());
+                let argc = self.plain_args(args)?;
+                self.emit(Op::DirectEval(argc, idx));
+            }
             ExprKind::New { callee, args } => {
                 let name = self.name_const(callee);
                 self.expr(callee)?;

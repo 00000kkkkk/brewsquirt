@@ -97,7 +97,10 @@ pub fn install(vm: &mut Vm) {
         }
     }
     let eval = native_fn(vm, "eval", 1, global_eval);
+    vm.eval_fn = eval.as_object().cloned();
     vm.define_global("eval", eval);
+    let script = native_fn(vm, "evalScript", 1, eval_script);
+    vm.define_global("%evalScript%", script);
 
     let ctors: [crate::object::NativeFn; 7] = [
         error_ctor::<0>,
@@ -767,16 +770,16 @@ fn dynamic_function(vm: &mut Vm, args: &[Value], kind: &str) -> R {
     vm.run_proto(proto)
 }
 
+fn eval_script(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let src = vm.to_string(&arg(args, 0))?;
+    vm.run_script(&src, "<script>")
+}
+
 fn global_eval(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let Value::Str(code) = arg(args, 0) else {
         return Ok(arg(args, 0));
     };
-    let dir = std::env::current_dir().unwrap_or_default();
-    let proto = match vm.compile_script(&code, "<eval>", dir, false) {
-        Ok(p) => p,
-        Err(e) => return Err(vm.syntax_error_value(&e, "<eval>")),
-    };
-    vm.run_script_proto(proto)
+    vm.indirect_eval(&code)
 }
 
 fn error_ctor<const K: usize>(vm: &mut Vm, this: Value, args: &[Value]) -> R {

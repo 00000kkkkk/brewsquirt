@@ -81,9 +81,40 @@ fn parse_goal(src: &str, script: bool) -> R<Vec<Stmt>> {
         in_generator: false,
         class_ids: Vec::new(),
         field_init: 0,
-        next_class_id: 0,
+        nt_ok: false,
     };
     parser.program()
+}
+
+pub fn parse_eval(src: &str, ctx: &EvalCtx) -> R<Vec<Stmt>> {
+    let toks = crate::lexer::tokenize_goal(src, true)?;
+    let mut parser = Parser {
+        script: true,
+        toks,
+        pos: 0,
+        no_in: false,
+        fn_depth: 0,
+        args_used: vec![false],
+        span_start: None,
+        in_async: false,
+        in_generator: false,
+        class_ids: ctx.privates.clone(),
+        field_init: u32::from(ctx.field_init),
+        nt_ok: ctx.in_function,
+    };
+    parser.program()
+}
+
+thread_local! {
+    static CLASS_IDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+fn fresh_class_id() -> u32 {
+    CLASS_IDS.with(|c| {
+        let n = c.get() + 1;
+        c.set(n);
+        n
+    })
 }
 
 enum BinKind {
@@ -101,7 +132,7 @@ struct Parser {
     class_ids: Vec<(u32, Rc<Vec<Rc<str>>>)>,
     field_init: u32,
     script: bool,
-    next_class_id: u32,
+    nt_ok: bool,
     args_used: Vec<bool>,
     span_start: Option<u32>,
 }
@@ -540,8 +571,18 @@ impl Parser {
                 }
                 Ok(StmtKind::Switch(disc, cases))
             }
-            Some("import") if !self.is_at(1, P::LParen) && !self.is_at(1, P::Dot) => self.import(),
-            Some("export") => self.export(),
+            Some("import") if !self.is_at(1, P::LParen) && !self.is_at(1, P::Dot) => {
+                if self.script {
+                    return Err(self.error("Cannot use import statement outside a module"));
+                }
+                self.import()
+            }
+            Some("export") => {
+                if self.script {
+                    return Err(self.error("Unexpected token 'export'"));
+                }
+                self.export()
+            }
             Some("debugger") => {
                 self.advance();
                 self.semicolon()?;
@@ -910,9 +951,11 @@ impl Parser {
         self.in_generator = is_generator;
         self.args_used.push(false);
         let saved_field = std::mem::take(&mut self.field_init);
+        let nt = std::mem::replace(&mut self.nt_ok, true);
         let parsed = self
             .params()
             .and_then(|(params, rest)| Ok((params, rest, self.function_body()?)));
+        self.nt_ok = nt;
         self.field_init = saved_field;
         let uses_arguments = self.args_used.pop().unwrap_or(false);
         let end = self.prev_end();
@@ -1101,9 +1144,9 @@ impl Parser {
         } else {
             None
         };
-        self.next_class_id += 1;
+        let id = fresh_class_id();
         let declared = self.prescan_private();
-        self.class_ids.push((self.next_class_id, Rc::new(declared)));
+        self.class_ids.push((id, Rc::new(declared)));
         let parsed = self.class_body(superclass.is_some());
         self.class_ids.pop();
         let (constructor, members) = parsed?;
@@ -1148,7 +1191,9 @@ impl Parser {
                     self.in_generator = false;
                     self.args_used.push(false);
                     self.field_init += 1;
+                    let nt = std::mem::replace(&mut self.nt_ok, true);
                     let body = self.function_body();
+                    self.nt_ok = nt;
                     self.field_init -= 1;
                     self.args_used.pop();
                     (self.in_async, self.in_generator) = saved;
@@ -1257,7 +1302,9 @@ impl Parser {
                 let value = if self.eat(P::Eq) {
                     self.fn_depth += 1;
                     self.field_init += 1;
+                    let nt = std::mem::replace(&mut self.nt_ok, true);
                     let v = self.assignment();
+                    self.nt_ok = nt;
                     self.field_init -= 1;
                     self.fn_depth -= 1;
                     Some(v?)
@@ -1887,13 +1934,32 @@ impl Parser {
                 };
             } else if self.is(P::LParen) {
                 let args = self.arguments()?;
-                e = Expr {
-                    kind: ExprKind::Call {
-                        callee: Box::new(e),
-                        args,
-                        optional: false,
-                    },
-                    line,
+                let direct = matches!(&e.kind, ExprKind::Ident(n) if &**n == "eval")
+                    && !args.iter().any(|a| matches!(a, Arg::Spread(_)));
+                e = if direct {
+                    if self.field_init == 0 {
+                        if let Some(top) = self.args_used.last_mut() {
+                            *top = true;
+                        }
+                    }
+                    let ctx = Rc::new(EvalCtx {
+                        privates: self.class_ids.clone(),
+                        in_function: self.nt_ok,
+                        field_init: self.field_init > 0,
+                    });
+                    Expr {
+                        kind: ExprKind::DirectEval(args, ctx),
+                        line,
+                    }
+                } else {
+                    Expr {
+                        kind: ExprKind::Call {
+                            callee: Box::new(e),
+                            args,
+                            optional: false,
+                        },
+                        line,
+                    }
                 };
             } else if matches!(self.peek().tok, Tok::Template(_)) {
                 let Tok::Template(parts) = self.advance().tok else {
@@ -1938,7 +2004,7 @@ impl Parser {
             self.advance();
             match self.ident_name()? {
                 n if &*n == "target" => {
-                    if self.fn_depth == 0 {
+                    if !self.nt_ok {
                         return Err(self.error("new.target expression is not allowed here"));
                     }
                     return Ok(Expr {
@@ -2027,7 +2093,7 @@ impl Parser {
                         class_ids: self.class_ids.clone(),
                         field_init: self.field_init,
                         script: self.script,
-                        next_class_id: self.next_class_id,
+                        nt_ok: self.nt_ok,
                         args_used: vec![false],
                         span_start: None,
                     };
@@ -2213,6 +2279,9 @@ impl Parser {
                                 return Err(self.error(
                                     "The only valid meta property for import is 'import.meta'",
                                 ));
+                            }
+                            if self.script {
+                                return Err(self.error("Cannot use 'import.meta' outside a module"));
                             }
                             ExprKind::ImportMeta
                         } else {

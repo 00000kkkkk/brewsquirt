@@ -54,6 +54,7 @@ pub enum ExprKind {
         args: Vec<Arg>,
         optional: bool,
     },
+    DirectEval(Vec<Arg>, Rc<EvalCtx>),
     New {
         callee: Box<Expr>,
         args: Vec<Arg>,
@@ -228,6 +229,13 @@ pub enum FuncKind {
     StaticMethod,
     ClassConstructor,
     DerivedConstructor,
+}
+
+#[derive(Debug)]
+pub struct EvalCtx {
+    pub privates: Vec<(u32, Rc<Vec<Rc<str>>>)>,
+    pub in_function: bool,
+    pub field_init: bool,
 }
 
 #[derive(Clone, Debug)]

@@ -1,7 +1,7 @@
 use crate::bigint::BigOp;
 use crate::builtins;
 use crate::bytecode::{Cmp, FunctionProto, ModuleInfo, NO_NAME, Op, ProtoKind};
-use crate::compiler::{Mode, compile_module};
+use crate::compiler::{Mode, compile_eval, compile_indirect_eval, compile_module};
 use crate::event_loop::{Job, ResumeMode, Signal, Step, Timer};
 use crate::inspect::{inspect_plain, inspect_top};
 use crate::module;
@@ -279,6 +279,7 @@ pub struct Vm {
     pub(crate) proxies_used: bool,
     pub(crate) global_accessors: bool,
     pub(crate) next_new_target: Option<Rc<Obj>>,
+    pub(crate) eval_fn: Option<Rc<Obj>>,
     pub(crate) gen_return_pending: bool,
     pub(crate) pending_ns: Option<Value>,
     pub(crate) import_metas: FxHashMap<Rc<str>, Value>,
@@ -354,6 +355,7 @@ impl Vm {
             proxies_used: false,
             global_accessors: false,
             next_new_target: None,
+            eval_fn: None,
             gen_return_pending: false,
             pending_ns: None,
             import_metas: FxHashMap::default(),
@@ -606,6 +608,7 @@ impl Vm {
             proto,
             upvalues: Box::new([]),
             home: RefCell::new(None),
+            new_target: RefCell::new(None),
         });
         let f = Value::Object(Obj::new(
             ObjKind::Function(closure),
@@ -629,12 +632,91 @@ impl Vm {
         self.run_script_proto(proto)
     }
 
+    pub fn indirect_eval(&mut self, src: &str) -> Result<Value, Value> {
+        let ast = match parser::parse_script(src) {
+            Ok(a) => a,
+            Err(e) => return Err(self.syntax_error_value(&e, "<eval>")),
+        };
+        let t = src.trim_start();
+        let strict = t.starts_with("\"use strict\"") || t.starts_with("'use strict'");
+        let module = Rc::new(ModuleInfo {
+            name: "<eval>".into(),
+            dir: std::env::current_dir().unwrap_or_default(),
+            source: src.into(),
+            sloppy: false,
+        });
+        let proto = match compile_indirect_eval(&ast, module, strict) {
+            Ok(p) => p,
+            Err(e) => return Err(self.syntax_error_value(&e, "<eval>")),
+        };
+        self.run_script_proto(proto)
+    }
+
+    fn direct_eval(
+        &mut self,
+        src: &str,
+        scope: &Rc<crate::bytecode::EvalScope>,
+        cl: &Rc<Closure>,
+        base: usize,
+        nt: Value,
+    ) -> Result<Value, Value> {
+        let ast = match parser::parse_eval(src, &scope.ctx) {
+            Ok(a) => a,
+            Err(e) => return Err(self.syntax_error_value(&e, "<eval>")),
+        };
+        let module = Rc::new(ModuleInfo {
+            name: "<eval>".into(),
+            dir: cl.proto.module.dir.clone(),
+            source: src.into(),
+            sloppy: false,
+        });
+        let proto = match compile_eval(&ast, module, scope) {
+            Ok(p) => p,
+            Err(e) => return Err(self.syntax_error_value(&e, "<eval>")),
+        };
+        let mut ups = Vec::with_capacity(proto.upvalues.len());
+        for u in &proto.upvalues {
+            if u.is_local {
+                self.flush_builder(base + u.index as usize);
+                ups.push(self.capture_upvalue(base + u.index as usize));
+            } else {
+                ups.push(cl.upvalues[u.index as usize].clone());
+            }
+        }
+        let c = Rc::new(Closure {
+            gc_slot: std::cell::Cell::new(u32::MAX),
+            proto,
+            upvalues: ups.into_boxed_slice(),
+            home: RefCell::new(cl.home.borrow().clone()),
+            new_target: RefCell::new(Some(nt)),
+        });
+        let f = Value::Object(Obj::new(
+            ObjKind::Function(c),
+            Some(self.realm.function_proto.clone()),
+        ));
+        self.call_value(&f, Value::Undefined, &[])
+    }
+
+    fn frame_new_target(&self, fi: usize, base: usize, cl: &Closure) -> Value {
+        if self.frames[fi].construct {
+            return match &self.frames[fi].new_target {
+                Some(t) => Value::Object(t.clone()),
+                None => self.stack[base - 1].clone(),
+            };
+        }
+        if cl.proto.kind == ProtoKind::Arrow {
+            return cl.new_target.borrow().clone().unwrap_or_default();
+        }
+        Value::Undefined
+    }
+
     pub fn run_proto(&mut self, proto: Rc<FunctionProto>) -> Result<Value, Value> {
         let closure = Rc::new(Closure {
             gc_slot: std::cell::Cell::new(u32::MAX),
             proto,
             upvalues: Box::new([]),
             home: RefCell::new(None),
+            new_target: RefCell::new(None),
         });
         let f = Value::Object(Obj::new(
             ObjKind::Function(closure),
@@ -4036,16 +4118,20 @@ impl Vm {
                             ups.push(cl.upvalues[u.index as usize].clone());
                         }
                     }
-                    let home = if p.kind == ProtoKind::Arrow {
-                        cl.home.borrow().clone()
+                    let (home, nt) = if p.kind == ProtoKind::Arrow {
+                        (
+                            cl.home.borrow().clone(),
+                            Some(self.frame_new_target(fi, base, &cl)),
+                        )
                     } else {
-                        None
+                        (None, None)
                     };
                     let c = Rc::new(Closure {
                         gc_slot: std::cell::Cell::new(u32::MAX),
                         proto: p,
                         upvalues: ups.into_boxed_slice(),
                         home: RefCell::new(home),
+                        new_target: RefCell::new(nt),
                     });
                     let fproto = match (c.proto.is_generator, c.proto.is_async) {
                         (true, true) => &self.realm.async_generator_function_proto,
@@ -4154,13 +4240,31 @@ impl Vm {
                     }
                 }
                 Op::NewTarget => {
-                    let v = if self.frames[fi].construct {
-                        match &self.frames[fi].new_target {
-                            Some(t) => Value::Object(t.clone()),
-                            None => self.stack[base - 1].clone(),
-                        }
+                    let v = self.frame_new_target(fi, base, &cl);
+                    self.stack.push(v);
+                }
+                Op::DirectEval(argc, idx) => {
+                    let args = self.stack.split_off(self.stack.len() - argc as usize);
+                    pop!();
+                    let callee = pop!();
+                    let intrinsic = matches!((&callee, &self.eval_fn), (Value::Object(a), Some(b)) if Rc::ptr_eq(a, b));
+                    let v = if !intrinsic {
+                        tri!(self.call_value(&callee, Value::Undefined, &args))
                     } else {
-                        Value::Undefined
+                        match args.first() {
+                            Some(Value::Str(src)) => {
+                                let scope = proto.evals[idx as usize].clone();
+                                let nt = if scope.ctx.field_init {
+                                    Value::Undefined
+                                } else {
+                                    self.frame_new_target(fi, base, &cl)
+                                };
+                                let c = cl.clone();
+                                tri!(self.direct_eval(src, &scope, &c, base, nt))
+                            }
+                            Some(v) => v.clone(),
+                            None => Value::Undefined,
+                        }
                     };
                     self.stack.push(v);
                 }
