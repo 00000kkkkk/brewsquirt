@@ -9,7 +9,7 @@ use std::path::Path;
 
 type R = Result<Value, Value>;
 
-pub const LAZY_GLOBALS: [&str; 1] = ["Buffer"];
+pub const LAZY_GLOBALS: [&str; 2] = ["Buffer", "WebSocket"];
 
 const NODE_SRC: &str = r##"
 (native) => {
@@ -2775,6 +2775,313 @@ const NODE_SRC: &str = r##"
     globalAgent: new Agent({ protocol: "https:" }),
   }
 
+  const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+  const wsOrigin = (href) => {
+    const u = new URL(href)
+    return `${u.protocol === "wss:" ? "https:" : "http:"}//${u.host}`
+  }
+  class WebSocket extends EventTarget {
+    static CONNECTING = 0
+    static OPEN = 1
+    static CLOSING = 2
+    static CLOSED = 3
+    #url
+    #protocol = ""
+    #extensions = ""
+    #readyState = 0
+    #binaryType = "blob"
+    #bufferedAmount = 0
+    #socket = null
+    #buffer = Buffer.alloc(0)
+    #fragments = []
+    #fragmentOpcode = 0
+    #closeSent = false
+    #closeInfo = null
+    #closeTimer = null
+    #pendingClose = null
+    #req = null
+    constructor(url, protocols) {
+      super()
+      this.onopen = null
+      this.onmessage = null
+      this.onclose = null
+      this.onerror = null
+      let parsed
+      try {
+        parsed = new URL(String(url))
+      } catch {
+        throw new DOMException(`Failed to construct 'WebSocket': The URL '${url}' is invalid.`, "SyntaxError")
+      }
+      if (parsed.protocol === "http:") parsed.protocol = "ws:"
+      else if (parsed.protocol === "https:") parsed.protocol = "wss:"
+      if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+        throw new DOMException(`Failed to construct 'WebSocket': The URL's scheme must be either 'http', 'https', 'ws', or 'wss'. '${parsed.protocol}' is not allowed.`, "SyntaxError")
+      }
+      if (parsed.hash) throw new DOMException("Failed to construct 'WebSocket': The URL contains a fragment identifier.", "SyntaxError")
+      this.#url = parsed.href
+      const list = protocols === undefined ? [] : Array.isArray(protocols) ? protocols.map(String) : [String(protocols)]
+      if (new Set(list).size !== list.length) throw new DOMException("Failed to construct 'WebSocket': The subprotocol list contains duplicates.", "SyntaxError")
+      queueMicrotask(() => this.#connect(parsed, list))
+    }
+    get CONNECTING() {
+      return 0
+    }
+    get OPEN() {
+      return 1
+    }
+    get CLOSING() {
+      return 2
+    }
+    get CLOSED() {
+      return 3
+    }
+    get url() {
+      return this.#url
+    }
+    get readyState() {
+      return this.#readyState
+    }
+    get protocol() {
+      return this.#protocol
+    }
+    get extensions() {
+      return this.#extensions
+    }
+    get bufferedAmount() {
+      return this.#bufferedAmount
+    }
+    get binaryType() {
+      return this.#binaryType
+    }
+    set binaryType(value) {
+      if (value === "blob" || value === "arraybuffer" || value === "nodebuffer") this.#binaryType = value
+    }
+    #connect(u, protocols) {
+      const key = Buffer.from(native.randomBytes(16).buffer).toString("base64")
+      const secure = u.protocol === "wss:"
+      const headers = { Host: u.host, Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Key": key, "Sec-WebSocket-Version": "13" }
+      if (protocols.length) headers["Sec-WebSocket-Protocol"] = protocols.join(", ")
+      const req = (secure ? httpsClient : httpClient).request({ protocol: secure ? "https:" : "http:", hostname: u.hostname, port: u.port || (secure ? 443 : 80), path: u.pathname + u.search, headers })
+      this.#req = req
+      req.on("upgrade", (res, socket, head) => {
+        const expected = crypto.createHash("sha1").update(key + WS_GUID).digest("base64")
+        if (res.headers["sec-websocket-accept"] !== expected) {
+          socket.destroy()
+          return this.#fail("Invalid Sec-WebSocket-Accept header")
+        }
+        const chosen = res.headers["sec-websocket-protocol"]
+        if (chosen !== undefined && !protocols.includes(chosen)) {
+          socket.destroy()
+          return this.#fail("Server sent a subprotocol that was not requested")
+        }
+        if (res.headers["sec-websocket-extensions"]) {
+          socket.destroy()
+          return this.#fail("Server sent an extension that was not requested")
+        }
+        this.#protocol = chosen ?? ""
+        this.#socket = socket
+        this.#readyState = 1
+        socket.on("data", (chunk) => this.#onData(chunk))
+        socket.on("close", () => this.#onSocketClose())
+        socket.on("error", () => {})
+        if (head.length) this.#onData(head)
+        if (this.#pendingClose) {
+          const [code, reason] = this.#pendingClose
+          this.#pendingClose = null
+          this.#readyState = 1
+          this.close(code, reason)
+          return
+        }
+        this.dispatchEvent(new Event("open"))
+      })
+      req.on("response", (res) => this.#fail(`Unexpected server response: ${res.statusCode}`))
+      req.on("error", (e) => this.#fail(e.message))
+      req.end()
+    }
+    #fail(message) {
+      if (this.#readyState === 3) return
+      this.#readyState = 3
+      const error = new Error(message)
+      this.dispatchEvent(new ErrorEvent("error", { message, error }))
+      this.dispatchEvent(new CloseEvent("close", { wasClean: false, code: 1006, reason: "" }))
+    }
+    send(data) {
+      if (this.#readyState === 0) throw new DOMException("Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.", "InvalidStateError")
+      if (this.#readyState !== 1) return
+      if (typeof data === "string") return this.#sendFrame(1, Buffer.from(data, "utf8"))
+      if (typeof Blob === "function" && data instanceof Blob) {
+        this.#bufferedAmount += data.size
+        data.arrayBuffer().then((ab) => {
+          this.#bufferedAmount -= data.size
+          if (this.#readyState === 1) this.#sendFrame(2, Buffer.from(ab))
+        })
+        return
+      }
+      if (data instanceof ArrayBuffer) return this.#sendFrame(2, Buffer.from(data))
+      if (ArrayBuffer.isView(data)) return this.#sendFrame(2, Buffer.from(data.buffer, data.byteOffset, data.byteLength))
+      this.#sendFrame(1, Buffer.from(String(data), "utf8"))
+    }
+    #sendFrame(opcode, payload) {
+      if (!this.#socket || this.#socket.destroyed) return
+      const mask = Buffer.from(native.randomBytes(4).buffer)
+      const len = payload.length
+      let header
+      if (len < 126) header = Buffer.from([0x80 | opcode, 0x80 | len])
+      else if (len < 65536) {
+        header = Buffer.alloc(4)
+        header[0] = 0x80 | opcode
+        header[1] = 0x80 | 126
+        header.writeUInt16BE(len, 2)
+      } else {
+        header = Buffer.alloc(10)
+        header[0] = 0x80 | opcode
+        header[1] = 0x80 | 127
+        header.writeBigUInt64BE(BigInt(len), 2)
+      }
+      const masked = Buffer.alloc(len)
+      for (let i = 0; i < len; i++) masked[i] = payload[i] ^ mask[i & 3]
+      this.#socket.write(Buffer.concat([header, mask, masked]))
+    }
+    ping(data) {
+      if (this.#readyState === 1) this.#sendFrame(9, data === undefined ? Buffer.alloc(0) : Buffer.from(data))
+    }
+    close(code, reason) {
+      if (code !== undefined && code !== 1000 && !(code >= 3000 && code <= 4999)) {
+        throw new DOMException("Failed to execute 'close' on 'WebSocket': The close code must be either 1000, or between 3000 and 4999.", "InvalidAccessError")
+      }
+      const text = reason === undefined ? Buffer.alloc(0) : Buffer.from(String(reason), "utf8")
+      if (text.length > 123) throw new DOMException("Failed to execute 'close' on 'WebSocket': The close reason must not be greater than 123 UTF-8 bytes.", "SyntaxError")
+      if (this.#readyState === 2 || this.#readyState === 3) return
+      if (this.#readyState === 0) {
+        this.#readyState = 2
+        this.#pendingClose = [code, reason]
+        return
+      }
+      this.#readyState = 2
+      const payload = code === undefined ? Buffer.alloc(0) : Buffer.concat([Buffer.from([code >> 8, code & 255]), text])
+      this.#sendFrame(8, payload)
+      this.#closeSent = true
+      this.#closeTimer = setTimeout(() => this.#socket?.destroy(), 30000)
+      if (typeof this.#closeTimer?.unref === "function") this.#closeTimer.unref()
+    }
+    #onData(chunk) {
+      this.#buffer = this.#buffer.length ? Buffer.concat([this.#buffer, chunk]) : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+      while (this.#readyState !== 3) {
+        const b = this.#buffer
+        if (b.length < 2) return
+        const fin = (b[0] & 0x80) !== 0
+        const rsv = b[0] & 0x70
+        const opcode = b[0] & 0x0f
+        const masked = (b[1] & 0x80) !== 0
+        let len = b[1] & 0x7f
+        let offset = 2
+        if (len === 126) {
+          if (b.length < 4) return
+          len = b.readUInt16BE(2)
+          offset = 4
+        } else if (len === 127) {
+          if (b.length < 10) return
+          len = Number(b.readBigUInt64BE(2))
+          offset = 10
+        }
+        if (masked) offset += 4
+        if (b.length < offset + len) return
+        if (rsv) return this.#protocolError("RSV bits are set")
+        let payload = b.subarray(offset, offset + len)
+        if (masked) {
+          const mask = b.subarray(offset - 4, offset)
+          const out = Buffer.alloc(len)
+          for (let i = 0; i < len; i++) out[i] = payload[i] ^ mask[i & 3]
+          payload = out
+        }
+        this.#buffer = b.subarray(offset + len)
+        this.#onFrame(fin, opcode, payload)
+      }
+    }
+    #onFrame(fin, opcode, payload) {
+      switch (opcode) {
+        case 0:
+          if (!this.#fragmentOpcode) return this.#protocolError("Unexpected continuation frame")
+          this.#fragments.push(payload)
+          if (fin) {
+            const data = Buffer.concat(this.#fragments)
+            const op = this.#fragmentOpcode
+            this.#fragments = []
+            this.#fragmentOpcode = 0
+            this.#deliver(op, data)
+          }
+          break
+        case 1:
+        case 2:
+          if (this.#fragmentOpcode) return this.#protocolError("Expected a continuation frame")
+          if (fin) this.#deliver(opcode, payload)
+          else {
+            this.#fragmentOpcode = opcode
+            this.#fragments = [payload]
+          }
+          break
+        case 8: {
+          let code = 1005
+          let reason = ""
+          if (payload.length === 1) return this.#protocolError("Invalid close payload")
+          if (payload.length >= 2) {
+            code = payload.readUInt16BE(0)
+            reason = payload.subarray(2).toString("utf8")
+          }
+          this.#closeInfo = { code, reason, wasClean: true }
+          if (!this.#closeSent) {
+            this.#readyState = 2
+            this.#sendFrame(8, payload.subarray(0, Math.min(payload.length, 125)))
+            this.#closeSent = true
+          }
+          this.#socket.end()
+          break
+        }
+        case 9:
+          if (this.#readyState === 1) this.#sendFrame(10, payload)
+          break
+        case 10:
+          break
+        default:
+          this.#protocolError("Invalid opcode")
+      }
+    }
+    #deliver(opcode, data) {
+      let payload
+      if (opcode === 1) {
+        try {
+          payload = new TextDecoder("utf-8", { fatal: true }).decode(data)
+        } catch {
+          return this.#protocolError("Invalid UTF-8 payload", 1007)
+        }
+      } else if (this.#binaryType === "arraybuffer") payload = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
+      else if (this.#binaryType === "nodebuffer") payload = Buffer.from(data)
+      else payload = new Blob([data])
+      this.dispatchEvent(new MessageEvent("message", { data: payload, origin: wsOrigin(this.#url) }))
+    }
+    #protocolError(message, code = 1002) {
+      if (this.#readyState === 3) return
+      this.#closeInfo = { code, reason: message, wasClean: false }
+      if (!this.#closeSent && this.#socket && !this.#socket.destroyed) {
+        try {
+          this.#sendFrame(8, Buffer.concat([Buffer.from([code >> 8, code & 255]), Buffer.from(message)]))
+        } catch {}
+        this.#closeSent = true
+      }
+      this.#readyState = 2
+      this.dispatchEvent(new ErrorEvent("error", { message, error: new Error(message) }))
+      this.#socket?.destroy()
+    }
+    #onSocketClose() {
+      if (this.#readyState === 3) return
+      clearTimeout(this.#closeTimer)
+      this.#readyState = 3
+      const info = this.#closeInfo ?? { code: 1006, reason: "", wasClean: false }
+      this.dispatchEvent(new CloseEvent("close", info))
+    }
+  }
+  Object.defineProperty(WebSocket.prototype, Symbol.toStringTag, { value: "WebSocket", configurable: true })
+
   const zlibConstants = {
     Z_NO_FLUSH: 0, Z_PARTIAL_FLUSH: 1, Z_SYNC_FLUSH: 2, Z_FULL_FLUSH: 3, Z_FINISH: 4, Z_BLOCK: 5,
     Z_OK: 0, Z_STREAM_END: 1, Z_NEED_DICT: 2, Z_ERRNO: -1, Z_STREAM_ERROR: -2, Z_DATA_ERROR: -3,
@@ -4526,6 +4833,7 @@ const NODE_SRC: &str = r##"
     streamPromises,
     httpClient,
     httpsClient,
+    WebSocket,
     StringDecoder,
     querystring,
     tty,
@@ -4629,6 +4937,8 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     let exports = vm.call_value(&factory, Value::Undefined, &[Value::Object(n)])?;
     let buffer = vm.get_prop(&exports, "Buffer")?;
     vm.define_global("Buffer", buffer);
+    let websocket = vm.get_prop(&exports, "WebSocket")?;
+    vm.define_global("WebSocket", websocket);
     vm.node = Some(exports.clone());
     Ok(exports)
 }

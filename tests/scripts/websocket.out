@@ -1,0 +1,10 @@
+constructed 0 true "" "" 0
+InvalidStateError
+handshake GET /room?x=1 HTTP/1.1 websocket 13 chat, other
+open 1 chat
+server text hello
+server binary 1,2,3,4
+server pong ping
+server close 1000 bye
+close 1000 bye true 3 HELLO | long:300 | bin:4,3,2,1
+done

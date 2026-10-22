@@ -217,7 +217,7 @@ JavaSquirt 1.1.0 implements modern JavaScript as specified, passing 97% of test2
 - **Binary data**: `ArrayBuffer`, typed arrays, `DataView`, `TextEncoder`, `TextDecoder`, `Buffer`, base64 and hex, `structuredClone`, `crypto.randomUUID`
 - **Node.js compatibility**: `node:fs`, `node:path`, `node:events`, `node:assert`, `node:readline`, `node:util`, `node:url`, `node:test`, real TCP and TLS sockets in `node:net` and `node:tls`, asynchronous `child_process` and more, so many Node scripts run unchanged; `process.stdin`, `process.stdout.write`, `process.exitCode`, `process.on("exit")`
 - **Cancellation**: `AbortController`, `AbortSignal.timeout`, `EventTarget` and `DOMException`
-- **Networking**: `fetch` over HTTP and HTTPS, `URL`, `URLSearchParams`, `Headers`, `Request`, `Response`, and HTTP servers with `squirt:http` (`serve` and Node-style `createServer`)
+- **Networking**: `fetch` over HTTP and HTTPS, `WebSocket`, TCP and TLS sockets, `URL`, `URLSearchParams`, `Headers`, `Request`, `Response`, and HTTP servers with `squirt:http` (`serve` and Node-style `createServer`)
 - **Testing**: `jsq test` with `squirt:test` (`describe`, `test`, `expect`, `assert`, hooks, async tests)
 - **Console**: output formatted exactly like Node's `util.inspect`
 - **Builtins**: `console`, `Math`, `Number`, `String`, `Array`, `Object`, `JSON`, `Map`, `Set`, `WeakMap`, `WeakSet`, `WeakRef`, `Symbol`, `Promise`, `Date`, `parseInt`, `parseFloat`, `isNaN`, `isFinite`, `encodeURIComponent`, `decodeURIComponent`, `process.argv`, `process.exit`, `process.env`

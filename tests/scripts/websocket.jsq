@@ -1,0 +1,88 @@
+const net = require("node:net")
+const crypto = require("node:crypto")
+const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+const frame = (opcode, payload) => {
+  const len = payload.length
+  const header = len < 126 ? Buffer.from([0x80 | opcode, len]) : Buffer.concat([Buffer.from([0x80 | opcode, 126]), Buffer.from([len >> 8, len & 255])])
+  return Buffer.concat([header, payload])
+}
+
+const server = net.createServer((sock) => {
+  let buffer = Buffer.alloc(0)
+  let upgraded = false
+  sock.on("data", (chunk) => {
+    buffer = Buffer.concat([buffer, chunk])
+    if (!upgraded) {
+      const end = buffer.indexOf("\r\n\r\n")
+      if (end < 0) return
+      const lines = buffer.subarray(0, end).toString().split("\r\n")
+      const headers = Object.fromEntries(lines.slice(1).map((l) => l.split(": ")).map(([k, v]) => [k.toLowerCase(), v]))
+      console.log("handshake", lines[0], headers.upgrade, headers["sec-websocket-version"], headers["sec-websocket-protocol"])
+      const accept = crypto.createHash("sha1").update(headers["sec-websocket-key"] + GUID).digest("base64")
+      sock.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\nSec-WebSocket-Protocol: chat\r\n\r\n`)
+      upgraded = true
+      buffer = buffer.subarray(end + 4)
+    }
+    while (buffer.length >= 2) {
+      const opcode = buffer[0] & 0x0f
+      let len = buffer[1] & 0x7f
+      let offset = 2
+      if (len === 126) {
+        len = buffer.readUInt16BE(2)
+        offset = 4
+      }
+      const masked = (buffer[1] & 0x80) !== 0
+      if (masked) offset += 4
+      if (buffer.length < offset + len) return
+      const payload = Buffer.alloc(len)
+      for (let i = 0; i < len; i++) payload[i] = masked ? buffer[offset + i] ^ buffer[offset - 4 + (i & 3)] : buffer[offset + i]
+      buffer = buffer.subarray(offset + len)
+      if (opcode === 1) {
+        console.log("server text", payload.toString())
+        sock.write(frame(1, Buffer.from(payload.toString().toUpperCase())))
+        sock.write(frame(1, Buffer.from("x".repeat(300))))
+      } else if (opcode === 2) {
+        console.log("server binary", payload.join(","))
+        sock.write(frame(2, Buffer.from([...payload].reverse())))
+        sock.write(frame(9, Buffer.from("ping")))
+      } else if (opcode === 10) {
+        console.log("server pong", payload.toString())
+      } else if (opcode === 8) {
+        console.log("server close", payload.readUInt16BE(0), payload.subarray(2).toString())
+        sock.write(frame(8, payload))
+        sock.end()
+      }
+    }
+  })
+})
+
+server.listen(0, "127.0.0.1", () => {
+  const ws = new WebSocket(`ws://127.0.0.1:${server.address().port}/room?x=1`, ["chat", "other"])
+  ws.binaryType = "arraybuffer"
+  console.log("constructed", ws.readyState, ws.url.endsWith("/room?x=1"), JSON.stringify(ws.protocol), JSON.stringify(ws.extensions), ws.bufferedAmount)
+  try {
+    ws.send("too early")
+  } catch (e) {
+    console.log(e.name)
+  }
+  const got = []
+  ws.addEventListener("open", () => {
+    console.log("open", ws.readyState, ws.protocol)
+    ws.send("hello")
+  })
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === "string") {
+      got.push(ev.data.length > 20 ? `long:${ev.data.length}` : ev.data)
+      if (got.length === 2) ws.send(new Uint8Array([1, 2, 3, 4]))
+    } else {
+      got.push(`bin:${new Uint8Array(ev.data).join(",")}`)
+      setTimeout(() => ws.close(1000, "bye"), 20)
+    }
+  }
+  ws.onclose = (ev) => {
+    console.log("close", ev.code, ev.reason, ev.wasClean, ws.readyState, got.join(" | "))
+    server.close(() => console.log("done"))
+  }
+  ws.onerror = (ev) => console.log("error", ev.message)
+})

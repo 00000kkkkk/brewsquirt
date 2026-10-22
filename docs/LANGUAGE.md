@@ -1698,6 +1698,24 @@ name=jsq&tags=fast%26wet false
 entangled `MessagePort`s that deliver structured clones of posted messages asynchronously, and
 `BroadcastChannel` delivers to every other channel with the same name; both accept `onmessage`,
 `addEventListener("message")` and Node's `on("message")`.
+
+`WebSocket` is the standard client: `new WebSocket(url, protocols?)` connects over `ws:` or
+`wss:` (TLS verified against the bundled root store), fires `open`, `message`, `close` and
+`error` events (also through `onopen` and friends), `send` accepts strings, `ArrayBuffer`s,
+typed arrays and `Blob`s, `close(code?, reason?)` performs the closing handshake, and
+`binaryType` chooses `"blob"` (the default), `"arraybuffer"` or `"nodebuffer"` for incoming
+binary messages. `readyState`, `protocol`, `extensions`, `bufferedAmount` and the `CONNECTING`,
+`OPEN`, `CLOSING` and `CLOSED` constants behave as in browsers.
+
+```js
+const ws = new WebSocket("wss://echo.websocket.org")
+ws.onopen = () => ws.send("hello")
+ws.onmessage = (event) => {
+  console.log(event.data)
+  ws.close(1000, "done")
+}
+ws.onclose = (event) => console.log(event.code, event.wasClean)
+```
 `AbortSignal.timeout(ms)` aborts after a delay without keeping the program alive, and
 `AbortSignal.any(signals)` aborts when any of the signals does.
 
@@ -1974,7 +1992,7 @@ numeric arrays and `<ref *1>` markers for cycles. A first argument containing `%
 | `Map`    | `new Map(entries?)`, `set`, `get`, `has`, `delete`, `clear`, `size`, `forEach`                 |
 | `Set`    | `new Set(values?)`, `add`, `has`, `delete`, `clear`, `size`, `forEach`                         |
 | Errors   | `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, `URIError`, `EvalError`   |
-| Web      | `URL`, `URLSearchParams`, `Headers`, `Request`, `Response`, `EventTarget`, `Event`, `AbortController`, `AbortSignal`, `DOMException` |
+| Web      | `URL`, `URLSearchParams`, `Headers`, `Request`, `Response`, `EventTarget`, `Event`, `AbortController`, `AbortSignal`, `DOMException`, `WebSocket`, `MessageChannel`, `BroadcastChannel` |
 | Binary   | `ArrayBuffer`, typed arrays, `DataView`, `TextEncoder`, `TextDecoder`, `Buffer`, `atob`, `btoa`, `structuredClone`, `crypto` |
 | Weak     | `WeakMap` (`get`, `set`, `has`, `delete`), `WeakSet` (`add`, `has`, `delete`), `WeakRef` (`deref`) with object keys |
 | Timing   | `performance.now()` for a monotonic clock in milliseconds, `Date.now()` for epoch milliseconds |
@@ -2102,8 +2120,8 @@ Dependency specs:
 
 These are on the roadmap and currently produce a `SyntaxError` or are absent:
 
-- `URL.createObjectURL`, BYOB stream readers and `WebSocket`
-- Streaming bodies, WebSockets and HTTPS servers
+- `URL.createObjectURL`, BYOB stream readers and WebSocket servers
+- HTTPS servers
 - TLS servers, Unix domain sockets, `node:worker_threads`, and ciphers, key pairs and
   signatures in `node:crypto`
 - `Intl` covers numbers, plural rules, lists, relative times, collation and segmentation in a

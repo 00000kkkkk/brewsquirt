@@ -79,6 +79,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `net.createServer` accepts connections with `connection`, `listening` and `close` events,
   `address`, `maxConnections` and `getConnections`; `tls.connect` opens TLS 1.2/1.3 client
   connections verified against the Mozilla root store, with `secureConnect`.
+- A global `WebSocket` client (RFC 6455 over `net`/`tls` and the HTTP upgrade path) with
+  `open`, `message`, `close` and `error` events, `send` of strings, `ArrayBuffer`s, views and
+  `Blob`s, `close(code, reason)`, `binaryType` (`blob`, `arraybuffer` or `nodebuffer`),
+  `protocol`, `extensions`, `bufferedAmount` and the `readyState` constants.
 - `http.request` and `https.request` with an `Upgrade` header (or `createConnection`) go over a
   raw `net`/`tls` socket and emit `upgrade` with the response head and the socket, so the `ws`
   WebSocket client works; `https.request(options)` defaults the protocol to `https:`.
