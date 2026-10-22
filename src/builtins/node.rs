@@ -3931,10 +3931,22 @@ const NODE_SRC: &str = r##"
     const pending = []
     server.once("connection", (s) => {
       sock = s
-      s.unref()
+      if (child[kChild]?.unrefed) s.unref()
       server.close()
       ipcWire(child, s, pending, unwrap)
     })
+    const baseRef = child.ref.bind(child)
+    const baseUnref = child.unref.bind(child)
+    child.ref = () => {
+      child[kChild].unrefed = false
+      if (sock) sock.ref()
+      return baseRef()
+    }
+    child.unref = () => {
+      child[kChild].unrefed = true
+      if (sock) sock.unref()
+      return baseUnref()
+    }
     child.send = (message, sendHandle, options, cb) => {
       if (typeof sendHandle === "function") cb = sendHandle
       else if (typeof options === "function") cb = options
