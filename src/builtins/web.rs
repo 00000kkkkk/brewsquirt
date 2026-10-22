@@ -7,12 +7,21 @@ use std::time::Duration;
 
 type R = Result<Value, Value>;
 
-pub const LAZY_GLOBALS: [&str; 15] = [
+pub const LAZY_GLOBALS: [&str; 24] = [
     "fetch",
     "CustomEvent",
     "Blob",
     "File",
     "FormData",
+    "ReadableStream",
+    "WritableStream",
+    "TransformStream",
+    "TextEncoderStream",
+    "TextDecoderStream",
+    "CompressionStream",
+    "DecompressionStream",
+    "ByteLengthQueuingStrategy",
+    "CountQueuingStrategy",
     "Headers",
     "Request",
     "Response",
@@ -597,6 +606,846 @@ const WEB_SRC: &str = r##"
     }
   }
 
+  const kStream = Symbol("streamState")
+  const kDisturbed = Symbol("disturbed")
+  const defer = () => {
+    let resolve
+    let reject
+    const promise = new Promise((res, rej) => {
+      resolve = res
+      reject = rej
+    })
+    promise.catch(() => {})
+    return { promise, resolve, reject }
+  }
+  const chunkSize = (strategy, chunk) => {
+    if (typeof strategy?.size === "function") {
+      const n = Number(strategy.size(chunk))
+      if (!Number.isFinite(n) || n < 0) throw new RangeError("The return value of a queuing strategy's size function must be a finite, non-NaN, non-negative number")
+      return n
+    }
+    return 1
+  }
+  const highWater = (strategy, fallback) => {
+    const hw = strategy?.highWaterMark
+    if (hw === undefined) return fallback
+    const n = Number(hw)
+    if (Number.isNaN(n) || n < 0) throw new RangeError("Invalid highWaterMark")
+    return n
+  }
+
+  class CountQueuingStrategy {
+    #hw
+    constructor(init) {
+      this.#hw = Number(init?.highWaterMark)
+    }
+    get highWaterMark() {
+      return this.#hw
+    }
+    get size() {
+      return () => 1
+    }
+  }
+  class ByteLengthQueuingStrategy {
+    #hw
+    constructor(init) {
+      this.#hw = Number(init?.highWaterMark)
+    }
+    get highWaterMark() {
+      return this.#hw
+    }
+    get size() {
+      return (chunk) => chunk.byteLength
+    }
+  }
+
+  class ReadableStreamDefaultController {
+    #st
+    constructor(st, key) {
+      if (key !== kStream) throw new TypeError("Illegal constructor")
+      this.#st = st
+    }
+    get desiredSize() {
+      const st = this.#st
+      if (st.state === "errored") return null
+      if (st.state === "closed") return 0
+      return st.highWaterMark - st.queueSize
+    }
+    enqueue(chunk) {
+      const st = this.#st
+      if (st.closeRequested || st.state !== "readable") throw new TypeError("The stream is not in a state that permits enqueue")
+      if (st.type === "bytes" && !(chunk instanceof Uint8Array)) {
+        if (ArrayBuffer.isView(chunk)) chunk = viewBytes(chunk)
+        else if (chunk instanceof ArrayBuffer) chunk = new Uint8Array(chunk)
+        else throw new TypeError("The provided value is not of type 'ArrayBufferView'")
+      }
+      const pending = st.reads.shift()
+      if (pending) pending.resolve({ value: chunk, done: false })
+      else {
+        const size = st.type === "bytes" ? chunk.byteLength : chunkSize(st.strategy, chunk)
+        st.queue.push({ chunk, size })
+        st.queueSize += size
+      }
+      pullIfNeeded(st)
+    }
+    close() {
+      const st = this.#st
+      if (st.closeRequested || st.state !== "readable") throw new TypeError("The stream is not in a state that permits close")
+      st.closeRequested = true
+      if (st.queue.length === 0) finishClose(st)
+    }
+    error(e) {
+      errorStream(this.#st, e)
+    }
+  }
+
+  function finishClose(st) {
+    if (st.state !== "readable") return
+    st.state = "closed"
+    for (const r of st.reads.splice(0)) r.resolve({ value: undefined, done: true })
+    if (st.reader) st.reader[kStream].closed.resolve()
+  }
+  function errorStream(st, e) {
+    if (st.state !== "readable") return
+    st.state = "errored"
+    st.storedError = e
+    st.queue = []
+    st.queueSize = 0
+    for (const r of st.reads.splice(0)) r.reject(e)
+    if (st.reader) st.reader[kStream].closed.reject(e)
+  }
+  function pullIfNeeded(st) {
+    if (!st.started || st.closeRequested || st.state !== "readable") return
+    if (st.reads.length === 0 && st.highWaterMark - st.queueSize <= 0) return
+    if (st.pulling) {
+      st.pullAgain = true
+      return
+    }
+    st.pulling = true
+    Promise.resolve()
+      .then(() => st.source.pull?.(st.controller))
+      .then(
+        () => {
+          st.pulling = false
+          if (st.pullAgain) {
+            st.pullAgain = false
+            pullIfNeeded(st)
+          }
+        },
+        (e) => {
+          st.pulling = false
+          errorStream(st, e)
+        },
+      )
+  }
+  function cancelStream(st, reason) {
+    st.disturbed = true
+    if (st.state === "closed") return Promise.resolve()
+    if (st.state === "errored") return Promise.reject(st.storedError)
+    st.queue = []
+    st.queueSize = 0
+    finishClose(st)
+    return Promise.resolve()
+      .then(() => st.source.cancel?.(reason))
+      .then(() => undefined)
+  }
+
+  class ReadableStreamDefaultReader {
+    constructor(stream) {
+      if (!(stream instanceof ReadableStream)) throw new TypeError("ReadableStreamDefaultReader constructor argument must be a ReadableStream")
+      const st = stream[kStream]
+      if (st.reader) throw new TypeError("ReadableStream is locked")
+      this[kStream] = { stream, st, closed: defer() }
+      st.reader = this
+      if (st.state === "closed") this[kStream].closed.resolve()
+      if (st.state === "errored") this[kStream].closed.reject(st.storedError)
+    }
+    get closed() {
+      return this[kStream].closed.promise
+    }
+    read() {
+      const { st } = this[kStream]
+      if (!st || st.reader !== this) return Promise.reject(new TypeError("This readable stream reader has been released"))
+      st.disturbed = true
+      if (st.queue.length) {
+        const { chunk, size } = st.queue.shift()
+        st.queueSize -= size
+        if (st.closeRequested && st.queue.length === 0) finishClose(st)
+        else pullIfNeeded(st)
+        return Promise.resolve({ value: chunk, done: false })
+      }
+      if (st.state === "closed") return Promise.resolve({ value: undefined, done: true })
+      if (st.state === "errored") return Promise.reject(st.storedError)
+      const d = defer()
+      st.reads.push(d)
+      pullIfNeeded(st)
+      return d.promise
+    }
+    releaseLock() {
+      const { st } = this[kStream]
+      if (!st || st.reader !== this) return
+      const e = new TypeError("Reader was released")
+      for (const r of st.reads.splice(0)) r.reject(e)
+      if (st.state === "readable") this[kStream].closed.reject(e)
+      st.reader = null
+      this[kStream].st = null
+    }
+    cancel(reason) {
+      const { st } = this[kStream]
+      if (!st || st.reader !== this) return Promise.reject(new TypeError("This readable stream reader has been released"))
+      return cancelStream(st, reason)
+    }
+  }
+
+  class ReadableStream {
+    constructor(underlyingSource = {}, strategy = {}) {
+      if (underlyingSource === null) underlyingSource = {}
+      const type = underlyingSource.type === undefined ? undefined : String(underlyingSource.type)
+      if (type !== undefined && type !== "bytes") throw new TypeError(`'${type}' is not a valid enumeration value for ReadableStreamType`)
+      const st = {
+        source: underlyingSource,
+        strategy,
+        type,
+        highWaterMark: highWater(strategy, type === "bytes" ? 0 : 1),
+        queue: [],
+        queueSize: 0,
+        reads: [],
+        reader: null,
+        state: "readable",
+        storedError: undefined,
+        started: false,
+        pulling: false,
+        pullAgain: false,
+        closeRequested: false,
+        disturbed: false,
+      }
+      st.controller = new ReadableStreamDefaultController(st, kStream)
+      this[kStream] = st
+      Promise.resolve()
+        .then(() => underlyingSource.start?.(st.controller))
+        .then(
+          () => {
+            st.started = true
+            pullIfNeeded(st)
+          },
+          (e) => errorStream(st, e),
+        )
+    }
+    get locked() {
+      return this[kStream].reader !== null
+    }
+    get [kDisturbed]() {
+      return this[kStream].disturbed
+    }
+    getReader(options) {
+      if (options?.mode !== undefined) {
+        if (String(options.mode) !== "byob") throw new TypeError(`'${options.mode}' is not a valid enumeration value for ReadableStreamReaderMode`)
+        throw new TypeError("BYOB readers are not supported")
+      }
+      return new ReadableStreamDefaultReader(this)
+    }
+    cancel(reason) {
+      if (this.locked) return Promise.reject(new TypeError("Cannot cancel a locked ReadableStream"))
+      return cancelStream(this[kStream], reason)
+    }
+    async pipeTo(dest, options = {}) {
+      if (!(dest instanceof WritableStream)) throw new TypeError("pipeTo destination must be a WritableStream")
+      if (this.locked) throw new TypeError("ReadableStream is locked")
+      if (dest.locked) throw new TypeError("WritableStream is locked")
+      const reader = this.getReader()
+      const writer = dest.getWriter()
+      const signal = options.signal
+      let aborted = null
+      const onAbort = () => {
+        aborted = signal.reason
+      }
+      if (signal) {
+        if (signal.aborted) aborted = signal.reason
+        else signal.addEventListener("abort", onAbort, { once: true })
+      }
+      try {
+        while (true) {
+          if (aborted !== null) {
+            const err = aborted
+            if (!options.preventAbort) await writer.abort(err).catch(() => {})
+            if (!options.preventCancel) await reader.cancel(err).catch(() => {})
+            throw err
+          }
+          await writer.ready
+          const { value, done } = await reader.read()
+          if (done) {
+            if (!options.preventClose) await writer.close()
+            return
+          }
+          try {
+            await writer.write(value)
+          } catch (e) {
+            if (!options.preventCancel) await reader.cancel(e).catch(() => {})
+            throw e
+          }
+        }
+      } catch (e) {
+        if (this[kStream].state === "errored" && !options.preventAbort) await writer.abort(e).catch(() => {})
+        throw e
+      } finally {
+        if (signal) signal.removeEventListener("abort", onAbort)
+        reader.releaseLock()
+        writer.releaseLock()
+      }
+    }
+    pipeThrough(transform, options) {
+      if (!transform || !(transform.readable instanceof ReadableStream) || !(transform.writable instanceof WritableStream)) throw new TypeError("pipeThrough needs a pair of readable and writable streams")
+      if (this.locked) throw new TypeError("ReadableStream is locked")
+      this.pipeTo(transform.writable, options).catch(() => {})
+      return transform.readable
+    }
+    tee() {
+      if (this.locked) throw new TypeError("ReadableStream is locked")
+      const reader = this.getReader()
+      const ctrls = []
+      const cancelled = [false, false]
+      let reading = false
+      const pull = () => {
+        if (reading) return Promise.resolve()
+        reading = true
+        return reader.read().then(
+          ({ value, done }) => {
+            reading = false
+            if (done) {
+              for (const c of ctrls) {
+                try {
+                  c.close()
+                } catch {}
+              }
+              return
+            }
+            ctrls.forEach((c, i) => {
+              if (cancelled[i]) return
+              try {
+                c.enqueue(value)
+              } catch {}
+            })
+          },
+          (e) => {
+            reading = false
+            for (const c of ctrls) c.error(e)
+          },
+        )
+      }
+      const make = (i) =>
+        new ReadableStream({
+          start(c) {
+            ctrls[i] = c
+          },
+          pull,
+          cancel(reason) {
+            cancelled[i] = true
+            if (cancelled[0] && cancelled[1]) return reader.cancel(reason)
+          },
+        })
+      return [make(0), make(1)]
+    }
+    values(options) {
+      const reader = this.getReader()
+      const preventCancel = !!options?.preventCancel
+      const iterator = {
+        next: () =>
+          reader.read().then((r) => {
+            if (r.done) reader.releaseLock()
+            return r
+          }),
+        return: (value) => {
+          const p = preventCancel ? Promise.resolve() : reader.cancel(value)
+          return p.then(() => {
+            reader.releaseLock()
+            return { value, done: true }
+          })
+        },
+        [Symbol.asyncIterator]() {
+          return this
+        },
+      }
+      return iterator
+    }
+    [Symbol.asyncIterator]() {
+      return this.values()
+    }
+    static from(iterable) {
+      if (iterable instanceof ReadableStream) return iterable
+      const it = iterable?.[Symbol.asyncIterator]?.() ?? iterable?.[Symbol.iterator]?.()
+      if (!it) throw new TypeError("ReadableStream.from requires an iterable")
+      return new ReadableStream({
+        async pull(controller) {
+          const { value, done } = await it.next()
+          if (done) controller.close()
+          else controller.enqueue(value)
+        },
+        async cancel(reason) {
+          await it.return?.(reason)
+        },
+      })
+    }
+    get [Symbol.toStringTag]() {
+      return "ReadableStream"
+    }
+  }
+
+  class WritableStreamDefaultController {
+    #st
+    constructor(st, key) {
+      if (key !== kStream) throw new TypeError("Illegal constructor")
+      this.#st = st
+    }
+    get signal() {
+      return this.#st.abortController.signal
+    }
+    error(e) {
+      const st = this.#st
+      if (st.state !== "writable") return
+      failWritable(st, e)
+    }
+  }
+  function failWritable(st, e) {
+    if (st.state === "errored") return
+    st.state = "errored"
+    st.storedError = e
+    for (const w of st.queue.splice(0)) w.reject(e)
+    if (st.closing) st.closing.reject(e)
+    st.ready.reject(e)
+    if (st.writer) st.writer[kStream].closed.reject(e)
+  }
+  function advanceWritable(st) {
+    if (st.inflight || !st.started || st.state === "errored") return
+    const next = st.queue.shift()
+    if (!next) {
+      if (st.closing && st.state === "writable") {
+        st.state = "closing"
+        st.inflight = true
+        Promise.resolve()
+          .then(() => st.sink.close?.())
+          .then(
+            () => {
+              st.inflight = false
+              st.state = "closed"
+              st.closing.resolve()
+              if (st.writer) st.writer[kStream].closed.resolve()
+            },
+            (e) => {
+              st.inflight = false
+              failWritable(st, e)
+            },
+          )
+      }
+      return
+    }
+    st.inflight = true
+    Promise.resolve()
+      .then(() => st.sink.write?.(next.chunk, st.controller))
+      .then(
+        () => {
+          st.inflight = false
+          st.queueSize -= next.size
+          next.resolve()
+          if (st.highWaterMark - st.queueSize > 0 && st.backpressure) {
+            st.backpressure = false
+            st.ready.resolve()
+          }
+          advanceWritable(st)
+        },
+        (e) => {
+          st.inflight = false
+          next.reject(e)
+          failWritable(st, e)
+        },
+      )
+  }
+
+  class WritableStreamDefaultWriter {
+    constructor(stream) {
+      if (!(stream instanceof WritableStream)) throw new TypeError("WritableStreamDefaultWriter constructor argument must be a WritableStream")
+      const st = stream[kStream]
+      if (st.writer) throw new TypeError("WritableStream is locked")
+      this[kStream] = { stream, st, closed: defer() }
+      st.writer = this
+      if (st.state === "closed") this[kStream].closed.resolve()
+      if (st.state === "errored") this[kStream].closed.reject(st.storedError)
+    }
+    get closed() {
+      return this[kStream].closed.promise
+    }
+    get ready() {
+      const { st } = this[kStream]
+      return st ? st.ready.promise : Promise.reject(new TypeError("Writer was released"))
+    }
+    get desiredSize() {
+      const { st } = this[kStream]
+      if (!st) throw new TypeError("Writer was released")
+      if (st.state === "errored") return null
+      if (st.state === "closed" || st.state === "closing") return 0
+      return st.highWaterMark - st.queueSize
+    }
+    write(chunk) {
+      const { st } = this[kStream]
+      if (!st) return Promise.reject(new TypeError("Writer was released"))
+      if (st.state === "errored") return Promise.reject(st.storedError)
+      if (st.closing || st.state !== "writable") return Promise.reject(new TypeError("The stream is closing or closed and cannot be written to"))
+      let size
+      try {
+        size = chunkSize(st.strategy, chunk)
+      } catch (e) {
+        failWritable(st, e)
+        return Promise.reject(e)
+      }
+      const d = defer()
+      st.queue.push({ chunk, size, resolve: d.resolve, reject: d.reject })
+      st.queueSize += size
+      if (st.highWaterMark - st.queueSize <= 0 && !st.backpressure) {
+        st.backpressure = true
+        st.ready = defer()
+      }
+      advanceWritable(st)
+      return d.promise
+    }
+    close() {
+      const { st } = this[kStream]
+      if (!st) return Promise.reject(new TypeError("Writer was released"))
+      if (st.state === "errored") return Promise.reject(st.storedError)
+      if (st.closing || st.state !== "writable") return Promise.reject(new TypeError("The stream is already closing"))
+      st.closing = defer()
+      advanceWritable(st)
+      return st.closing.promise
+    }
+    abort(reason) {
+      const { st } = this[kStream]
+      if (!st) return Promise.reject(new TypeError("Writer was released"))
+      return abortWritable(st, reason)
+    }
+    releaseLock() {
+      const { st } = this[kStream]
+      if (!st) return
+      const e = new TypeError("Writer was released")
+      if (st.state === "writable") {
+        this[kStream].closed.reject(e)
+        if (st.backpressure) st.ready.reject(e)
+      }
+      st.writer = null
+      st.ready = defer()
+      st.ready.resolve()
+      this[kStream].st = null
+    }
+  }
+  function abortWritable(st, reason) {
+    if (st.state === "closed" || st.state === "errored") return Promise.resolve()
+    st.abortController.abort(reason)
+    const err = reason === undefined ? new DOMException("The operation was aborted", "AbortError") : reason
+    failWritable(st, err)
+    return Promise.resolve()
+      .then(() => st.sink.abort?.(reason))
+      .then(() => undefined)
+  }
+
+  class WritableStream {
+    constructor(underlyingSink = {}, strategy = {}) {
+      if (underlyingSink === null) underlyingSink = {}
+      if (underlyingSink.type !== undefined) throw new RangeError("Invalid type is specified")
+      const st = {
+        sink: underlyingSink,
+        strategy,
+        highWaterMark: highWater(strategy, 1),
+        queue: [],
+        queueSize: 0,
+        writer: null,
+        state: "writable",
+        storedError: undefined,
+        started: false,
+        inflight: false,
+        closing: null,
+        backpressure: false,
+        ready: defer(),
+        abortController: new AbortController(),
+      }
+      st.ready.resolve()
+      st.controller = new WritableStreamDefaultController(st, kStream)
+      this[kStream] = st
+      Promise.resolve()
+        .then(() => underlyingSink.start?.(st.controller))
+        .then(
+          () => {
+            st.started = true
+            advanceWritable(st)
+          },
+          (e) => failWritable(st, e),
+        )
+    }
+    get locked() {
+      return this[kStream].writer !== null
+    }
+    getWriter() {
+      return new WritableStreamDefaultWriter(this)
+    }
+    abort(reason) {
+      if (this.locked) return Promise.reject(new TypeError("Cannot abort a locked WritableStream"))
+      return abortWritable(this[kStream], reason)
+    }
+    close() {
+      if (this.locked) return Promise.reject(new TypeError("Cannot close a locked WritableStream"))
+      const st = this[kStream]
+      if (st.closing || st.state !== "writable") return Promise.reject(new TypeError("The stream is already closing"))
+      st.closing = defer()
+      advanceWritable(st)
+      return st.closing.promise
+    }
+    get [Symbol.toStringTag]() {
+      return "WritableStream"
+    }
+  }
+
+  class TransformStreamDefaultController {
+    #st
+    constructor(st, key) {
+      if (key !== kStream) throw new TypeError("Illegal constructor")
+      this.#st = st
+    }
+    get desiredSize() {
+      return this.#st.readableController.desiredSize
+    }
+    enqueue(chunk) {
+      try {
+        this.#st.readableController.enqueue(chunk)
+      } catch (e) {
+        this.#st.writableController.error(e)
+        throw e
+      }
+    }
+    error(e) {
+      this.#st.readableController.error(e)
+      this.#st.writableController.error(e)
+    }
+    terminate() {
+      try {
+        this.#st.readableController.close()
+      } catch {}
+      this.#st.writableController.error(new TypeError("The transform stream has been terminated"))
+    }
+  }
+
+  class TransformStream {
+    #readable
+    #writable
+    constructor(transformer = {}, writableStrategy = {}, readableStrategy = {}) {
+      if (transformer === null) transformer = {}
+      if (transformer.readableType !== undefined || transformer.writableType !== undefined) throw new RangeError("Invalid type is specified")
+      const st = {}
+      const controller = new TransformStreamDefaultController(st, kStream)
+      const transform = typeof transformer.transform === "function" ? (chunk) => transformer.transform(chunk, controller) : (chunk) => controller.enqueue(chunk)
+      let startPromise
+      this.#readable = new ReadableStream(
+        {
+          start(c) {
+            st.readableController = c
+          },
+          pull() {
+            if (st.pullWaiting) {
+              const w = st.pullWaiting
+              st.pullWaiting = null
+              w()
+            }
+          },
+          cancel(reason) {
+            st.writableController.error(reason)
+          },
+        },
+        readableStrategy,
+      )
+      this.#writable = new WritableStream(
+        {
+          start(c) {
+            st.writableController = c
+            startPromise = Promise.resolve().then(() => transformer.start?.(controller))
+            return startPromise
+          },
+          async write(chunk) {
+            if (st.readableController.desiredSize !== null && st.readableController.desiredSize <= 0) {
+              await new Promise((resolve) => (st.pullWaiting = resolve))
+            }
+            await transform(chunk)
+          },
+          async close() {
+            await transformer.flush?.(controller)
+            try {
+              st.readableController.close()
+            } catch {}
+          },
+          async abort(reason) {
+            await transformer.cancel?.(reason)
+            st.readableController.error(reason)
+          },
+        },
+        writableStrategy,
+      )
+    }
+    get readable() {
+      return this.#readable
+    }
+    get writable() {
+      return this.#writable
+    }
+    get [Symbol.toStringTag]() {
+      return "TransformStream"
+    }
+  }
+
+  const utf8Tail = (bytes) => {
+    const n = bytes.length
+    for (let back = 1; back <= 3 && back <= n; back++) {
+      const b = bytes[n - back]
+      if (b < 0x80) return 0
+      if (b >= 0xc0) {
+        const need = b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : 2
+        return back < need ? back : 0
+      }
+    }
+    return 0
+  }
+
+  class TextEncoderStream extends TransformStream {
+    constructor() {
+      let pendingHigh = null
+      super({
+        transform(chunk, controller) {
+          let s = String(chunk)
+          if (pendingHigh !== null) {
+            s = pendingHigh + s
+            pendingHigh = null
+          }
+          const last = s.charCodeAt(s.length - 1)
+          if (last >= 0xd800 && last <= 0xdbff) {
+            pendingHigh = s[s.length - 1]
+            s = s.slice(0, -1)
+          }
+          if (s) controller.enqueue(encoder.encode(s))
+        },
+        flush(controller) {
+          if (pendingHigh !== null) controller.enqueue(encoder.encode(pendingHigh))
+        },
+      })
+    }
+    get encoding() {
+      return "utf-8"
+    }
+  }
+
+  class TextDecoderStream extends TransformStream {
+    #encoding
+    #fatal
+    #ignoreBOM
+    constructor(label = "utf-8", options = {}) {
+      const td = new TextDecoder(label, options)
+      let pending = new Uint8Array(0)
+      let first = true
+      super({
+        transform(chunk, controller) {
+          let bytes = chunk instanceof Uint8Array ? chunk : chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : viewBytes(chunk)
+          if (pending.length) {
+            const joined = new Uint8Array(pending.length + bytes.length)
+            joined.set(pending)
+            joined.set(bytes, pending.length)
+            bytes = joined
+            pending = new Uint8Array(0)
+          }
+          const keep = td.encoding === "utf-8" ? utf8Tail(bytes) : td.encoding === "utf-16le" ? bytes.length % 2 : 0
+          if (keep) {
+            pending = bytes.slice(bytes.length - keep)
+            bytes = bytes.subarray(0, bytes.length - keep)
+          }
+          if (first && !options.ignoreBOM && td.encoding === "utf-8" && bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) bytes = bytes.subarray(3)
+          if (bytes.length) {
+            first = false
+            controller.enqueue(td.decode(bytes))
+          }
+        },
+        flush(controller) {
+          if (pending.length) controller.enqueue(td.decode(pending))
+        },
+      })
+      this.#encoding = td.encoding
+      this.#fatal = !!options.fatal
+      this.#ignoreBOM = !!options.ignoreBOM
+    }
+    get encoding() {
+      return this.#encoding
+    }
+    get fatal() {
+      return this.#fatal
+    }
+    get ignoreBOM() {
+      return this.#ignoreBOM
+    }
+  }
+
+  const zlibFor = (format, decompress) => {
+    const zlib = require("node:zlib")
+    const op = { gzip: decompress ? "gunzipSync" : "gzipSync", deflate: decompress ? "inflateSync" : "deflateSync", "deflate-raw": decompress ? "inflateRawSync" : "deflateRawSync" }[format]
+    if (!op) throw new TypeError(`Unsupported compression format: '${format}'`)
+    return zlib[op]
+  }
+  class CompressionStream extends TransformStream {
+    #format
+    constructor(format) {
+      const run = zlibFor(String(format), false)
+      const chunks = []
+      super({
+        transform(chunk) {
+          chunks.push(chunk instanceof Uint8Array ? chunk : chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : viewBytes(chunk))
+        },
+        flush(controller) {
+          const out = run(concatBytes(chunks))
+          controller.enqueue(new Uint8Array(out.buffer, out.byteOffset, out.byteLength))
+        },
+      })
+      this.#format = String(format)
+    }
+    get format() {
+      return this.#format
+    }
+  }
+  class DecompressionStream extends TransformStream {
+    #format
+    constructor(format) {
+      const run = zlibFor(String(format), true)
+      const chunks = []
+      super({
+        transform(chunk) {
+          chunks.push(chunk instanceof Uint8Array ? chunk : chunk instanceof ArrayBuffer ? new Uint8Array(chunk) : viewBytes(chunk))
+        },
+        flush(controller) {
+          const out = run(concatBytes(chunks))
+          controller.enqueue(new Uint8Array(out.buffer, out.byteOffset, out.byteLength))
+        },
+      })
+      this.#format = String(format)
+    }
+    get format() {
+      return this.#format
+    }
+  }
+
+  async function collectStream(stream) {
+    const chunks = []
+    for await (const c of stream) chunks.push(typeof c === "string" ? encoder.encode(c) : c instanceof Uint8Array ? c : c instanceof ArrayBuffer ? new Uint8Array(c) : viewBytes(c))
+    return concatBytes(chunks)
+  }
+  const bytesToStream = (bytes) =>
+    new ReadableStream(
+      {
+        start(c) {
+          if (bytes.length) c.enqueue(bytes)
+          c.close()
+        },
+      },
+      { type: "bytes" },
+    )
+
   const kBytes = Symbol("bytes")
   const concatBytes = (chunks) => {
     const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0))
@@ -651,7 +1500,7 @@ const WEB_SRC: &str = r##"
       return this[kBytes].slice()
     }
     stream() {
-      throw new TypeError("Blob.prototype.stream is not supported: use arrayBuffer() or text()")
+      return bytesToStream(this[kBytes].slice())
     }
     get [Symbol.toStringTag]() {
       return "Blob"
@@ -809,6 +1658,7 @@ const WEB_SRC: &str = r##"
     if (body instanceof URLSearchParams) return body.toString()
     if (body instanceof Blob) return body[kBytes].slice()
     if (body instanceof FormData) return encodeFormData(body)
+    if (body instanceof ReadableStream) return body
     if (body instanceof Uint8Array && internal) return body
     if (body instanceof ArrayBuffer) return new Uint8Array(body.slice(0))
     if (ArrayBuffer.isView(body)) return viewBytes(body)
@@ -829,25 +1679,41 @@ const WEB_SRC: &str = r##"
     return null
   }
 
+  const kRaw = Symbol("rawBody")
   class Body {
     #body
     #used = false
+    #stream = null
     constructor(body) {
       this.#body = bodyInit(body)
     }
-    get body() {
+    get [kRaw]() {
       return this.#body
+    }
+    set [kRaw](v) {
+      this.#body = v
+      this.#stream = null
+    }
+    get body() {
+      if (this.#body === null) return null
+      if (this.#body instanceof ReadableStream) return this.#body
+      if (!this.#stream) this.#stream = bytesToStream(toBytes(this.#body))
+      return this.#stream
     }
     get bodyUsed() {
-      return this.#used
+      if (this.#used) return true
+      const s = this.#body instanceof ReadableStream ? this.#body : this.#stream
+      return s ? s[kDisturbed] : false
     }
-    #take() {
-      if (this.#used) throw new TypeError("Body is unusable: Body has already been read")
+    async #take() {
+      if (this.bodyUsed) throw new TypeError("Body is unusable: Body has already been read")
       this.#used = true
-      return this.#body
+      const b = this.#body
+      if (b instanceof ReadableStream) return await collectStream(b)
+      return b
     }
     async text() {
-      const b = this.#take()
+      const b = await this.#take()
       return typeof b === "string" ? b : b === null ? "" : decoder.decode(b)
     }
     async json() {
@@ -857,17 +1723,17 @@ const WEB_SRC: &str = r##"
       return new Uint8Array(await this.arrayBuffer())
     }
     async arrayBuffer() {
-      const b = toBytes(this.#take())
+      const b = toBytes(await this.#take())
       return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)
     }
     async blob() {
-      const b = toBytes(this.#take())
+      const b = toBytes(await this.#take())
       const type = this.headers?.get("content-type") ?? ""
       return new Blob([b], { type })
     }
     async formData() {
       const type = this.headers?.get("content-type") ?? ""
-      const b = toBytes(this.#take())
+      const b = toBytes(await this.#take())
       const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(type)
       if (/multipart\/form-data/i.test(type) && m) return parseMultipart(b, m[1] ?? m[2].trim())
       if (/application\/x-www-form-urlencoded/i.test(type)) {
@@ -900,7 +1766,18 @@ const WEB_SRC: &str = r##"
     }
     clone() {
       if (this.bodyUsed) throw new TypeError("Response.clone: Body has already been consumed.")
-      return new Response(this.body, this)
+      let raw = this[kRaw]
+      if (raw instanceof ReadableStream) {
+        const [a, b] = raw.tee()
+        this[kRaw] = a
+        raw = b
+      }
+      internal = true
+      try {
+        return new Response(raw, this)
+      } finally {
+        internal = false
+      }
     }
     static json(data, init = {}) {
       const headers = new Headers(init.headers)
@@ -917,7 +1794,7 @@ const WEB_SRC: &str = r##"
     constructor(input, init = {}) {
       const src = input instanceof Request ? input : null
       const method = String(init.method ?? src?.method ?? "GET").toUpperCase()
-      const body = init.body !== undefined ? init.body : src ? src.body : null
+      const body = init.body !== undefined ? init.body : src ? src[kRaw] : null
       if ((method === "GET" || method === "HEAD") && body != null) {
         throw new TypeError("Request with GET/HEAD method cannot have body.")
       }
@@ -946,11 +1823,13 @@ const WEB_SRC: &str = r##"
     }
     const signal = req.signal
     signal.throwIfAborted()
+    let payload = req[kRaw]
+    if (payload instanceof ReadableStream) payload = await collectStream(payload)
     const [id, pending] = native.fetch(
       req.method,
       url.href,
       [...req.headers],
-      req.body,
+      payload,
       Number(init.timeout ?? 0),
       req.redirect !== "manual",
     )
@@ -989,8 +1868,12 @@ const WEB_SRC: &str = r##"
     }
   }
 
-  function toReply(res) {
-    if (res instanceof Response) return [res.status, [...res.headers], res.body ?? ""]
+  async function toReply(res) {
+    if (res instanceof Response) {
+      let raw = res[kRaw]
+      if (raw instanceof ReadableStream) raw = await collectStream(raw)
+      return [res.status, [...res.headers], raw ?? ""]
+    }
     if (res === undefined || res === null) return [204, [], ""]
     if (typeof res === "string") return [200, [["content-type", "text/plain;charset=UTF-8"]], res]
     return [200, [["content-type", "application/json"]], JSON.stringify(res)]
@@ -1305,6 +2188,15 @@ const WEB_SRC: &str = r##"
     Blob,
     File,
     FormData,
+    ReadableStream,
+    WritableStream,
+    TransformStream,
+    TextEncoderStream,
+    TextDecoderStream,
+    CompressionStream,
+    DecompressionStream,
+    ByteLengthQueuingStrategy,
+    CountQueuingStrategy,
     fetch,
     serve,
     createServer,

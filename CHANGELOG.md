@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `console.dir`, `console.dirxml` and `console.trace`.
 
 - `jsq -p "<code>"` evaluates a snippet and prints its value.
+- Web streams: `ReadableStream`, `WritableStream` and `TransformStream` with default readers and
+  writers, `pipeTo`, `pipeThrough`, `tee`, `cancel`, `abort`, abort signals, backpressure and
+  async iteration, `ReadableStream.from`, `TextEncoderStream`, `TextDecoderStream`,
+  `CompressionStream`, `DecompressionStream`, `CountQueuingStrategy` and
+  `ByteLengthQueuingStrategy`; `Response.body` and `Request.body` are readable streams, stream
+  bodies can be sent with `fetch` and returned from server handlers, and `Blob.prototype.stream`.
 - `Blob`, `File` and `FormData`: construct from strings, buffers and other blobs, `slice`,
   `text`, `arrayBuffer` and `bytes`; `fetch`, `Request` and `Response` accept them as bodies,
   encode `FormData` as `multipart/form-data`, and expose `blob()` and `formData()` that also

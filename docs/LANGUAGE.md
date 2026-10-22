@@ -1613,6 +1613,33 @@ text/html, application/json [ 'accept' ]
 POST https://example.com/api hi
 ```
 
+Bodies may be strings, `ArrayBuffer`s, typed arrays, `URLSearchParams`, `Blob`s, `FormData` (sent
+as `multipart/form-data`) or `ReadableStream`s. Besides `text()`, `json()`, `arrayBuffer()` and
+`bytes()`, a body offers `blob()` and `formData()`, which also parses multipart and URL-encoded
+request bodies on the server side. `response.body` is a `ReadableStream` of `Uint8Array` chunks.
+
+### Blobs, files and streams
+
+`Blob` and `File` hold bytes with a MIME type and a name; `FormData` collects fields and files for
+uploads. The WHATWG streams are available as `ReadableStream`, `WritableStream` and
+`TransformStream` with default readers and writers, `pipeTo`, `pipeThrough`, `tee`, `cancel`,
+`abort`, backpressure through `highWaterMark`, `ReadableStream.from(iterable)` and async
+iteration, plus `TextEncoderStream`, `TextDecoderStream`, `CompressionStream` and
+`DecompressionStream` (`gzip`, `deflate`, `deflate-raw`) and the two queuing strategies. BYOB
+readers are not supported.
+
+```js
+const upper = new TransformStream({ transform: (chunk, c) => c.enqueue(chunk.toUpperCase()) })
+const chunks = []
+await ReadableStream.from(["a", "b"]).pipeThrough(upper).pipeTo(new WritableStream({ write: (c) => chunks.push(c) }))
+const gz = await new Response(new Blob(["hello"]).stream().pipeThrough(new CompressionStream("gzip"))).bytes()
+console.log(chunks.join(""), gz[0].toString(16), new File(["x"], "a.txt").name)
+```
+
+```text
+AB 1f a.txt
+```
+
 ### `URL` and `URLSearchParams`
 
 ```js
@@ -2025,7 +2052,7 @@ Dependency specs:
 
 These are on the roadmap and currently produce a `SyntaxError` or are absent:
 
-- `Blob.prototype.stream`, `URL.createObjectURL` and web `ReadableStream`
+- `URL.createObjectURL`, BYOB stream readers and `WebSocket`
 - Streaming bodies, WebSockets and HTTPS servers
 - `node:net`, `node:worker_threads`, and ciphers, key pairs and signatures in `node:crypto`
 - `Intl` covers numbers, plural rules, lists, relative times, collation and segmentation in a
