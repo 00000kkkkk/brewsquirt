@@ -1276,8 +1276,887 @@ const NODE_SRC: &str = r##"
     subtle: globalThis.crypto.subtle,
     constants: {},
   }
+  const utf8Incomplete = (bytes) => {
+    const n = bytes.length
+    for (let back = 1; back <= 3 && back <= n; back++) {
+      const b = bytes[n - back]
+      if (b < 0x80) return 0
+      if (b >= 0xc0) {
+        const need = b >= 0xf0 ? 4 : b >= 0xe0 ? 3 : 2
+        return back < need ? back : 0
+      }
+    }
+    return 0
+  }
+  class StringDecoder {
+    #pending = new Uint8Array(0)
+    constructor(encoding = "utf8") {
+      this.encoding = normEncoding(encoding)
+    }
+    #join(buf) {
+      const bytes = cryptoBytes(buf, undefined, "buf")
+      if (this.#pending.length === 0) return bytes
+      const out = new Uint8Array(this.#pending.length + bytes.length)
+      out.set(this.#pending)
+      out.set(bytes, this.#pending.length)
+      this.#pending = new Uint8Array(0)
+      return out
+    }
+    write(buf) {
+      if (typeof buf === "string") return buf
+      const bytes = this.#join(buf)
+      let keep = 0
+      if (this.encoding === "utf8") keep = utf8Incomplete(bytes)
+      else if (this.encoding === "utf16le") keep = bytes.length % 2
+      else if (this.encoding === "base64" || this.encoding === "base64url") keep = bytes.length % 3
+      if (keep) {
+        this.#pending = bytes.slice(bytes.length - keep)
+        return stringFromBytes(bytes.subarray(0, bytes.length - keep), this.encoding)
+      }
+      return stringFromBytes(bytes, this.encoding)
+    }
+    end(buf) {
+      let out = buf === undefined ? "" : this.write(buf)
+      if (this.#pending.length) {
+        out += stringFromBytes(this.#pending, this.encoding)
+        this.#pending = new Uint8Array(0)
+      }
+      return out
+    }
+    get lastNeed() {
+      return this.#pending.length
+    }
+  }
+
+  const qsEscape = (s) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase())
+  const qsUnescape = (s) => {
+    try {
+      return decodeURIComponent(s.replace(/\+/g, " "))
+    } catch {
+      return s
+    }
+  }
+  const qsValue = (v) => {
+    if (typeof v === "string") return v
+    if (typeof v === "number" && Number.isFinite(v)) return String(v)
+    if (typeof v === "bigint" || typeof v === "boolean") return String(v)
+    return ""
+  }
+  const querystring = {
+    escape: qsEscape,
+    unescape: qsUnescape,
+    parse(str, sep = "&", eq = "=", options) {
+      const out = Object.create(null)
+      if (typeof str !== "string" || str.length === 0) return out
+      const decode = options?.decodeURIComponent ?? qsUnescape
+      let count = 0
+      const max = options?.maxKeys ?? 1000
+      for (const part of str.split(sep)) {
+        if (part === "") continue
+        if (max > 0 && count++ >= max) break
+        const i = part.indexOf(eq)
+        const k = decode(i < 0 ? part : part.slice(0, i))
+        const v = i < 0 ? "" : decode(part.slice(i + eq.length))
+        if (k in out) {
+          if (Array.isArray(out[k])) out[k].push(v)
+          else out[k] = [out[k], v]
+        } else out[k] = v
+      }
+      return out
+    },
+    stringify(obj, sep = "&", eq = "=", options) {
+      if (obj === null || typeof obj !== "object") return ""
+      const encode = options?.encodeURIComponent ?? qsEscape
+      const parts = []
+      for (const k of Object.keys(obj)) {
+        const v = obj[k]
+        const ks = encode(qsValue(k)) + eq
+        if (Array.isArray(v)) for (const x of v) parts.push(ks + encode(qsValue(x)))
+        else parts.push(ks + encode(qsValue(v)))
+      }
+      return parts.join(sep)
+    },
+  }
+  querystring.encode = querystring.stringify
+  querystring.decode = querystring.parse
+
+  const tty = {
+    isatty: (fd) => Number.isInteger(fd) && fd >= 0 && native.isTTY(fd),
+  }
+
+  class PerformanceObserver {
+    #cb
+    constructor(cb) {
+      this.#cb = cb
+    }
+    observe() {}
+    disconnect() {}
+    takeRecords() {
+      return []
+    }
+    static get supportedEntryTypes() {
+      return ["mark", "measure"]
+    }
+  }
+
+  const kRead = Symbol("readableState")
+  const kWrite = Symbol("writableState")
+  const streamError = (code, message) => {
+    const e = new Error(message)
+    e.code = code
+    return e
+  }
+  function destroyStream(stream, err) {
+    const r = stream[kRead]
+    const w = stream[kWrite]
+    if ((r && r.destroyed) || (w && w.destroyed)) return stream
+    if (r) {
+      r.destroyed = true
+      r.buffer = []
+      stream.readable = false
+    }
+    if (w) {
+      w.destroyed = true
+      w.queue = []
+      stream.writable = false
+    }
+    stream.destroyed = true
+    const done = (e) => {
+      const error = e === undefined ? err : e
+      queueMicrotask(() => {
+        if (error) stream.emit("error", error)
+        stream.emit("close")
+      })
+    }
+    if (typeof stream._destroy === "function") {
+      try {
+        stream._destroy(err ?? null, done)
+      } catch (e) {
+        done(e)
+      }
+    } else done()
+    return stream
+  }
+  function toChunk(stream, chunk, encoding, objectMode) {
+    if (objectMode) return chunk
+    if (typeof chunk === "string") return Buffer.from(chunk, encoding ?? "utf8")
+    if (chunk instanceof Uint8Array) return Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+    if (chunk instanceof ArrayBuffer) return Buffer.from(chunk)
+    throw streamError("ERR_INVALID_ARG_TYPE", `The "chunk" argument must be of type string or an instance of Buffer or Uint8Array. Received ${typeof chunk}`)
+  }
+
+  class Readable extends EventEmitter {
+    constructor(options = {}) {
+      super()
+      this[kRead] = {
+        buffer: [],
+        ended: false,
+        endEmitted: false,
+        flowing: null,
+        reading: false,
+        scheduled: false,
+        destroyed: false,
+        encoding: options.encoding ?? null,
+        objectMode: !!options.objectMode,
+        highWaterMark: options.highWaterMark ?? (options.objectMode ? 16 : 65536),
+        autoDestroy: options.autoDestroy !== false,
+        pipes: [],
+      }
+      this.readable = true
+      this.readableEnded = false
+      this.destroyed = false
+      if (typeof options.read === "function") this._read = options.read
+      if (typeof options.destroy === "function") this._destroy = options.destroy
+      if (typeof options.construct === "function") queueMicrotask(() => options.construct.call(this, (e) => e && this.destroy(e)))
+    }
+    get readableObjectMode() {
+      return this[kRead].objectMode
+    }
+    get readableHighWaterMark() {
+      return this[kRead].highWaterMark
+    }
+    get readableLength() {
+      return this[kRead].buffer.reduce((n, c) => n + (this[kRead].objectMode ? 1 : c.length), 0)
+    }
+    get readableFlowing() {
+      return this[kRead].flowing
+    }
+    get readableEncoding() {
+      return this[kRead].encoding
+    }
+    _read() {}
+    push(chunk, encoding) {
+      const r = this[kRead]
+      if (r.destroyed) return false
+      if (chunk === null) {
+        r.ended = true
+        this.#maybeEnd()
+        return false
+      }
+      let c = toChunk(this, chunk, encoding, r.objectMode)
+      if (!r.objectMode && r.encoding && typeof c !== "string") c = c.toString(r.encoding)
+      r.buffer.push(c)
+      this.#schedule()
+      return this.readableLength < r.highWaterMark
+    }
+    unshift(chunk) {
+      this[kRead].buffer.unshift(chunk)
+    }
+    #schedule() {
+      const r = this[kRead]
+      if (r.scheduled) return
+      r.scheduled = true
+      queueMicrotask(() => {
+        r.scheduled = false
+        this.#flow()
+      })
+    }
+    #flow() {
+      const r = this[kRead]
+      if (r.destroyed) return
+      if (r.flowing) {
+        while (r.flowing && r.buffer.length && !r.destroyed) this.emit("data", r.buffer.shift())
+        if (r.flowing && !r.buffer.length && !r.ended && !r.destroyed) this.#callRead()
+      } else if (r.buffer.length && this.listenerCount("readable") > 0) {
+        this.emit("readable")
+      }
+      this.#maybeEnd()
+    }
+    #callRead() {
+      const r = this[kRead]
+      if (r.reading || r.ended || r.destroyed) return
+      r.reading = true
+      try {
+        this._read(r.highWaterMark)
+      } catch (e) {
+        this.destroy(e)
+      }
+      r.reading = false
+    }
+    #maybeEnd() {
+      const r = this[kRead]
+      if (r.ended && r.buffer.length === 0 && !r.endEmitted && !r.destroyed) {
+        r.endEmitted = true
+        this.readable = false
+        this.readableEnded = true
+        queueMicrotask(() => {
+          if (this.listenerCount("readable") > 0) this.emit("readable")
+          this.emit("end")
+          if (r.autoDestroy && !this[kWrite]) this.destroy()
+          else if (r.autoDestroy && this[kWrite] && this[kWrite].finished) this.destroy()
+        })
+      }
+    }
+    on(event, fn) {
+      super.on(event, fn)
+      if (event === "data" && this[kRead].flowing !== false) this.resume()
+      if (event === "readable") {
+        this[kRead].flowing = false
+        this.#schedule()
+        if (!this[kRead].buffer.length) queueMicrotask(() => this.#callRead())
+      }
+      return this
+    }
+    resume() {
+      const r = this[kRead]
+      if (r.flowing !== true) {
+        r.flowing = true
+        this.#schedule()
+      }
+      return this
+    }
+    pause() {
+      this[kRead].flowing = false
+      return this
+    }
+    isPaused() {
+      return this[kRead].flowing === false
+    }
+    read(size) {
+      const r = this[kRead]
+      if (!r.buffer.length && !r.ended) this.#callRead()
+      if (!r.buffer.length) {
+        this.#maybeEnd()
+        return null
+      }
+      if (r.objectMode || size === undefined) {
+        const c = r.buffer.shift()
+        this.#maybeEnd()
+        if (!r.buffer.length && !r.ended) queueMicrotask(() => this.#callRead())
+        return c
+      }
+      let out = typeof r.buffer[0] === "string" ? r.buffer.join("") : Buffer.concat(r.buffer)
+      r.buffer = []
+      if (out.length > size) {
+        r.buffer.push(out.slice(size))
+        out = out.slice(0, size)
+      }
+      this.#maybeEnd()
+      return out
+    }
+    setEncoding(encoding) {
+      const r = this[kRead]
+      r.encoding = encoding ?? "utf8"
+      r.buffer = r.buffer.map((c) => (typeof c === "string" ? c : c.toString(r.encoding)))
+      return this
+    }
+    pipe(dest, options) {
+      const r = this[kRead]
+      r.pipes.push(dest)
+      const onData = (chunk) => {
+        if (dest.write(chunk) === false && typeof dest.once === "function") {
+          this.pause()
+          dest.once("drain", () => this.resume())
+        }
+      }
+      this.on("data", onData)
+      if (options?.end !== false) this.once("end", () => dest.end())
+      if (typeof dest.emit === "function") dest.emit("pipe", this)
+      return dest
+    }
+    unpipe(dest) {
+      const r = this[kRead]
+      r.pipes = dest ? r.pipes.filter((d) => d !== dest) : []
+      return this
+    }
+    destroy(err) {
+      return destroyStream(this, err)
+    }
+    async *[Symbol.asyncIterator]() {
+      const queue = []
+      let done = false
+      let error = null
+      let wake = null
+      this.on("data", (c) => {
+        queue.push(c)
+        if (wake) wake()
+      })
+      this.once("end", () => {
+        done = true
+        if (wake) wake()
+      })
+      this.once("error", (e) => {
+        error = e
+        if (wake) wake()
+      })
+      this.once("close", () => {
+        done = true
+        if (wake) wake()
+      })
+      try {
+        while (true) {
+          if (queue.length) {
+            yield queue.shift()
+            continue
+          }
+          if (error) throw error
+          if (done) return
+          await new Promise((resolve) => (wake = resolve))
+          wake = null
+        }
+      } finally {
+        if (!done && !error) this.destroy()
+      }
+    }
+    async toArray() {
+      const out = []
+      for await (const c of this) out.push(c)
+      return out
+    }
+    static from(iterable, options = {}) {
+      const r = new Readable({ objectMode: true, ...options })
+      const source = typeof iterable === "string" || iterable instanceof Uint8Array ? [iterable] : iterable
+      ;(async () => {
+        try {
+          for await (const c of source) {
+            if (r.destroyed) return
+            r.push(c)
+          }
+          r.push(null)
+        } catch (e) {
+          r.destroy(e)
+        }
+      })()
+      return r
+    }
+  }
+
+  function initWritable(stream, options) {
+    stream[kWrite] = {
+      queue: [],
+      writing: false,
+      ending: false,
+      finished: false,
+      destroyed: false,
+      needDrain: false,
+      corked: 0,
+      objectMode: !!(options.objectMode || options.writableObjectMode),
+      highWaterMark: options.highWaterMark ?? options.writableHighWaterMark ?? 16384,
+      decodeStrings: options.decodeStrings !== false,
+      defaultEncoding: options.defaultEncoding ?? "utf8",
+      autoDestroy: options.autoDestroy !== false,
+    }
+    stream.writable = true
+    stream.writableEnded = false
+    stream.writableFinished = false
+    stream.destroyed = false
+    if (typeof options.write === "function") stream._write = options.write
+    if (typeof options.writev === "function") stream._writev = options.writev
+    if (typeof options.final === "function") stream._final = options.final
+    if (typeof options.destroy === "function") stream._destroy = options.destroy
+  }
+  const writableMethods = {
+    _write(chunk, encoding, cb) {
+      cb(streamError("ERR_METHOD_NOT_IMPLEMENTED", "The _write() method is not implemented"))
+    },
+    write(chunk, encoding, cb) {
+      const w = this[kWrite]
+      if (typeof encoding === "function") [encoding, cb] = [undefined, encoding]
+      if (w.ending || w.destroyed) {
+        const e = streamError("ERR_STREAM_WRITE_AFTER_END", "write after end")
+        queueMicrotask(() => {
+          if (typeof cb === "function") cb(e)
+          this.emit("error", e)
+        })
+        return false
+      }
+      let enc = encoding ?? (typeof chunk === "string" ? w.defaultEncoding : "buffer")
+      let c = chunk
+      if (!w.objectMode) {
+        if (typeof chunk === "string" && w.decodeStrings) {
+          c = Buffer.from(chunk, enc)
+          enc = "buffer"
+        } else if (typeof chunk !== "string") {
+          c = toChunk(this, chunk, undefined, false)
+          enc = "buffer"
+        }
+      }
+      w.queue.push([c, enc, cb])
+      processWrites(this)
+      const ok = w.queue.length < w.highWaterMark
+      if (!ok) w.needDrain = true
+      return ok
+    },
+    end(chunk, encoding, cb) {
+      const w = this[kWrite]
+      if (typeof chunk === "function") [chunk, encoding, cb] = [undefined, undefined, chunk]
+      if (typeof encoding === "function") [encoding, cb] = [undefined, encoding]
+      if (chunk != null) this.write(chunk, encoding)
+      if (typeof cb === "function") {
+        if (w.finished) queueMicrotask(cb)
+        else this.once("finish", cb)
+      }
+      if (!w.ending) {
+        w.ending = true
+        this.writableEnded = true
+        this.writable = false
+        queueMicrotask(() => processWrites(this))
+      }
+      return this
+    },
+    cork() {
+      this[kWrite].corked++
+    },
+    uncork() {
+      const w = this[kWrite]
+      if (w.corked > 0) w.corked--
+      if (w.corked === 0) processWrites(this)
+    },
+    setDefaultEncoding(encoding) {
+      this[kWrite].defaultEncoding = encoding
+      return this
+    },
+    destroy(err) {
+      return destroyStream(this, err)
+    },
+  }
+  function processWrites(stream) {
+    const w = stream[kWrite]
+    if (w.writing || w.destroyed || w.corked > 0) return
+    const next = w.queue.shift()
+    if (!next) {
+      if (w.ending && !w.finished) finishWritable(stream)
+      else if (w.needDrain) {
+        w.needDrain = false
+        stream.emit("drain")
+      }
+      return
+    }
+    w.writing = true
+    const [chunk, enc, cb] = next
+    let called = false
+    const done = (err) => {
+      if (called) return
+      called = true
+      w.writing = false
+      if (err) {
+        if (typeof cb === "function") cb(err)
+        stream.destroy(err)
+        return
+      }
+      if (typeof cb === "function") cb(null)
+      queueMicrotask(() => processWrites(stream))
+    }
+    try {
+      stream._write(chunk, enc, done)
+    } catch (e) {
+      done(e)
+    }
+  }
+  function finishWritable(stream) {
+    const w = stream[kWrite]
+    w.finished = true
+    const fin = (err) => {
+      if (err) return stream.destroy(err)
+      stream.writableFinished = true
+      stream.emit("finish")
+      const r = stream[kRead]
+      if (w.autoDestroy && (!r || r.endEmitted)) stream.destroy()
+    }
+    if (typeof stream._final === "function") {
+      try {
+        stream._final(fin)
+      } catch (e) {
+        fin(e)
+      }
+    } else fin()
+  }
+
+  class Writable extends EventEmitter {
+    constructor(options = {}) {
+      super()
+      initWritable(this, options)
+      if (typeof options.construct === "function") queueMicrotask(() => options.construct.call(this, (e) => e && this.destroy(e)))
+    }
+    get writableObjectMode() {
+      return this[kWrite].objectMode
+    }
+    get writableHighWaterMark() {
+      return this[kWrite].highWaterMark
+    }
+    get writableLength() {
+      return this[kWrite].queue.length
+    }
+    get writableNeedDrain() {
+      return this[kWrite].needDrain
+    }
+    get writableCorked() {
+      return this[kWrite].corked
+    }
+  }
+  Object.assign(Writable.prototype, writableMethods)
+
+  class Duplex extends Readable {
+    constructor(options = {}) {
+      super({ ...options, read: options.read, objectMode: options.objectMode || options.readableObjectMode, highWaterMark: options.readableHighWaterMark ?? options.highWaterMark })
+      initWritable(this, options)
+      this.allowHalfOpen = options.allowHalfOpen !== false
+    }
+    get writableObjectMode() {
+      return this[kWrite].objectMode
+    }
+    get writableHighWaterMark() {
+      return this[kWrite].highWaterMark
+    }
+    get writableLength() {
+      return this[kWrite].queue.length
+    }
+    get writableNeedDrain() {
+      return this[kWrite].needDrain
+    }
+  }
+  for (const name of Object.keys(writableMethods)) if (name !== "destroy") Duplex.prototype[name] = writableMethods[name]
+
+  class Transform extends Duplex {
+    constructor(options = {}) {
+      super(options)
+      if (typeof options.transform === "function") this._transform = options.transform
+      if (typeof options.flush === "function") this._flush = options.flush
+    }
+    _transform(chunk, encoding, cb) {
+      cb(streamError("ERR_METHOD_NOT_IMPLEMENTED", "The _transform() method is not implemented"))
+    }
+    _write(chunk, encoding, cb) {
+      let called = false
+      try {
+        this._transform(chunk, encoding, (err, data) => {
+          if (called) return
+          called = true
+          if (err) return cb(err)
+          if (data != null) this.push(data)
+          cb()
+        })
+      } catch (e) {
+        cb(e)
+      }
+    }
+    _final(cb) {
+      const finish = (err, data) => {
+        if (err) return cb(err)
+        if (data != null) this.push(data)
+        this.push(null)
+        cb()
+      }
+      if (typeof this._flush === "function") {
+        try {
+          this._flush(finish)
+        } catch (e) {
+          cb(e)
+        }
+      } else finish()
+    }
+  }
+
+  class PassThrough extends Transform {
+    _transform(chunk, encoding, cb) {
+      cb(null, chunk)
+    }
+  }
+
+  function finished(stream, options, cb) {
+    if (typeof options === "function") [options, cb] = [{}, options]
+    let done = false
+    const settle = (err) => {
+      if (done) return
+      done = true
+      cleanup()
+      cb(err)
+    }
+    const onEnd = () => settle()
+    const onError = (e) => settle(e)
+    const onClose = () => {
+      if (stream[kRead] && !stream[kRead].endEmitted && !stream[kRead].destroyed) return settle(streamError("ERR_STREAM_PREMATURE_CLOSE", "Premature close"))
+      if (stream[kWrite] && !stream[kWrite].finished) return settle(streamError("ERR_STREAM_PREMATURE_CLOSE", "Premature close"))
+      settle()
+    }
+    const cleanup = () => {
+      if (typeof stream.off !== "function") return
+      stream.off("end", onEnd)
+      stream.off("finish", onEnd)
+      stream.off("error", onError)
+      stream.off("close", onClose)
+    }
+    if (typeof stream.on !== "function") {
+      queueMicrotask(() => settle())
+      return cleanup
+    }
+    const readable = stream[kRead] !== undefined || typeof stream.read === "function" || stream.readable === true
+    const writable = stream[kWrite] !== undefined || typeof stream.write === "function"
+    if (readable && (!writable || options?.writable === false)) stream.on("end", onEnd)
+    else stream.on("finish", onEnd)
+    if (readable && writable && options?.writable !== false && options?.readable !== false) {
+      let ended = false
+      let finishedW = false
+      stream.off("finish", onEnd)
+      stream.on("end", () => {
+        ended = true
+        if (finishedW) settle()
+      })
+      stream.on("finish", () => {
+        finishedW = true
+        if (ended) settle()
+      })
+    }
+    stream.on("error", onError)
+    stream.on("close", onClose)
+    return cleanup
+  }
+
+  function pipeline(...args) {
+    const cb = typeof args[args.length - 1] === "function" ? args.pop() : null
+    const streams = args.flat()
+    if (streams.length < 2) throw streamError("ERR_MISSING_ARGS", "The streams argument must contain at least two streams")
+    let settled = false
+    const settle = (err) => {
+      if (settled) return
+      settled = true
+      if (err) for (const s of streams) if (typeof s.destroy === "function" && !s.destroyed) s.destroy(err)
+      if (cb) cb(err ?? undefined, streams[streams.length - 1][kRead] ? undefined : undefined)
+    }
+    for (let i = 0; i < streams.length; i++) {
+      const s = streams[i]
+      if (typeof s.on === "function") s.on("error", settle)
+      if (i < streams.length - 1) {
+        const next = streams[i + 1]
+        if (typeof s.pipe === "function") s.pipe(next)
+        else if (s && typeof s[Symbol.asyncIterator] === "function") Readable.from(s).pipe(next)
+        else throw streamError("ERR_INVALID_ARG_TYPE", "pipeline expects streams")
+      }
+    }
+    finished(streams[streams.length - 1], (err) => settle(err))
+    return streams[streams.length - 1]
+  }
+
+  const streamPromises = {
+    pipeline: (...streams) =>
+      new Promise((resolve, reject) => {
+        pipeline(...streams, (err) => (err ? reject(err) : resolve()))
+      }),
+    finished: (stream, options) =>
+      new Promise((resolve, reject) => {
+        finished(stream, options ?? {}, (err) => (err ? reject(err) : resolve()))
+      }),
+  }
+
+  const stream = Object.assign(Readable, { Readable, Writable, Duplex, Transform, PassThrough, Stream: Readable, pipeline, finished, promises: streamPromises })
+  stream.isReadable = (s) => !!(s && s[kRead] && !s[kRead].destroyed && !s[kRead].endEmitted)
+  stream.isWritable = (s) => !!(s && s[kWrite] && !s[kWrite].destroyed && !s[kWrite].ending)
+  stream.isErrored = () => false
+  stream.addAbortSignal = (signal, s) => {
+    signal.addEventListener("abort", () => s.destroy(new DOMException("The operation was aborted", "AbortError")), { once: true })
+    return s
+  }
+
+  class IncomingResponse extends Readable {
+    constructor(res) {
+      super()
+      this.statusCode = res.status
+      this.statusMessage = res.statusText
+      this.headers = {}
+      this.rawHeaders = []
+      for (const [k, v] of res.headers) {
+        this.headers[k] = this.headers[k] === undefined ? v : `${this.headers[k]}, ${v}`
+        this.rawHeaders.push(k, v)
+      }
+      this.httpVersion = "1.1"
+      this.url = ""
+      this.complete = false
+      res.arrayBuffer().then(
+        (buf) => {
+          if (buf.byteLength) this.push(Buffer.from(buf))
+          this.complete = true
+          this.push(null)
+        },
+        (e) => this.destroy(e),
+      )
+    }
+    text() {
+      return this.toArray().then((parts) => Buffer.concat(parts.map((p) => (typeof p === "string" ? Buffer.from(p) : p))).toString("utf8"))
+    }
+    json() {
+      return this.text().then((t) => JSON.parse(t))
+    }
+  }
+
+  class ClientRequest extends Writable {
+    #url
+    #options
+    #chunks = []
+    #sent = false
+    #controller = new AbortController()
+    constructor(url, options, cb) {
+      super({ highWaterMark: Infinity })
+      if (typeof url === "string" || url instanceof URL) {
+        this.#url = new URL(String(url))
+        this.#options = options ?? {}
+      } else {
+        this.#options = url ?? {}
+        const o = this.#options
+        const protocol = o.protocol ?? "http:"
+        const host = o.hostname ?? o.host ?? "localhost"
+        const port = o.port ? `:${o.port}` : ""
+        this.#url = new URL(`${protocol}//${host}${port}${o.path ?? "/"}`)
+        cb = cb ?? options
+      }
+      if (typeof options === "function") cb = options
+      this.method = (this.#options.method ?? "GET").toUpperCase()
+      this.path = this.#url.pathname + this.#url.search
+      this.host = this.#url.hostname
+      this.protocol = this.#url.protocol
+      this.aborted = false
+      this.headersSent = false
+      this.reusedSocket = false
+      this.#headers = new Headers()
+      for (const [k, v] of Object.entries(this.#options.headers ?? {})) this.setHeader(k, v)
+      if (typeof cb === "function") this.once("response", cb)
+      if (this.#options.timeout) this.setTimeout(this.#options.timeout)
+      if (this.#options.signal) this.#options.signal.addEventListener("abort", () => this.destroy(this.#options.signal.reason), { once: true })
+    }
+    #headers
+    setHeader(name, value) {
+      this.#headers.delete(name)
+      for (const v of Array.isArray(value) ? value : [value]) this.#headers.append(name, String(v))
+      return this
+    }
+    getHeader(name) {
+      return this.#headers.get(name) ?? undefined
+    }
+    getHeaders() {
+      return Object.fromEntries(this.#headers)
+    }
+    removeHeader(name) {
+      this.#headers.delete(name)
+    }
+    hasHeader(name) {
+      return this.#headers.has(name)
+    }
+    setTimeout(ms, cb) {
+      if (typeof cb === "function") this.once("timeout", cb)
+      setTimeout(() => {
+        if (!this.#sent || this.destroyed) return
+        this.emit("timeout")
+      }, ms)
+      return this
+    }
+    setNoDelay() {}
+    setSocketKeepAlive() {}
+    flushHeaders() {}
+    abort() {
+      this.aborted = true
+      this.#controller.abort()
+      this.destroy()
+    }
+    _write(chunk, encoding, cb) {
+      this.#chunks.push(chunk)
+      cb()
+    }
+    _final(cb) {
+      this.#sent = true
+      this.headersSent = true
+      const body = this.#chunks.length ? Buffer.concat(this.#chunks) : undefined
+      fetch(this.#url, { method: this.method, headers: this.#headers, body, signal: this.#controller.signal, redirect: "follow" }).then(
+        (res) => {
+          const incoming = new IncomingResponse(res)
+          incoming.req = this
+          this.res = incoming
+          this.emit("response", incoming)
+          cb()
+        },
+        (e) => {
+          cb()
+          if (!this.destroyed) this.destroy(e)
+        },
+      )
+    }
+  }
+
+  function httpRequest(url, options, cb) {
+    return new ClientRequest(url, options, cb)
+  }
+  function httpGet(url, options, cb) {
+    const req = httpRequest(url, options, cb)
+    req.end()
+    return req
+  }
+  class Agent {
+    constructor(options = {}) {
+      this.options = options
+      this.maxSockets = options.maxSockets ?? Infinity
+      this.keepAlive = !!options.keepAlive
+    }
+    destroy() {}
+  }
+  const httpClient = { request: httpRequest, get: httpGet, Agent, globalAgent: new Agent(), ClientRequest, IncomingMessage: IncomingResponse, METHODS: ["ACL", "BIND", "CHECKOUT", "CONNECT", "COPY", "DELETE", "GET", "HEAD", "LINK", "LOCK", "M-SEARCH", "MERGE", "MKACTIVITY", "MKCALENDAR", "MKCOL", "MOVE", "NOTIFY", "OPTIONS", "PATCH", "POST", "PROPFIND", "PROPPATCH", "PURGE", "PUT", "QUERY", "REBIND", "REPORT", "SEARCH", "SOURCE", "SUBSCRIBE", "TRACE", "UNBIND", "UNLINK", "UNLOCK", "UNSUBSCRIBE"] }
+
   return {
     crypto,
+    stream,
+    streamPromises,
+    httpClient,
+    StringDecoder,
+    querystring,
+    tty,
+    PerformanceObserver,
     Buffer,
     EventEmitter,
     fs,
@@ -1396,7 +2275,33 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 }
             }
             "os" | "child_process" => vm.import_builtin(name)?,
-            "http" => vm.import_builtin("http")?,
+            "http" | "https" => {
+                let h = vm.import_builtin("http")?;
+                let n = load(vm)?;
+                let client = vm.get_prop(&n, "httpClient")?;
+                if let Value::Object(h) = &h {
+                    for (k, v) in vm.own_entries(&client) {
+                        if h.get_own(&k).is_none() {
+                            h.set_own(k, v);
+                        }
+                    }
+                    h.set_own("default", Value::Object(h.clone()));
+                }
+                h
+            }
+            "stream" => {
+                let n = load(vm)?;
+                let s = vm.get_prop(&n, "stream")?;
+                if let Value::Object(o) = &s {
+                    o.set_own("default", s.clone());
+                }
+                s
+            }
+            "stream/promises" => {
+                let n = load(vm)?;
+                let p = vm.get_prop(&n, "streamPromises")?;
+                with_default(vm, p)?
+            }
             "events" => {
                 let n = load(vm)?;
                 let ee = vm.get_prop(&n, "EventEmitter")?;
@@ -1489,6 +2394,30 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 let n = load(vm)?;
                 let c = vm.get_prop(&n, "crypto")?;
                 with_default(vm, c)?
+            }
+            "string_decoder" => {
+                let n = load(vm)?;
+                pick(vm, &n, &["StringDecoder"])?
+            }
+            "querystring" => {
+                let n = load(vm)?;
+                let q = vm.get_prop(&n, "querystring")?;
+                with_default(vm, q)?
+            }
+            "tty" => {
+                let n = load(vm)?;
+                let t = vm.get_prop(&n, "tty")?;
+                with_default(vm, t)?
+            }
+            "perf_hooks" => {
+                let n = load(vm)?;
+                let o = vm.new_object();
+                let p = vm.globals.get("performance").cloned().unwrap_or_default();
+                o.set_own("performance", p);
+                let po = vm.get_prop(&n, "PerformanceObserver")?;
+                o.set_own("PerformanceObserver", po);
+                o.set_own("default", Value::Object(o.clone()));
+                Value::Object(o)
             }
             "timers/promises" => {
                 let o = vm.new_object();

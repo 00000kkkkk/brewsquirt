@@ -31,6 +31,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `console.dir`, `console.dirxml` and `console.trace`.
 
 - `jsq -p "<code>"` evaluates a snippet and prints its value.
+- Globals `setImmediate`, `clearImmediate`, `global`, `navigator`, `reportError` and
+  `CustomEvent`; `performance.mark`, `measure`, `timeOrigin` and entry queries;
+  `process.availableParallelism`.
+- Node modules `string_decoder`, `querystring`, `tty` and `perf_hooks`.
+- `node:stream`: `Readable`, `Writable`, `Duplex`, `Transform`, `PassThrough`, `Readable.from`,
+  `pipeline`, `finished` and the `stream/promises` versions, with backpressure, `drain`,
+  object mode, encodings and async iteration.
+- `http.request`, `http.get`, `http.Agent` and the `node:https` module: client requests built
+  on `fetch` whose responses are readable streams with `statusCode`, `headers`, `setEncoding`
+  and `json()`.
 
 ### Changed
 

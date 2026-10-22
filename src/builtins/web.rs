@@ -7,8 +7,9 @@ use std::time::Duration;
 
 type R = Result<Value, Value>;
 
-pub const LAZY_GLOBALS: [&str; 11] = [
+pub const LAZY_GLOBALS: [&str; 12] = [
     "fetch",
+    "CustomEvent",
     "Headers",
     "Request",
     "Response",
@@ -83,6 +84,17 @@ const WEB_SRC: &str = r##"
     }
     get [STOP]() {
       return this.#stopped
+    }
+  }
+
+  class CustomEvent extends Event {
+    #detail
+    constructor(type, init = {}) {
+      super(type, init)
+      this.#detail = init?.detail ?? null
+    }
+    get detail() {
+      return this.#detail
     }
   }
 
@@ -1059,6 +1071,7 @@ const WEB_SRC: &str = r##"
     AbortController,
     AbortSignal,
     Event,
+    CustomEvent,
     EventTarget,
     DOMException,
     fetch,

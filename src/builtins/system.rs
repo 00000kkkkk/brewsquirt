@@ -42,6 +42,13 @@ pub fn install(vm: &mut Vm) {
     method(vm, &process, "hrtime", 1, hrtime);
     method(vm, &process, "uptime", 0, uptime);
     method(vm, &process, "memoryUsage", 0, memory_usage);
+    method(
+        vm,
+        &process,
+        "availableParallelism",
+        0,
+        available_parallelism,
+    );
     method(vm, &process, "on", 2, process_on);
     method(vm, &process, "once", 2, process_on);
     method(vm, &process, "off", 2, process_on);
@@ -289,6 +296,13 @@ fn assert(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         vm.write_err(&line);
     }
     Ok(Value::Undefined)
+}
+
+fn available_parallelism(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    let n = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    Ok(Value::Number(n as f64))
 }
 
 fn exit(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

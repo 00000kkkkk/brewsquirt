@@ -1236,6 +1236,90 @@ class SuppressedError extends Error {
 define(SuppressedError.prototype, "name", "SuppressedError")
 define(globalThis, "SuppressedError", SuppressedError)
 
+define(globalThis, "global", globalThis)
+define(globalThis, "setImmediate", named("setImmediate", function setImmediate(fn, ...args) {
+  return setTimeout(fn, 0, ...args)
+}))
+define(globalThis, "clearImmediate", named("clearImmediate", function clearImmediate(handle) {
+  clearTimeout(handle)
+}))
+define(globalThis, "reportError", named("reportError", function reportError(error) {
+  console.error("Uncaught", error)
+}))
+define(globalThis, "navigator", {
+  get hardwareConcurrency() {
+    return process.availableParallelism()
+  },
+  get language() {
+    return "en-US"
+  },
+  get languages() {
+    return ["en-US"]
+  },
+  get platform() {
+    return process.platform
+  },
+  get userAgent() {
+    return `JavaSquirt/${process.version.slice(1)}`
+  },
+  get onLine() {
+    return true
+  },
+})
+{
+  const entries = []
+  const marks = new Map()
+  const origin = Date.now() - performance.now()
+  define(performance, "timeOrigin", origin)
+  defineAll(performance, {
+    mark(name, options) {
+      const entry = { name: String(name), entryType: "mark", startTime: options?.startTime ?? performance.now(), duration: 0, detail: options?.detail ?? null }
+      marks.set(entry.name, entry)
+      entries.push(entry)
+      return entry
+    },
+    measure(name, start, end) {
+      let startTime = 0
+      let endTime = performance.now()
+      if (typeof start === "object" && start !== null) {
+        if (start.start !== undefined) startTime = typeof start.start === "string" ? marks.get(start.start)?.startTime ?? 0 : start.start
+        if (start.end !== undefined) endTime = typeof start.end === "string" ? marks.get(start.end)?.startTime ?? endTime : start.end
+        if (start.duration !== undefined) endTime = startTime + start.duration
+      } else {
+        if (start !== undefined) startTime = marks.get(String(start))?.startTime ?? 0
+        if (end !== undefined) endTime = marks.get(String(end))?.startTime ?? endTime
+      }
+      const entry = { name: String(name), entryType: "measure", startTime, duration: endTime - startTime, detail: null }
+      entries.push(entry)
+      return entry
+    },
+    clearMarks(name) {
+      if (name === undefined) marks.clear()
+      else marks.delete(String(name))
+      const keep = entries.filter((e) => e.entryType !== "mark" || (name !== undefined && e.name !== String(name)))
+      entries.length = 0
+      entries.push(...keep)
+    },
+    clearMeasures(name) {
+      const keep = entries.filter((e) => e.entryType !== "measure" || (name !== undefined && e.name !== String(name)))
+      entries.length = 0
+      entries.push(...keep)
+    },
+    getEntries() {
+      return entries.slice()
+    },
+    getEntriesByName(name, type) {
+      return entries.filter((e) => e.name === String(name) && (type === undefined || e.entryType === type))
+    },
+    getEntriesByType(type) {
+      return entries.filter((e) => e.entryType === type)
+    },
+    toJSON() {
+      return { timeOrigin: origin }
+    },
+  })
+}
+
 {
   const timers = new Map()
   const counts = new Map()

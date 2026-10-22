@@ -1723,7 +1723,11 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:util`                    | `inspect`, `format`, `promisify`, `callbackify`, `inherits`, `types`, `isDeepStrictEqual` |
 | `node:url`                     | `URL`, `URLSearchParams`, `fileURLToPath`, `pathToFileURL`          |
 | `node:readline`, `node:readline/promises` | `createInterface` with `line` events, async iteration and `question` |
-| `node:http`                    | `createServer` and `STATUS_CODES`; requests have `on("data")`, `on("end")`, `setEncoding`, `pipe`, `text()` and `json()`, responses have `writeHead`, `setHeader`, `write`, `end` and `finish` events |
+| `node:string_decoder`          | `StringDecoder` that keeps incomplete UTF-8, UTF-16 and base64 sequences between chunks |
+| `node:querystring`             | `parse`, `stringify`, `escape`, `unescape`, `encode`, `decode`      |
+| `node:tty`, `node:perf_hooks`  | `isatty`; `performance` with `mark`, `measure` and entries, and a `PerformanceObserver` stub |
+| `node:stream`, `node:stream/promises` | `Readable` (with `Readable.from`, `read`, `push`, `pipe`, async iteration and `toArray`), `Writable`, `Duplex`, `Transform`, `PassThrough`, `pipeline` and `finished` in callback and promise forms |
+| `node:http`, `node:https`      | `request`, `get`, `Agent` and `ClientRequest` built on `fetch`, responses are readable streams with `statusCode` and `headers`; `createServer` and `STATUS_CODES`; requests have `on("data")`, `on("end")`, `setEncoding`, `pipe`, `text()` and `json()`, responses have `writeHead`, `setHeader`, `write`, `end` and `finish` events |
 | `node:crypto`                  | `createHash` and `createHmac` (md5, sha1, sha224, sha256, sha384, sha512), `hash`, `randomBytes`, `randomInt`, `randomUUID`, `getRandomValues`, `timingSafeEqual`, `webcrypto` and `subtle.digest` |
 | `node:timers`, `node:timers/promises` | Timers, and `setTimeout` as a promise                        |
 | `node:process`                 | `process`                                                           |
