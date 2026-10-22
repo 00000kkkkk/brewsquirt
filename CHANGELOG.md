@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   abbreviations and GMT offsets, `resolvedOptions().timeZone` reports the system zone, and
   `Intl.supportedValuesOf("timeZone")` lists the canonical zones.
 
+### Fixed
+
+- `Date.parse` accepts the slash-separated legacy formats V8 understands, such as
+  `7/1/2026, 9:00:00 PM`, `2026/07/01 21:00:00` and `12/31/99`, so `new Date(date.toLocaleString("en-US", { timeZone }))`
+  round-trips and the `dayjs` and `luxon` time zone plugins work.
+
 ## [1.3.0] - 2026-10-22
 
 ### Fixed

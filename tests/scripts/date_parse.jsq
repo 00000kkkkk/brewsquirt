@@ -1,0 +1,8 @@
+const same = (text, ...local) => new Date(text).getTime() === new Date(...local).getTime()
+console.log(same("7/1/2026, 9:00:00 PM", 2026, 6, 1, 21, 0, 0), same("7/1/2026 9:00:00 PM", 2026, 6, 1, 21, 0, 0), same("7/1/2026, 12:05:00 AM", 2026, 6, 1, 0, 5, 0))
+console.log(same("7/1/2026", 2026, 6, 1), same("2026/07/01 21:00:00", 2026, 6, 1, 21, 0, 0), same("12/31/99", 1999, 11, 31), same("1/2/03", 2003, 0, 2))
+console.log(same("July 1, 2026 21:00:00", 2026, 6, 1, 21, 0, 0), same("Jul 1, 2026, 9:00:00 PM", 2026, 6, 1, 21, 0, 0))
+console.log(new Date("7/1/2026, 9:00:00 PM GMT+0900").toISOString(), new Date("Wed, 01 Jul 2026 12:00:00 GMT").toISOString())
+console.log(isNaN(new Date("13/1/2026")), isNaN(new Date("7/32/2026")), isNaN(new Date("not a date")))
+const d = new Date(2026, 6, 1, 21, 0, 0)
+console.log(new Date(d.toLocaleString("en-US")).getTime() === d.getTime(), new Date(d.toString()).getTime() === d.getTime(), new Date(d.toUTCString()).getTime() === d.getTime())

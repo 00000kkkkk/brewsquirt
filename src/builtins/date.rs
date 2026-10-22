@@ -834,6 +834,31 @@ fn parse_loose(s: &str) -> Option<f64> {
                 continue;
             }
         }
+        if tok.contains('/') {
+            let parts: Vec<f64> = tok
+                .split('/')
+                .map(|p| p.parse::<f64>())
+                .collect::<Result<_, _>>()
+                .ok()?;
+            let (y, m, d) = match parts.as_slice() {
+                [a, b, c] if *a > 31.0 => (*a, *b, *c),
+                [a, b, c] => (*c, *a, *b),
+                _ => return None,
+            };
+            if !(1.0..=12.0).contains(&m) || !(1.0..=31.0).contains(&d) {
+                return None;
+            }
+            month = Some(m - 1.0);
+            numbers.push(d);
+            numbers.push(if y < 50.0 {
+                2000.0 + y
+            } else if y < 100.0 {
+                1900.0 + y
+            } else {
+                y
+            });
+            continue;
+        }
         if tok.contains(':') {
             let parts: Vec<f64> = tok
                 .split(':')
