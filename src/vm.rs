@@ -354,6 +354,7 @@ pub struct Vm {
     pub(crate) import_metas: FxHashMap<Rc<str>, Value>,
     pub rejection: bool,
     pub exiting: bool,
+    pub(crate) main_cjs_pending: bool,
     pub symbol_seq: u64,
     pub symbol_registry: FxHashMap<Rc<str>, Value>,
     pub symbol_iterator: Value,
@@ -473,6 +474,7 @@ impl Vm {
             stdin_handler: None,
             stdin_stopped: false,
             exiting: false,
+            main_cjs_pending: false,
         };
         crate::gc::configure_from_env();
         builtins::install(&mut vm);
@@ -895,6 +897,13 @@ impl Vm {
         };
         let name = path.display().to_string();
         let abs = module::canonical(path);
+        if module::is_commonjs(&abs) {
+            self.main_cjs_pending = true;
+            let key = abs.display().to_string();
+            let r = self.require_path(&abs, &key);
+            self.main_cjs_pending = false;
+            return r;
+        }
         let dir = abs.parent().map(Path::to_path_buf).unwrap_or_default();
         let proto = match self.compile(&src, &name, dir, Mode::Module) {
             Ok(p) => p,
@@ -1588,6 +1597,15 @@ impl Vm {
         module.set_own("paths", paths);
         cache.set_own(key.clone(), Value::Object(module.clone()));
         let require = self.globals.get("require").cloned().unwrap_or_default();
+        if std::mem::take(&mut self.main_cjs_pending) {
+            module.set_own("id", ".".into());
+            if let Value::Object(r) = &require {
+                r.set_own("main", Value::Object(module.clone()));
+            }
+            if let Some(Value::Object(p)) = self.globals.get("process").cloned() {
+                p.set_hidden("mainModule", Value::Object(module.clone()));
+            }
+        }
         let r = self.call_value(
             &wrapper,
             Value::Object(exports.clone()),

@@ -51,6 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Running a CommonJS `.js` file directly (`jsq app.js`) executed it twice, once as an ES module
+  and once as CommonJS while collecting its exports. The entry point now runs once through the
+  CommonJS loader, so `__dirname`, `__filename`, `module`, `exports` and
+  `require.main === module` work as in Node; entry files with `import`, `export` or top-level
+  `await` still run as ES modules.
 - `Number.prototype.toString(radix)` uses V8's digit generation, so `(0.5).toString(3)` and
   `(1e21).toString(36)` match Node exactly instead of printing extra digits.
 - `JSON.parse` reports V8's messages: `Unexpected end of JSON input`, `Unexpected token ']',

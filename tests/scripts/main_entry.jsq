@@ -1,0 +1,9 @@
+const { spawnSync } = require("node:child_process")
+const path = require("node:path")
+for (const file of ["main_cjs.js", "main_tla.js"]) {
+  const r = spawnSync(process.execPath, [path.join(import.meta.dirname, "fixtures", file)], { encoding: "utf8" })
+  console.log(r.stdout.trim())
+  if (r.stderr.trim()) console.log("stderr:", r.stderr.trim())
+}
+const viaRequire = require("./fixtures/main_cjs.js")
+console.log(viaRequire.value)
