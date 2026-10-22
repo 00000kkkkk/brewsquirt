@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -49,13 +49,82 @@ pub enum IoEvent {
         reply: Sender<HttpReply>,
     },
     Stdin(Option<Vec<u8>>),
+    Socket {
+        id: u64,
+        event: SocketEvent,
+    },
+    Accept {
+        server: u64,
+        id: u64,
+        local: SocketAddr,
+        remote: SocketAddr,
+        cmd: Sender<SocketCmd>,
+    },
+    Child {
+        id: u64,
+        event: ChildEvent,
+    },
+}
+
+pub enum SocketEvent {
+    Connected {
+        local: SocketAddr,
+        remote: SocketAddr,
+    },
+    Data(Vec<u8>),
+    End,
+    Error {
+        code: String,
+        message: String,
+    },
+    Closed,
+}
+
+pub enum SocketCmd {
+    Write(Vec<u8>),
+    End,
+    Destroy,
+}
+
+pub enum ChildEvent {
+    Stdout(Vec<u8>),
+    Stderr(Vec<u8>),
+    Exit {
+        code: Option<i32>,
+        signal: Option<String>,
+    },
+    Error(String),
+}
+
+pub enum ChildCmd {
+    Write(Vec<u8>),
+    EndStdin,
+    Kill,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum StdioMode {
+    Pipe,
+    Inherit,
+    Null,
+}
+
+pub struct ChildSpec {
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: Option<Vec<(String, String)>>,
+    pub shell: bool,
+    pub stdin: StdioMode,
+    pub stdout: StdioMode,
+    pub stderr: StdioMode,
 }
 
 pub struct Io {
     pub tx: Sender<IoEvent>,
     pub rx: Receiver<IoEvent>,
     pub pending: usize,
-    pub seq: u64,
+    pub ids: Arc<AtomicU64>,
 }
 
 impl Default for Io {
@@ -65,16 +134,508 @@ impl Default for Io {
             tx,
             rx,
             pending: 0,
-            seq: 0,
+            ids: Arc::new(AtomicU64::new(0)),
         }
     }
 }
 
 impl Io {
     pub fn next_id(&mut self) -> u64 {
-        self.seq += 1;
-        self.seq
+        self.ids.fetch_add(1, Ordering::SeqCst) + 1
     }
+}
+
+pub fn error_code(e: &std::io::Error) -> &'static str {
+    use std::io::ErrorKind::*;
+    match e.kind() {
+        ConnectionRefused => "ECONNREFUSED",
+        ConnectionReset => "ECONNRESET",
+        ConnectionAborted => "ECONNABORTED",
+        TimedOut => "ETIMEDOUT",
+        BrokenPipe => "EPIPE",
+        NotConnected => "ENOTCONN",
+        AddrInUse => "EADDRINUSE",
+        AddrNotAvailable => "EADDRNOTAVAIL",
+        HostUnreachable | NetworkUnreachable => "EHOSTUNREACH",
+        PermissionDenied => "EACCES",
+        _ => "EIO",
+    }
+}
+
+fn tls_config() -> Arc<rustls::ClientConfig> {
+    static CONFIG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let roots = rustls::RootCertStore {
+                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+            };
+            let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .expect("tls versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+            Arc::new(config)
+        })
+        .clone()
+}
+
+fn tls_wrap(
+    tcp: TcpStream,
+    servername: &str,
+) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, String> {
+    let name = rustls::pki_types::ServerName::try_from(servername.to_string())
+        .map_err(|e| format!("invalid server name {servername}: {e}"))?;
+    let conn = rustls::ClientConnection::new(tls_config(), name).map_err(|e| e.to_string())?;
+    let mut stream = rustls::StreamOwned::new(conn, tcp);
+    while stream.conn.is_handshaking() {
+        stream
+            .conn
+            .complete_io(&mut stream.sock)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(stream)
+}
+
+enum Flow {
+    Continue,
+    Stop,
+}
+
+fn socket_cmd<S: Write>(
+    cmd: SocketCmd,
+    tcp: &TcpStream,
+    stream: &mut S,
+    write_done: &mut bool,
+    read_done: bool,
+    id: u64,
+    tx: &Sender<IoEvent>,
+) -> Flow {
+    match cmd {
+        SocketCmd::Write(data) => {
+            if let Err(e) = stream.write_all(&data).and_then(|_| stream.flush()) {
+                let _ = tx.send(IoEvent::Socket {
+                    id,
+                    event: SocketEvent::Error {
+                        code: error_code(&e).to_string(),
+                        message: format!("write {}", error_code(&e)),
+                    },
+                });
+                return Flow::Stop;
+            }
+            Flow::Continue
+        }
+        SocketCmd::End => {
+            let _ = stream.flush();
+            let _ = tcp.shutdown(std::net::Shutdown::Write);
+            *write_done = true;
+            if read_done {
+                Flow::Stop
+            } else {
+                Flow::Continue
+            }
+        }
+        SocketCmd::Destroy => Flow::Stop,
+    }
+}
+
+fn socket_loop<S: Read + Write>(
+    tcp: TcpStream,
+    mut stream: S,
+    id: u64,
+    rx: Receiver<SocketCmd>,
+    tx: Sender<IoEvent>,
+) {
+    let mut buf = vec![0u8; 65536];
+    let mut read_done = false;
+    let mut write_done = false;
+    'outer: loop {
+        if read_done {
+            match rx.recv() {
+                Ok(cmd) => {
+                    if let Flow::Stop =
+                        socket_cmd(cmd, &tcp, &mut stream, &mut write_done, read_done, id, &tx)
+                    {
+                        break 'outer;
+                    }
+                    if write_done {
+                        break 'outer;
+                    }
+                    continue;
+                }
+                Err(_) => break 'outer,
+            }
+        }
+        loop {
+            match rx.try_recv() {
+                Ok(cmd) => {
+                    if let Flow::Stop =
+                        socket_cmd(cmd, &tcp, &mut stream, &mut write_done, read_done, id, &tx)
+                    {
+                        break 'outer;
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break 'outer,
+            }
+        }
+        match stream.read(&mut buf) {
+            Ok(0) => {
+                read_done = true;
+                let _ = tx.send(IoEvent::Socket {
+                    id,
+                    event: SocketEvent::End,
+                });
+                if write_done {
+                    break 'outer;
+                }
+            }
+            Ok(n) => {
+                let _ = tx.send(IoEvent::Socket {
+                    id,
+                    event: SocketEvent::Data(buf[..n].to_vec()),
+                });
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                ) => {}
+            Err(e) => {
+                if !matches!(
+                    e.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::UnexpectedEof
+                ) {
+                    let code = error_code(&e);
+                    let _ = tx.send(IoEvent::Socket {
+                        id,
+                        event: SocketEvent::Error {
+                            code: code.to_string(),
+                            message: format!("read {code}"),
+                        },
+                    });
+                } else if !read_done {
+                    let _ = tx.send(IoEvent::Socket {
+                        id,
+                        event: SocketEvent::End,
+                    });
+                }
+                break 'outer;
+            }
+        }
+    }
+    let _ = tcp.shutdown(std::net::Shutdown::Both);
+    let _ = tx.send(IoEvent::Socket {
+        id,
+        event: SocketEvent::Closed,
+    });
+}
+
+pub fn socket_connect(
+    id: u64,
+    host: String,
+    port: u16,
+    tls: Option<String>,
+    tx: Sender<IoEvent>,
+) -> Sender<SocketCmd> {
+    let (ctx, crx) = channel::<SocketCmd>();
+    std::thread::spawn(move || {
+        let fail = |code: &str, message: String| {
+            let _ = tx.send(IoEvent::Socket {
+                id,
+                event: SocketEvent::Error {
+                    code: code.to_string(),
+                    message,
+                },
+            });
+            let _ = tx.send(IoEvent::Socket {
+                id,
+                event: SocketEvent::Closed,
+            });
+        };
+        let addrs: Vec<SocketAddr> =
+            match std::net::ToSocketAddrs::to_socket_addrs(&(host.as_str(), port)) {
+                Ok(a) => a.collect(),
+                Err(_) => {
+                    fail("ENOTFOUND", format!("getaddrinfo ENOTFOUND {host}"));
+                    return;
+                }
+            };
+        if addrs.is_empty() {
+            fail("ENOTFOUND", format!("getaddrinfo ENOTFOUND {host}"));
+            return;
+        }
+        let mut stream = None;
+        let mut last: Option<std::io::Error> = None;
+        for a in &addrs {
+            match TcpStream::connect_timeout(a, Duration::from_secs(60)) {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(e) => last = Some(e),
+            }
+        }
+        let Some(stream) = stream else {
+            let e = last.unwrap_or_else(|| std::io::Error::other("connect failed"));
+            let code = error_code(&e);
+            fail(code, format!("connect {code} {host}:{port}"));
+            return;
+        };
+        let _ = stream.set_nodelay(true);
+        let (Ok(local), Ok(remote)) = (stream.local_addr(), stream.peer_addr()) else {
+            fail("EIO", "connect failed".to_string());
+            return;
+        };
+        let Ok(tcp) = stream.try_clone() else {
+            fail("EIO", "connect failed".to_string());
+            return;
+        };
+        match tls {
+            None => {
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
+                let _ = tx.send(IoEvent::Socket {
+                    id,
+                    event: SocketEvent::Connected { local, remote },
+                });
+                socket_loop(tcp, stream, id, crx, tx);
+            }
+            Some(servername) => match tls_wrap(stream, &servername) {
+                Ok(secure) => {
+                    let _ = secure
+                        .sock
+                        .set_read_timeout(Some(Duration::from_millis(20)));
+                    let _ = tx.send(IoEvent::Socket {
+                        id,
+                        event: SocketEvent::Connected { local, remote },
+                    });
+                    socket_loop(tcp, secure, id, crx, tx);
+                }
+                Err(message) => fail("ERR_TLS_HANDSHAKE", message),
+            },
+        }
+    });
+    ctx
+}
+
+pub fn socket_listen(
+    host: &str,
+    port: u16,
+    server: u64,
+    ids: Arc<AtomicU64>,
+    tx: Sender<IoEvent>,
+) -> std::io::Result<ServerHandle> {
+    let listener = TcpListener::bind((host, port))?;
+    let addr = listener.local_addr()?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            if flag.load(Ordering::SeqCst) {
+                break;
+            }
+            let Ok(stream) = conn else { continue };
+            let (Ok(local), Ok(remote)) = (stream.local_addr(), stream.peer_addr()) else {
+                continue;
+            };
+            let Ok(tcp) = stream.try_clone() else {
+                continue;
+            };
+            let _ = stream.set_nodelay(true);
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
+            let id = ids.fetch_add(1, Ordering::SeqCst) + 1;
+            let (ctx, crx) = channel::<SocketCmd>();
+            let tx2 = tx.clone();
+            let _ = tx.send(IoEvent::Accept {
+                server,
+                id,
+                local,
+                remote,
+                cmd: ctx,
+            });
+            std::thread::spawn(move || socket_loop(tcp, stream, id, crx, tx2));
+        }
+    });
+    Ok(ServerHandle { addr, stop })
+}
+
+#[cfg(windows)]
+fn shell_for(line: &str) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    let mut c = std::process::Command::new("cmd");
+    c.args(["/d", "/s", "/c"]);
+    c.raw_arg(format!("\"{line}\""));
+    c
+}
+
+#[cfg(not(windows))]
+fn shell_for(line: &str) -> std::process::Command {
+    let mut c = std::process::Command::new("sh");
+    c.arg("-c").arg(line);
+    c
+}
+
+fn stdio_for(mode: StdioMode) -> std::process::Stdio {
+    match mode {
+        StdioMode::Pipe => std::process::Stdio::piped(),
+        StdioMode::Inherit => std::process::Stdio::inherit(),
+        StdioMode::Null => std::process::Stdio::null(),
+    }
+}
+
+#[cfg(unix)]
+fn signal_name(status: &std::process::ExitStatus) -> Option<String> {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal().map(|s| {
+        match s {
+            1 => "SIGHUP",
+            2 => "SIGINT",
+            3 => "SIGQUIT",
+            6 => "SIGABRT",
+            9 => "SIGKILL",
+            13 => "SIGPIPE",
+            14 => "SIGALRM",
+            15 => "SIGTERM",
+            _ => "SIGTERM",
+        }
+        .to_string()
+    })
+}
+
+#[cfg(not(unix))]
+fn signal_name(_status: &std::process::ExitStatus) -> Option<String> {
+    None
+}
+
+pub fn child_spawn(
+    id: u64,
+    spec: ChildSpec,
+    tx: Sender<IoEvent>,
+) -> std::io::Result<(Sender<ChildCmd>, u32)> {
+    let mut cmd = if spec.shell {
+        let mut line = spec.program.clone();
+        for a in &spec.args {
+            line.push(' ');
+            line.push_str(a);
+        }
+        shell_for(&line)
+    } else {
+        let mut c = std::process::Command::new(&spec.program);
+        c.args(&spec.args);
+        c
+    };
+    if let Some(dir) = &spec.cwd {
+        cmd.current_dir(dir);
+    }
+    if let Some(env) = &spec.env {
+        cmd.env_clear();
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+    }
+    cmd.stdin(stdio_for(spec.stdin));
+    cmd.stdout(stdio_for(spec.stdout));
+    cmd.stderr(stdio_for(spec.stderr));
+    let mut child = cmd.spawn()?;
+    let pid = child.id();
+    let (ctx, crx) = channel::<ChildCmd>();
+    let killed = Arc::new(AtomicBool::new(false));
+    let mut stdin = child.stdin.take();
+    let kill_flag = killed.clone();
+    std::thread::spawn(move || {
+        while let Ok(cmd) = crx.recv() {
+            match cmd {
+                ChildCmd::Write(data) => {
+                    if let Some(s) = stdin.as_mut() {
+                        if s.write_all(&data).and_then(|_| s.flush()).is_err() {
+                            stdin = None;
+                        }
+                    }
+                }
+                ChildCmd::EndStdin => {
+                    stdin = None;
+                }
+                ChildCmd::Kill => {
+                    kill_flag.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+    });
+    if let Some(mut out) = child.stdout.take() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; 65536];
+            while let Ok(n) = out.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let _ = tx.send(IoEvent::Child {
+                    id,
+                    event: ChildEvent::Stdout(buf[..n].to_vec()),
+                });
+            }
+        });
+    }
+    if let Some(mut err) = child.stderr.take() {
+        let tx = tx.clone();
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; 65536];
+            while let Ok(n) = err.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let _ = tx.send(IoEvent::Child {
+                    id,
+                    event: ChildEvent::Stderr(buf[..n].to_vec()),
+                });
+            }
+        });
+    }
+    std::thread::spawn(move || {
+        let mut was_killed = false;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let code = status.code();
+                    let signal =
+                        signal_name(&status).or_else(|| was_killed.then(|| "SIGTERM".to_string()));
+                    let code = if signal.is_some() { None } else { code };
+                    let _ = tx.send(IoEvent::Child {
+                        id,
+                        event: ChildEvent::Exit { code, signal },
+                    });
+                    break;
+                }
+                Ok(None) => {
+                    if killed.load(Ordering::SeqCst) && !was_killed {
+                        was_killed = true;
+                        let _ = child.kill();
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => {
+                    let _ = tx.send(IoEvent::Child {
+                        id,
+                        event: ChildEvent::Error(e.to_string()),
+                    });
+                    let _ = tx.send(IoEvent::Child {
+                        id,
+                        event: ChildEvent::Exit {
+                            code: None,
+                            signal: None,
+                        },
+                    });
+                    break;
+                }
+            }
+        }
+    });
+    Ok((ctx, pid))
 }
 
 fn agent() -> &'static ureq::Agent {

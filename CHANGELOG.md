@@ -73,6 +73,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and scrypt functions exist but throw errors with `code`s so that packages such as
   `jsonwebtoken` fall back to HMAC.
 - `fs.realpath.native` and `fs.realpathSync.native`.
+- Real TCP sockets: `net.connect`/`net.createConnection` and `net.Socket` are duplex streams
+  over a socket thread with `connect`, `data`, `end`, `close`, `error`, `timeout` and `ready`
+  events, `setTimeout`, `ref`/`unref`, `address`, `bytesRead`/`bytesWritten`;
+  `net.createServer` accepts connections with `connection`, `listening` and `close` events,
+  `address`, `maxConnections` and `getConnections`; `tls.connect` opens TLS 1.2/1.3 client
+  connections verified against the Mozilla root store, with `secureConnect`.
+- Asynchronous `child_process`: `spawn` with piped or inherited stdio, `stdin`/`stdout`/`stderr`
+  streams, `spawn`, `exit` and `close` events and `kill`; `exec`, `execFile` (with `maxBuffer`,
+  `timeout`, `encoding` and `util.promisify` support) and `fork` (without IPC).
 - `TextDecoder` accepts `utf-16le`, `utf-16be`, `latin1`, `ascii`, `iso-8859-1` and
   `windows-1252` labels.
 - Import attributes: `import data from "./x.json" with { type: "json" }` and the legacy `assert`

@@ -1,0 +1,12 @@
+4 6 0
+listening event true
+address 127.0.0.1 IPv4 number
+states true true opening true true
+connected true 127.0.0.1 open
+server saw end 127.0.0.1
+client end "echo:hello echo:world" 21 11
+client close true closed
+connections null 0
+server closed false
+refused ECONNREFUSED connect true
+refused closed

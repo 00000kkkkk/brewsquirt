@@ -430,6 +430,7 @@ dependencies = [
  "num-integer",
  "num-traits",
  "rustc-hash",
+ "rustls",
  "serde",
  "serde_json",
  "sha1",
@@ -437,6 +438,7 @@ dependencies = [
  "unicode-ident",
  "unicode-normalization",
  "ureq",
+ "webpki-roots",
 ]
 
 [[package]]

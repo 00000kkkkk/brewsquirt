@@ -42,6 +42,8 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 unicode-ident = "1"
 unicode-normalization = "0.1"
 ureq = "3.4"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "1"
 
 [profile.release]
 lto = "fat"

@@ -6,6 +6,7 @@ mod extras;
 pub mod intl;
 pub mod intrinsics;
 pub(crate) mod json;
+pub mod netio;
 pub mod node;
 pub mod reflect;
 pub mod typed;

@@ -2895,6 +2895,15 @@ fn request_value(vm: &mut Vm, r: HttpRequest) -> Value {
 pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
     match ev {
         IoEvent::Stdin(chunk) => super::node::handle_stdin(vm, chunk)?,
+        IoEvent::Socket { id, event } => super::netio::handle_socket(vm, id, event)?,
+        IoEvent::Accept {
+            server,
+            id,
+            local,
+            remote,
+            cmd,
+        } => super::netio::handle_accept(vm, server, id, local, remote, cmd)?,
+        IoEvent::Child { id, event } => super::netio::handle_child(vm, id, event)?,
         IoEvent::Fetch { id, result } => {
             let Some(p) = vm.io_fetches.remove(&id) else {
                 return Ok(());

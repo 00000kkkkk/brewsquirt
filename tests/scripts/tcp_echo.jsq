@@ -1,0 +1,35 @@
+const net = require("node:net")
+const { Readable, Writable } = require("node:stream")
+console.log(net.isIP("127.0.0.1"), net.isIP("::1"), net.isIP("nope"))
+const server = net.createServer({ allowHalfOpen: false }, (sock) => {
+  sock.setEncoding("utf8")
+  sock.on("data", (d) => sock.write("echo:" + d))
+  sock.on("end", () => console.log("server saw end", sock.remoteAddress))
+})
+server.on("listening", () => console.log("listening event", server.listening))
+server.listen(0, "127.0.0.1", () => {
+  const { port, address, family } = server.address()
+  console.log("address", address, family, typeof port)
+  const client = net.createConnection({ port, host: "127.0.0.1" })
+  console.log("states", client.connecting, client.pending, client.readyState, client instanceof Readable, client instanceof Writable)
+  client.on("connect", () => console.log("connected", client.remotePort === port, client.localAddress, client.readyState))
+  client.on("ready", () => client.write("hello "))
+  let got = ""
+  client.on("data", (d) => {
+    got += d.toString()
+    if (got.length < 20) client.end(Buffer.from("world"))
+  })
+  client.on("end", () => console.log("client end", JSON.stringify(got), client.bytesRead, client.bytesWritten))
+  client.on("close", () => {
+    console.log("client close", client.destroyed, client.readyState)
+    server.getConnections((err, n) => {
+      console.log("connections", err, n)
+      server.close(() => {
+        console.log("server closed", server.listening)
+        const refused = net.connect(port, "127.0.0.1")
+        refused.on("error", (e) => console.log("refused", e.code, e.syscall, e.port === port))
+        refused.on("close", () => console.log("refused closed"))
+      })
+    })
+  })
+})

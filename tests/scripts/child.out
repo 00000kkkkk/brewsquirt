@@ -1,0 +1,12 @@
+true number null false
+spawned
+exit 3 null
+close 3 "got ping" "bye" 3
+exec null 42 ""
+execFile 2 1
+buffer true buffered
+promisified 'p1'
+rejected 5
+killed null SIGTERM true
+spawn error ENOENT spawn definitely-not-a-program-xyz
+bad close -2

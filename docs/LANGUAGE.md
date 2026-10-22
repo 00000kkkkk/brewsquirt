@@ -1457,6 +1457,22 @@ C:\data\y.txt
 Options: `cwd`, `env` (an object of variables added to the environment), `input` (text written
 to stdin) and, for `spawnSync`, `shell: true` to go through the shell.
 
+`node:child_process` adds the asynchronous API: `spawn(file, args?, options?)` returns a
+`ChildProcess` with `pid`, `stdin`, `stdout` and `stderr` streams (or `stdio: "inherit"` /
+`"ignore"`), `spawn`, `exit` (`code`, `signal`) and `close` events, `kill()`, `exitCode`,
+`signalCode` and `killed`; `exec(command, options?, callback)` runs through the shell and
+`execFile(file, args?, options?, callback)` without it, both collecting output with `encoding`,
+`maxBuffer` and `timeout` options and working with `util.promisify`; `fork(module, args?)`
+starts another `jsq` with inherited stdio (there is no IPC channel).
+
+```js
+const { spawn, exec } = require("node:child_process")
+const child = spawn(process.execPath, ["-p", "6 * 7"])
+child.stdout.on("data", (chunk) => console.log("out", chunk.toString().trim()))
+child.on("close", (code) => console.log("done", code))
+exec("git status --short", (err, stdout) => console.log(err ? err.code : stdout))
+```
+
 ```js
 import { execSync, spawnSync } from "squirt:child_process"
 
@@ -1803,7 +1819,8 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:async_hooks`             | `AsyncLocalStorage` whose store is visible to synchronous callees of `run` and `enterWith`, `AsyncResource`, `createHook` as a no-op |
 | `node:punycode`                | `encode`, `decode`, `toASCII`, `toUnicode`, `ucs2`                |
 | `node:http2`, `node:worker_threads`, `node:cluster`, `node:v8`, `node:inspector`, `node:diagnostics_channel`, `node:constants` | Load with their constants and classes so that packages importing them work; operations that need threads, HTTP/2 or the inspector throw `ENOTSUP` |
-| `node:net`, `node:tls`         | `isIP`, `isIPv4`, `isIPv6`, `SocketAddress`, `BlockList`; sockets and servers exist as classes but connecting throws `ENOTSUP` for now |
+| `node:net`                     | Real TCP: `connect`/`createConnection` return a `Socket` (a duplex stream with `connect`, `ready`, `data`, `end`, `close`, `error` and `timeout` events, `setTimeout`, `setEncoding`, `ref`/`unref`, `address`, `remoteAddress`/`remotePort`, `bytesRead`/`bytesWritten`); `createServer` listens with `connection`, `listening` and `close` events, `address`, `maxConnections`, `getConnections` and `closeAllConnections`; plus `isIP`, `isIPv4`, `isIPv6`, `SocketAddress`, `BlockList`. Unix domain sockets and IPC are not available |
+| `node:tls`                     | `connect` opens a TLS 1.2/1.3 connection verified against the bundled Mozilla root store and emits `secureConnect`; `TLSSocket` reports `encrypted`, `authorized`, `getProtocol` and `getCipher`. `createServer` is not available |
 | `node:zlib`                    | `gzip`, `gunzip`, `deflate`, `inflate`, `deflateRaw`, `inflateRaw` and `unzip` as sync, callback and `create*` stream forms, `crc32` and `constants`; no brotli |
 | `node:stream`, `node:stream/promises` | The legacy callable `Stream` constructor, `Readable` (with `Readable.from`, `read`, `push`, `pipe`, async iteration and `toArray`), `Writable`, `Duplex`, `Transform`, `PassThrough`, `_readableState`/`_writableState`, `pipeline` and `finished` in callback and promise forms. The stream classes are function constructors, so `Readable.call(this, options)` in a `util.inherits` subclass initialises the stream |
 | `node:http`, `node:https`      | `request`, `get`, `Agent` and `ClientRequest` built on `fetch`, responses are readable streams with `statusCode` and `headers`; `createServer` and `STATUS_CODES`; requests have `on("data")`, `on("end")`, `setEncoding`, `pipe`, `text()` and `json()`, responses have `writeHead`, `setHeader`, `write`, `end` and `finish` events |
@@ -2087,7 +2104,7 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
 
 - `URL.createObjectURL`, BYOB stream readers and `WebSocket`
 - Streaming bodies, WebSockets and HTTPS servers
-- TCP sockets in `node:net` and `node:tls`, `node:worker_threads`, and ciphers, key pairs and
+- TLS servers, Unix domain sockets, `node:worker_threads`, and ciphers, key pairs and
   signatures in `node:crypto`
 - `Intl` covers numbers, plural rules, lists, relative times, collation and segmentation in a
   handful of locales; dates know the month and weekday names, date orders and separators of

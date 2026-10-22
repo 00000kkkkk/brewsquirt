@@ -1044,8 +1044,10 @@ const NODE_SRC: &str = r##"
   assert.AssertionError = AssertionError
   assert.strict = assert
 
+  const kPromisifyCustom = Symbol.for("nodejs.util.promisify.custom")
   function promisify(fn) {
     if (typeof fn !== "function") throw new TypeError('The "original" argument must be of type function')
+    if (typeof fn[kPromisifyCustom] === "function") return fn[kPromisifyCustom]
     return function (...args) {
       return new Promise((resolve, reject) => {
         fn.call(this, ...args, (err, ...values) => {
@@ -1055,6 +1057,8 @@ const NODE_SRC: &str = r##"
       })
     }
   }
+
+  promisify.custom = kPromisifyCustom
 
   function callbackify(fn) {
     return function (...args) {
@@ -2366,6 +2370,13 @@ const NODE_SRC: &str = r##"
   }
   Object.defineProperties(Writable.prototype, writableGetters)
   Object.assign(Writable.prototype, writableMethods)
+  Object.defineProperty(Writable, Symbol.hasInstance, {
+    value(object) {
+      if (Function.prototype[Symbol.hasInstance].call(this, object)) return true
+      return this === Writable && object !== null && typeof object === "object" && object[kWrite] !== undefined
+    },
+    configurable: true,
+  })
 
   function Duplex(options) {
     options = options ?? {}
@@ -2850,94 +2861,301 @@ const NODE_SRC: &str = r##"
     isIPv6,
     isIP: (s) => (isIPv4(s) ? 4 : isIPv6(s) ? 6 : 0),
   }
-  class Socket extends EventEmitter {
+  const kSock = Symbol("socket")
+  const attachSocket = (sock, id) => {
+    const st = sock[kSock]
+    st.id = id
+    const handler = (kind, a, b, c, d) => {
+      switch (kind) {
+        case "connect": {
+          st.connected = true
+          sock.connecting = false
+          sock.pending = false
+          sock.localAddress = a
+          sock.localPort = b
+          sock.remoteAddress = c
+          sock.remotePort = d
+          sock.remoteFamily = isIPv6(c) ? "IPv6" : "IPv4"
+          sock.readyState = "open"
+          for (const [chunk, cb] of st.queued) {
+            native.netWrite(st.id, chunk)
+            cb?.()
+          }
+          st.queued = []
+          if (st.pendingEnd) native.netEnd(st.id)
+          touchTimeout(sock)
+          sock.emit("connect")
+          sock.emit("ready")
+          break
+        }
+        case "data":
+          sock.bytesRead += a.byteLength
+          touchTimeout(sock)
+          sock.push(Buffer.from(a.buffer, a.byteOffset, a.byteLength))
+          break
+        case "end":
+          sock.readyState = sock.writable ? "writeOnly" : "closed"
+          sock.push(null)
+          if (!sock.allowHalfOpen && !sock.writableEnded) sock.end()
+          break
+        case "error": {
+          const e = new Error(a)
+          e.code = b
+          e.syscall = a.split(" ")[0]
+          if (sock.remoteAddress) {
+            e.address = sock.remoteAddress
+            e.port = sock.remotePort
+          } else {
+            e.address = st.host
+            e.port = st.port
+          }
+          st.hadError = true
+          sock.connecting = false
+          sock.destroy(e)
+          break
+        }
+        case "close":
+          st.closed = true
+          clearTimeout(st.timer)
+          sock.readyState = "closed"
+          if (!sock.destroyed) sock.destroy()
+          break
+      }
+    }
+    native.netAttach(id, handler)
+    return handler
+  }
+  const touchTimeout = (sock) => {
+    const st = sock[kSock]
+    clearTimeout(st.timer)
+    if (st.timeout > 0) {
+      st.timer = setTimeout(() => sock.emit("timeout"), st.timeout)
+      if (typeof st.timer?.unref === "function") st.timer.unref()
+    }
+  }
+  class Socket extends Duplex {
     constructor(options = {}) {
-      super()
+      super({ ...options, allowHalfOpen: options.allowHalfOpen ?? false, objectMode: false })
+      this[kSock] = { id: null, connected: false, queued: [], pendingEnd: false, closed: false, hadError: false, timeout: 0, timer: null, host: undefined, port: undefined, tls: !!options[kTls], servername: options.servername }
       this.connecting = false
-      this.destroyed = false
-      this.readable = false
-      this.writable = false
+      this.pending = true
+      this.readyState = "closed"
+      this.bytesRead = 0
+      this.bytesWritten = 0
+      this.localAddress = undefined
+      this.localPort = undefined
       this.remoteAddress = undefined
       this.remotePort = undefined
+      this.remoteFamily = undefined
+      this.encrypted = !!options[kTls]
+      if (options[kSocketId] !== undefined) {
+        const st = this[kSock]
+        st.connected = true
+        this.pending = false
+        this.readyState = "open"
+        this.localAddress = options.localAddress
+        this.localPort = options.localPort
+        this.remoteAddress = options.remoteAddress
+        this.remotePort = options.remotePort
+        this.remoteFamily = isIPv6(options.remoteAddress) ? "IPv6" : "IPv4"
+        attachSocket(this, options[kSocketId])
+      }
     }
     connect(...args) {
       const cb = typeof args[args.length - 1] === "function" ? args.pop() : null
-      this.connecting = true
-      queueMicrotask(() => {
-        this.connecting = false
-        const e = new Error("net.Socket connections are not supported yet, use fetch or http.request")
+      let options = args[0]
+      if (typeof options !== "object" || options === null) {
+        options = { port: args[0], host: typeof args[1] === "string" ? args[1] : undefined }
+      }
+      const st = this[kSock]
+      if (options.path) {
+        const e = new Error("IPC sockets are not supported in this runtime")
         e.code = "ENOTSUP"
-        this.emit("error", e)
-        this.emit("close", true)
-      })
+        queueMicrotask(() => this.destroy(e))
+        return this
+      }
+      const port = Number(options.port)
+      const host = options.host ?? "localhost"
+      if (!Number.isInteger(port) || port < 0 || port > 65535) {
+        throw new RangeError(`The "options.port" property must be >= 0 and < 65536. Received ${options.port}`)
+      }
+      st.host = host
+      st.port = port
+      this.connecting = true
+      this.readyState = "opening"
       if (cb) this.once("connect", cb)
+      const servername = st.servername ?? options.servername ?? (isIPv4(host) || isIPv6(host) ? undefined : host)
+      const id = native.netConnect(host, port, st.tls, servername, null)
+      attachSocket(this, id)
+      if (options.timeout) this.setTimeout(options.timeout)
       return this
     }
-    setEncoding() {
-      return this
+    _read() {}
+    _write(chunk, encoding, cb) {
+      const st = this[kSock]
+      const bytes = typeof chunk === "string" ? Buffer.from(chunk, encoding) : chunk
+      this.bytesWritten += bytes.length
+      if (!st.connected) {
+        st.queued.push([bytes, cb])
+        return
+      }
+      if (st.closed) return cb(streamError("ERR_STREAM_DESTROYED", "Cannot call write after a stream was destroyed"))
+      native.netWrite(st.id, bytes)
+      touchTimeout(this)
+      cb()
     }
-    setKeepAlive() {
+    _final(cb) {
+      const st = this[kSock]
+      this.readyState = this.readable ? "readOnly" : "closed"
+      if (!st.connected) st.pendingEnd = true
+      else if (!st.closed) native.netEnd(st.id)
+      cb()
+    }
+    _destroy(err, cb) {
+      const st = this[kSock]
+      clearTimeout(st.timer)
+      if (st.id !== null && !st.closed) native.netDestroy(st.id)
+      this.readyState = "closed"
+      cb(err)
+    }
+    setTimeout(ms, cb) {
+      const st = this[kSock]
+      st.timeout = Number(ms) || 0
+      if (typeof cb === "function") {
+        if (st.timeout === 0) this.removeListener("timeout", cb)
+        else this.once("timeout", cb)
+      }
+      touchTimeout(this)
       return this
     }
     setNoDelay() {
       return this
     }
-    setTimeout(ms, cb) {
-      if (typeof cb === "function") this.once("timeout", cb)
+    setKeepAlive() {
       return this
     }
-    write(data, encoding, cb) {
-      if (typeof encoding === "function") cb = encoding
-      if (typeof cb === "function") queueMicrotask(() => cb(new Error("socket is not connected")))
-      return false
-    }
-    end() {
-      return this
-    }
-    destroy(err) {
-      if (this.destroyed) return this
-      this.destroyed = true
-      queueMicrotask(() => {
-        if (err) this.emit("error", err)
-        this.emit("close", !!err)
-      })
-      return this
+    setEncoding(encoding) {
+      return super.setEncoding(encoding)
     }
     ref() {
+      const st = this[kSock]
+      if (st.id !== null) native.netRef(st.id, true)
       return this
     }
     unref() {
+      const st = this[kSock]
+      if (st.id !== null) native.netRef(st.id, false)
       return this
     }
     address() {
-      return {}
+      if (this.localAddress === undefined) return {}
+      return { address: this.localAddress, family: isIPv6(this.localAddress) ? "IPv6" : "IPv4", port: this.localPort }
+    }
+    get bufferSize() {
+      return this.writableLength
+    }
+    get timeout() {
+      return this[kSock].timeout
+    }
+    resetAndDestroy() {
+      return this.destroy()
     }
   }
+  const kSocketId = Symbol("socketId")
+  const kTls = Symbol("tls")
   net.Socket = Socket
   net.Stream = Socket
-  net.createConnection = (...args) => new Socket().connect(...args)
+  net.createConnection = (...args) => {
+    const options = typeof args[0] === "object" && args[0] !== null ? args[0] : {}
+    return new Socket(options).connect(...args)
+  }
   net.connect = net.createConnection
   class NetServer extends EventEmitter {
     constructor(options, listener) {
       super()
-      if (typeof options === "function") listener = options
+      if (typeof options === "function") [options, listener] = [{}, options]
       if (typeof listener === "function") this.on("connection", listener)
+      this[kSock] = { id: null, address: null, connections: new Set(), closing: false, options: options ?? {} }
       this.listening = false
+      this.maxConnections = undefined
     }
-    listen() {
-      throw new Error("net.createServer is not supported yet, use http.createServer or serve")
-    }
-    close(cb) {
-      if (typeof cb === "function") queueMicrotask(cb)
+    listen(...args) {
+      const cb = typeof args[args.length - 1] === "function" ? args.pop() : null
+      let options = args[0]
+      if (typeof options !== "object" || options === null) {
+        options = { port: args[0], host: typeof args[1] === "string" ? args[1] : undefined }
+      }
+      const st = this[kSock]
+      if (st.id !== null) throw streamError("ERR_SERVER_ALREADY_LISTEN", "Listen method has been called more than once without closing.")
+      if (options.path) {
+        const e = new Error("IPC servers are not supported in this runtime")
+        e.code = "ENOTSUP"
+        queueMicrotask(() => this.emit("error", e))
+        return this
+      }
+      const port = options.port === undefined ? 0 : Number(options.port)
+      const host = options.host ?? (options.ipv6Only ? "::" : "0.0.0.0")
+      if (cb) this.once("listening", cb)
+      let result
+      try {
+        result = native.netListen(host, port, (id, localAddress, localPort, remoteAddress, remotePort) => {
+          if (this.maxConnections !== undefined && st.connections.size >= this.maxConnections) {
+            native.netDestroy(id)
+            this.emit("drop", { localAddress, localPort, remoteAddress, remotePort })
+            return
+          }
+          const sock = new Socket({ [kSocketId]: id, localAddress, localPort, remoteAddress, remotePort, allowHalfOpen: st.options.allowHalfOpen })
+          sock.server = this
+          st.connections.add(sock)
+          sock.once("close", () => {
+            st.connections.delete(sock)
+            if (st.closing && st.connections.size === 0) this.emit("close")
+          })
+          this.emit("connection", sock)
+        })
+      } catch (e) {
+        queueMicrotask(() => this.emit("error", e))
+        return this
+      }
+      st.id = result[0]
+      st.address = { address: result[2], family: isIPv6(result[2]) ? "IPv6" : "IPv4", port: result[1] }
+      this.listening = true
+      queueMicrotask(() => this.emit("listening"))
       return this
     }
+    close(cb) {
+      const st = this[kSock]
+      if (typeof cb === "function") {
+        if (st.id === null) queueMicrotask(() => cb(streamError("ERR_SERVER_NOT_RUNNING", "Server is not running.")))
+        else this.once("close", () => cb())
+      }
+      if (st.id !== null) {
+        native.netServerClose(st.id)
+        st.id = null
+        this.listening = false
+        st.closing = true
+        if (st.connections.size === 0) queueMicrotask(() => this.emit("close"))
+      }
+      return this
+    }
+    closeAllConnections() {
+      for (const s of this[kSock].connections) s.destroy()
+    }
+    closeIdleConnections() {}
     address() {
-      return null
+      return this[kSock].address
+    }
+    getConnections(cb) {
+      queueMicrotask(() => cb(null, this[kSock].connections.size))
     }
     ref() {
+      const st = this[kSock]
+      if (st.id !== null) native.netServerRef(st.id, true)
       return this
     }
     unref() {
+      const st = this[kSock]
+      if (st.id !== null) native.netServerRef(st.id, false)
       return this
     }
   }
@@ -2959,24 +3177,287 @@ const NODE_SRC: &str = r##"
       this.flowlabel = options.flowlabel ?? 0
     }
   }
+  net.getDefaultAutoSelectFamily = () => true
+  net.setDefaultAutoSelectFamily = () => {}
 
+  class TLSSocket extends Socket {
+    constructor(socket, options = {}) {
+      super({ ...options, [kTls]: true })
+      this.encrypted = true
+      this.authorized = true
+      this.authorizationError = null
+      this.alpnProtocol = false
+    }
+    getPeerCertificate() {
+      return {}
+    }
+    getCertificate() {
+      return {}
+    }
+    getProtocol() {
+      return "TLSv1.3"
+    }
+    getCipher() {
+      return { name: "TLS_AES_128_GCM_SHA256", standardName: "TLS_AES_128_GCM_SHA256", version: "TLSv1.3" }
+    }
+    getSession() {
+      return undefined
+    }
+    isSessionReused() {
+      return false
+    }
+    exportKeyingMaterial() {
+      throw unsupportedKeys()
+    }
+  }
   const tls = {
-    connect() {
-      throw new Error("tls.connect is not supported yet, use fetch or https.request")
+    connect(...args) {
+      const cb = typeof args[args.length - 1] === "function" ? args.pop() : null
+      let options
+      if (typeof args[0] === "object" && args[0] !== null) options = { ...args[0] }
+      else options = { port: args[0], host: typeof args[1] === "string" ? args[1] : undefined, ...(typeof args[1] === "object" ? args[1] : typeof args[2] === "object" ? args[2] : {}) }
+      const sock = new TLSSocket(null, options)
+      if (cb) sock.once("secureConnect", cb)
+      sock.once("connect", () => sock.emit("secureConnect"))
+      sock.connect(options)
+      return sock
     },
-    createSecureContext: () => ({}),
+    createSecureContext: () => ({ context: {} }),
     createServer() {
-      throw new Error("tls.createServer is not supported yet")
+      const e = new Error("tls.createServer is not supported in this runtime")
+      e.code = "ENOTSUP"
+      throw e
     },
     checkServerIdentity: () => undefined,
-    getCiphers: () => [],
+    getCiphers: () => ["tls_aes_128_gcm_sha256", "tls_aes_256_gcm_sha384", "tls_chacha20_poly1305_sha256"],
     rootCertificates: [],
     DEFAULT_MIN_VERSION: "TLSv1.2",
     DEFAULT_MAX_VERSION: "TLSv1.3",
     DEFAULT_ECDH_CURVE: "auto",
+    DEFAULT_CIPHERS: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256",
+    TLSSocket,
   }
-  tls.TLSSocket = class TLSSocket extends Socket {}
-  tls.Server = class TLSServer extends NetServer {}
+  tls.Server = class TLSServer extends NetServer {
+    listen() {
+      throw tls.createServer()
+    }
+  }
+
+  const kChild = Symbol("child")
+  class ChildProcess extends EventEmitter {
+    constructor() {
+      super()
+      this[kChild] = { id: null, stdoutDone: false, stderrDone: false, exited: false, exitArgs: null }
+      this.pid = undefined
+      this.exitCode = null
+      this.signalCode = null
+      this.killed = false
+      this.connected = false
+      this.spawnfile = undefined
+      this.spawnargs = []
+      this.stdin = null
+      this.stdout = null
+      this.stderr = null
+      this.stdio = [null, null, null]
+    }
+    kill(signal = "SIGTERM") {
+      const st = this[kChild]
+      if (st.id === null || st.exited) return false
+      this.killed = native.childKill(st.id)
+      return this.killed
+    }
+    ref() {
+      const st = this[kChild]
+      if (st.id !== null) native.childRef(st.id, true)
+      return this
+    }
+    unref() {
+      const st = this[kChild]
+      if (st.id !== null) native.childRef(st.id, false)
+      return this
+    }
+    send() {
+      const e = new Error("IPC channels are not supported in this runtime")
+      e.code = "ERR_IPC_CHANNEL_CLOSED"
+      throw e
+    }
+    disconnect() {}
+    [Symbol.dispose]() {
+      this.kill()
+    }
+  }
+  const normalizeStdio = (stdio) => {
+    if (stdio === undefined) return ["pipe", "pipe", "pipe"]
+    if (typeof stdio === "string") return [stdio, stdio, stdio]
+    return [0, 1, 2].map((i) => {
+      const v = stdio[i]
+      if (v === undefined || v === null || v === "pipe" || v === "overlapped") return "pipe"
+      if (v === "inherit" || v === process.stdin || v === process.stdout || v === process.stderr || v === i) return "inherit"
+      return "ignore"
+    })
+  }
+  function spawn(file, args, options) {
+    if (!Array.isArray(args)) [args, options] = [[], args]
+    options = options ?? {}
+    const child = new ChildProcess()
+    const st = child[kChild]
+    child.spawnfile = String(file)
+    child.spawnargs = [String(file), ...args.map(String)]
+    const stdio = normalizeStdio(options.stdio)
+    if (stdio[0] === "pipe") {
+      child.stdin = new Writable({
+        write(chunk, encoding, cb) {
+          if (st.id !== null && !st.exited) native.childWrite(st.id, typeof chunk === "string" ? Buffer.from(chunk, encoding) : chunk)
+          cb()
+        },
+        final(cb) {
+          if (st.id !== null) native.childEndStdin(st.id)
+          cb()
+        },
+      })
+    } else st.stdinDone = true
+    if (stdio[1] === "pipe") child.stdout = new Readable({ read() {} })
+    else st.stdoutDone = true
+    if (stdio[2] === "pipe") child.stderr = new Readable({ read() {} })
+    else st.stderrDone = true
+    child.stdio = [child.stdin, child.stdout, child.stderr]
+    const maybeClose = () => {
+      if (st.exited && st.stdoutDone && st.stderrDone && !st.closed) {
+        st.closed = true
+        child.emit("close", ...st.exitArgs)
+      }
+    }
+    if (child.stdout) child.stdout.once("end", () => { st.stdoutDone = true; maybeClose() })
+    if (child.stderr) child.stderr.once("end", () => { st.stderrDone = true; maybeClose() })
+    const handler = (kind, a, b) => {
+      switch (kind) {
+        case "stdout":
+          child.stdout?.push(Buffer.from(a.buffer, a.byteOffset, a.byteLength))
+          break
+        case "stderr":
+          child.stderr?.push(Buffer.from(a.buffer, a.byteOffset, a.byteLength))
+          break
+        case "error": {
+          const e = new Error(a)
+          child.emit("error", e)
+          break
+        }
+        case "exit":
+          st.exited = true
+          child.exitCode = a
+          child.signalCode = b
+          st.exitArgs = [a, b]
+          if (child.stdin && !child.stdin.writableEnded) child.stdin.destroy()
+          child.emit("exit", a, b)
+          child.stdout?.push(null)
+          child.stderr?.push(null)
+          queueMicrotask(maybeClose)
+          break
+      }
+    }
+    try {
+      const shell = options.shell === true || typeof options.shell === "string"
+      const [id, pid] = native.childSpawn(String(file), args.map(String), { cwd: options.cwd, env: options.env, shell, stdio }, handler)
+      st.id = id
+      child.pid = pid
+      queueMicrotask(() => child.emit("spawn"))
+    } catch (e) {
+      st.exited = true
+      st.exitArgs = [-2, null]
+      queueMicrotask(() => {
+        child.emit("error", e)
+        child.stdout?.push(null)
+        child.stderr?.push(null)
+        maybeClose()
+      })
+    }
+    return child
+  }
+  const collect = (child, options, cb, command) => {
+    const encoding = options.encoding === undefined ? "utf8" : options.encoding
+    const maxBuffer = options.maxBuffer ?? 1024 * 1024
+    const out = []
+    const err = []
+    let total = 0
+    let killedForSize = false
+    const decode = (chunks) => {
+      const buf = Buffer.concat(chunks)
+      return encoding === "buffer" || encoding === null ? buf : buf.toString(encoding)
+    }
+    const guard = (chunk) => {
+      total += chunk.length
+      if (total > maxBuffer && !killedForSize) {
+        killedForSize = true
+        child.kill()
+      }
+    }
+    child.stdout?.on("data", (c) => { out.push(c); guard(c) })
+    child.stderr?.on("data", (c) => { err.push(c); guard(c) })
+    let timer = null
+    if (options.timeout > 0) timer = setTimeout(() => child.kill(options.killSignal ?? "SIGTERM"), options.timeout)
+    let done = false
+    child.once("error", (e) => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      e.cmd = command
+      cb(e, decode(out), decode(err))
+    })
+    child.once("close", (code, signal) => {
+      if (done) return
+      done = true
+      clearTimeout(timer)
+      const stdout = decode(out)
+      const stderr = decode(err)
+      if (code === 0 && !killedForSize) return cb(null, stdout, stderr)
+      let e
+      if (killedForSize) {
+        e = new RangeError("stdout maxBuffer length exceeded")
+        e.code = "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+      } else {
+        e = new Error(`Command failed: ${command}\n${typeof stderr === "string" ? stderr : stderr.toString()}`)
+        e.code = code
+        e.killed = child.killed
+        e.signal = signal
+        e.cmd = command
+      }
+      cb(e, stdout, stderr)
+    })
+    return child
+  }
+  function exec(command, options, cb) {
+    if (typeof options === "function") [options, cb] = [{}, options]
+    options = options ?? {}
+    const child = spawn(String(command), [], { ...options, shell: options.shell ?? true })
+    return collect(child, options, cb ?? (() => {}), String(command))
+  }
+  function execFile(file, args, options, cb) {
+    if (typeof args === "function") [args, options, cb] = [[], {}, args]
+    else if (!Array.isArray(args)) [args, options, cb] = [[], args, options]
+    if (typeof options === "function") [options, cb] = [{}, options]
+    options = options ?? {}
+    const child = spawn(String(file), args, options)
+    return collect(child, options, cb ?? (() => {}), [file, ...args].join(" "))
+  }
+  const promisified = (fn) => (...args) =>
+    new Promise((resolve, reject) => {
+      fn(...args, (err, stdout, stderr) => {
+        if (err) {
+          err.stdout = stdout
+          err.stderr = stderr
+          reject(err)
+        } else resolve({ stdout, stderr })
+      })
+    })
+  exec[Symbol.for("nodejs.util.promisify.custom")] = promisified(exec)
+  execFile[Symbol.for("nodejs.util.promisify.custom")] = promisified(execFile)
+  function fork(modulePath, args, options) {
+    if (!Array.isArray(args)) [args, options] = [[], args]
+    options = options ?? {}
+    const execArgv = options.execArgv ?? []
+    return spawn(options.execPath ?? process.execPath, [...execArgv, String(modulePath), ...args], { ...options, stdio: options.stdio ?? "inherit" })
+  }
+  const childProcessAsync = { spawn, exec, execFile, fork, ChildProcess }
 
   const dnsLookupAll = (host) => native.dnsLookup(host).map(([address, family]) => ({ address, family }))
   const dnsPromises = {
@@ -3964,6 +4445,7 @@ const NODE_SRC: &str = r##"
     wasi,
     makeNodeTest,
     urlLegacy,
+    childProcessAsync,
     EventEmitter,
     fs,
     promises,
@@ -3997,7 +4479,21 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let n = vm.new_object();
-    let natives: [(&str, u32, crate::object::NativeFn); 31] = [
+    let natives: [(&str, u32, crate::object::NativeFn); 45] = [
+        ("netConnect", 5, super::netio::net_connect),
+        ("netAttach", 2, super::netio::net_attach),
+        ("netWrite", 2, super::netio::net_write),
+        ("netEnd", 1, super::netio::net_end),
+        ("netDestroy", 1, super::netio::net_destroy),
+        ("netRef", 2, super::netio::net_ref),
+        ("netListen", 3, super::netio::net_listen),
+        ("netServerClose", 1, super::netio::net_server_close),
+        ("netServerRef", 2, super::netio::net_server_ref),
+        ("childSpawn", 4, super::netio::child_spawn),
+        ("childWrite", 2, super::netio::child_write),
+        ("childEndStdin", 1, super::netio::child_end_stdin),
+        ("childKill", 1, super::netio::child_kill),
+        ("childRef", 2, super::netio::child_ref),
         ("read", 1, fs_read),
         ("write", 3, fs_write),
         ("exists", 1, fs_exists),
@@ -4086,7 +4582,20 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                     _ => p,
                 }
             }
-            "os" | "child_process" => vm.import_builtin(name)?,
+            "os" => vm.import_builtin("os")?,
+            "child_process" => {
+                let cp = vm.import_builtin("child_process")?;
+                let n = load(vm)?;
+                let extra = vm.get_prop(&n, "childProcessAsync")?;
+                if let Value::Object(o) = &cp {
+                    for (k, v) in vm.own_entries(&extra) {
+                        if o.get_own(&k).is_none() {
+                            o.set_own(k, v);
+                        }
+                    }
+                }
+                cp
+            }
             "http" | "https" => {
                 let h = vm.import_builtin("http")?;
                 let n = load(vm)?;

@@ -1,0 +1,41 @@
+const { spawn, exec, execFile, ChildProcess } = require("node:child_process")
+const util = require("node:util")
+const jsq = process.execPath
+const once = (emitter, event) => new Promise((resolve) => emitter.once(event, (...args) => resolve(args)))
+
+async function main() {
+  const child = spawn(jsq, ["-e", "process.stdin.on('data', d => process.stdout.write('got ' + d)); process.stdin.on('end', () => { console.error('bye'); process.exit(3) })"])
+  console.log(child instanceof ChildProcess, typeof child.pid, child.exitCode, child.killed)
+  let out = ""
+  let err = ""
+  child.stdout.on("data", (d) => (out += d))
+  child.stderr.on("data", (d) => (err += d))
+  await once(child, "spawn")
+  console.log("spawned")
+  child.stdin.write("ping")
+  child.stdin.end()
+  const [exitCode, signal] = await once(child, "exit")
+  console.log("exit", exitCode, signal)
+  const [closeCode] = await once(child, "close")
+  console.log("close", closeCode, JSON.stringify(out), JSON.stringify(err.trim()), child.exitCode)
+
+  await new Promise((resolve) => exec(`"${jsq}" -p "6*7"`, (e, stdout, stderr) => (console.log("exec", e, stdout.trim(), JSON.stringify(stderr)), resolve())))
+  await new Promise((resolve) => execFile(jsq, ["-e", "console.log(process.argv.length); process.exit(2)"], (e, stdout) => (console.log("execFile", e && e.code, stdout.trim()), resolve())))
+  await new Promise((resolve) => execFile(jsq, ["-e", "console.log('buffered')"], { encoding: "buffer" }, (e, stdout) => (console.log("buffer", Buffer.isBuffer(stdout), stdout.toString().trim()), resolve())))
+  const r = await util.promisify(exec)(`"${jsq}" -p "'p'+1"`)
+  console.log("promisified", r.stdout.trim())
+  await util.promisify(execFile)(jsq, ["-e", "process.exit(5)"]).catch((e) => console.log("rejected", e.code))
+
+  const long = spawn(jsq, ["-e", "setInterval(() => {}, 1000)"])
+  await once(long, "spawn")
+  setTimeout(() => long.kill(), 50)
+  const [code, sig] = await once(long, "exit")
+  console.log("killed", code, sig, long.killed)
+
+  const bad = spawn("definitely-not-a-program-xyz")
+  const [e] = await once(bad, "error")
+  console.log("spawn error", e.code, e.syscall)
+  const [badCode] = await once(bad, "close")
+  console.log("bad close", badCode)
+}
+main()
