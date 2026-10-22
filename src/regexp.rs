@@ -84,6 +84,8 @@ fn octal_at(chars: &[char], i: usize) -> (u32, usize) {
     (v, n.max(1))
 }
 
+const EMOJI_SEQUENCE: &str = r"(?:[\x{1F1E6}-\x{1F1FF}]{2}|[0-9#*]\x{FE0F}?\x{20E3}|\x{1F3F4}[\x{E0020}-\x{E007E}]+\x{E007F}|(?:\p{Emoji_Presentation}|\p{Emoji}\x{FE0F})[\x{1F3FB}-\x{1F3FF}]?(?:\x{200D}(?:\p{Emoji_Presentation}|\p{Emoji}\x{FE0F}?)[\x{1F3FB}-\x{1F3FF}]?)*)";
+
 pub fn translate(source: &str, flags: &str) -> Result<String, String> {
     let chars: Vec<char> = source.chars().collect();
     let (groups, has_names) = crate::regexp_syntax::prescan(&chars, flags.contains('v'));
@@ -244,11 +246,40 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                             Some(("General_Category" | "gc", v)) => format!("gc={v}"),
                             _ => body,
                         };
-                        out.push('\\');
-                        out.push(e);
-                        out.push('{');
-                        out.push_str(&body);
-                        out.push('}');
+                        let emoji_sequence = matches!(
+                            body.as_str(),
+                            "RGI_Emoji"
+                                | "Basic_Emoji"
+                                | "Emoji_Keycap_Sequence"
+                                | "RGI_Emoji_Flag_Sequence"
+                                | "RGI_Emoji_Modifier_Sequence"
+                                | "RGI_Emoji_Tag_Sequence"
+                                | "RGI_Emoji_ZWJ_Sequence"
+                        );
+                        if emoji_sequence && e == 'p' {
+                            out.push_str(if in_class {
+                                "\\p{Emoji_Presentation}"
+                            } else {
+                                EMOJI_SEQUENCE
+                            });
+                        } else if matches!(
+                            body.as_str(),
+                            "Cs" | "Surrogate" | "gc=Cs" | "gc=Surrogate"
+                        ) {
+                            if e == 'p' {
+                                out.push_str("[\\x{E000}&&\\x{E001}]");
+                            } else if in_class {
+                                out.push_str("\\x00-\\x{10FFFF}");
+                            } else {
+                                out.push_str("[\\x00-\\x{10FFFF}]");
+                            }
+                        } else {
+                            out.push('\\');
+                            out.push(e);
+                            out.push('{');
+                            out.push_str(&body);
+                            out.push('}');
+                        }
                         i += 1 + end;
                     }
                     'p' | 'P' => {

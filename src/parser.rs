@@ -3022,6 +3022,11 @@ impl Parser {
                         if self.reserved(&n) {
                             return Err(self.error(format!("Unexpected reserved word '{n}'")));
                         }
+                        if &*n == "arguments" {
+                            if let Some(top) = self.args_used.last_mut() {
+                                *top = true;
+                            }
+                        }
                         props.push(PropDef::Shorthand(n));
                     }
                 } else {

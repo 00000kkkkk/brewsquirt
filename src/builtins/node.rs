@@ -712,6 +712,8 @@ const NODE_SRC: &str = r##"
   }
   promises.constants = fs.constants
   fs.promises = promises
+  fs.realpath.native = fs.realpath
+  fs.realpathSync.native = fs.realpathSync
 
   function fileURLToPath(url) {
     const u = typeof url === "string" ? new URL(url) : url
@@ -1367,7 +1369,39 @@ const NODE_SRC: &str = r##"
     if (!(key in hashSizes)) throw new Error(`Digest method not supported: ${alg}`)
     return key
   }
+  const kKeyBytes = Symbol("keyBytes")
+  const unsupportedKeys = () => {
+    const e = new Error("Asymmetric keys are not supported in this runtime")
+    e.code = "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM"
+    return e
+  }
+  class KeyObject {
+    #bytes
+    constructor(type, bytes) {
+      if (type !== "secret") throw unsupportedKeys()
+      this.type = type
+      this.#bytes = bytes
+      this.symmetricKeySize = bytes.length
+    }
+    get [kKeyBytes]() {
+      return this.#bytes
+    }
+    export(options) {
+      if (options?.format === "jwk") return { kty: "oct", k: Buffer.from(this.#bytes).toString("base64url") }
+      return Buffer.from(this.#bytes)
+    }
+    equals(other) {
+      return other instanceof KeyObject && other.type === this.type && Buffer.from(this.#bytes).equals(other.export())
+    }
+    toCryptoKey() {
+      throw unsupportedKeys()
+    }
+    static from() {
+      throw unsupportedKeys()
+    }
+  }
   function cryptoBytes(data, encoding, what = "data") {
+    if (data instanceof KeyObject) return data[kKeyBytes]
     if (typeof data === "string") return Buffer.from(data, encoding)
     if (data instanceof ArrayBuffer) return new Uint8Array(data)
     if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
@@ -1483,6 +1517,95 @@ const NODE_SRC: &str = r##"
     },
     Hash,
     Hmac,
+    KeyObject,
+    createSecretKey: (key, encoding) => new KeyObject("secret", cryptoBytes(key, encoding, "key")),
+    createPrivateKey: () => {
+      throw unsupportedKeys()
+    },
+    createPublicKey: () => {
+      throw unsupportedKeys()
+    },
+    generateKeySync: (type, options) => new KeyObject("secret", native.randomBytes(Math.ceil((options?.length ?? 256) / 8))),
+    generateKey(type, options, cb) {
+      let key
+      let err = null
+      try {
+        key = crypto.generateKeySync(type, options)
+      } catch (e) {
+        err = e
+      }
+      queueMicrotask(() => cb(err, key))
+    },
+    generateKeyPairSync: () => {
+      throw unsupportedKeys()
+    },
+    generateKeyPair(type, options, cb) {
+      const done = typeof options === "function" ? options : cb
+      queueMicrotask(() => done(unsupportedKeys()))
+    },
+    createSign: () => {
+      throw unsupportedKeys()
+    },
+    createVerify: () => {
+      throw unsupportedKeys()
+    },
+    sign: () => {
+      throw unsupportedKeys()
+    },
+    verify: () => {
+      throw unsupportedKeys()
+    },
+    createCipheriv: () => {
+      const e = new Error("Ciphers are not supported in this runtime")
+      e.code = "ERR_CRYPTO_UNKNOWN_CIPHER"
+      throw e
+    },
+    createDecipheriv: () => {
+      const e = new Error("Ciphers are not supported in this runtime")
+      e.code = "ERR_CRYPTO_UNKNOWN_CIPHER"
+      throw e
+    },
+    getCiphers: () => [],
+    getCurves: () => [],
+    pbkdf2Sync(password, salt, iterations, keylen, digest) {
+      const out = native.pbkdf2(hashName(digest), cryptoBytes(password, undefined, "password"), cryptoBytes(salt, undefined, "salt"), iterations, keylen)
+      return Buffer.from(out.buffer, out.byteOffset, out.byteLength)
+    },
+    pbkdf2(password, salt, iterations, keylen, digest, cb) {
+      let out
+      let err = null
+      try {
+        out = crypto.pbkdf2Sync(password, salt, iterations, keylen, digest)
+      } catch (e) {
+        err = e
+      }
+      queueMicrotask(() => cb(err, out))
+    },
+    hkdfSync(digest, ikm, salt, info, keylen) {
+      const out = native.hkdf(hashName(digest), cryptoBytes(ikm, undefined, "ikm"), cryptoBytes(salt, undefined, "salt"), cryptoBytes(info, undefined, "info"), keylen)
+      return out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength)
+    },
+    hkdf(digest, ikm, salt, info, keylen, cb) {
+      let out
+      let err = null
+      try {
+        out = crypto.hkdfSync(digest, ikm, salt, info, keylen)
+      } catch (e) {
+        err = e
+      }
+      queueMicrotask(() => cb(err, out))
+    },
+    scryptSync: () => {
+      const e = new Error("scrypt is not supported in this runtime")
+      e.code = "ERR_CRYPTO_SCRYPT_NOT_SUPPORTED"
+      throw e
+    },
+    scrypt: (password, salt, keylen, options, cb) => {
+      const done = typeof options === "function" ? options : cb
+      const e = new Error("scrypt is not supported in this runtime")
+      e.code = "ERR_CRYPTO_SCRYPT_NOT_SUPPORTED"
+      queueMicrotask(() => done(e))
+    },
     webcrypto: globalThis.crypto,
     subtle: globalThis.crypto.subtle,
     constants: {},
@@ -1656,7 +1779,35 @@ const NODE_SRC: &str = r##"
     throw streamError("ERR_INVALID_ARG_TYPE", `The "chunk" argument must be of type string or an instance of Buffer or Uint8Array. Received ${typeof chunk}`)
   }
 
-  class Readable extends EventEmitter {
+  function Stream(options) {
+    EventEmitter.call(this, options)
+  }
+  Object.setPrototypeOf(Stream.prototype, EventEmitter.prototype)
+  Object.setPrototypeOf(Stream, EventEmitter)
+  Stream.prototype.pipe = function pipe(dest, options) {
+    const source = this
+    source.on("data", (chunk) => {
+      if (dest.writable === false || typeof dest.write !== "function") return
+      if (dest.write(chunk) === false && typeof source.pause === "function") source.pause()
+    })
+    if (typeof dest.on === "function") {
+      dest.on("drain", () => {
+        if (typeof source.resume === "function") source.resume()
+      })
+    }
+    if (!options || options.end !== false) {
+      source.on("end", () => {
+        if (typeof dest.end === "function") dest.end()
+      })
+    }
+    if (typeof dest.emit === "function") dest.emit("pipe", source)
+    return dest
+  }
+
+  class Readable extends Stream {
+    get _readableState() {
+      return this[kRead]
+    }
     constructor(options = {}) {
       super()
       this[kRead] = {
@@ -2033,7 +2184,10 @@ const NODE_SRC: &str = r##"
     } else fin()
   }
 
-  class Writable extends EventEmitter {
+  class Writable extends Stream {
+    get _writableState() {
+      return this[kWrite]
+    }
     constructor(options = {}) {
       super()
       initWritable(this, options)
@@ -2058,6 +2212,9 @@ const NODE_SRC: &str = r##"
   Object.assign(Writable.prototype, writableMethods)
 
   class Duplex extends Readable {
+    get _writableState() {
+      return this[kWrite]
+    }
     constructor(options = {}) {
       super({ ...options, read: options.read, objectMode: options.objectMode || options.readableObjectMode, highWaterMark: options.readableHighWaterMark ?? options.highWaterMark })
       initWritable(this, options)
@@ -2209,7 +2366,7 @@ const NODE_SRC: &str = r##"
       }),
   }
 
-  const stream = Object.assign(Readable, { Readable, Writable, Duplex, Transform, PassThrough, Stream: Readable, pipeline, finished, promises: streamPromises })
+  const stream = Object.assign(Stream, { Readable, Writable, Duplex, Transform, PassThrough, Stream, pipeline, finished, promises: streamPromises })
   stream.isReadable = (s) => !!(s && s[kRead] && !s[kRead].destroyed && !s[kRead].endEmitted)
   stream.isWritable = (s) => !!(s && s[kWrite] && !s[kWrite].destroyed && !s[kWrite].ending)
   stream.isErrored = () => false
@@ -3567,7 +3724,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let n = vm.new_object();
-    let natives: [(&str, u32, crate::object::NativeFn); 29] = [
+    let natives: [(&str, u32, crate::object::NativeFn); 31] = [
         ("read", 1, fs_read),
         ("write", 3, fs_write),
         ("exists", 1, fs_exists),
@@ -3593,6 +3750,8 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         ("digest", 2, crypto_digest),
         ("hmac", 3, crypto_hmac),
         ("randomBytes", 1, crypto_random_bytes),
+        ("pbkdf2", 5, crypto_pbkdf2),
+        ("hkdf", 5, crypto_hkdf),
         ("zlib", 3, zlib_op),
         ("crc32", 2, zlib_crc32),
         ("format", 0, native_format),
@@ -4000,6 +4159,89 @@ fn crypto_hmac(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             format!("Digest method not supported: {alg}"),
         )),
     }
+}
+
+fn crypto_pbkdf2(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let alg = vm.to_string(&arg(args, 0))?;
+    let password = crypto_input(vm, &arg(args, 1), "password")?;
+    let salt = crypto_input(vm, &arg(args, 2), "salt")?;
+    let iterations = vm.to_number(&arg(args, 3))?;
+    let keylen = vm.to_number(&arg(args, 4))?;
+    if !(1.0..=2147483647.0).contains(&iterations) || iterations.fract() != 0.0 {
+        return Err(vm.range_error(
+            "The value of \"iterations\" is out of range. It must be >= 1 && <= 2147483647",
+        ));
+    }
+    if !(0.0..=2147483647.0).contains(&keylen) || keylen.fract() != 0.0 {
+        return Err(vm.range_error(
+            "The value of \"keylen\" is out of range. It must be >= 0 && <= 2147483647",
+        ));
+    }
+    let keylen = keylen as usize;
+    let iterations = iterations as usize;
+    let mut out = Vec::with_capacity(keylen);
+    let mut block: u32 = 1;
+    while out.len() < keylen {
+        let mut msg = salt.clone();
+        msg.extend_from_slice(&block.to_be_bytes());
+        let Some(mut u) = super::binary::hmac_bytes(&alg, &password, &msg) else {
+            return Err(vm.make_error(
+                ErrorKind::Error,
+                format!("Digest method not supported: {alg}"),
+            ));
+        };
+        let mut t = u.clone();
+        for _ in 1..iterations {
+            u = super::binary::hmac_bytes(&alg, &password, &u).unwrap_or_default();
+            for (a, b) in t.iter_mut().zip(&u) {
+                *a ^= b;
+            }
+        }
+        out.extend_from_slice(&t);
+        block += 1;
+    }
+    out.truncate(keylen);
+    Ok(super::typed::new_uint8(vm, out))
+}
+
+fn crypto_hkdf(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let alg = vm.to_string(&arg(args, 0))?;
+    let ikm = crypto_input(vm, &arg(args, 1), "ikm")?;
+    let salt = crypto_input(vm, &arg(args, 2), "salt")?;
+    let info = crypto_input(vm, &arg(args, 3), "info")?;
+    let keylen = vm.to_number(&arg(args, 4))?;
+    let Some(hash_len) = super::binary::digest_bytes(&alg, b"").map(|d| d.len()) else {
+        return Err(vm.make_error(
+            ErrorKind::Error,
+            format!("Digest method not supported: {alg}"),
+        ));
+    };
+    if !(keylen >= 0.0 && keylen <= (255 * hash_len) as f64 && keylen.fract() == 0.0) {
+        return Err(vm.range_error(format!(
+            "The value of \"keylen\" is out of range. It must be >= 0 && <= {}",
+            255 * hash_len
+        )));
+    }
+    let keylen = keylen as usize;
+    let salt = if salt.is_empty() {
+        vec![0u8; hash_len]
+    } else {
+        salt
+    };
+    let prk = super::binary::hmac_bytes(&alg, &salt, &ikm).unwrap_or_default();
+    let mut out = Vec::with_capacity(keylen);
+    let mut previous: Vec<u8> = Vec::new();
+    let mut counter: u8 = 1;
+    while out.len() < keylen {
+        let mut msg = previous.clone();
+        msg.extend_from_slice(&info);
+        msg.push(counter);
+        previous = super::binary::hmac_bytes(&alg, &prk, &msg).unwrap_or_default();
+        out.extend_from_slice(&previous);
+        counter = counter.wrapping_add(1);
+    }
+    out.truncate(keylen);
+    Ok(super::typed::new_uint8(vm, out))
 }
 
 fn crypto_random_bytes(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

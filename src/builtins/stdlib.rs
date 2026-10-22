@@ -437,6 +437,476 @@ fn os_cpus(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
     Ok(vm.new_array(list))
 }
 
+#[cfg(windows)]
+mod osinfo {
+    #[repr(C)]
+    struct OsVersionInfoW {
+        size: u32,
+        major: u32,
+        minor: u32,
+        build: u32,
+        platform_id: u32,
+        csd: [u16; 128],
+    }
+
+    #[repr(C)]
+    struct MemoryStatusEx {
+        length: u32,
+        memory_load: u32,
+        total_phys: u64,
+        avail_phys: u64,
+        total_page: u64,
+        avail_page: u64,
+        total_virtual: u64,
+        avail_virtual: u64,
+        avail_extended: u64,
+    }
+
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn RtlGetVersion(info: *mut OsVersionInfoW) -> i32;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(buf: *mut MemoryStatusEx) -> i32;
+        fn GetTickCount64() -> u64;
+    }
+
+    fn version_parts() -> (u32, u32, u32) {
+        let mut info = OsVersionInfoW {
+            size: std::mem::size_of::<OsVersionInfoW>() as u32,
+            major: 0,
+            minor: 0,
+            build: 0,
+            platform_id: 0,
+            csd: [0; 128],
+        };
+        let status = unsafe { RtlGetVersion(&mut info) };
+        if status == 0 {
+            (info.major, info.minor, info.build)
+        } else {
+            (10, 0, 0)
+        }
+    }
+
+    pub fn release() -> String {
+        let (major, minor, build) = version_parts();
+        format!("{major}.{minor}.{build}")
+    }
+
+    pub fn version() -> String {
+        let (_, _, build) = version_parts();
+        format!("Windows {}", if build >= 22000 { "11" } else { "10" })
+    }
+
+    pub fn memory() -> (u64, u64) {
+        let mut status = MemoryStatusEx {
+            length: std::mem::size_of::<MemoryStatusEx>() as u32,
+            memory_load: 0,
+            total_phys: 0,
+            avail_phys: 0,
+            total_page: 0,
+            avail_page: 0,
+            total_virtual: 0,
+            avail_virtual: 0,
+            avail_extended: 0,
+        };
+        if unsafe { GlobalMemoryStatusEx(&mut status) } != 0 {
+            (status.total_phys, status.avail_phys)
+        } else {
+            (0, 0)
+        }
+    }
+
+    pub fn uptime() -> f64 {
+        unsafe { GetTickCount64() as f64 / 1000.0 }
+    }
+
+    pub fn loadavg() -> [f64; 3] {
+        [0.0; 3]
+    }
+
+    pub fn ids() -> (f64, f64) {
+        (-1.0, -1.0)
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod osinfo {
+    fn read(path: &str) -> String {
+        std::fs::read_to_string(path).unwrap_or_default()
+    }
+
+    pub fn release() -> String {
+        let s = read("/proc/sys/kernel/osrelease");
+        let s = s.trim();
+        if s.is_empty() {
+            "0.0.0".to_string()
+        } else {
+            s.to_string()
+        }
+    }
+
+    pub fn version() -> String {
+        let s = read("/proc/version");
+        match s.find("#") {
+            Some(i) => s[i..].trim().to_string(),
+            None => s.trim().to_string(),
+        }
+    }
+
+    pub fn memory() -> (u64, u64) {
+        let mut total = 0;
+        let mut avail = 0;
+        for line in read("/proc/meminfo").lines() {
+            let kb = |l: &str| {
+                l.split_whitespace()
+                    .nth(1)
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0)
+                    * 1024
+            };
+            if line.starts_with("MemTotal:") {
+                total = kb(line);
+            } else if line.starts_with("MemAvailable:") {
+                avail = kb(line);
+            }
+        }
+        (total, avail)
+    }
+
+    pub fn uptime() -> f64 {
+        read("/proc/uptime")
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+    }
+
+    pub fn loadavg() -> [f64; 3] {
+        let s = read("/proc/loadavg");
+        let mut parts = s
+            .split_whitespace()
+            .map(|v| v.parse::<f64>().unwrap_or(0.0));
+        [
+            parts.next().unwrap_or(0.0),
+            parts.next().unwrap_or(0.0),
+            parts.next().unwrap_or(0.0),
+        ]
+    }
+
+    pub fn ids() -> (f64, f64) {
+        unsafe extern "C" {
+            fn getuid() -> u32;
+            fn getgid() -> u32;
+        }
+        unsafe { (getuid() as f64, getgid() as f64) }
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+mod osinfo {
+    fn cmd(program: &str, args: &[&str]) -> String {
+        std::process::Command::new(program)
+            .args(args)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default()
+    }
+
+    pub fn release() -> String {
+        let s = cmd("uname", &["-r"]);
+        if s.is_empty() { "0.0.0".to_string() } else { s }
+    }
+
+    pub fn version() -> String {
+        cmd("uname", &["-v"])
+    }
+
+    pub fn memory() -> (u64, u64) {
+        let total = cmd("sysctl", &["-n", "hw.memsize"])
+            .parse::<u64>()
+            .unwrap_or(0);
+        let page = cmd("sysctl", &["-n", "hw.pagesize"])
+            .parse::<u64>()
+            .unwrap_or(4096);
+        let mut free = 0;
+        for line in cmd("vm_stat", &[]).lines() {
+            if line.starts_with("Pages free:") || line.starts_with("Pages inactive:") {
+                let n = line
+                    .split(':')
+                    .nth(1)
+                    .map(|v| v.trim().trim_end_matches('.'))
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+                free += n * page;
+            }
+        }
+        (total, free)
+    }
+
+    pub fn uptime() -> f64 {
+        let s = cmd("sysctl", &["-n", "kern.boottime"]);
+        let boot = s
+            .split("sec = ")
+            .nth(1)
+            .and_then(|v| v.split([',', ' ']).next())
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        if boot > 0.0 { now - boot } else { 0.0 }
+    }
+
+    pub fn loadavg() -> [f64; 3] {
+        let s = cmd("sysctl", &["-n", "vm.loadavg"]);
+        let mut parts = s
+            .trim_matches(|c| c == '{' || c == '}' || c == ' ')
+            .split_whitespace()
+            .map(|v| v.parse::<f64>().unwrap_or(0.0));
+        [
+            parts.next().unwrap_or(0.0),
+            parts.next().unwrap_or(0.0),
+            parts.next().unwrap_or(0.0),
+        ]
+    }
+
+    pub fn ids() -> (f64, f64) {
+        unsafe extern "C" {
+            fn getuid() -> u32;
+            fn getgid() -> u32;
+        }
+        unsafe { (getuid() as f64, getgid() as f64) }
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
+mod osinfo {
+    pub fn release() -> String {
+        "0.0.0".to_string()
+    }
+    pub fn version() -> String {
+        String::new()
+    }
+    pub fn memory() -> (u64, u64) {
+        (0, 0)
+    }
+    pub fn uptime() -> f64 {
+        0.0
+    }
+    pub fn loadavg() -> [f64; 3] {
+        [0.0; 3]
+    }
+    pub fn ids() -> (f64, f64) {
+        (-1.0, -1.0)
+    }
+}
+
+pub fn os_ids() -> (f64, f64) {
+    osinfo::ids()
+}
+
+fn os_release(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    Ok(osinfo::release().into())
+}
+
+fn os_version(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    Ok(osinfo::version().into())
+}
+
+fn os_machine(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    Ok(match std::env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => "arm64",
+        "x86" => "i686",
+        other => other,
+    }
+    .into())
+}
+
+fn os_user_info(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    let (uid, gid) = osinfo::ids();
+    let username = ["USER", "USERNAME", "LOGNAME"]
+        .iter()
+        .find_map(|k| std::env::var(k).ok())
+        .unwrap_or_default();
+    let o = vm.new_object();
+    o.set_own("uid", Value::Number(uid));
+    o.set_own("gid", Value::Number(gid));
+    o.set_own("username", username.into());
+    o.set_own("homedir", home_dir().into());
+    o.set_own(
+        "shell",
+        match std::env::var("SHELL") {
+            Ok(s) if !cfg!(windows) => s.into(),
+            _ => Value::Null,
+        },
+    );
+    Ok(Value::Object(o))
+}
+
+fn os_loadavg(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    let list = osinfo::loadavg()
+        .iter()
+        .map(|v| Value::Number(*v))
+        .collect();
+    Ok(vm.new_array(list))
+}
+
+fn os_uptime(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    Ok(Value::Number(osinfo::uptime().floor()))
+}
+
+fn os_totalmem(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    Ok(Value::Number(osinfo::memory().0 as f64))
+}
+
+fn os_freemem(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    Ok(Value::Number(osinfo::memory().1 as f64))
+}
+
+fn os_endianness(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    Ok(if cfg!(target_endian = "little") {
+        "LE"
+    } else {
+        "BE"
+    }
+    .into())
+}
+
+fn os_get_priority(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    Ok(Value::Number(0.0))
+}
+
+fn os_set_priority(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    Ok(Value::Undefined)
+}
+
+fn os_network_interfaces(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    let entry = vm.new_object();
+    entry.set_own("address", "127.0.0.1".into());
+    entry.set_own("netmask", "255.0.0.0".into());
+    entry.set_own("family", "IPv4".into());
+    entry.set_own("mac", "00:00:00:00:00:00".into());
+    entry.set_own("internal", Value::Bool(true));
+    entry.set_own("cidr", "127.0.0.1/8".into());
+    let list = vm.new_array(vec![Value::Object(entry)]);
+    let o = vm.new_object();
+    let name = if cfg!(windows) {
+        "Loopback Pseudo-Interface 1"
+    } else {
+        "lo"
+    };
+    o.set_own(name, list);
+    Ok(Value::Object(o))
+}
+
+fn numbers(vm: &mut Vm, pairs: &[(&str, f64)]) -> Value {
+    let o = vm.new_object();
+    for (k, v) in pairs {
+        o.set_own(*k, Value::Number(*v));
+    }
+    Value::Object(o)
+}
+
+fn os_constants(vm: &mut Vm) -> Value {
+    let signals = numbers(
+        vm,
+        &[
+            ("SIGHUP", 1.0),
+            ("SIGINT", 2.0),
+            ("SIGQUIT", 3.0),
+            ("SIGILL", 4.0),
+            ("SIGTRAP", 5.0),
+            ("SIGABRT", 6.0),
+            ("SIGIOT", 6.0),
+            ("SIGBUS", 7.0),
+            ("SIGFPE", 8.0),
+            ("SIGKILL", 9.0),
+            ("SIGUSR1", 10.0),
+            ("SIGSEGV", 11.0),
+            ("SIGUSR2", 12.0),
+            ("SIGPIPE", 13.0),
+            ("SIGALRM", 14.0),
+            ("SIGTERM", 15.0),
+            ("SIGCHLD", 17.0),
+            ("SIGCONT", 18.0),
+            ("SIGSTOP", 19.0),
+            ("SIGTSTP", 20.0),
+            ("SIGTTIN", 21.0),
+            ("SIGTTOU", 22.0),
+            ("SIGURG", 23.0),
+            ("SIGXCPU", 24.0),
+            ("SIGXFSZ", 25.0),
+            ("SIGVTALRM", 26.0),
+            ("SIGPROF", 27.0),
+            ("SIGWINCH", 28.0),
+            ("SIGIO", 29.0),
+            ("SIGSYS", 31.0),
+        ],
+    );
+    let errno = numbers(
+        vm,
+        &[
+            ("E2BIG", 7.0),
+            ("EACCES", 13.0),
+            ("EADDRINUSE", 98.0),
+            ("EADDRNOTAVAIL", 99.0),
+            ("EAGAIN", 11.0),
+            ("EBADF", 9.0),
+            ("EBUSY", 16.0),
+            ("ECONNABORTED", 103.0),
+            ("ECONNREFUSED", 111.0),
+            ("ECONNRESET", 104.0),
+            ("EEXIST", 17.0),
+            ("EINTR", 4.0),
+            ("EINVAL", 22.0),
+            ("EIO", 5.0),
+            ("EISDIR", 21.0),
+            ("EMFILE", 24.0),
+            ("ENOENT", 2.0),
+            ("ENOMEM", 12.0),
+            ("ENOSPC", 28.0),
+            ("ENOTDIR", 20.0),
+            ("ENOTEMPTY", 39.0),
+            ("ENOTSUP", 95.0),
+            ("EPERM", 1.0),
+            ("EPIPE", 32.0),
+            ("ETIMEDOUT", 110.0),
+        ],
+    );
+    let priority = numbers(
+        vm,
+        &[
+            ("PRIORITY_LOW", 19.0),
+            ("PRIORITY_BELOW_NORMAL", 10.0),
+            ("PRIORITY_NORMAL", 0.0),
+            ("PRIORITY_ABOVE_NORMAL", -7.0),
+            ("PRIORITY_HIGH", -14.0),
+            ("PRIORITY_HIGHEST", -20.0),
+        ],
+    );
+    let dlopen = numbers(
+        vm,
+        &[
+            ("RTLD_LAZY", 1.0),
+            ("RTLD_NOW", 2.0),
+            ("RTLD_GLOBAL", 256.0),
+            ("RTLD_LOCAL", 0.0),
+        ],
+    );
+    let o = vm.new_object();
+    o.set_own("UV_UDP_REUSEADDR", Value::Number(4.0));
+    o.set_own("signals", signals);
+    o.set_own("errno", errno);
+    o.set_own("priority", priority);
+    o.set_own("dlopen", dlopen);
+    Value::Object(o)
+}
+
 pub fn os_module(vm: &mut Vm) -> Value {
     let o = vm.new_object();
     let fns: &[(&str, crate::object::NativeFn)] = &[
@@ -448,11 +918,34 @@ pub fn os_module(vm: &mut Vm) -> Value {
         ("hostname", os_hostname),
         ("availableParallelism", os_parallelism),
         ("cpus", os_cpus),
+        ("release", os_release),
+        ("version", os_version),
+        ("machine", os_machine),
+        ("userInfo", os_user_info),
+        ("loadavg", os_loadavg),
+        ("uptime", os_uptime),
+        ("totalmem", os_totalmem),
+        ("freemem", os_freemem),
+        ("endianness", os_endianness),
+        ("networkInterfaces", os_network_interfaces),
+        ("getPriority", os_get_priority),
+        ("setPriority", os_set_priority),
     ];
     for (name, f) in fns {
         method(vm, &o, name, 0, *f);
     }
     o.set_own("EOL", if cfg!(windows) { "\r\n" } else { "\n" }.into());
+    o.set_own(
+        "devNull",
+        if cfg!(windows) {
+            "\\\\.\\nul"
+        } else {
+            "/dev/null"
+        }
+        .into(),
+    );
+    let constants = os_constants(vm);
+    o.set_own("constants", constants);
     o.set_hidden("default", Value::Object(o.clone()));
     Value::Object(o)
 }

@@ -1289,7 +1289,93 @@ define(globalThis, "global", globalThis)
     return process
   }
   let warned = false
+  let capture = null
+  let captureListener = null
+  const signalNumbers = { SIGHUP: 1, SIGINT: 2, SIGQUIT: 3, SIGILL: 4, SIGTRAP: 5, SIGABRT: 6, SIGBUS: 7, SIGFPE: 8, SIGKILL: 9, SIGUSR1: 10, SIGSEGV: 11, SIGUSR2: 12, SIGPIPE: 13, SIGALRM: 14, SIGTERM: 15, SIGCHLD: 17, SIGCONT: 18, SIGSTOP: 19, SIGTSTP: 20, SIGWINCH: 28 }
+  const hr = process.hrtime
+  define(hr, "bigint", named("bigint", function bigint() {
+    const [s, n] = hr()
+    return BigInt(s) * 1000000000n + BigInt(n)
+  }))
+  process.features = { inspector: false, debug: false, uv: true, ipv6: true, tls_alpn: true, tls_sni: true, tls_ocsp: true, tls: true, cached_builtins: true, require_module: true, typescript: false }
+  process.config = { variables: { node_shared: false, node_module_version: 127, napi_build_version: "9", v8_enable_i18n_support: 1 }, target_defaults: { cflags: [], default_configuration: "Release", defines: [], include_dirs: [], libraries: [] } }
+  process.execArgv = []
+  process.argv0 = process.argv[0]
+  process.ppid = 0
+  process.title = "jsq"
+  process.debugPort = 9229
+  process.sourceMapsEnabled = false
+  process.allowedNodeEnvironmentFlags = new Set()
+  process.report = {
+    compact: false,
+    directory: "",
+    filename: "",
+    reportOnFatalError: false,
+    reportOnSignal: false,
+    reportOnUncaughtException: false,
+    signal: "SIGUSR2",
+    getReport: () => ({ header: { nodejsVersion: process.version, platform: process.platform, arch: process.arch } }),
+    writeReport: () => "",
+  }
   defineAll(process, {
+    umask() {
+      return 0o22
+    },
+    kill(pid, signal = "SIGTERM") {
+      if (pid === process.pid) {
+        const name = typeof signal === "number" ? Object.keys(signalNumbers).find((k) => signalNumbers[k] === signal) ?? String(signal) : String(signal)
+        if (signal === 0 || signal === "0") return true
+        if (!process.emit(name, name)) process.exit(128 + (signalNumbers[name] ?? 15))
+        return true
+      }
+      const e = new Error(`kill ESRCH`)
+      e.code = "ESRCH"
+      e.errno = -3
+      e.syscall = "kill"
+      throw e
+    },
+    cpuUsage(previous) {
+      const user = Math.round(performance.now() * 1000)
+      const out = { user, system: 0 }
+      if (previous) {
+        out.user -= previous.user
+        out.system -= previous.system
+      }
+      return out
+    },
+    resourceUsage() {
+      const mem = process.memoryUsage()
+      return { userCPUTime: Math.round(performance.now() * 1000), systemCPUTime: 0, maxRSS: Math.round(mem.rss / 1024), sharedMemorySize: 0, unsharedDataSize: 0, unsharedStackSize: 0, minorPageFault: 0, majorPageFault: 0, swappedOut: 0, fsRead: 0, fsWrite: 0, ipcSent: 0, ipcReceived: 0, signalsCount: 0, voluntaryContextSwitches: 0, involuntaryContextSwitches: 0 }
+    },
+    abort() {
+      process.exit(134)
+    },
+    binding(name) {
+      const e = new Error(`No such module: ${name}`)
+      e.code = "ERR_INVALID_MODULE"
+      throw e
+    },
+    setSourceMapsEnabled(value) {
+      process.sourceMapsEnabled = !!value
+    },
+    getActiveResourcesInfo() {
+      return []
+    },
+    setUncaughtExceptionCaptureCallback(fn) {
+      if (fn !== null && typeof fn !== "function") throw new TypeError('The "fn" argument must be of type function or null')
+      if (fn !== null && capture !== null) {
+        const e = new Error("`process.setupUncaughtExceptionCapture()` was called while a capture callback was already active")
+        e.code = "ERR_UNCAUGHT_EXCEPTION_CAPTURE_ALREADY_SET"
+        throw e
+      }
+      if (captureListener) process.off("uncaughtException", captureListener)
+      capture = fn
+      captureListener = fn === null ? null : (err) => fn(err)
+      if (captureListener) process.on("uncaughtException", captureListener)
+    },
+    hasUncaughtExceptionCaptureCallback() {
+      return capture !== null
+    },
     on(name, fn) {
       return add(name, fn, false, false)
     },

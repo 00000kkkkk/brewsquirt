@@ -60,8 +60,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `INSPECT_MAX_BYTES`, `atob`, `btoa`, `isUtf8`, `isAscii`, `transcode`, `Blob` and `File`, and
   the `Buffer` statics are enumerable like Node's so that `safer-buffer` style wrappers copy them.
 
+- `process.hrtime.bigint`, `process.features`, `process.config`, `process.execArgv`,
+  `process.argv0`, `process.ppid`, `process.title`, `process.umask`, `process.kill` (own pid
+  only), `process.cpuUsage`, `process.resourceUsage`, `process.abort`, `process.report`,
+  `process.setUncaughtExceptionCaptureCallback` and `process.getuid`/`getgid`/`geteuid`/`getegid`
+  on Unix.
+- `os.release`, `os.version`, `os.machine`, `os.userInfo`, `os.uptime`, `os.totalmem`,
+  `os.freemem`, `os.loadavg`, `os.networkInterfaces`, `os.endianness`, `os.devNull`,
+  `os.constants`, `os.getPriority` and `os.setPriority`.
+- `crypto.KeyObject`, `createSecretKey`, `generateKeySync`, `pbkdf2`/`pbkdf2Sync`,
+  `hkdf`/`hkdfSync`; `createHmac` accepts secret `KeyObject`s, and the asymmetric key, cipher
+  and scrypt functions exist but throw errors with `code`s so that packages such as
+  `jsonwebtoken` fall back to HMAC.
+- `fs.realpath.native` and `fs.realpathSync.native`.
+- `require("stream")` is the legacy callable `Stream` constructor with `pipe`, and `Readable`
+  and `Writable` extend it, so `readable-stream` and packages that call `Stream.call(this)` work.
+- `\p{RGI_Emoji}` and the other emoji sequence properties under the `v` flag match emoji
+  sequences (flags, keycaps, tag sequences, modifiers and ZWJ sequences).
+
 ### Fixed
 
+- Assigning `fn.prototype` on an ordinary function whose prototype chain contains a class no
+  longer throws, which fixes `markdown-it`'s callable wrapper.
+- Unresolved identifiers fall back to `Object.prototype` members the way `globalThis` inherits
+  them in Node, so `toString` or `hasOwnProperty` used as a bare name resolve instead of throwing.
+- `\p{Surrogate}` in Unicode regular expressions matches nothing instead of failing to compile,
+  so `string-width` and `yargs` load.
+- `{ arguments }` as a shorthand property inside a function refers to the arguments object
+  instead of throwing a ReferenceError.
 - `export * as name from "pkg"`, `export { x } from "pkg"` and `export * from "pkg"` now link
   when the source is a package or a CommonJS file; previously only relative ES modules were
   re-exported, which broke `htmlparser2`, `cheerio` and similar packages.

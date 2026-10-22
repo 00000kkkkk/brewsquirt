@@ -515,6 +515,15 @@ impl Vm {
             if is_proxy(&c) && !Rc::ptr_eq(&c, o) {
                 return self.op_set(&c, key, val, receiver);
             }
+            if &*key == "prototype" {
+                if let ObjKind::Function(f) = &c.kind {
+                    if c.get_own("prototype").is_none()
+                        && (f.proto.is_constructor() || f.proto.is_generator)
+                    {
+                        let _ = self.get_obj(&c, "prototype");
+                    }
+                }
+            }
             if let ObjKind::Typed(t) = &c.kind {
                 if let Some(n) = crate::builtins::typed::canonical_numeric(&key) {
                     let same = matches!(receiver, Value::Object(r) if Rc::ptr_eq(r, &c));

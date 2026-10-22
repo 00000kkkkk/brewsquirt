@@ -1,0 +1,48 @@
+function shorthand() {
+  const o = { arguments }
+  return o.arguments.length
+}
+console.log(shorthand(1, 2), typeof toString, hasOwnProperty === Object.prototype.hasOwnProperty)
+
+function wrapper() {}
+class Base {}
+Object.setPrototypeOf(wrapper, Base)
+wrapper.prototype = Base.prototype
+console.log(wrapper.prototype === Base.prototype, Object.getPrototypeOf(wrapper) === Base)
+
+console.log(/\p{Surrogate}/u.test("\ud800"), /[^\p{Control}\p{Surrogate}]/v.test("a"), /\P{Surrogate}/u.test("a"))
+console.log(/^\p{RGI_Emoji}$/v.test("🇺🇦"), /^\p{RGI_Emoji}$/v.test("👨‍👩‍👧"), /^\p{RGI_Emoji}$/v.test("a"), /^\p{RGI_Emoji}$/v.test("1️⃣"))
+
+const Stream = require("node:stream")
+function Legacy() {
+  Stream.call(this)
+}
+Object.setPrototypeOf(Legacy.prototype, Stream.prototype)
+const legacy = new Legacy()
+let seen
+legacy.on("ping", (v) => (seen = v))
+legacy.emit("ping", 7)
+const { Writable, Readable } = Stream
+const w = new Writable({ objectMode: true, write(chunk, enc, cb) { cb() } })
+console.log(typeof Stream, seen, w._writableState.objectMode, new Readable({ read() {} })._readableState.flowing, Stream.Readable === Readable)
+
+const os = require("node:os")
+console.log(typeof os.release(), typeof os.version(), os.machine().length > 0, typeof os.userInfo().username, os.totalmem() >= os.freemem(), os.loadavg().length, os.endianness(), os.constants.signals.SIGTERM, typeof os.uptime())
+
+const crypto = require("node:crypto")
+console.log(crypto.pbkdf2Sync("password", "salt", 1, 20, "sha1").toString("hex"))
+console.log(crypto.pbkdf2Sync("password", "salt", 4096, 20, "sha1").toString("hex"))
+console.log(Buffer.from(crypto.hkdfSync("sha256", Buffer.alloc(22, 0x0b), Buffer.from("000102030405060708090a0b0c", "hex"), Buffer.from("f0f1f2f3f4f5f6f7f8f9", "hex"), 42)).toString("hex"))
+const key = crypto.createSecretKey(Buffer.from("secret"))
+console.log(key.type, key.symmetricKeySize, key instanceof crypto.KeyObject, crypto.createHmac("sha256", key).update("x").digest("hex") === crypto.createHmac("sha256", "secret").update("x").digest("hex"))
+try {
+  crypto.createPrivateKey("nope")
+} catch (e) {
+  console.log(e.code)
+}
+crypto.pbkdf2("pw", "salt", 10, 8, "sha256", (err, out) => console.log(err, out.length))
+
+console.log(typeof process.hrtime.bigint(), process.features.require_module, Array.isArray(process.execArgv), typeof process.umask(), process.kill(process.pid, 0))
+const buffer = require("node:buffer")
+const copied = Object.keys(buffer.Buffer)
+console.log(copied.includes("from"), copied.includes("isBuffer"), typeof require("node:fs").realpath.native, typeof require("node:fs").realpathSync.native)

@@ -1433,6 +1433,12 @@ C:\data\y.txt
 | `hostname()`             | The machine's host name                             |
 | `availableParallelism()` | The number of CPUs the process can use              |
 | `cpus()`                 | One entry per CPU                                   |
+| `release()`, `version()`, `machine()` | Kernel release, OS version string and hardware name |
+| `userInfo()`             | `uid`, `gid`, `username`, `homedir` and `shell`     |
+| `uptime()`, `totalmem()`, `freemem()`, `loadavg()` | Uptime in seconds, memory in bytes and the load averages (zeros on Windows) |
+| `networkInterfaces()`    | The loopback interface                              |
+| `endianness()`, `devNull`, `constants` | `"LE"` or `"BE"`, the null device path, and `signals`, `errno`, `priority` and `dlopen` constants |
+| `getPriority()`, `setPriority()` | Process priority (reported as `0`)            |
 | `EOL`                    | `"\r\n"` on Windows, `"\n"` elsewhere              |
 
 ### `squirt:child_process`
@@ -1771,7 +1777,7 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:fs/promises`             | The promise versions                                                |
 | `node:path`, `node:os`, `node:child_process` | As `squirt:path`, `squirt:os` and `squirt:child_process` |
 | `node:events`                  | `EventEmitter` with `on`, `once`, `off`, `emit`, `prependListener`, `listenerCount`, `eventNames`, and `events.once` |
-| `node:buffer`                  | `Buffer`                                                            |
+| `node:buffer`                  | `Buffer`, `SlowBuffer`, `kMaxLength`, `constants`, `isUtf8`, `isAscii`, `transcode`, `atob`, `btoa`, `Blob`, `File` |
 | `node:assert`                  | `ok`, `equal`, `strictEqual`, `deepStrictEqual`, `throws`, `rejects`, `match` and the rest |
 | `node:util`                    | `inspect`, `format`, `promisify`, `callbackify`, `inherits`, `types`, `isDeepStrictEqual` |
 | `node:url`                     | `URL`, `URLSearchParams`, `fileURLToPath`, `pathToFileURL`          |
@@ -1793,9 +1799,9 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:http2`, `node:worker_threads`, `node:cluster`, `node:v8`, `node:inspector`, `node:diagnostics_channel`, `node:constants` | Load with their constants and classes so that packages importing them work; operations that need threads, HTTP/2 or the inspector throw `ENOTSUP` |
 | `node:net`, `node:tls`         | `isIP`, `isIPv4`, `isIPv6`, `SocketAddress`, `BlockList`; sockets and servers exist as classes but connecting throws `ENOTSUP` for now |
 | `node:zlib`                    | `gzip`, `gunzip`, `deflate`, `inflate`, `deflateRaw`, `inflateRaw` and `unzip` as sync, callback and `create*` stream forms, `crc32` and `constants`; no brotli |
-| `node:stream`, `node:stream/promises` | `Readable` (with `Readable.from`, `read`, `push`, `pipe`, async iteration and `toArray`), `Writable`, `Duplex`, `Transform`, `PassThrough`, `pipeline` and `finished` in callback and promise forms |
+| `node:stream`, `node:stream/promises` | The legacy callable `Stream` constructor, `Readable` (with `Readable.from`, `read`, `push`, `pipe`, async iteration and `toArray`), `Writable`, `Duplex`, `Transform`, `PassThrough`, `_readableState`/`_writableState`, `pipeline` and `finished` in callback and promise forms |
 | `node:http`, `node:https`      | `request`, `get`, `Agent` and `ClientRequest` built on `fetch`, responses are readable streams with `statusCode` and `headers`; `createServer` and `STATUS_CODES`; requests have `on("data")`, `on("end")`, `setEncoding`, `pipe`, `text()` and `json()`, responses have `writeHead`, `setHeader`, `write`, `end` and `finish` events |
-| `node:crypto`                  | `createHash` and `createHmac` (md5, sha1, sha224, sha256, sha384, sha512), `hash`, `randomBytes`, `randomInt`, `randomUUID`, `getRandomValues`, `timingSafeEqual`, `webcrypto` and `subtle.digest` |
+| `node:crypto`                  | `createHash` and `createHmac` (md5, sha1, sha224, sha256, sha384, sha512), `hash`, `randomBytes`, `randomInt`, `randomUUID`, `getRandomValues`, `timingSafeEqual`, `pbkdf2`/`pbkdf2Sync`, `hkdf`/`hkdfSync`, secret `KeyObject`s via `createSecretKey` and `generateKeySync`, `webcrypto` and `subtle.digest`; asymmetric keys, signatures, ciphers and scrypt throw errors with a `code` |
 | `node:timers`, `node:timers/promises` | Timers, and `setTimeout` as a promise                        |
 | `node:process`                 | `process`                                                           |
 
@@ -1989,6 +1995,8 @@ a|b 42 7
 | `process.nextTick(fn, ...args)`, `process.hrtime()`, `process.uptime()` | Scheduling and timing |
 | `process.on(event, fn)`, `once`, `off`, `emit`, `listenerCount` | Event emitter methods; `exit` fires with the exit code, `beforeExit` when the event loop drains and may schedule more work, `uncaughtException` and `unhandledRejection` receive errors that would otherwise end the program, `warning` receives emitted warnings |
 | `process.emitWarning(message, type?, code?)` | Emits `warning` and prints `(jsq:pid) Type: message` to stderr unless `NODE_NO_WARNINGS=1` |
+| `process.hrtime.bigint()`, `process.cpuUsage()`, `process.resourceUsage()`, `process.memoryUsage()` | Timing and resource figures |
+| `process.features`, `process.config`, `process.execArgv`, `process.argv0`, `process.ppid`, `process.title`, `process.report`, `process.umask()`, `process.kill(pid, signal?)` (own pid only), `process.getuid()` and friends on Unix | Node-compatible process details |
 
 ```js
 const name = process.env.USER ?? "anonymous"

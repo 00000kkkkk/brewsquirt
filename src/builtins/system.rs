@@ -52,6 +52,12 @@ pub fn install(vm: &mut Vm) {
     method(vm, &process, "on", 2, process_on);
     method(vm, &process, "once", 2, process_on);
     method(vm, &process, "off", 2, process_on);
+    if cfg!(unix) {
+        method(vm, &process, "getuid", 0, process_uid);
+        method(vm, &process, "geteuid", 0, process_uid);
+        method(vm, &process, "getgid", 0, process_gid);
+        method(vm, &process, "getegid", 0, process_gid);
+    }
     process.set_own("pid", Value::Number(std::process::id() as f64));
     let arch = match std::env::consts::ARCH {
         "x86_64" => "x64",
@@ -436,6 +442,14 @@ fn stderr_write(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 
 fn process_on(_vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     Ok(this)
+}
+
+fn process_uid(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    Ok(Value::Number(super::stdlib::os_ids().0))
+}
+
+fn process_gid(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    Ok(Value::Number(super::stdlib::os_ids().1))
 }
 
 fn process_stdin(vm: &mut Vm, this: Value, _args: &[Value]) -> R {

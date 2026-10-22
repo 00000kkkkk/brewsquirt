@@ -2724,6 +2724,15 @@ impl Vm {
                         }
                     }
                 }
+                if &*key == "prototype" {
+                    if let ObjKind::Function(f) = &o.kind {
+                        if !o.has_own("prototype")
+                            && (f.proto.is_constructor() || f.proto.is_generator)
+                        {
+                            let _ = self.get_obj(o, "prototype");
+                        }
+                    }
+                }
                 let mut props = o.props.borrow_mut();
                 let hit = props
                     .get(&key)
@@ -4271,18 +4280,24 @@ impl Vm {
                             }
                             self.stack.push(v);
                         }
-                        None => throw!(self.make_error_at(
-                            ErrorKind::ReferenceError,
-                            format!("{n} is not defined"),
-                            fi,
-                            ip
-                        )),
+                        None => match self.realm.object_proto.get_own(&n) {
+                            Some(v) if crate::props::accessor_parts(&v).is_none() => {
+                                self.stack.push(v)
+                            }
+                            _ => throw!(self.make_error_at(
+                                ErrorKind::ReferenceError,
+                                format!("{n} is not defined"),
+                                fi,
+                                ip
+                            )),
+                        },
                     }
                 }
                 Op::GlobalRef(k) => {
                     let n = name!(k);
-                    let found =
-                        self.globals.resolve(&n).is_some() || tri!(self.load_lazy_global(&n));
+                    let found = self.globals.resolve(&n).is_some()
+                        || tri!(self.load_lazy_global(&n))
+                        || self.realm.object_proto.get_own(&n).is_some();
                     self.stack.push(Value::Bool(found));
                 }
                 Op::SetGlobal(k) | Op::SetGlobalStrict(k) => {
@@ -4386,6 +4401,13 @@ impl Vm {
                         throw!(self.tdz_error(&proto, k));
                     }
                     let mut found = self.globals.lookup(&n).cloned();
+                    if found.is_none() {
+                        found = self
+                            .realm
+                            .object_proto
+                            .get_own(&n)
+                            .filter(|v| crate::props::accessor_parts(v).is_none());
+                    }
                     if let Some(Value::Object(a)) = &found {
                         if a.is_accessor() {
                             let raw = found.take().unwrap_or_default();
