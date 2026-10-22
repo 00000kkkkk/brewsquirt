@@ -1,5 +1,5 @@
 [files]
-extend-exclude = ["LICENSE", "target", "Cargo.lock", "nude_modules"]
+extend-exclude = ["LICENSE", "target", "Cargo.lock", "nude_modules", "src/regexp_syntax.rs"]
 
 [default.extend-words]
 vrotdaem = "vrotdaem"
