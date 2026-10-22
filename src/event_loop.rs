@@ -377,25 +377,27 @@ impl Vm {
     }
 
     pub fn has_intrinsic_promise_ctor(&mut self, v: &Value) -> bool {
+        let Some(intrinsic) = self.promise_intrinsic.clone() else {
+            return true;
+        };
         if let Value::Object(o) = v {
             let plain_proto = o
                 .proto
                 .borrow()
                 .as_ref()
                 .is_some_and(|p| Rc::ptr_eq(p, &self.realm.promise_proto));
-            if plain_proto && o.get_own("constructor").is_none() {
+            let proto_ctor_intact = matches!(
+                self.realm.promise_proto.get_own("constructor"),
+                Some(Value::Object(c)) if Rc::ptr_eq(&c, &intrinsic)
+            );
+            if plain_proto && proto_ctor_intact && o.get_own("constructor").is_none() {
                 return true;
             }
         }
-        let intrinsic = self.realm.promise_proto.get_own("constructor");
-        let ctor = match self.get_prop(v, "constructor") {
-            Ok(c) => c,
-            Err(_) => return true,
-        };
-        match (&ctor, &intrinsic) {
-            (Value::Object(a), Some(Value::Object(b))) => Rc::ptr_eq(a, b),
-            (_, None) => true,
-            _ => false,
+        match self.get_prop(v, "constructor") {
+            Ok(Value::Object(c)) => Rc::ptr_eq(&c, &intrinsic),
+            Ok(_) => false,
+            Err(_) => true,
         }
     }
 

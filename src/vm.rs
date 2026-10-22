@@ -355,6 +355,7 @@ pub struct Vm {
     pub rejection: bool,
     pub exiting: bool,
     pub(crate) main_cjs_pending: bool,
+    pub(crate) promise_intrinsic: Option<Rc<Obj>>,
     pub symbol_seq: u64,
     pub symbol_registry: FxHashMap<Rc<str>, Value>,
     pub symbol_iterator: Value,
@@ -475,6 +476,7 @@ impl Vm {
             stdin_stopped: false,
             exiting: false,
             main_cjs_pending: false,
+            promise_intrinsic: None,
         };
         crate::gc::configure_from_env();
         builtins::install(&mut vm);

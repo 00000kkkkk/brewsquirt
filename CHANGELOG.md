@@ -49,6 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `i` rules, and `BigInt.prototype.toLocaleString` formats every digit instead of rounding
   through a `Number`.
 
+### Changed
+
+- `Promise.resolve` and `Promise.reject` on the built-in `Promise` skip the generic
+  capability machinery, which makes `await Promise.resolve(x)` about five times faster.
+
 ### Fixed
 
 - Running a CommonJS `.js` file directly (`jsq app.js`) executed it twice, once as an ES module

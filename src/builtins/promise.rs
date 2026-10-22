@@ -14,6 +14,8 @@ const P = Promise
 const thenRaw = globalThis["%PromiseThenRaw%"]
 const isCtor = globalThis["%IsConstructor%"]
 const isPromise = globalThis["%IsPromise%"]
+const resolveFast = globalThis["%PromiseResolveFast%"]
+const rejectFast = globalThis["%PromiseRejectFast%"]
 const isObject = (v) => v !== null && (typeof v === "object" || typeof v === "function")
 const DONE = Symbol("done")
 
@@ -256,11 +258,13 @@ P.race = combinator("race", (rec, C, cap, promiseResolve) => {
 const statics = {
   resolve(x) {
     const C = this
+    if (C === P) return resolveFast(x)
     if (!isObject(C)) throw new TypeError("PromiseResolve called on non-object")
     return resolveWith(C, x)
   },
   reject(r) {
     const C = this
+    if (C === P) return rejectFast(r)
     const cap = newCapability(C)
     const reject = cap.reject
     reject(r)
@@ -541,6 +545,7 @@ pub fn install(vm: &mut Vm) {
         Some(|| ObjKind::Promise(Box::new(RefCell::new(PromiseData::default())))),
         &pp,
     );
+    vm.promise_intrinsic = Some(promise.clone());
     vm.define_global("Promise", Value::Object(promise));
     vm.promise_resolve_fn = native_fn(vm, "", 2, resolve_fn);
     vm.promise_reject_fn = native_fn(vm, "", 2, reject_fn);
@@ -550,6 +555,26 @@ pub fn install(vm: &mut Vm) {
     vm.define_global("%IsConstructor%", f);
     let f = native_fn(vm, "isPromise", 1, is_promise);
     vm.define_global("%IsPromise%", f);
+    let f = native_fn(vm, "resolve", 1, resolve_fast);
+    vm.define_global("%PromiseResolveFast%", f);
+    let f = native_fn(vm, "reject", 1, reject_fast);
+    vm.define_global("%PromiseRejectFast%", f);
+}
+
+fn resolve_fast(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let x = arg(args, 0);
+    if Vm::is_promise(&x) && vm.has_intrinsic_promise_ctor(&x) {
+        return Ok(x);
+    }
+    let p = vm.new_promise();
+    vm.resolve_promise(&p, x);
+    Ok(Value::Object(p))
+}
+
+fn reject_fast(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let p = vm.new_promise();
+    vm.reject_promise(&p, arg(args, 0));
+    Ok(Value::Object(p))
 }
 
 pub fn run_prelude(vm: &mut Vm) {
