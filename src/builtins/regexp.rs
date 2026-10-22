@@ -188,8 +188,38 @@ fn groups_object(vm: &mut Vm, data: &RegexData, items: &[Value]) -> Value {
 fn regexp_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let pattern = arg(args, 0);
     let flags_arg = arg(args, 1);
+    let pattern_is_regexp = match &pattern {
+        Value::Object(_) => {
+            let m = vm.get_prop(&pattern, crate::object::MATCH_KEY)?;
+            if m.is_undefined() {
+                as_regexp(&pattern).is_some()
+            } else {
+                m.truthy()
+            }
+        }
+        _ => false,
+    };
     let (source, default_flags): (Rc<str>, Rc<str>) = match as_regexp(&pattern) {
         Some((_, d)) => (d.source.clone(), d.flags.clone()),
+        None if pattern_is_regexp => {
+            let p = vm.get_prop(&pattern, "source")?;
+            let p = if p.is_undefined() {
+                Rc::from("")
+            } else {
+                vm.to_string(&p)?
+            };
+            let f = if flags_arg.is_undefined() {
+                let f = vm.get_prop(&pattern, "flags")?;
+                if f.is_undefined() {
+                    Rc::from("")
+                } else {
+                    vm.to_string(&f)?
+                }
+            } else {
+                Rc::from("")
+            };
+            (p, f)
+        }
         None => match pattern {
             Value::Undefined => ("(?:)".into(), "".into()),
             p => (vm.to_string(&p)?, "".into()),
@@ -251,8 +281,14 @@ fn regexp_compile(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 }
 
 fn to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let (_, data) = this_regexp(vm, &this)?;
-    Ok(format!("/{}/{}", data.source, data.flags).into())
+    if !this.is_object() {
+        return Err(vm.type_error("RegExp.prototype.toString requires that 'this' be an Object"));
+    }
+    let source = vm.get_prop(&this, "source")?;
+    let source = vm.to_string(&source)?;
+    let flags = vm.get_prop(&this, "flags")?;
+    let flags = vm.to_string(&flags)?;
+    Ok(format!("/{source}/{flags}").into())
 }
 
 pub fn coerce_regexp(

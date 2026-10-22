@@ -374,7 +374,11 @@ impl Parser {
 
     fn binding_ident(&mut self) -> R<Rc<str>> {
         match self.word() {
-            Some(s) if self.reserved(&s) && self.peek().escaped => {
+            Some(s)
+                if self.reserved(&s)
+                    && self.peek().escaped
+                    && !(&*s == "await" && self.script && !self.in_async && !self.static_block) =>
+            {
                 Err(self.error("Keyword must not contain escaped characters"))
             }
             Some(s) => {
@@ -2556,7 +2560,14 @@ impl Parser {
                 ExprKind::Object(props)
             }
             Tok::Punct(P::Hash) => ExprKind::Str(self.private_name()?),
-            Tok::Ident(name) if self.peek().escaped && self.reserved(name) => {
+            Tok::Ident(name)
+                if self.peek().escaped
+                    && self.reserved(name)
+                    && !(&**name == "await"
+                        && self.script
+                        && !self.in_async
+                        && !self.static_block) =>
+            {
                 return Err(self.error("Keyword must not contain escaped characters"));
             }
             Tok::Ident(name) if self.peek().escaped => {
