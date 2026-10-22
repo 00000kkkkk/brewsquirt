@@ -1,0 +1,48 @@
+const fs = require("node:fs")
+const path = require("node:path")
+const os = require("node:os")
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jsq-watch-"))
+const seen = []
+const watcher = fs.watch(dir, { interval: 30 }, (kind, name) => seen.push(`${kind}:${name}`))
+console.log(watcher instanceof fs.FSWatcher, typeof watcher.close, typeof watcher.unref)
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const main = async () => {
+  await wait(100)
+  fs.writeFileSync(path.join(dir, "a.txt"), "one")
+  await wait(200)
+  fs.writeFileSync(path.join(dir, "a.txt"), "two!!")
+  await wait(200)
+  fs.unlinkSync(path.join(dir, "a.txt"))
+  await wait(200)
+  watcher.close()
+  await new Promise((resolve) => watcher.once("close", resolve))
+  console.log([...new Set(seen)].sort().join(" "))
+
+  let statChanges = 0
+  const file = path.join(dir, "s.txt")
+  fs.writeFileSync(file, "x")
+  const sw = fs.watchFile(file, { interval: 30 }, () => statChanges++)
+  await wait(120)
+  fs.writeFileSync(file, "xyz")
+  await wait(200)
+  fs.unwatchFile(file)
+  console.log("stat changes", statChanges >= 1, sw instanceof fs.StatWatcher, typeof sw.unref)
+
+  const ac = new AbortController()
+  const events = []
+  const iter = fs.promises.watch(dir, { interval: 30, signal: ac.signal })
+  setTimeout(() => fs.writeFileSync(path.join(dir, "p.txt"), "p"), 80)
+  setTimeout(() => ac.abort(), 400)
+  for await (const ev of iter) events.push(ev.eventType)
+  console.log("promises.watch", events.length > 0, events.every((e) => e === "rename" || e === "change"))
+
+  try {
+    fs.watch(path.join(dir, "missing-dir"))
+  } catch (e) {
+    console.log(e.code, e.syscall)
+  }
+  fs.rmSync(dir, { recursive: true, force: true })
+  console.log("done")
+}
+main()

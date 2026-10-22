@@ -57,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `perf_hooks.createHistogram`/`monitorEventLoopDelay` (`@hapi/hapi`).
 - The `zlib` stream classes expose the `_handle` and `_processChunk` internals that `minizlib`
   drives synchronously, so `tar` creates and extracts `.tgz` archives.
+- `fs.watch` (polling a file or directory tree on an IO thread, with `recursive`, `persistent`,
+  `signal`, `encoding`, `ref`/`unref` and `close`), `fs.watchFile`/`unwatchFile` with
+  `StatWatcher`, and `fs.promises.watch` as an async iterator.
 - File descriptor APIs in `fs`: `openSync`/`open`, `closeSync`/`close`, `readSync`/`read`,
   `writeSync`/`write`, `fstatSync`/`fstat`, `ftruncateSync`, `fsyncSync`, the `O_*` and `S_IF*`
   constants, and `fs.promises.open` returning a `FileHandle` with `read`, `write`, `readFile`,

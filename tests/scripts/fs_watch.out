@@ -1,0 +1,6 @@
+true function function
+change:a.txt rename:a.txt
+stat changes true true function
+promises.watch true true
+ENOENT watch
+done

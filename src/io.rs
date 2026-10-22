@@ -73,6 +73,108 @@ pub enum IoEvent {
         cmd: Sender<SocketCmd>,
         head: Vec<u8>,
     },
+    Watch {
+        id: u64,
+        event: WatchEvent,
+    },
+}
+
+pub struct WatchEvent {
+    pub kind: &'static str,
+    pub filename: Option<String>,
+}
+
+pub enum WatchCmd {
+    Stop,
+}
+
+type WatchSnapshot = std::collections::BTreeMap<String, (u128, u64, bool)>;
+
+fn watch_entry(md: &std::fs::Metadata) -> (u128, u64, bool) {
+    let mtime = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    (mtime, md.len(), md.is_dir())
+}
+
+fn watch_scan(root: &std::path::Path, is_dir: bool, recursive: bool) -> WatchSnapshot {
+    let mut out = WatchSnapshot::new();
+    if !is_dir {
+        if let Ok(md) = std::fs::metadata(root) {
+            let name = root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            out.insert(name, watch_entry(&md));
+        }
+        return out;
+    }
+    let mut stack = vec![std::path::PathBuf::new()];
+    while let Some(rel) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(root.join(&rel)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(md) = entry.metadata() else {
+                continue;
+            };
+            let rel_path = rel.join(entry.file_name());
+            let entry_is_dir = md.is_dir();
+            out.insert(rel_path.to_string_lossy().into_owned(), watch_entry(&md));
+            if recursive && entry_is_dir {
+                stack.push(rel_path);
+            }
+        }
+    }
+    out
+}
+
+pub fn watch_start(
+    id: u64,
+    path: std::path::PathBuf,
+    recursive: bool,
+    interval: Duration,
+    tx: Sender<IoEvent>,
+) -> std::io::Result<Sender<WatchCmd>> {
+    let is_dir = std::fs::metadata(&path)?.is_dir();
+    let (cmd_tx, cmd_rx) = channel::<WatchCmd>();
+    std::thread::spawn(move || {
+        let mut prev = watch_scan(&path, is_dir, recursive);
+        loop {
+            match cmd_rx.recv_timeout(interval) {
+                Ok(WatchCmd::Stop) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            let next = watch_scan(&path, is_dir, recursive);
+            let mut events = Vec::new();
+            for (name, entry) in &next {
+                match prev.get(name) {
+                    None => events.push(("rename", name.clone())),
+                    Some(old) if old != entry => events.push(("change", name.clone())),
+                    _ => {}
+                }
+            }
+            for name in prev.keys() {
+                if !next.contains_key(name) {
+                    events.push(("rename", name.clone()));
+                }
+            }
+            prev = next;
+            for (kind, filename) in events {
+                let event = WatchEvent {
+                    kind,
+                    filename: Some(filename),
+                };
+                if tx.send(IoEvent::Watch { id, event }).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    Ok(cmd_tx)
 }
 
 pub enum SocketEvent {

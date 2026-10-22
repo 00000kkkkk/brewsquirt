@@ -27,6 +27,78 @@ pub struct ChildEntry {
     pub refed: bool,
 }
 
+pub struct WatchEntry {
+    pub cmd: Sender<io::WatchCmd>,
+    pub handler: Value,
+    pub refed: bool,
+}
+
+pub fn watch_start(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let path = vm.to_string(&arg(args, 0))?.to_string();
+    let recursive = arg(args, 1).truthy();
+    let interval = match arg(args, 2) {
+        Value::Number(n) if n.is_finite() && n >= 1.0 => n,
+        _ => 200.0,
+    };
+    let handler = arg(args, 3);
+    let id = vm.io.next_id();
+    let cmd = io::watch_start(
+        id,
+        std::path::PathBuf::from(&path),
+        recursive,
+        std::time::Duration::from_millis(interval as u64),
+        vm.io.tx.clone(),
+    )
+    .map_err(|e| super::node::fs_error(vm, &e, "watch", &path, None))?;
+    vm.io.pending += 1;
+    vm.io_watchers.insert(
+        id,
+        WatchEntry {
+            cmd,
+            handler,
+            refed: true,
+        },
+    );
+    Ok(Value::Number(id as f64))
+}
+
+pub fn watch_close(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let id = id_arg(vm, args)?;
+    if let Some(e) = vm.io_watchers.remove(&id) {
+        let _ = e.cmd.send(io::WatchCmd::Stop);
+        if e.refed {
+            adjust_pending(vm, -1);
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+pub fn watch_ref(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let id = id_arg(vm, args)?;
+    let want = arg(args, 1).truthy();
+    let mut delta = 0i64;
+    if let Some(e) = vm.io_watchers.get_mut(&id) {
+        if e.refed != want {
+            e.refed = want;
+            delta = if want { 1 } else { -1 };
+        }
+    }
+    adjust_pending(vm, delta);
+    Ok(Value::Undefined)
+}
+
+pub fn handle_watch(vm: &mut Vm, id: u64, event: io::WatchEvent) -> Result<(), Value> {
+    let Some(handler) = vm.io_watchers.get(&id).map(|e| e.handler.clone()) else {
+        return Ok(());
+    };
+    let filename = match event.filename {
+        Some(f) => Value::from(f),
+        None => Value::Null,
+    };
+    vm.call_value(&handler, Value::Undefined, &[event.kind.into(), filename])?;
+    Ok(())
+}
+
 fn id_arg(vm: &mut Vm, args: &[Value]) -> Result<u64, Value> {
     Ok(vm.to_number(&arg(args, 0))? as u64)
 }

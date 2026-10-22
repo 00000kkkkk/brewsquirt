@@ -1110,6 +1110,151 @@ const NODE_SRC: &str = r##"
   }
   promises.open = async (path, flags = "r", mode) => new FileHandle(fs.openSync(path, flags, mode))
   promises.FileHandle = FileHandle
+  class FSWatcher extends EventEmitter {
+    #id = -1
+    #closed = false
+    constructor(path, options, listener) {
+      super()
+      const encoding = options?.encoding ?? "utf8"
+      if (typeof listener === "function") this.on("change", listener)
+      this.#id = native.watchStart(pathOf(path), !!options?.recursive, options?.interval ?? 200, (kind, filename) => {
+        if (this.#closed) return
+        const name = filename == null ? null : encoding === "buffer" ? Buffer.from(filename) : filename
+        this.emit("change", kind, name)
+      })
+      if (options?.persistent === false) this.unref()
+      if (options?.signal) options.signal.addEventListener("abort", () => this.close(), { once: true })
+    }
+    close() {
+      if (this.#closed) return
+      this.#closed = true
+      native.watchClose(this.#id)
+      queueMicrotask(() => this.emit("close"))
+    }
+    ref() {
+      if (!this.#closed) native.watchRef(this.#id, true)
+      return this
+    }
+    unref() {
+      if (!this.#closed) native.watchRef(this.#id, false)
+      return this
+    }
+    [Symbol.asyncDispose]() {
+      this.close()
+      return Promise.resolve()
+    }
+  }
+  fs.watch = (path, options, listener) => {
+    if (typeof options === "function") [options, listener] = [undefined, options]
+    if (typeof options === "string") options = { encoding: options }
+    return new FSWatcher(path, options, listener)
+  }
+  fs.FSWatcher = FSWatcher
+  const emptyStats = () => new Stats({ mode: 0, size: 0, atimeMs: 0, mtimeMs: 0, ctimeMs: 0, birthtimeMs: 0, kind: "file" })
+  const statOrEmpty = (p) => {
+    try {
+      return fs.statSync(p)
+    } catch {
+      return emptyStats()
+    }
+  }
+  class StatWatcher extends EventEmitter {
+    #timer = null
+    #prev
+    constructor(path, options) {
+      super()
+      this.#prev = statOrEmpty(path)
+      this.#timer = setInterval(() => {
+        const curr = statOrEmpty(path)
+        if (curr.mtimeMs !== this.#prev.mtimeMs || curr.size !== this.#prev.size || curr.mode !== this.#prev.mode) {
+          const prev = this.#prev
+          this.#prev = curr
+          this.emit("change", curr, prev)
+        }
+      }, options?.interval ?? 5007)
+      if (options?.persistent === false) this.#timer.unref()
+    }
+    stop() {
+      if (this.#timer === null) return
+      clearInterval(this.#timer)
+      this.#timer = null
+      queueMicrotask(() => this.emit("stop"))
+    }
+    ref() {
+      this.#timer?.ref()
+      return this
+    }
+    unref() {
+      this.#timer?.unref()
+      return this
+    }
+  }
+  fs.StatWatcher = StatWatcher
+  const statWatchers = new Map()
+  fs.watchFile = (path, options, listener) => {
+    if (typeof options === "function") [options, listener] = [undefined, options]
+    if (typeof listener !== "function") throw new TypeError('The "listener" argument must be of type function')
+    const key = pathOf(path)
+    let watcher = statWatchers.get(key)
+    if (!watcher) {
+      watcher = new StatWatcher(key, options)
+      statWatchers.set(key, watcher)
+    }
+    watcher.on("change", listener)
+    return watcher
+  }
+  fs.unwatchFile = (path, listener) => {
+    const key = pathOf(path)
+    const watcher = statWatchers.get(key)
+    if (!watcher) return
+    if (typeof listener === "function") watcher.removeListener("change", listener)
+    else watcher.removeAllListeners("change")
+    if (watcher.listenerCount("change") === 0) {
+      watcher.stop()
+      statWatchers.delete(key)
+    }
+  }
+  promises.watch = (path, options = {}) => {
+    const watcher = new FSWatcher(path, options)
+    const queue = []
+    let wake = null
+    let done = false
+    let failure = null
+    const notify = () => {
+      if (wake) {
+        const w = wake
+        wake = null
+        w()
+      }
+    }
+    watcher.on("change", (eventType, filename) => {
+      queue.push({ eventType, filename })
+      notify()
+    })
+    watcher.on("error", (e) => {
+      failure = e
+      notify()
+    })
+    watcher.on("close", () => {
+      done = true
+      notify()
+    })
+    return {
+      [Symbol.asyncIterator]() {
+        return this
+      },
+      async next() {
+        while (queue.length === 0 && !done && !failure) await new Promise((resolve) => (wake = resolve))
+        if (failure) throw failure
+        if (queue.length === 0) return { value: undefined, done: true }
+        return { value: queue.shift(), done: false }
+      },
+      async return() {
+        watcher.close()
+        return { value: undefined, done: true }
+      },
+    }
+  }
   promises.constants = fs.constants
   fs.promises = promises
   fs.realpath.native = fs.realpath
@@ -5673,7 +5818,10 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let n = vm.new_object();
-    let natives: [(&str, u32, crate::object::NativeFn); 52] = [
+    let natives: [(&str, u32, crate::object::NativeFn); 55] = [
+        ("watchStart", 4, super::netio::watch_start),
+        ("watchClose", 1, super::netio::watch_close),
+        ("watchRef", 2, super::netio::watch_ref),
         ("fsOpen", 3, fs_open),
         ("fsClose", 1, fs_close),
         ("fsReadFd", 5, fs_read_fd),

@@ -3052,6 +3052,7 @@ pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
             cmd,
         } => super::netio::handle_accept(vm, server, id, local, remote, cmd)?,
         IoEvent::Child { id, event } => super::netio::handle_child(vm, id, event)?,
+        IoEvent::Watch { id, event } => super::netio::handle_watch(vm, id, event)?,
         IoEvent::Fetch { id, result } => {
             let Some(p) = vm.io_fetches.remove(&id) else {
                 return Ok(());
