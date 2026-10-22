@@ -252,11 +252,8 @@ pub fn compile(source: &str, flags: &str) -> Result<Rc<RegexData>, String> {
     if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return Ok(hit);
     }
-    if let Some(bad) = flags.chars().find(|c| !"dgimsuyv".contains(*c)) {
-        return Err(format!(
-            "Invalid flags supplied to RegExp constructor '{bad}'"
-        ));
-    }
+    crate::regexp_syntax::validate(source, flags)
+        .map_err(|e| format!("Invalid regular expression: /{source}/{flags}: {e}"))?;
     let translated = translate(source, flags)
         .map_err(|e| format!("Invalid regular expression: /{source}/{flags}: {e}"))?;
     let re = fancy_regex::RegexBuilder::new(&translated)
