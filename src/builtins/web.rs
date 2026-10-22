@@ -7,9 +7,12 @@ use std::time::Duration;
 
 type R = Result<Value, Value>;
 
-pub const LAZY_GLOBALS: [&str; 12] = [
+pub const LAZY_GLOBALS: [&str; 15] = [
     "fetch",
     "CustomEvent",
+    "Blob",
+    "File",
+    "FormData",
     "Headers",
     "Request",
     "Response",
@@ -594,15 +597,221 @@ const WEB_SRC: &str = r##"
     }
   }
 
+  const kBytes = Symbol("bytes")
+  const concatBytes = (chunks) => {
+    const out = new Uint8Array(chunks.reduce((n, c) => n + c.length, 0))
+    let at = 0
+    for (const c of chunks) {
+      out.set(c, at)
+      at += c.length
+    }
+    return out
+  }
+  const viewBytes = (v) => new Uint8Array(v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength))
+
+  class Blob {
+    #type
+    constructor(parts = [], options = {}) {
+      if (parts === null || typeof parts !== "object" || typeof parts[Symbol.iterator] !== "function") {
+        if (arguments.length > 0) throw new TypeError("Failed to construct 'Blob': The provided value cannot be converted to a sequence.")
+        parts = []
+      }
+      const chunks = []
+      for (const p of parts) {
+        if (p instanceof Blob) chunks.push(p[kBytes])
+        else if (p instanceof ArrayBuffer) chunks.push(new Uint8Array(p.slice(0)))
+        else if (ArrayBuffer.isView(p)) chunks.push(viewBytes(p))
+        else chunks.push(encoder.encode(options?.endings === "native" ? String(p).replace(/\r?\n/g, EOL) : String(p)))
+      }
+      this[kBytes] = concatBytes(chunks)
+      const t = options?.type === undefined ? "" : String(options.type)
+      this.#type = /^[\x20-\x7e]*$/.test(t) ? t.toLowerCase() : ""
+    }
+    get size() {
+      return this[kBytes].length
+    }
+    get type() {
+      return this.#type
+    }
+    slice(start = 0, end = this.size, contentType = "") {
+      const n = this.size
+      const s = start < 0 ? Math.max(n + start, 0) : Math.min(start, n)
+      const e = end < 0 ? Math.max(n + end, 0) : Math.min(end, n)
+      const b = new Blob([], { type: contentType })
+      b[kBytes] = this[kBytes].slice(s, Math.max(e, s))
+      return b
+    }
+    async text() {
+      return decoder.decode(this[kBytes])
+    }
+    async arrayBuffer() {
+      return this[kBytes].slice().buffer
+    }
+    async bytes() {
+      return this[kBytes].slice()
+    }
+    stream() {
+      throw new TypeError("Blob.prototype.stream is not supported: use arrayBuffer() or text()")
+    }
+    get [Symbol.toStringTag]() {
+      return "Blob"
+    }
+  }
+  const EOL = typeof process !== "undefined" && process.platform === "win32" ? "\r\n" : "\n"
+
+  class File extends Blob {
+    #name
+    #lastModified
+    constructor(parts, name, options = {}) {
+      if (arguments.length < 2) throw new TypeError("Failed to construct 'File': 2 arguments required")
+      super(parts, options)
+      this.#name = String(name).replace(/\//g, ":")
+      const lm = options?.lastModified
+      this.#lastModified = lm === undefined ? Date.now() : Number(lm) || 0
+    }
+    get name() {
+      return this.#name
+    }
+    get lastModified() {
+      return this.#lastModified
+    }
+    get webkitRelativePath() {
+      return ""
+    }
+    get [Symbol.toStringTag]() {
+      return "File"
+    }
+  }
+
+  const formBoundaries = new WeakMap()
+  class FormData {
+    #entries = []
+    constructor(form) {
+      if (form !== undefined) throw new TypeError("FormData constructor: form elements are not supported")
+    }
+    #normalize(name, value, filename) {
+      name = String(name)
+      if (value instanceof Blob) {
+        const fname = filename !== undefined ? String(filename) : value instanceof File ? value.name : "blob"
+        if (!(value instanceof File) || filename !== undefined) value = new File([value], fname, { type: value.type, lastModified: value instanceof File ? value.lastModified : undefined })
+        return [name, value]
+      }
+      if (filename !== undefined) throw new TypeError("Failed to execute 'append' on 'FormData': parameter 2 is not of type 'Blob'.")
+      return [name, String(value)]
+    }
+    append(name, value, filename) {
+      this.#entries.push(this.#normalize(name, value, filename))
+    }
+    set(name, value, filename) {
+      const entry = this.#normalize(name, value, filename)
+      const i = this.#entries.findIndex((e) => e[0] === entry[0])
+      if (i < 0) this.#entries.push(entry)
+      else {
+        this.#entries[i] = entry
+        this.#entries = this.#entries.filter((e, j) => j <= i || e[0] !== entry[0])
+      }
+    }
+    get(name) {
+      name = String(name)
+      const e = this.#entries.find((e) => e[0] === name)
+      return e ? e[1] : null
+    }
+    getAll(name) {
+      name = String(name)
+      return this.#entries.filter((e) => e[0] === name).map((e) => e[1])
+    }
+    has(name) {
+      name = String(name)
+      return this.#entries.some((e) => e[0] === name)
+    }
+    delete(name) {
+      name = String(name)
+      this.#entries = this.#entries.filter((e) => e[0] !== name)
+    }
+    *entries() {
+      for (const e of this.#entries.slice()) yield [e[0], e[1]]
+    }
+    *keys() {
+      for (const e of this.#entries.slice()) yield e[0]
+    }
+    *values() {
+      for (const e of this.#entries.slice()) yield e[1]
+    }
+    forEach(fn, thisArg) {
+      for (const [k, v] of this.entries()) fn.call(thisArg, v, k, this)
+    }
+    [Symbol.iterator]() {
+      return this.entries()
+    }
+    get [Symbol.toStringTag]() {
+      return "FormData"
+    }
+  }
+
+  const escapeDisposition = (s) => s.replace(/\n/g, "%0A").replace(/\r/g, "%0D").replace(/"/g, "%22")
+  function encodeFormData(form) {
+    let boundary = formBoundaries.get(form)
+    if (!boundary) {
+      boundary = "----JavaSquirtFormBoundary" + Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("")
+      formBoundaries.set(form, boundary)
+    }
+    const chunks = []
+    for (const [name, value] of form) {
+      let head = `--${boundary}\r\nContent-Disposition: form-data; name="${escapeDisposition(name)}"`
+      if (value instanceof Blob) {
+        head += `; filename="${escapeDisposition(value.name)}"\r\nContent-Type: ${value.type || "application/octet-stream"}`
+        chunks.push(encoder.encode(head + "\r\n\r\n"), value[kBytes], encoder.encode("\r\n"))
+      } else {
+        chunks.push(encoder.encode(head + "\r\n\r\n" + value.replace(/\r(?!\n)|(?<!\r)\n/g, "\r\n") + "\r\n"))
+      }
+    }
+    chunks.push(encoder.encode(`--${boundary}--\r\n`))
+    return concatBytes(chunks)
+  }
+
+  const indexOfBytes = (hay, needle, from = 0) => {
+    outer: for (let i = from; i <= hay.length - needle.length; i++) {
+      for (let j = 0; j < needle.length; j++) if (hay[i + j] !== needle[j]) continue outer
+      return i
+    }
+    return -1
+  }
+  function parseMultipart(bytes, boundary) {
+    const form = new FormData()
+    const delim = encoder.encode("--" + boundary)
+    let pos = indexOfBytes(bytes, delim)
+    if (pos < 0) throw new TypeError("Failed to parse multipart body: boundary not found")
+    pos += delim.length
+    while (pos < bytes.length) {
+      if (bytes[pos] === 45 && bytes[pos + 1] === 45) break
+      if (bytes[pos] === 13 && bytes[pos + 1] === 10) pos += 2
+      const headEnd = indexOfBytes(bytes, encoder.encode("\r\n\r\n"), pos)
+      if (headEnd < 0) throw new TypeError("Failed to parse multipart body: malformed part headers")
+      const head = decoder.decode(bytes.subarray(pos, headEnd))
+      const next = indexOfBytes(bytes, delim, headEnd + 4)
+      if (next < 0) throw new TypeError("Failed to parse multipart body: unterminated part")
+      let bodyEnd = next
+      if (bytes[bodyEnd - 2] === 13 && bytes[bodyEnd - 1] === 10) bodyEnd -= 2
+      const body = bytes.slice(headEnd + 4, bodyEnd)
+      const name = /name="([^"]*)"/.exec(head)?.[1] ?? ""
+      const filename = /filename="([^"]*)"/.exec(head)?.[1]
+      const type = /content-type:\s*([^\r\n]+)/i.exec(head)?.[1]?.trim() ?? ""
+      if (filename !== undefined) form.append(name, new File([body], filename, { type }))
+      else form.append(name, decoder.decode(body))
+      pos = next + delim.length
+    }
+    return form
+  }
+
   function bodyInit(body) {
     if (body == null) return null
     if (typeof body === "string") return body
     if (body instanceof URLSearchParams) return body.toString()
+    if (body instanceof Blob) return body[kBytes].slice()
+    if (body instanceof FormData) return encodeFormData(body)
     if (body instanceof Uint8Array && internal) return body
     if (body instanceof ArrayBuffer) return new Uint8Array(body.slice(0))
-    if (ArrayBuffer.isView(body)) {
-      return new Uint8Array(body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength))
-    }
+    if (ArrayBuffer.isView(body)) return viewBytes(body)
     return String(body)
   }
 
@@ -615,6 +824,8 @@ const WEB_SRC: &str = r##"
   function defaultType(body) {
     if (typeof body === "string") return "text/plain;charset=UTF-8"
     if (body instanceof URLSearchParams) return "application/x-www-form-urlencoded;charset=UTF-8"
+    if (body instanceof Blob) return body.type || null
+    if (body instanceof FormData) return `multipart/form-data; boundary=${formBoundaries.get(body)}`
     return null
   }
 
@@ -648,6 +859,23 @@ const WEB_SRC: &str = r##"
     async arrayBuffer() {
       const b = toBytes(this.#take())
       return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength)
+    }
+    async blob() {
+      const b = toBytes(this.#take())
+      const type = this.headers?.get("content-type") ?? ""
+      return new Blob([b], { type })
+    }
+    async formData() {
+      const type = this.headers?.get("content-type") ?? ""
+      const b = toBytes(this.#take())
+      const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(type)
+      if (/multipart\/form-data/i.test(type) && m) return parseMultipart(b, m[1] ?? m[2].trim())
+      if (/application\/x-www-form-urlencoded/i.test(type)) {
+        const form = new FormData()
+        for (const [k, v] of new URLSearchParams(decoder.decode(b))) form.append(k, v)
+        return form
+      }
+      throw new TypeError("Failed to parse body as FormData: unsupported content type")
     }
   }
 
@@ -1074,6 +1302,9 @@ const WEB_SRC: &str = r##"
     CustomEvent,
     EventTarget,
     DOMException,
+    Blob,
+    File,
+    FormData,
     fetch,
     serve,
     createServer,

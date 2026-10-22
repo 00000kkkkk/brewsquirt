@@ -2025,7 +2025,7 @@ Dependency specs:
 
 These are on the roadmap and currently produce a `SyntaxError` or are absent:
 
-- `Blob` and `FormData`
+- `Blob.prototype.stream`, `URL.createObjectURL` and web `ReadableStream`
 - Streaming bodies, WebSockets and HTTPS servers
 - `node:net`, `node:worker_threads`, and ciphers, key pairs and signatures in `node:crypto`
 - `Intl` covers numbers, plural rules, lists, relative times, collation and segmentation in a
