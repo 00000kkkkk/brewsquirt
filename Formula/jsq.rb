@@ -1,28 +1,28 @@
 class Jsq < Formula
   desc "JavaSquirt: JavaScript semantics, Rust speed"
   homepage "https://github.com/00000kkkkk/javasquirt"
-  version "1.1.0"
+  version "1.2.0"
   license "Apache-2.0"
 
   on_macos do
     on_arm do
-      url "https://github.com/00000kkkkk/javasquirt/releases/download/v1.1.0/javasquirt-v1.1.0-aarch64-apple-darwin.tar.gz"
-      sha256 "0a4590941aa004b48320e522084092e672ebd4757ebfef8c438bec6de5549941"
+      url "https://github.com/00000kkkkk/javasquirt/releases/download/v1.2.0/javasquirt-v1.2.0-aarch64-apple-darwin.tar.gz"
+      sha256 "3523f7f77b5df6e9e496a2e0ec83f65605813cec1383b430e42765ed33b0fcff"
     end
     on_intel do
-      url "https://github.com/00000kkkkk/javasquirt/releases/download/v1.1.0/javasquirt-v1.1.0-x86_64-apple-darwin.tar.gz"
-      sha256 "189040a69a55de4d036fae76dfc167d9d96c44087a1c713b0c7c32cd123a28bd"
+      url "https://github.com/00000kkkkk/javasquirt/releases/download/v1.2.0/javasquirt-v1.2.0-x86_64-apple-darwin.tar.gz"
+      sha256 "f03fb558d3de49d8c6929f7b1e9eb1491521ade309acaec282dd017aecbb5beb"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/00000kkkkk/javasquirt/releases/download/v1.1.0/javasquirt-v1.1.0-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "a0a144bb0d451b554bb6aeb56a06723ee699b2e60122aa42dc5dadd6f3e0a7d6"
+      url "https://github.com/00000kkkkk/javasquirt/releases/download/v1.2.0/javasquirt-v1.2.0-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "e88f13951006897b97bb62147b03da05d433a6fa54fa03bddf1287f06cd3b9a9"
     end
     on_intel do
-      url "https://github.com/00000kkkkk/javasquirt/releases/download/v1.1.0/javasquirt-v1.1.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "5da24c9727c68c397876a228213c7db8e5fc34fec115a6ff1e5e9978c04ee666"
+      url "https://github.com/00000kkkkk/javasquirt/releases/download/v1.2.0/javasquirt-v1.2.0-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "4edd111e9b4d7358a28ad335e67ddafd2b3ee61bc02d90670e7ef97116081c1c"
     end
   end
 
