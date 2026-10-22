@@ -2576,7 +2576,7 @@ const NODE_SRC: &str = r##"
     #sent = false
     #controller = new AbortController()
     constructor(url, options, cb) {
-      super({ highWaterMark: Infinity })
+      super({ highWaterMark: Infinity, autoDestroy: false })
       if (typeof url === "string" || url instanceof URL) {
         this.#url = new URL(String(url))
         this.#options = options ?? {}
@@ -2641,10 +2641,88 @@ const NODE_SRC: &str = r##"
       this.#chunks.push(chunk)
       cb()
     }
+    _destroy(err, cb) {
+      if (this.socket && !this.socket.destroyed) this.socket.destroy()
+      this.#controller.abort()
+      cb(err)
+    }
+    #rawRequest(body, cb) {
+      const secure = this.#url.protocol === "https:" || this.#url.protocol === "wss:"
+      const port = Number(this.#url.port) || (secure ? 443 : 80)
+      const host = this.#url.hostname.replace(/^\[|\]$/g, "")
+      const sock = secure ? tls.connect({ host, port, servername: this.#options.servername ?? host }) : net.connect({ host, port })
+      this.socket = sock
+      this.connection = sock
+      this.emit("socket", sock)
+      sock.once(secure ? "secureConnect" : "connect", () => {
+        if (!this.#headers.has("host")) this.setHeader("Host", this.#url.host)
+        if (body && !this.#headers.has("content-length")) this.setHeader("Content-Length", String(body.length))
+        let head = `${this.method} ${this.path} HTTP/1.1\r\n`
+        for (const [k, v] of this.#headers) head += `${k}: ${v}\r\n`
+        head += "\r\n"
+        sock.write(head)
+        if (body) sock.write(body)
+        cb()
+      })
+      let buffered = Buffer.alloc(0)
+      let headDone = false
+      const onData = (chunk) => {
+        if (headDone) return
+        buffered = Buffer.concat([buffered, chunk])
+        const idx = buffered.indexOf("\r\n\r\n")
+        if (idx < 0) return
+        headDone = true
+        sock.removeListener("data", onData)
+        const lines = buffered.subarray(0, idx).toString("latin1").split("\r\n")
+        const rest = buffered.subarray(idx + 4)
+        const [, statusText, ...message] = lines[0].split(" ")
+        const statusCode = Number(statusText)
+        const headers = {}
+        const rawHeaders = []
+        for (const line of lines.slice(1)) {
+          const i = line.indexOf(":")
+          if (i < 0) continue
+          const name = line.slice(0, i).trim()
+          const key = name.toLowerCase()
+          const value = line.slice(i + 1).trim()
+          rawHeaders.push(name, value)
+          if (headers[key] === undefined) headers[key] = value
+          else if (key === "set-cookie") headers[key] = [].concat(headers[key], value)
+          else headers[key] += ", " + value
+        }
+        const res = new Readable({ read() {} })
+        Object.assign(res, { statusCode, statusMessage: message.join(" "), headers, rawHeaders, httpVersion: "1.1", httpVersionMajor: 1, httpVersionMinor: 1, complete: false, socket: sock, req: this, url: "", method: null, aborted: false })
+        res.setTimeout = () => res
+        this.res = res
+        if (statusCode === 101 && this.listenerCount("upgrade") > 0) {
+          this.emit("upgrade", res, sock, rest)
+          return
+        }
+        if (rest.length) res.push(rest)
+        sock.on("data", (c) => res.push(c))
+        sock.on("end", () => {
+          res.complete = true
+          res.push(null)
+        })
+        this.emit("response", res)
+      }
+      sock.on("data", onData)
+      sock.on("error", (e) => {
+        if (!this.destroyed) this.destroy(e)
+      })
+      sock.on("close", () => {
+        if (!headDone && !this.destroyed) {
+          const e = new Error("socket hang up")
+          e.code = "ECONNRESET"
+          this.destroy(e)
+        }
+      })
+    }
     _final(cb) {
       this.#sent = true
       this.headersSent = true
       const body = this.#chunks.length ? Buffer.concat(this.#chunks) : undefined
+      if (this.#headers.has("upgrade") || this.#options.createConnection) return this.#rawRequest(body, cb)
       fetch(this.#url, { method: this.method, headers: this.#headers, body, signal: this.#controller.signal, redirect: "follow" }).then(
         (res) => {
           const incoming = new IncomingResponse(res)
@@ -2678,6 +2756,24 @@ const NODE_SRC: &str = r##"
     destroy() {}
   }
   const httpClient = { request: httpRequest, get: httpGet, Agent, globalAgent: new Agent(), ClientRequest, IncomingMessage: IncomingResponse, METHODS: ["ACL", "BIND", "CHECKOUT", "CONNECT", "COPY", "DELETE", "GET", "HEAD", "LINK", "LOCK", "M-SEARCH", "MERGE", "MKACTIVITY", "MKCALENDAR", "MKCOL", "MOVE", "NOTIFY", "OPTIONS", "PATCH", "POST", "PROPFIND", "PROPPATCH", "PURGE", "PUT", "QUERY", "REBIND", "REPORT", "SEARCH", "SOURCE", "SUBSCRIBE", "TRACE", "UNBIND", "UNLINK", "UNLOCK", "UNSUBSCRIBE"] }
+  const withHttps = (url, options) => {
+    if (typeof url === "object" && url !== null && !(url instanceof URL)) return [url.protocol == null ? { ...url, protocol: "https:" } : url, options]
+    if (typeof options === "object" && options !== null && options.protocol == null) return [url, { ...options, protocol: "https:" }]
+    return [url, options]
+  }
+  const httpsClient = {
+    ...httpClient,
+    request(url, options, cb) {
+      const [u, o] = withHttps(url, options)
+      return new ClientRequest(u, o, cb)
+    },
+    get(url, options, cb) {
+      const req = httpsClient.request(url, options, cb)
+      req.end()
+      return req
+    },
+    globalAgent: new Agent({ protocol: "https:" }),
+  }
 
   const zlibConstants = {
     Z_NO_FLUSH: 0, Z_PARTIAL_FLUSH: 1, Z_SYNC_FLUSH: 2, Z_FULL_FLUSH: 3, Z_FINISH: 4, Z_BLOCK: 5,
@@ -3263,7 +3359,7 @@ const NODE_SRC: &str = r##"
     kill(signal = "SIGTERM") {
       const st = this[kChild]
       if (st.id === null || st.exited) return false
-      this.killed = native.childKill(st.id)
+      this.killed = native.childKill(st.id, signal)
       return this.killed
     }
     ref() {
@@ -4429,6 +4525,7 @@ const NODE_SRC: &str = r##"
     dnsPromises,
     streamPromises,
     httpClient,
+    httpsClient,
     StringDecoder,
     querystring,
     tty,
@@ -4492,7 +4589,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         ("childSpawn", 4, super::netio::child_spawn),
         ("childWrite", 2, super::netio::child_write),
         ("childEndStdin", 1, super::netio::child_end_stdin),
-        ("childKill", 1, super::netio::child_kill),
+        ("childKill", 2, super::netio::child_kill),
         ("childRef", 2, super::netio::child_ref),
         ("read", 1, fs_read),
         ("write", 3, fs_write),
@@ -4596,7 +4693,7 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 }
                 cp
             }
-            "http" | "https" => {
+            "http" => {
                 let h = vm.import_builtin("http")?;
                 let n = load(vm)?;
                 let client = vm.get_prop(&n, "httpClient")?;
@@ -4609,6 +4706,20 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                     h.set_hidden("default", Value::Object(h.clone()));
                 }
                 h
+            }
+            "https" => {
+                let h = vm.import_builtin("http")?;
+                let n = load(vm)?;
+                let client = vm.get_prop(&n, "httpsClient")?;
+                let o = vm.new_object();
+                for (k, v) in vm.own_entries(&h) {
+                    o.set_own(k, v);
+                }
+                for (k, v) in vm.own_entries(&client) {
+                    o.set_own(k, v);
+                }
+                o.set_hidden("default", Value::Object(o.clone()));
+                Value::Object(o)
             }
             "stream" => {
                 let n = load(vm)?;

@@ -1,0 +1,34 @@
+const net = require("node:net")
+const http = require("node:http")
+const server = net.createServer((sock) => {
+  let head = ""
+  let upgraded = false
+  sock.on("data", (chunk) => {
+    if (upgraded) return
+    head += chunk.toString("latin1")
+    const end = head.indexOf("\r\n\r\n")
+    if (end < 0) return
+    upgraded = true
+    const lines = head.slice(0, end).split("\r\n")
+    const headers = Object.fromEntries(lines.slice(1).map((l) => l.split(": ")).map(([k, v]) => [k.toLowerCase(), v]))
+    console.log("server got", lines[0], headers.upgrade, headers.connection, headers.host.startsWith("127.0.0.1"))
+    sock.write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: echo\r\nConnection: Upgrade\r\nX-Extra: yes\r\n\r\nleftover")
+    sock.on("data", (d) => sock.write(Buffer.concat([Buffer.from("re:"), d])))
+  })
+})
+server.listen(0, "127.0.0.1", () => {
+  const port = server.address().port
+  const req = http.request({ host: "127.0.0.1", port, path: "/chat", headers: { Connection: "Upgrade", Upgrade: "echo" } })
+  req.on("upgrade", (res, socket, head) => {
+    console.log("upgrade", res.statusCode, res.statusMessage, res.headers.upgrade, res.headers["x-extra"], head.toString())
+    socket.on("data", (d) => {
+      console.log("after upgrade", d.toString())
+      socket.end()
+    })
+    socket.on("close", () => server.close(() => console.log("done")))
+    socket.write("ping")
+  })
+  req.on("response", (res) => console.log("unexpected response", res.statusCode))
+  req.on("error", (e) => console.log("error", e.message))
+  req.end()
+})

@@ -308,8 +308,25 @@ pub fn child_end_stdin(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 
 pub fn child_kill(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let id = id_arg(vm, args)?;
+    let signal = match arg(args, 1) {
+        Value::Undefined | Value::Null => 15,
+        Value::Number(n) => n as i32,
+        v => {
+            let name = vm.to_string(&v)?;
+            match io::signal_number(&name) {
+                Some(n) => n,
+                None => {
+                    let err = vm.type_error(format!("Unknown signal: {name}"));
+                    if let Value::Object(o) = &err {
+                        o.set_own("code", "ERR_UNKNOWN_SIGNAL".into());
+                    }
+                    return Err(err);
+                }
+            }
+        }
+    };
     if let Some(e) = vm.io_children.get(&id) {
-        let _ = e.cmd.send(ChildCmd::Kill);
+        let _ = e.cmd.send(ChildCmd::Kill(signal));
         return Ok(Value::Bool(true));
     }
     Ok(Value::Bool(false))

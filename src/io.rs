@@ -99,7 +99,7 @@ pub enum ChildEvent {
 pub enum ChildCmd {
     Write(Vec<u8>),
     EndStdin,
-    Kill,
+    Kill(i32),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -488,23 +488,58 @@ fn stdio_for(mode: StdioMode) -> std::process::Stdio {
     }
 }
 
+pub fn signal_label(signal: i32) -> String {
+    match signal {
+        1 => "SIGHUP",
+        2 => "SIGINT",
+        3 => "SIGQUIT",
+        6 => "SIGABRT",
+        9 => "SIGKILL",
+        10 => "SIGUSR1",
+        12 => "SIGUSR2",
+        13 => "SIGPIPE",
+        14 => "SIGALRM",
+        15 => "SIGTERM",
+        _ => "SIGTERM",
+    }
+    .to_string()
+}
+
+pub fn signal_number(name: &str) -> Option<i32> {
+    Some(match name {
+        "SIGHUP" => 1,
+        "SIGINT" => 2,
+        "SIGQUIT" => 3,
+        "SIGABRT" => 6,
+        "SIGKILL" => 9,
+        "SIGUSR1" => 10,
+        "SIGUSR2" => 12,
+        "SIGPIPE" => 13,
+        "SIGALRM" => 14,
+        "SIGTERM" => 15,
+        _ => return None,
+    })
+}
+
+#[cfg(unix)]
+fn send_signal(child: &mut std::process::Child, signal: i32) {
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    if unsafe { kill(child.id() as i32, signal) } != 0 {
+        let _ = child.kill();
+    }
+}
+
+#[cfg(not(unix))]
+fn send_signal(child: &mut std::process::Child, _signal: i32) {
+    let _ = child.kill();
+}
+
 #[cfg(unix)]
 fn signal_name(status: &std::process::ExitStatus) -> Option<String> {
     use std::os::unix::process::ExitStatusExt;
-    status.signal().map(|s| {
-        match s {
-            1 => "SIGHUP",
-            2 => "SIGINT",
-            3 => "SIGQUIT",
-            6 => "SIGABRT",
-            9 => "SIGKILL",
-            13 => "SIGPIPE",
-            14 => "SIGALRM",
-            15 => "SIGTERM",
-            _ => "SIGTERM",
-        }
-        .to_string()
-    })
+    status.signal().map(signal_label)
 }
 
 #[cfg(not(unix))]
@@ -545,8 +580,10 @@ pub fn child_spawn(
     let pid = child.id();
     let (ctx, crx) = channel::<ChildCmd>();
     let killed = Arc::new(AtomicBool::new(false));
+    let kill_signal = Arc::new(std::sync::atomic::AtomicI32::new(15));
     let mut stdin = child.stdin.take();
     let kill_flag = killed.clone();
+    let kill_sig = kill_signal.clone();
     std::thread::spawn(move || {
         while let Ok(cmd) = crx.recv() {
             match cmd {
@@ -560,7 +597,8 @@ pub fn child_spawn(
                 ChildCmd::EndStdin => {
                     stdin = None;
                 }
-                ChildCmd::Kill => {
+                ChildCmd::Kill(signal) => {
+                    kill_sig.store(signal, Ordering::SeqCst);
                     kill_flag.store(true, Ordering::SeqCst);
                 }
             }
@@ -602,8 +640,9 @@ pub fn child_spawn(
             match child.try_wait() {
                 Ok(Some(status)) => {
                     let code = status.code();
-                    let signal =
-                        signal_name(&status).or_else(|| was_killed.then(|| "SIGTERM".to_string()));
+                    let signal = signal_name(&status).or_else(|| {
+                        was_killed.then(|| signal_label(kill_signal.load(Ordering::SeqCst)))
+                    });
                     let code = if signal.is_some() { None } else { code };
                     let _ = tx.send(IoEvent::Child {
                         id,
@@ -614,7 +653,7 @@ pub fn child_spawn(
                 Ok(None) => {
                     if killed.load(Ordering::SeqCst) && !was_killed {
                         was_killed = true;
-                        let _ = child.kill();
+                        send_signal(&mut child, kill_signal.load(Ordering::SeqCst));
                     }
                     std::thread::sleep(Duration::from_millis(5));
                 }
