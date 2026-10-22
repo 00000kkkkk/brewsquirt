@@ -491,14 +491,18 @@ impl Vm {
     pub fn resolving_functions(&self, p: &Rc<Obj>) -> (Value, Value) {
         let record = Value::Object(Obj::new(ObjKind::Ordinary, None));
         let make = |target: &Value| {
-            Value::Object(Obj::new(
+            let f = Obj::new(
                 ObjKind::Bound(Box::new(Bound {
                     target: target.clone(),
                     this: Value::Object(p.clone()),
                     args: vec![record.clone()],
                 })),
                 Some(self.realm.function_proto.clone()),
-            ))
+            );
+            let ro = crate::object::NON_ENUM | crate::object::READ_ONLY;
+            f.set_with_attrs("length", Value::Number(1.0), ro);
+            f.set_with_attrs("name", Value::Str("".into()), ro);
+            Value::Object(f)
         };
         (
             make(&self.promise_resolve_fn),

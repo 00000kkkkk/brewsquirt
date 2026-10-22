@@ -70,6 +70,7 @@ pub struct Pristine {
     gen_next: Value,
     pub(crate) set_add: Value,
     pub(crate) map_set: Value,
+    pub(crate) array_join: Value,
 }
 
 pub struct Realm {
@@ -2821,6 +2822,7 @@ impl Vm {
             gen_next,
             set_add: own(&self.realm.set_proto, "add"),
             map_set: own(&self.realm.map_proto, "set"),
+            array_join: own(&self.realm.array_proto, "join"),
         }));
     }
 
@@ -4128,6 +4130,14 @@ impl Vm {
                 }
                 Op::ToPropertyKey => {
                     let v = pop!();
+                    if self.stack.last().is_some_and(|o| o.is_nullish()) {
+                        let base = self.stack.last().cloned().unwrap_or_default();
+                        throw!(self.type_error(format!(
+                            "Cannot read properties of {} (reading '{}')",
+                            inspect_plain(&base),
+                            inspect_plain(&v)
+                        )));
+                    }
                     let k = tri!(self.to_property_key(&v));
                     self.stack.push(Value::Str(k));
                 }

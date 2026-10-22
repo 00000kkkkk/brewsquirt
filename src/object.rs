@@ -809,8 +809,22 @@ impl View {
     }
 }
 
-pub type WeakEntries = rustc_hash::FxHashMap<usize, (std::rc::Weak<Obj>, Value)>;
-pub type WeakKeys = rustc_hash::FxHashMap<usize, std::rc::Weak<Obj>>;
+pub enum WeakHold {
+    Obj(std::rc::Weak<Obj>),
+    Sym(Rc<Symbol>),
+}
+
+impl WeakHold {
+    pub fn alive(&self) -> bool {
+        match self {
+            WeakHold::Obj(w) => w.strong_count() > 0,
+            WeakHold::Sym(_) => true,
+        }
+    }
+}
+
+pub type WeakEntries = rustc_hash::FxHashMap<usize, (WeakHold, Value)>;
+pub type WeakKeys = rustc_hash::FxHashMap<usize, WeakHold>;
 
 pub struct RegExpObj {
     pub data: RefCell<Rc<crate::regexp::RegexData>>,

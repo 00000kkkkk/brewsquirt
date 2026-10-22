@@ -1,6 +1,6 @@
 use super::{arg, expect_fn, make_ctor, method};
 use crate::inspect::inspect_plain;
-use crate::object::{IterState, MapKey, Obj, ObjKind};
+use crate::object::{IterState, MapKey, Obj, ObjKind, WeakHold};
 use crate::value::Value;
 use crate::vm::Vm;
 use std::cell::RefCell;
@@ -394,11 +394,27 @@ fn iter_next<const F: usize>(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     Ok(Value::Object(o))
 }
 
-fn weak_key(vm: &mut Vm, v: &Value, what: &str) -> Result<Rc<Obj>, Value> {
+fn weak_ptr(vm: &Vm, v: &Value) -> Option<(usize, WeakHold)> {
     match v {
-        Value::Object(o) => Ok(o.clone()),
-        _ => Err(vm.type_error(format!("Invalid value used {what}: {}", inspect_plain(v)))),
+        Value::Object(o) => Some((Rc::as_ptr(o) as usize, WeakHold::Obj(Rc::downgrade(o)))),
+        Value::Symbol(s) => {
+            let registered = vm
+                .symbol_registry
+                .values()
+                .any(|r| matches!(r, Value::Symbol(x) if Rc::ptr_eq(x, s)));
+            if registered {
+                None
+            } else {
+                Some((Rc::as_ptr(s) as usize, WeakHold::Sym(s.clone())))
+            }
+        }
+        _ => None,
     }
+}
+
+fn weak_key(vm: &mut Vm, v: &Value, what: &str) -> Result<(usize, WeakHold), Value> {
+    weak_ptr(vm, v)
+        .ok_or_else(|| vm.type_error(format!("Invalid value used {what}: {}", inspect_plain(v))))
 }
 
 fn this_weakmap(vm: &mut Vm, this: &Value) -> Result<Rc<Obj>, Value> {
@@ -432,59 +448,56 @@ fn weakmap_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 
 fn weakmap_get(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let m = this_weakmap(vm, &this)?;
-    let Value::Object(k) = arg(args, 0) else {
+    let Some((ptr, _)) = weak_ptr(vm, &arg(args, 0)) else {
         return Ok(Value::Undefined);
     };
     let ObjKind::WeakMap(map) = &m.kind else {
         unreachable!()
     };
     let map = map.borrow();
-    Ok(match map.get(&(Rc::as_ptr(&k) as usize)) {
-        Some((w, v)) if w.strong_count() > 0 => v.clone(),
+    Ok(match map.get(&ptr) {
+        Some((w, v)) if w.alive() => v.clone(),
         _ => Value::Undefined,
     })
 }
 
 fn weakmap_set(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let m = this_weakmap(vm, &this)?;
-    let k = weak_key(vm, &arg(args, 0), "as weak map key")?;
+    let (ptr, hold) = weak_key(vm, &arg(args, 0), "as weak map key")?;
     let ObjKind::WeakMap(map) = &m.kind else {
         unreachable!()
     };
     let mut map = map.borrow_mut();
     if map.len() >= 64 && map.len().is_power_of_two() {
-        map.retain(|_, (w, _)| w.strong_count() > 0);
+        map.retain(|_, (w, _)| w.alive());
     }
-    map.insert(Rc::as_ptr(&k) as usize, (Rc::downgrade(&k), arg(args, 1)));
+    map.insert(ptr, (hold, arg(args, 1)));
     drop(map);
     Ok(this)
 }
 
 fn weakmap_has(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let m = this_weakmap(vm, &this)?;
-    let Value::Object(k) = arg(args, 0) else {
+    let Some((ptr, _)) = weak_ptr(vm, &arg(args, 0)) else {
         return Ok(Value::Bool(false));
     };
     let ObjKind::WeakMap(map) = &m.kind else {
         unreachable!()
     };
-    let found = map
-        .borrow()
-        .get(&(Rc::as_ptr(&k) as usize))
-        .is_some_and(|(w, _)| w.strong_count() > 0);
+    let found = map.borrow().get(&ptr).is_some_and(|(w, _)| w.alive());
     Ok(Value::Bool(found))
 }
 
 fn weakmap_delete(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let m = this_weakmap(vm, &this)?;
-    let Value::Object(k) = arg(args, 0) else {
+    let Some((ptr, _)) = weak_ptr(vm, &arg(args, 0)) else {
         return Ok(Value::Bool(false));
     };
     let ObjKind::WeakMap(map) = &m.kind else {
         unreachable!()
     };
-    let removed = map.borrow_mut().remove(&(Rc::as_ptr(&k) as usize));
-    Ok(Value::Bool(removed.is_some()))
+    let removed = map.borrow_mut().remove(&ptr);
+    Ok(Value::Bool(removed.is_some_and(|(w, _)| w.alive())))
 }
 
 fn weakset_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
@@ -502,51 +515,56 @@ fn weakset_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 
 fn weakset_add(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_weakset(vm, &this)?;
-    let k = weak_key(vm, &arg(args, 0), "in weak set")?;
+    let (ptr, hold) = weak_key(vm, &arg(args, 0), "in weak set")?;
     let ObjKind::WeakSet(set) = &s.kind else {
         unreachable!()
     };
     let mut set = set.borrow_mut();
     if set.len() >= 64 && set.len().is_power_of_two() {
-        set.retain(|_, w| w.strong_count() > 0);
+        set.retain(|_, w| w.alive());
     }
-    set.insert(Rc::as_ptr(&k) as usize, Rc::downgrade(&k));
+    set.insert(ptr, hold);
     drop(set);
     Ok(this)
 }
 
 fn weakset_has(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_weakset(vm, &this)?;
-    let Value::Object(k) = arg(args, 0) else {
+    let Some((ptr, _)) = weak_ptr(vm, &arg(args, 0)) else {
         return Ok(Value::Bool(false));
     };
     let ObjKind::WeakSet(set) = &s.kind else {
         unreachable!()
     };
-    let found = set
-        .borrow()
-        .get(&(Rc::as_ptr(&k) as usize))
-        .is_some_and(|w| w.strong_count() > 0);
+    let found = set.borrow().get(&ptr).is_some_and(|w| w.alive());
     Ok(Value::Bool(found))
 }
 
 fn weakset_delete(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_weakset(vm, &this)?;
-    let Value::Object(k) = arg(args, 0) else {
+    let Some((ptr, _)) = weak_ptr(vm, &arg(args, 0)) else {
         return Ok(Value::Bool(false));
     };
     let ObjKind::WeakSet(set) = &s.kind else {
         unreachable!()
     };
-    let removed = set.borrow_mut().remove(&(Rc::as_ptr(&k) as usize));
-    Ok(Value::Bool(removed.is_some()))
+    let removed = set.borrow_mut().remove(&ptr);
+    Ok(Value::Bool(removed.is_some_and(|w| w.alive())))
 }
 
 fn weakref_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     if this.is_undefined() && args.is_empty() {
         return Err(vm.type_error("WeakRef: target must be an object"));
     }
-    let target = weak_key(vm, &arg(args, 0), "as WeakRef target")?;
+    let target = match arg(args, 0) {
+        Value::Object(o) => o,
+        v => {
+            return Err(vm.type_error(format!(
+                "Invalid value used as WeakRef target: {}",
+                inspect_plain(&v)
+            )));
+        }
+    };
     Ok(Value::Object(Obj::new(
         ObjKind::WeakRef(Rc::downgrade(&target)),
         Some(vm.realm.weakref_proto.clone()),

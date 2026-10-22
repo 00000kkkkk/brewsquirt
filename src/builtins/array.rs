@@ -459,12 +459,18 @@ fn join(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 }
 
 fn to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    let f = vm.get_prop(&this, "join")?;
+    let pristine = vm
+        .pristine
+        .as_ref()
+        .is_some_and(|p| f.strict_eq(&p.array_join));
     match &this {
-        Value::Object(o) if matches!(o.kind, ObjKind::Array(_)) => {
+        Value::Object(o) if pristine && matches!(o.kind, ObjKind::Array(_)) => {
             let list = items(o).clone();
             Ok(join_values(vm, &list, ",")?.into())
         }
-        _ => Ok("[object Object]".into()),
+        _ if f.is_callable() => vm.call_value(&f, this, &[]),
+        _ => super::object::object_to_string(vm, this, &[]),
     }
 }
 

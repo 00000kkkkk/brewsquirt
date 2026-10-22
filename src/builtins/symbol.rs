@@ -34,6 +34,12 @@ pub fn install(vm: &mut Vm) {
     let sp = vm.realm.symbol_proto.clone();
     method(vm, &sp, "toString", 0, symbol_to_string);
     method(vm, &sp, "valueOf", 0, symbol_value_of);
+    let tp = super::native_fn(vm, crate::object::TO_PRIMITIVE_KEY, 1, symbol_to_primitive);
+    sp.set_with_attrs(
+        crate::object::TO_PRIMITIVE_KEY,
+        tp,
+        crate::object::NON_ENUM | crate::object::READ_ONLY,
+    );
     let symbol = make_ctor(
         vm,
         "Symbol",
@@ -242,6 +248,18 @@ fn symbol_key_for(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 
 pub fn symbol_text(s: &Symbol) -> String {
     format!("Symbol({})", s.description.as_deref().unwrap_or(""))
+}
+
+fn symbol_to_primitive(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    match crate::object::unwrap_primitive(&this)
+        .as_ref()
+        .unwrap_or(&this)
+    {
+        Value::Symbol(s) => Ok(Value::Symbol(s.clone())),
+        _ => Err(
+            vm.type_error("Symbol.prototype[Symbol.toPrimitive] requires that 'this' be a Symbol")
+        ),
+    }
 }
 
 fn symbol_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {

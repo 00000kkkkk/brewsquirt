@@ -2699,6 +2699,16 @@ impl Compiler {
     }
 
     fn call(&mut self, callee: &Expr, args: &[Arg], optional: bool) -> R<()> {
+        if let ExprKind::OptChain(inner) = &callee.kind {
+            let saved = std::mem::take(&mut self.chain);
+            let r = self.call(inner, args, optional);
+            let jumps = std::mem::replace(&mut self.chain, saved);
+            r?;
+            for j in jumps {
+                self.patch(j);
+            }
+            return Ok(());
+        }
         let name = self.name_const(callee);
         match &callee.kind {
             ExprKind::Member {
@@ -3042,6 +3052,15 @@ impl Compiler {
                 }
             }
             ExprKind::Object(props) => {
+                let protos = props
+                    .iter()
+                    .filter(|p| matches!(p, PropDef::KeyValue(PropKey::Named(n), _) if &**n == "__proto__"))
+                    .count();
+                if protos > 1 {
+                    return Err(
+                        self.err("Duplicate __proto__ fields are not allowed in object literals")
+                    );
+                }
                 self.emit(Op::NewObject);
                 for p in props {
                     match p {

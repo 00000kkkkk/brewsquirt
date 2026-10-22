@@ -1157,6 +1157,15 @@ impl Parser {
                 self.advance();
                 Ok((PropKey::Named(s), false))
             }
+            Tok::BigInt(s) => {
+                let s = s.clone();
+                self.advance();
+                let text: Rc<str> = match crate::bigint::from_string(&s) {
+                    Some(b) => b.to_string().into(),
+                    None => s,
+                };
+                Ok((PropKey::Named(text), false))
+            }
             Tok::Punct(P::LBracket) => {
                 self.advance();
                 let saved = self.no_in;
@@ -2101,6 +2110,9 @@ impl Parser {
                     }
                 };
             } else if matches!(self.peek().tok, Tok::Template(_)) {
+                if chain {
+                    return Err(self.error("Invalid tagged template on optional chain"));
+                }
                 let Tok::Template(parts) = self.advance().tok else {
                     unreachable!()
                 };

@@ -362,7 +362,7 @@ fn date_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
                 _ => f64::NAN,
             },
             v => {
-                let p = vm.to_primitive(v, false)?;
+                let p = vm.to_primitive_hint(v, "default")?;
                 match p {
                     Value::Str(s) => parse_date(&s),
                     other => vm.to_number(&other)?,
@@ -561,8 +561,17 @@ fn to_iso_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 }
 
 fn to_json(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let (_, t) = this_time(vm, &this)?;
-    Ok(iso_string(t).map(Value::from).unwrap_or(Value::Null))
+    let o = Value::Object(vm.to_object(&this)?);
+    if let Value::Number(n) = vm.to_primitive_hint(&o, "number")? {
+        if !n.is_finite() {
+            return Ok(Value::Null);
+        }
+    }
+    let f = vm.get_prop(&o, "toISOString")?;
+    if !f.is_callable() {
+        return Err(vm.type_error("toISOString is not a function"));
+    }
+    vm.call_value(&f, o, &[])
 }
 
 fn to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
