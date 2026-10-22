@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-22
+
+### Added
+
+- Mapped `arguments`: in sloppy functions with a simple parameter list, `arguments[i]` and the
+  i-th parameter are the same variable in both directions, also from closures and across
+  generator suspensions. `delete arguments[i]`, defining an accessor and making an element
+  non-writable break the link for that index, exactly as the specification describes, and
+  `Object.freeze(arguments)` breaks it for every index.
+- Global lexical environment: top-level `let`, `const` and `class` declarations in scripts no
+  longer become properties of the global object. They shadow same-named global properties,
+  stay visible to later scripts, indirect `eval` and `$262.evalScript`, and cannot be deleted.
+  A script that redeclares a global lexical binding, declares `let` over a non-configurable
+  global property or declares `var` or a function over a lexical binding fails with a
+  `SyntaxError` before any of its declarations take effect; `var` and function declarations on a
+  non-extensible global object fail with a `TypeError`.
+- Function names are visible inside parameter default expressions, a `var` in the body that
+  reuses a parameter name gets its own binding when the parameters have default values, a
+  function declaration may reuse a parameter name, and a function declared in the body named
+  `arguments` suppresses the arguments object.
+- Annex B: `for (var x = init in obj)` runs the initializer once before the loop, `f() = v`,
+  `f() += v`, `f()++` and `for (f() in obj)` evaluate the call and throw a `ReferenceError` at
+  run time in sloppy code instead of failing to parse, `-->` on the first line of a script is a
+  comment even after whitespace or delimited comments, and a block-level function named
+  `arguments` is skipped by the hoisting rules.
+- `for (let in obj)` treats `let` as an identifier in sloppy code, `await` is a valid label in
+  scripts, escaped identifiers can be labels, ``new tag`template` `` constructs the result of
+  the tagged template call and `new import.meta()` is parsed.
+- `Function.prototype.caller` read on a sloppy function that is currently executing reports the
+  sloppy function that called it, and `null` when the caller is strict, a generator, async,
+  native or the top level.
+
+### Fixed
+
+- Assigning to an unresolvable name in strict code evaluates the right-hand side first and then
+  throws a `ReferenceError`, even when the right-hand side created the binding.
+- `typeof` on a global accessor property calls the getter.
+- `symbol == object` converts the object with `Symbol.toPrimitive` before comparing.
+- `for...in` skips properties deleted during the enumeration.
+- Closures created in the first `for (let ...)` head expressions and in the update expression
+  observe the per-iteration copy of the loop variable.
+- Assigning a property on a primitive invokes setters and proxy traps found on its prototype
+  chain, and throws a `TypeError` in strict code when nothing accepts the assignment.
+- `let` and `const` cannot bind the name `let`, `let` followed by a newline and an identifier is
+  a declaration, `catch (e) { function e() {} }` is an early error, and `"use strict"` written
+  with escape sequences or line continuations is not a directive.
+- Lexer: a lone carriage return terminates statements and string literals, line and paragraph
+  separators end hashbang and block comments, and raw template strings normalise `\r\n` after
+  a backslash to `\n`.
+- Generator objects take their prototype after the parameters have been evaluated, so a default
+  value that replaces `prototype` is honoured.
+- Function declarations in a global `eval` update an existing configurable property to be
+  writable and enumerable.
+- `var x = e` inside `with` resolves `x` through the object before evaluating `e`, and `with`
+  statements reset the completion value seen by `eval`.
+- `Object.getOwnPropertyNames` on functions and classes lists integer keys first.
+- `Date.prototype.setYear` truncates the year before deciding whether it is two-digit.
+- `Object.prototype.toString` and `console.log` recognise mapped arguments objects.
+
 ## [0.10.0] - 2026-10-22
 
 ### Added
@@ -399,7 +458,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Continuous integration on Linux, macOS and Windows, MSRV check, cargo-deny, CodeQL, coverage,
   benchmarks, and release archives for five targets.
 
-[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.10.0...v1.0.0
 [0.10.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/00000kkkkk/javasquirt/compare/v0.7.0...v0.8.0

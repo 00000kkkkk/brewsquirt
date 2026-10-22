@@ -281,6 +281,8 @@ typos
 - [x] `SharedArrayBuffer` and `Atomics`
 - [x] 95% of test262
 - [x] 97% of test262
+- [x] Mapped `arguments` and the global lexical environment
+- [x] 1.0.0
 - [ ] 98% of test262
 - [ ] Own regular expression engine with lookbehind back-references and the `v` flag
 - [ ] WebSockets

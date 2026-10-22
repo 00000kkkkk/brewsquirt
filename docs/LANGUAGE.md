@@ -1,12 +1,12 @@
 # JavaSquirt Language Reference
 
-This document describes JavaSquirt 0.10.0. JavaSquirt follows JavaScript semantics: for every
+This document describes JavaSquirt 1.0.0. JavaSquirt follows JavaScript semantics: for every
 supported feature, a program should print the same output under `jsq` as under Node.js. Features
 that are not implemented yet are listed in [Not yet supported](#not-yet-supported).
 
 JavaSquirt is checked against [test262](https://github.com/tc39/test262), the official
 ECMAScript conformance suite. JavaSquirt passes 97% of the tests it runs, in both strict and
-sloppy mode (about 42,700 of 44,000). Most remaining failures are edge cases; the larger gaps are
+sloppy mode (about 42,800 of 44,000). Most remaining failures are edge cases; the larger gaps are
 listed in [Not yet supported](#not-yet-supported).
 
 ## Contents
@@ -447,7 +447,10 @@ hi stranger hi jsq args: 3
 
 Inside a non-arrow function, `arguments` holds every argument the call received, including
 those beyond the declared parameters. Arrow functions see the `arguments` of the function they
-are written in.
+are written in. In sloppy functions whose parameters have no defaults, destructuring or rest
+element, `arguments[i]` and the i-th parameter are the same variable: assigning either one
+changes the other, until that element is deleted or redefined. Strict functions and functions
+with complex parameters get an unlinked copy, and `arguments.callee` throws in strict mode.
 
 ```js
 function sum() {
@@ -943,7 +946,10 @@ Cannot assign to read only property 'x' of object '#<Object>'
 `Object.getOwnPropertyDescriptors`, `Object.getOwnPropertySymbols` and `propertyIsEnumerable` work
 as in JavaScript. Integer-like keys are listed first, in ascending order.
 
-`globalThis` is the global object. Properties added to it become global variables, and the
+`globalThis` is the global object. Properties added to it become global variables, and
+top-level `var` and function declarations in scripts become its properties. Top-level `let`,
+`const` and `class` declarations do not: they live in the global lexical environment, shadow
+same-named properties, are shared by every script and `eval` and cannot be deleted. The
 well-known symbols `Symbol.toPrimitive`, `Symbol.hasInstance` and `Symbol.toStringTag` customize
 conversion, `instanceof` and `Object.prototype.toString`.
 
@@ -1989,11 +1995,6 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
   handful of locales; dates are formatted in English
 - Regular expressions: the `v` flag's set operations, most `\p{...}` property escapes, lookbehind
   containing back-references, duplicate named groups and some early errors for invalid patterns
-- The sloppy mode `arguments` object is not mapped to the parameters: writing `arguments[0]`
-  does not change the first parameter
-- Top-level `let`, `const` and `class` declarations in scripts live on the global object instead
-  of a separate global lexical environment, and declarations spread over several scripts are not
-  checked for collisions
 - Arrays are dense: writing an index far beyond the end or setting `length` to a huge value
   throws a `RangeError` instead of creating a sparse array
 - Private names are shared by all evaluations of a class body, so instances of two classes made
