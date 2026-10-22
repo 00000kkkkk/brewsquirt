@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Install without Rust: `install.sh` for Linux and macOS and `install.ps1` for Windows download
+  the latest release, verify its checksum and put `jsq` and `vrotdaem` on the `PATH`; a Scoop
+  manifest in `bucket/` and a Homebrew formula in `Formula/` let the repository serve as a bucket
+  and a tap; `scripts/update-manifests.sh` refreshes both from a release's checksums and the
+  release workflow opens a pull request with that update.
+
 ## [1.0.0] - 2026-10-22
 
 ### Added

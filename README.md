@@ -59,6 +59,43 @@ combined speed: 9004x
 
 ## Install
 
+No Rust toolchain needed. Every method below installs two binaries, `jsq` and `vrotdaem`.
+
+### One-liner
+
+Linux and macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/00000kkkkk/javasquirt/main/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/00000kkkkk/javasquirt/main/install.ps1 | iex
+```
+
+The scripts download the latest release for your platform, verify its SHA-256 checksum, install
+into `~/.jsq/bin` (`%USERPROFILE%\.jsq\bin` on Windows) and add that directory to your `PATH`.
+Set `JSQ_VERSION=v1.0.0` to pin a version, `JSQ_INSTALL_DIR` to pick another directory and
+`JSQ_NO_MODIFY_PATH=1` to leave your shell profile alone.
+
+### Package managers
+
+Scoop (Windows):
+
+```powershell
+scoop bucket add javasquirt https://github.com/00000kkkkk/javasquirt
+scoop install jsq
+```
+
+Homebrew (macOS and Linux):
+
+```sh
+brew tap 00000kkkkk/javasquirt https://github.com/00000kkkkk/javasquirt
+brew install jsq
+```
+
 ### From source
 
 Requires Rust 1.85 or newer.
@@ -148,7 +185,7 @@ import helpers from "./helpers"
 
 ## Features
 
-JavaSquirt 0.4.0 implements a large, practical subset of modern JavaScript:
+JavaSquirt 1.0.0 implements modern JavaScript as specified, passing 97% of test262:
 
 - **Values**: `undefined`, `null`, booleans, numbers, strings, arrays, objects, functions, classes, `Map`, `Set`, `Error`
 - **Bindings**: block-scoped `let` and `const`, hoisted function declarations

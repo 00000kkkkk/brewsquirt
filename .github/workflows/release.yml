@@ -69,3 +69,28 @@ jobs:
           checksum: sha256
           locked: true
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  manifests:
+    name: manifests
+    needs: upload-assets
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+      - name: Update the Scoop manifest and the Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: sh scripts/update-manifests.sh "${{ github.ref_name }}"
+      - uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+          branch: chore/manifests-${{ github.ref_name }}
+          commit-message: "chore: bump install manifests to ${{ github.ref_name }}"
+          title: "chore: bump install manifests to ${{ github.ref_name }}"
+          body: "Scoop manifest and Homebrew formula regenerated from the ${{ github.ref_name }} release checksums."
+          labels: no-changelog
+          delete-branch: true

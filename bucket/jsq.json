@@ -1,0 +1,27 @@
+{
+    "version": "1.0.0",
+    "description": "JavaSquirt: JavaScript semantics, Rust speed. Installs the jsq runtime and the vrotdaem package manager.",
+    "homepage": "https://github.com/00000kkkkk/javasquirt",
+    "license": "Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/00000kkkkk/javasquirt/releases/download/v1.0.0/javasquirt-v1.0.0-x86_64-pc-windows-msvc.zip",
+            "hash": "9a04532c5d8361285d27c8991ea1a4b648836c2ce5dddf1c651ed1919526ef0a"
+        }
+    },
+    "bin": [
+        "jsq.exe",
+        "vrotdaem.exe"
+    ],
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/00000kkkkk/javasquirt/releases/download/v$version/javasquirt-v$version-x86_64-pc-windows-msvc.zip",
+                "hash": {
+                    "url": "https://github.com/00000kkkkk/javasquirt/releases/download/v$version/javasquirt-v$version-x86_64-pc-windows-msvc.sha256"
+                }
+            }
+        }
+    }
+}
