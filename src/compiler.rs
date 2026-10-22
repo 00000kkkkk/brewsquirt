@@ -1575,9 +1575,10 @@ impl Compiler {
             let cur_depth = self.st_ref().depth;
             let exists = {
                 let st = self.st_ref();
+                let self_slot = st.self_slot;
                 self.local_slots(&n)
                     .iter()
-                    .any(|&i| st.locals[i as usize].depth <= cur_depth)
+                    .any(|&i| st.locals[i as usize].depth <= cur_depth && Some(i) != self_slot)
             };
             self.st().vars.insert(n.clone());
             if exists {

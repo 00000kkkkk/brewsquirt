@@ -9,11 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A `var` inside a named function expression that reuses the function's own name shadows it
+  instead of failing with `Assignment to constant variable` (`bn.js`, `libphonenumber-js`).
+- `await` on a `Promise` subclass goes through its overridden `then`, as the specification's
+  `PromiseResolve` requires, so SDKs built on custom promise classes (`openai`) resolve to the
+  parsed response instead of `null`.
+- `export { default as x } from "node:…"` and `export * as ns from "node:…"` re-export the
+  builtin's bindings (`vfile`, `unified`).
+- `process.env` is case-insensitive on Windows, as in Node, so `process.env.PATH` works when
+  the variable is spelled `Path`; `String(process)` is `[object process]`.
+- `child_process` honours a string `shell` option such as `powershell.exe` (`zx`).
+- `http.IncomingMessage` carries `trailers`/`rawTrailers` and `ServerResponse` exposes the
+  serialized `_header` once headers are sent (`@hapi/shot`, `minipass-fetch`).
+- The `zlib` stream classes are function constructors whose `_handle.writeSync` drives
+  synchronous inflation (`pngjs`), and `Buffer.alloc`, `allocUnsafe` and `allocUnsafeSlow` can
+  be called with `new` (`cbor-x`, `msgpackr`).
+- `crypto.generateKeyPair`/`generateKeyPairSync` are no longer defined, so libraries that
+  feature-detect them fall back to their own implementations (`node-forge`).
 - Named imports from a CommonJS module whose `module.exports` is a function (such as
   `readable-stream`) now see the function's own properties, matching Node's lexer-based named
   exports.
 - `\uD800`-style escapes and `\u{...}` surrogate code points in regular expressions match the
   lone surrogates stored in strings instead of failing to compile.
+- `vm.runInContext` and `Script.prototype.runInContext` bind `this` to the context and resolve
+  `globalThis` through it, so a window-like context that assigns `this.Map = globalThis.Map` no
+  longer overwrites the real globals (`happy-dom` destroyed `Map`, `Promise` and `Object`).
 - `zlib.gunzip` and the tarball extractor in `vrotdaem` ignore bytes after the last gzip member,
   so block-padded tarballs such as `sylvester-0.0.21.tgz` install instead of failing with
   `invalid gzip header`; a failed `vrotdaem add` no longer leaves the dependency in `squirt.json`.
@@ -28,8 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `generateKey`, `sign`/`verify` with HMAC, `deriveBits`/`deriveKey` with PBKDF2 and HKDF, and
   a global `CryptoKey`; encryption algorithms report `NotSupportedError`. `jose` signs and
   verifies HS256 tokens.
+- `setTimeout`, `setInterval` and `setImmediate` return Node-style `Timeout` and `Immediate`
+  objects with `ref`, `unref`, `hasRef`, `refresh`, `close` and `Symbol.toPrimitive`, and
+  unreferenced timers no longer keep the process alive.
 - `stream.getDefaultHighWaterMark` and `setDefaultHighWaterMark`; `events.addAbortListener`
-  (`execa` runs child processes).
+  and `events.EventEmitterAsyncResource` (`execa` runs child processes, `piscina` loads);
+  `http.maxHeaderSize`; `performance.eventLoopUtilization`, `nodeTiming` and `timerify`, and
+  `perf_hooks.createHistogram`/`monitorEventLoopDelay` (`@hapi/hapi`).
 - The `zlib` stream classes expose the `_handle` and `_processChunk` internals that `minizlib`
   drives synchronously, so `tar` creates and extracts `.tgz` archives.
 - File descriptor APIs in `fs`: `openSync`/`open`, `closeSync`/`close`, `readSync`/`read`,

@@ -367,13 +367,26 @@ impl Vm {
 
     pub fn to_promise(&mut self, v: Value) -> Rc<Obj> {
         if let Value::Object(o) = &v {
-            if matches!(o.kind, ObjKind::Promise(_)) {
+            if matches!(o.kind, ObjKind::Promise(_)) && self.has_intrinsic_promise_ctor(&v) {
                 return o.clone();
             }
         }
         let p = self.new_promise();
         self.resolve_promise(&p, v);
         p
+    }
+
+    pub fn has_intrinsic_promise_ctor(&mut self, v: &Value) -> bool {
+        let intrinsic = self.realm.promise_proto.get_own("constructor");
+        let ctor = match self.get_prop(v, "constructor") {
+            Ok(c) => c,
+            Err(_) => return true,
+        };
+        match (&ctor, &intrinsic) {
+            (Value::Object(a), Some(Value::Object(b))) => Rc::ptr_eq(a, b),
+            (_, None) => true,
+            _ => false,
+        }
     }
 
     fn is_pending(p: &Obj) -> bool {
@@ -716,6 +729,10 @@ impl Vm {
         if self.timer_keys.contains_key(&id) {
             self.unref_timers.insert(id);
         }
+    }
+
+    pub fn ref_timer(&mut self, id: u64) {
+        self.unref_timers.remove(&id);
     }
 
     fn has_refed_timers(&self) -> bool {

@@ -1,4 +1,8 @@
 42 helper:x 1.0
+true true function [object process]
+4 TypeError
+object function true true false true true
+function true function
 abort abort
 function function
 65536 16
@@ -8,9 +12,14 @@ function 0
 hello world
 hello world
 padded two members
+4 5 undefined function function true
 true 201 2, 3 content-type,x-a hello true true 1
-GET / function 0
+GET / function 0 {}
+HTTP/1.1 201 Created true
+true number sync inflate works
+3 r 16384 number function undefined
 finish once true
+wrapped:value
 true [object CryptoKey] secret false HMAC SHA-256 48 sign,verify
 true true
 true false

@@ -145,6 +145,8 @@ pub fn install(vm: &mut Vm) {
         ("clearInterval", 1, clear_timer),
         ("queueMicrotask", 1, queue_microtask),
         ("sleep", 1, sleep),
+        ("%unrefTimer%", 1, unref_timer),
+        ("%refTimer%", 1, ref_timer),
     ];
     for (name, arity, f) in timers {
         let v = native_fn(vm, name, *arity, *f);
@@ -175,6 +177,24 @@ fn clear_timer(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     if let Value::Number(n) = arg(args, 0) {
         if n >= 0.0 {
             vm.clear_timer(n as u64);
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+fn unref_timer(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    if let Value::Number(n) = arg(args, 0) {
+        if n >= 0.0 {
+            vm.unref_timer(n as u64);
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+fn ref_timer(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    if let Value::Number(n) = arg(args, 0) {
+        if n >= 0.0 {
+            vm.ref_timer(n as u64);
         }
     }
     Ok(Value::Undefined)

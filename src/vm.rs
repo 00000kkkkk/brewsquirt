@@ -1143,7 +1143,11 @@ impl Vm {
         for (exported, source, imported) in &link.indirect {
             if &**exported == name {
                 let Some(dep) = self.link_target(path, source)? else {
-                    return Ok(Resolution::Found(path.clone(), name.into()));
+                    let bare = source
+                        .strip_prefix("node:")
+                        .or_else(|| source.strip_prefix("squirt:"))
+                        .unwrap_or(source);
+                    return Ok(Resolution::Builtin(Rc::from(bare), imported.clone()));
                 };
                 if &**imported == "*" {
                     return Ok(Resolution::Namespace(dep));
@@ -1288,6 +1292,22 @@ impl Vm {
                         self.namespace_for(&dep)
                     };
                     nso.set_own(name.clone(), dep_ns);
+                }
+                Resolution::Builtin(source, imported) => {
+                    let ns = match self.import_node(&source)? {
+                        Some(v) => v,
+                        None => self.import_builtin(&source)?,
+                    };
+                    if &*imported == "*" {
+                        nso.set_own(name.clone(), ns);
+                    } else {
+                        let getter = self.ns_getter(ns, &imported);
+                        nso.set_with_attrs(
+                            name.clone(),
+                            crate::builtins::intrinsics::raw_accessor(getter, Value::Undefined),
+                            0,
+                        );
+                    }
                 }
                 _ => {}
             }
@@ -6465,6 +6485,7 @@ fn function_proto_call(_vm: &mut Vm, _this: Value, _args: &[Value]) -> Result<Va
 enum Resolution {
     Found(PathBuf, Rc<str>),
     Namespace(PathBuf),
+    Builtin(Rc<str>, Rc<str>),
     Ambiguous,
     NotFound,
 }

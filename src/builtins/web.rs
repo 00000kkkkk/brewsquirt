@@ -2325,6 +2325,8 @@ const WEB_SRC: &str = r##"
     this.readable = true
     this.aborted = false
     this.destroyed = false
+    this.trailers = {}
+    this.rawTrailers = []
     if (req && typeof req.url === "string" && req.headers && typeof req.headers.entries === "function") {
       const u = new URL(req.url)
       this.method = req.method
@@ -2430,10 +2432,22 @@ const WEB_SRC: &str = r##"
     this.socket = null
     this.connection = null
   }
+  const sendHeaders = (res) => {
+    if (res.headersSent && typeof res._header === "string") return
+    const { headers } = responseState(res)
+    let text = `HTTP/1.1 ${res.statusCode} ${res.statusMessage || STATUS_CODES[res.statusCode] || ""}\r\n`
+    for (const [name, value] of headers) text += `${name}: ${value}\r\n`
+    if (!headers.has("date") && res.sendDate !== false) text += `Date: ${new Date().toUTCString()}\r\n`
+    if (!headers.has("connection")) text += "Connection: keep-alive\r\n"
+    text += "\r\n"
+    res._header = text
+    res._headerSent = true
+    res.headersSent = true
+  }
   defineMethods(ServerResponse.prototype, messageEmitter)
   defineMethods(ServerResponse.prototype, {
     flushHeaders() {
-      this.headersSent = true
+      sendHeaders(this)
     },
     cork() {},
     uncork() {},
@@ -2488,7 +2502,7 @@ const WEB_SRC: &str = r##"
       this.statusCode = status
       if (message !== undefined) this.statusMessage = message
       if (headers) for (const k of Object.keys(headers)) this.setHeader(k, headers[k])
-      this.headersSent = true
+      sendHeaders(this)
       return this
     },
     writeContinue() {},
@@ -2500,7 +2514,7 @@ const WEB_SRC: &str = r##"
         const encoded = typeof chunk === "string" && typeof encoding === "string" && !/^utf-?8$/i.test(encoding) && typeof Buffer === "function" ? Buffer.from(chunk, encoding) : chunk
         responseState(this).chunks.push(encoded)
       }
-      this.headersSent = true
+      sendHeaders(this)
       if (typeof cb === "function") queueMicrotask(cb)
       return true
     },
@@ -2512,7 +2526,7 @@ const WEB_SRC: &str = r##"
       if (chunk != null) this.write(chunk, encoding)
       this.writableEnded = true
       this.finished = true
-      this.headersSent = true
+      sendHeaders(this)
       const textual = state.chunks.every((c) => typeof c !== "object")
       let body
       if (textual) {
@@ -2759,6 +2773,7 @@ pub fn http_module(vm: &mut Vm) -> Result<Value, Value> {
         let v = vm.get_prop(&web, name)?;
         o.set_own(name, v);
     }
+    o.set_own("maxHeaderSize", Value::Number(16384.0));
     o.set_hidden("default", Value::Object(o.clone()));
     Ok(Value::Object(o))
 }

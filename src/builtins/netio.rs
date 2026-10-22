@@ -219,6 +219,7 @@ pub fn child_spawn(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         cwd: None,
         env: None,
         shell: false,
+        shell_path: None,
         stdin: StdioMode::Pipe,
         stdout: StdioMode::Pipe,
         stderr: StdioMode::Pipe,
@@ -227,7 +228,11 @@ pub fn child_spawn(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         if let Value::Str(dir) = vm.get_prop(&options, "cwd")? {
             spec.cwd = Some(dir.to_string());
         }
-        spec.shell = vm.get_prop(&options, "shell")?.truthy();
+        let shell = vm.get_prop(&options, "shell")?;
+        spec.shell = shell.truthy();
+        if let Value::Str(path) = &shell {
+            spec.shell_path = Some(path.to_string());
+        }
         let env = vm.get_prop(&options, "env")?;
         if env.is_object() {
             let mut pairs = Vec::new();

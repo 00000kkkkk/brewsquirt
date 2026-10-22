@@ -1,5 +1,30 @@
 import make, { helper, VERSION } from "./fixtures/cjs_fn.js"
+import { proc as reexportedProcess, cwd as reexportedCwd, pathNamespace } from "./fixtures/reexport_builtin.mjs"
 console.log(make(21), helper("x"), VERSION)
+console.log(reexportedProcess === process, reexportedCwd === process.cwd, typeof pathNamespace.join, String(process))
+
+const shadow = function prime(n) {
+  var prime = n + 1
+  prime *= 2
+  return prime
+}
+const strictSelf = function self() {
+  "use strict"
+  try {
+    self = 1
+  } catch (e) {
+    return e.constructor.name
+  }
+}
+console.log(shadow(1), strictSelf())
+
+const timer = setTimeout(() => {}, 1000)
+console.log(typeof timer, typeof timer.unref, timer.hasRef(), timer.unref() === timer, timer.hasRef(), +timer > 0, timer.ref().hasRef())
+clearTimeout(timer)
+setInterval(() => {}, 1000).unref()
+const immediate = setImmediate(() => {})
+console.log(typeof immediate.ref, immediate.hasRef(), typeof setTimeout[Symbol.for("nodejs.util.promisify.custom")])
+clearImmediate(immediate)
 
 const { addAbortListener, EventEmitter } = require("node:events")
 const ac = new AbortController()
@@ -25,6 +50,14 @@ const gunzip = new zlib.Gunzip()
 console.log(gunzip._processChunk(packed, zlib.constants.Z_FINISH).toString())
 console.log(zlib.gunzipSync(Buffer.concat([zlib.gzipSync("padded"), Buffer.alloc(512)])).toString(), zlib.gunzipSync(Buffer.concat([zlib.gzipSync("two "), zlib.gzipSync("members")])).toString())
 
+const vm = require("node:vm")
+const sandbox = vm.createContext({ x: 2 })
+vm.runInContext("this.y = x * 2; globalThis.z = y + 1; this.kind = typeof globalThis.Map", sandbox)
+const windowLike = { Map: undefined }
+windowLike.globalThis = windowLike
+new vm.Script("this.Map = globalThis.Map; this.self = this === globalThis").runInContext(windowLike)
+console.log(sandbox.y, sandbox.z, typeof globalThis.z, sandbox.kind, typeof Map, windowLike.self)
+
 const http = require("node:http")
 const util = require("node:util")
 function MockResponse() {
@@ -46,10 +79,34 @@ mock.write("he")
 mock.end("llo")
 console.log(mock instanceof http.ServerResponse, mock.statusCode, mock.getHeader("x-a"), mock.getHeaderNames().join(), mock.chunks.join(""), mock.headersSent, mock.writableEnded, mock.listenerCount("finish"))
 const message = new http.IncomingMessage()
-console.log(message.method, message.url, typeof message.socket.address, message.listenerCount("end"))
+console.log(message.method, message.url, typeof message.socket.address, message.listenerCount("end"), JSON.stringify(message.trailers))
+console.log(mock._header.split("\r\n")[0], /content-type: text\/plain/.test(mock._header))
+
+function MyInflate(opts) {
+  zlib.Inflate.call(this, opts)
+}
+util.inherits(MyInflate, zlib.Inflate)
+const inflater = new MyInflate()
+const packedDeflate = zlib.deflateSync("sync inflate works")
+const outBuf = Buffer.alloc(8)
+let res = inflater._handle.writeSync(zlib.constants.Z_FINISH, packedDeflate, 0, packedDeflate.length, outBuf, 0, 8)
+const pieces = [Buffer.from(outBuf.subarray(0, 8 - res[1]))]
+while (res[1] === 0) {
+  res = inflater._handle.writeSync(zlib.constants.Z_FINISH, null, 0, 0, outBuf, 0, 8)
+  pieces.push(Buffer.from(outBuf.subarray(0, 8 - res[1])))
+}
+console.log(inflater instanceof zlib.Inflate, typeof inflater._chunkSize, Buffer.concat(pieces).toString())
+console.log(new Buffer.allocUnsafeSlow(3).length, new (require("node:events").EventEmitterAsyncResource)({ name: "r" }).asyncResource.name, http.maxHeaderSize, typeof performance.eventLoopUtilization().utilization, typeof require("node:perf_hooks").monitorEventLoopDelay().percentile, typeof require("node:crypto").generateKeyPairSync)
+
+class Wrapped extends Promise {
+  then(onFulfilled, onRejected) {
+    return super.then((v) => onFulfilled(`wrapped:${v}`), onRejected)
+  }
+}
 
 const nodeCrypto = require("node:crypto")
 ;(async () => {
+  console.log(await new Wrapped((resolve) => resolve("value")))
   const enc = new TextEncoder()
   const key = await crypto.subtle.importKey("raw", enc.encode("secret"), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"])
   console.log(key instanceof CryptoKey, Object.prototype.toString.call(key), key.type, key.extractable, key.algorithm.name, key.algorithm.hash.name, key.algorithm.length, key.usages.join())

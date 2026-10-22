@@ -125,6 +125,7 @@ pub struct ChildSpec {
     pub cwd: Option<String>,
     pub env: Option<Vec<(String, String)>>,
     pub shell: bool,
+    pub shell_path: Option<String>,
     pub stdin: StdioMode,
     pub stdout: StdioMode,
     pub stderr: StdioMode,
@@ -480,17 +481,27 @@ pub fn socket_listen(
 }
 
 #[cfg(windows)]
-fn shell_for(line: &str) -> std::process::Command {
+fn shell_for(line: &str, shell: Option<&str>) -> std::process::Command {
     use std::os::windows::process::CommandExt;
-    let mut c = std::process::Command::new("cmd");
-    c.args(["/d", "/s", "/c"]);
-    c.raw_arg(format!("\"{line}\""));
+    let program = shell.unwrap_or("cmd");
+    let base = std::path::Path::new(program)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    let mut c = std::process::Command::new(program);
+    if base == "cmd" {
+        c.args(["/d", "/s", "/c"]);
+        c.raw_arg(format!("\"{line}\""));
+    } else {
+        c.arg("-c").arg(line);
+    }
     c
 }
 
 #[cfg(not(windows))]
-fn shell_for(line: &str) -> std::process::Command {
-    let mut c = std::process::Command::new("sh");
+fn shell_for(line: &str, shell: Option<&str>) -> std::process::Command {
+    let mut c = std::process::Command::new(shell.unwrap_or("sh"));
     c.arg("-c").arg(line);
     c
 }
@@ -573,7 +584,7 @@ pub fn child_spawn(
             line.push(' ');
             line.push_str(a);
         }
-        shell_for(&line)
+        shell_for(&line, spec.shell_path.as_deref())
     } else {
         let mut c = std::process::Command::new(&spec.program);
         c.args(&spec.args);

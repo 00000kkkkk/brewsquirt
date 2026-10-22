@@ -235,7 +235,15 @@ const NODE_SRC: &str = r##"
     writeDoubleBE(v, o = 0) { this.#view().setFloat64(o, v); return o + 8 }
   }
   for (const key of ["from", "alloc", "allocUnsafe", "allocUnsafeSlow", "byteLength", "concat", "isBuffer", "isEncoding", "compare"]) {
-    Object.defineProperty(Buffer, key, { value: Buffer[key], writable: true, enumerable: true, configurable: true })
+    const impl = Buffer[key]
+    let value = impl
+    if (key === "alloc" || key === "allocUnsafe" || key === "allocUnsafeSlow") {
+      value = function (size, fill, encoding) {
+        return impl(size, fill, encoding)
+      }
+      Object.defineProperty(value, "name", { value: key })
+    }
+    Object.defineProperty(Buffer, key, { value, writable: true, enumerable: true, configurable: true })
   }
   Buffer.poolSize = 8192
   const bufferView = (b) => new DataView(b.buffer, b.byteOffset, b.byteLength)
@@ -648,6 +656,32 @@ const NODE_SRC: &str = r##"
       },
     }
   }
+  class EventEmitterAsyncResource extends EventEmitter {
+    #resource
+    constructor(options) {
+      super(typeof options === "object" && options !== null ? options : undefined)
+      const name = typeof options === "string" ? options : options?.name ?? new.target.name
+      this.#resource = {
+        name,
+        asyncId: () => 0,
+        triggerAsyncId: () => 0,
+        emitDestroy() {},
+        runInAsyncScope: (fn, thisArg, ...args) => fn.apply(thisArg, args),
+        bind: (fn) => fn,
+      }
+    }
+    get asyncResource() {
+      return this.#resource
+    }
+    get asyncId() {
+      return 0
+    }
+    get triggerAsyncId() {
+      return 0
+    }
+    emitDestroy() {}
+  }
+  EventEmitter.EventEmitterAsyncResource = EventEmitterAsyncResource
   EventEmitter.once = function once(emitter, name, options) {
     return new Promise((resolve, reject) => {
       const signal = options?.signal
@@ -1907,13 +1941,6 @@ const NODE_SRC: &str = r##"
       }
       queueMicrotask(() => cb(err, key))
     },
-    generateKeyPairSync: () => {
-      throw unsupportedKeys()
-    },
-    generateKeyPair(type, options, cb) {
-      const done = typeof options === "function" ? options : cb
-      queueMicrotask(() => done(unsupportedKeys()))
-    },
     createSign: () => {
       throw unsupportedKeys()
     },
@@ -2102,6 +2129,33 @@ const NODE_SRC: &str = r##"
     static get supportedEntryTypes() {
       return ["mark", "measure"]
     }
+  }
+  const makeHistogram = () => ({
+    count: 0,
+    countBigInt: 0n,
+    min: 0,
+    minBigInt: 0n,
+    max: 0,
+    maxBigInt: 0n,
+    mean: 0,
+    stddev: 0,
+    exceeds: 0,
+    exceedsBigInt: 0n,
+    percentiles: new Map(),
+    percentilesBigInt: new Map(),
+    percentile: () => 0,
+    percentileBigInt: () => 0n,
+    record() {},
+    recordDelta() {},
+    add() {},
+    reset() {},
+    enable: () => true,
+    disable: () => true,
+  })
+  const perfHooksExtras = {
+    createHistogram: () => makeHistogram(),
+    monitorEventLoopDelay: () => makeHistogram(),
+    constants: { NODE_PERFORMANCE_GC_MAJOR: 4, NODE_PERFORMANCE_GC_MINOR: 1, NODE_PERFORMANCE_GC_INCREMENTAL: 8, NODE_PERFORMANCE_GC_WEAKCB: 16, NODE_PERFORMANCE_GC_FLAGS_NO: 0, NODE_PERFORMANCE_GC_FLAGS_FORCED: 4 },
   }
 
   const kRead = Symbol("readableState")
@@ -2753,6 +2807,8 @@ const NODE_SRC: &str = r##"
       this.statusMessage = res.statusText
       this.headers = {}
       this.rawHeaders = []
+      this.trailers = {}
+      this.rawTrailers = []
       for (const [k, v] of res.headers) {
         this.headers[k] = this.headers[k] === undefined ? v : `${this.headers[k]}, ${v}`
         this.rawHeaders.push(k, v)
@@ -2899,7 +2955,7 @@ const NODE_SRC: &str = r##"
           else headers[key] += ", " + value
         }
         const res = new Readable({ read() {} })
-        Object.assign(res, { statusCode, statusMessage: message.join(" "), headers, rawHeaders, httpVersion: "1.1", httpVersionMajor: 1, httpVersionMinor: 1, complete: false, socket: sock, req: this, url: "", method: null, aborted: false })
+        Object.assign(res, { statusCode, statusMessage: message.join(" "), headers, rawHeaders, trailers: {}, rawTrailers: [], httpVersion: "1.1", httpVersionMajor: 1, httpVersionMinor: 1, complete: false, socket: sock, req: this, url: "", method: null, aborted: false })
         res.setTimeout = () => res
         this.res = res
         if (statusCode === 101 && this.listenerCount("upgrade") > 0) {
@@ -3488,54 +3544,104 @@ const NODE_SRC: &str = r##"
     }
     return out
   }
-  class ZlibStream extends Transform {
-    #op
-    #options
-    #chunks = []
-    constructor(op, options) {
-      super({ highWaterMark: options?.highWaterMark })
-      this.#op = op
-      this.#options = options
-      this.bytesWritten = 0
-      this._handle = { close() {} }
+  const kZlib = Symbol("zlibState")
+  const zlibState = (stream) => {
+    let state = stream[kZlib]
+    if (!state) {
+      state = { op: "gzip", options: undefined, chunks: [] }
+      Object.defineProperty(stream, kZlib, { value: state, configurable: true })
     }
+    return state
+  }
+  const zlibHandle = (stream) => ({
+    pending: null,
+    offset: 0,
+    close() {},
+    reset() {
+      this.pending = null
+      zlibState(stream).chunks = []
+    },
+    params() {},
+    writeSync(flushFlag, input, inOff, inLen, out, outOff, outLen) {
+      const state = zlibState(stream)
+      if (input && inLen > 0) state.chunks.push(new Uint8Array(input.buffer, input.byteOffset + (inOff ?? 0), inLen))
+      if (this.pending === null) {
+        if (state.chunks.length === 0) return [0, outLen]
+        const data = joinChunks(state.chunks)
+        if (flushFlag !== zlibConstants.Z_FINISH) {
+          try {
+            this.pending = zlibRun(state.op, data, state.options)
+          } catch {
+            return [0, outLen]
+          }
+        } else {
+          this.pending = zlibRun(state.op, data, state.options)
+        }
+        state.chunks = []
+        this.offset = 0
+      }
+      const n = Math.min(outLen, this.pending.length - this.offset)
+      if (n > 0) out.set(this.pending.subarray(this.offset, this.offset + n), outOff)
+      this.offset += n
+      if (this.offset >= this.pending.length) this.pending = null
+      return [0, outLen - n]
+    },
+  })
+  function ZlibStream(op, options) {
+    Transform.call(this, { highWaterMark: options?.highWaterMark })
+    Object.defineProperty(this, kZlib, { value: { op, options, chunks: [] }, configurable: true })
+    this.bytesWritten = 0
+    this._chunkSize = options?.chunkSize ?? 16384
+    this._outBuffer = Buffer.allocUnsafe(this._chunkSize)
+    this._outOffset = 0
+    this._buffer = this._outBuffer
+    this._offset = 0
+    this._hadError = false
+    this._handle = zlibHandle(this)
+  }
+  Object.setPrototypeOf(ZlibStream.prototype, Transform.prototype)
+  Object.setPrototypeOf(ZlibStream, Transform)
+  Object.assign(ZlibStream.prototype, {
     _transform(chunk, encoding, cb) {
-      this.#chunks.push(chunk)
+      zlibState(this).chunks.push(chunk)
       this.bytesWritten += chunk.length
       cb()
-    }
+    },
     _flush(cb) {
+      const state = zlibState(this)
       try {
-        cb(null, zlibRun(this.#op, joinChunks(this.#chunks), this.#options))
+        cb(null, zlibRun(state.op, joinChunks(state.chunks), state.options))
       } catch (e) {
         cb(e)
       }
-    }
+    },
     _processChunk(chunk, flushFlag) {
+      const state = zlibState(this)
       if (chunk && chunk.byteLength) {
-        this.#chunks.push(chunk)
+        state.chunks.push(chunk)
         this.bytesWritten += chunk.byteLength
       }
       if (flushFlag !== zlibConstants.Z_FINISH) return Buffer.alloc(0)
-      const input = joinChunks(this.#chunks)
-      this.#chunks = []
-      return zlibRun(this.#op, input, this.#options)
-    }
+      const input = joinChunks(state.chunks)
+      state.chunks = []
+      return zlibRun(state.op, input, state.options)
+    },
     flush(kind, cb) {
       if (typeof kind === "function") cb = kind
       if (typeof cb === "function") queueMicrotask(cb)
-    }
+    },
     close(cb) {
       if (typeof cb === "function") this.once("close", cb)
       this.destroy()
-    }
+    },
     params(level, strategy, cb) {
       if (typeof cb === "function") queueMicrotask(cb)
-    }
+    },
     reset() {
-      this.#chunks = []
-    }
-  }
+      zlibState(this).chunks = []
+      if (this._handle) this._handle.pending = null
+    },
+  })
   const zlib = {
     constants: zlibConstants,
     ...zlibConstants,
@@ -3545,13 +3651,15 @@ const NODE_SRC: &str = r##"
     const Name = op[0].toUpperCase() + op.slice(1)
     zlib[op + "Sync"] = (data, options) => zlibRun(op, data, options)
     zlib[op] = zlibAsync(op)
-    zlib["create" + Name] = (options) => new ZlibStream(op, options)
-    zlib[Name] = class extends ZlibStream {
-      constructor(options) {
-        super(op, options)
-      }
+    const Ctor = function (options) {
+      if (!(this instanceof Ctor)) return new Ctor(options)
+      ZlibStream.call(this, op, options)
     }
-    Object.defineProperty(zlib[Name], "name", { value: Name })
+    Object.defineProperty(Ctor, "name", { value: Name })
+    Object.setPrototypeOf(Ctor.prototype, ZlibStream.prototype)
+    Object.setPrototypeOf(Ctor, ZlibStream)
+    zlib[Name] = Ctor
+    zlib["create" + Name] = (options) => new Ctor(options)
   }
   const unsupportedCodec = (name) => {
     const e = new Error(`${name} compression is not supported in this runtime`)
@@ -4184,7 +4292,7 @@ const NODE_SRC: &str = r##"
       }
     }
     try {
-      const shell = options.shell === true || typeof options.shell === "string"
+      const shell = options.shell === true || typeof options.shell === "string" ? options.shell : false
       const [id, pid] = native.childSpawn(String(file), args.map(String), { cwd: options.cwd, env: options.env, shell, stdio }, handler)
       st.id = id
       child.pid = pid
@@ -4663,10 +4771,20 @@ const NODE_SRC: &str = r##"
     }
   }
   const contexts = new WeakSet()
+  const contextGlobal = (sandbox) =>
+    new Proxy(sandbox, {
+      get: (target, key) => (key in target ? target[key] : globalThis[key]),
+      has: (target, key) => key in target || key in globalThis,
+      set: (target, key, value) => {
+        target[key] = value
+        return true
+      },
+    })
   const vmRun = (code, sandbox) => {
     if (sandbox === undefined || sandbox === null) return indirectEval(String(code))
-    const fn = new Function("__sandbox__", `with (__sandbox__) { return eval(${JSON.stringify(String(code))}) }`)
-    return fn(sandbox)
+    const scope = "globalThis" in sandbox ? {} : { globalThis: contextGlobal(sandbox), global: contextGlobal(sandbox) }
+    const fn = new Function("__sandbox__", "__scope__", `with (__sandbox__) { with (__scope__) { return eval(${JSON.stringify(String(code))}) } }`)
+    return fn.call(sandbox, sandbox, scope)
   }
   const vmConstants = { USE_MAIN_CONTEXT_DEFAULT_LOADER: Symbol("vm_dynamic_import_main_context_default"), DONT_CONTEXTIFY: Symbol("vm_context_no_contextify") }
   const vmModule = {
@@ -5507,6 +5625,7 @@ const NODE_SRC: &str = r##"
     querystring,
     tty,
     PerformanceObserver,
+    perfHooksExtras,
     Buffer,
     bufferModule,
     Console,
@@ -6003,6 +6122,10 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 o.set_own("performance", p);
                 let po = vm.get_prop(&n, "PerformanceObserver")?;
                 o.set_own("PerformanceObserver", po);
+                let extras = vm.get_prop(&n, "perfHooksExtras")?;
+                for (k, v) in vm.own_entries(&extras) {
+                    o.set_own(k, v);
+                }
                 o.set_hidden("default", Value::Object(o.clone()));
                 Value::Object(o)
             }

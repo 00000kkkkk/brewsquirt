@@ -1299,6 +1299,27 @@ define(globalThis, "global", globalThis)
   }))
   process.features = { inspector: false, debug: false, uv: true, ipv6: true, tls_alpn: true, tls_sni: true, tls_ocsp: true, tls: true, cached_builtins: true, require_module: true, typescript: false }
   process.config = { variables: { node_shared: false, node_module_version: 127, napi_build_version: "9", v8_enable_i18n_support: 1 }, target_defaults: { cflags: [], default_configuration: "Release", defines: [], include_dirs: [], libraries: [] } }
+  Object.defineProperty(process, Symbol.toStringTag, { value: "process", configurable: true })
+  if (process.platform === "win32") {
+    const rawEnv = process.env
+    const envKey = (target, key) => {
+      if (typeof key !== "string" || key in target) return key
+      const upper = key.toUpperCase()
+      for (const k of Object.keys(target)) if (k.toUpperCase() === upper) return k
+      return key
+    }
+    process.env = new Proxy(rawEnv, {
+      get: (target, key) => target[envKey(target, key)],
+      set: (target, key, value) => {
+        target[envKey(target, key)] = typeof key === "string" ? String(value) : value
+        return true
+      },
+      has: (target, key) => envKey(target, key) in target,
+      deleteProperty: (target, key) => delete target[envKey(target, key)],
+      getOwnPropertyDescriptor: (target, key) => Reflect.getOwnPropertyDescriptor(target, envKey(target, key)),
+      defineProperty: (target, key, descriptor) => Reflect.defineProperty(target, envKey(target, key), descriptor),
+    })
+  }
   process.execArgv = []
   process.argv0 = process.argv[0]
   process.ppid = 0
@@ -1458,12 +1479,128 @@ define(globalThis, "global", globalThis)
     },
   })
 }
-define(globalThis, "setImmediate", named("setImmediate", function setImmediate(fn, ...args) {
-  return setTimeout(fn, 0, ...args)
-}))
-define(globalThis, "clearImmediate", named("clearImmediate", function clearImmediate(handle) {
-  clearTimeout(handle)
-}))
+{
+  const nativeSetTimeout = setTimeout
+  const nativeSetInterval = setInterval
+  const nativeClear = clearTimeout
+  const unrefTimer = globalThis["%unrefTimer%"]
+  const refTimer = globalThis["%refTimer%"]
+  const kTimerId = Symbol("timerId")
+  const kRefed = Symbol("timerRefed")
+  const timerId = (handle) => {
+    if (handle === null || handle === undefined) return -1
+    if (typeof handle === "object") return typeof handle[kTimerId] === "number" ? handle[kTimerId] : -1
+    const n = Number(handle)
+    return Number.isFinite(n) ? n : -1
+  }
+  class Timeout {
+    constructor(id, callback, delay, args, repeat) {
+      this[kTimerId] = id
+      this[kRefed] = true
+      this._idleTimeout = delay
+      this._onTimeout = callback
+      this._timerArgs = args
+      this._repeat = repeat ? delay : null
+      this._destroyed = false
+    }
+    ref() {
+      if (!this[kRefed]) {
+        refTimer(this[kTimerId])
+        this[kRefed] = true
+      }
+      return this
+    }
+    unref() {
+      if (this[kRefed]) {
+        unrefTimer(this[kTimerId])
+        this[kRefed] = false
+      }
+      return this
+    }
+    hasRef() {
+      return this[kRefed]
+    }
+    refresh() {
+      nativeClear(this[kTimerId])
+      const start = this._repeat === null ? nativeSetTimeout : nativeSetInterval
+      this[kTimerId] = start(this._onTimeout, this._idleTimeout, ...this._timerArgs)
+      if (!this[kRefed]) unrefTimer(this[kTimerId])
+      this._destroyed = false
+      return this
+    }
+    close() {
+      nativeClear(this[kTimerId])
+      this._destroyed = true
+      return this
+    }
+    [Symbol.toPrimitive]() {
+      return this[kTimerId]
+    }
+    [Symbol.dispose]() {
+      this.close()
+    }
+  }
+  class Immediate {
+    constructor(id, callback, args) {
+      this[kTimerId] = id
+      this[kRefed] = true
+      this._onImmediate = callback
+      this._argv = args
+      this._destroyed = false
+    }
+    ref() {
+      if (!this[kRefed]) {
+        refTimer(this[kTimerId])
+        this[kRefed] = true
+      }
+      return this
+    }
+    unref() {
+      if (this[kRefed]) {
+        unrefTimer(this[kTimerId])
+        this[kRefed] = false
+      }
+      return this
+    }
+    hasRef() {
+      return this[kRefed]
+    }
+    [Symbol.toPrimitive]() {
+      return this[kTimerId]
+    }
+    [Symbol.dispose]() {
+      nativeClear(this[kTimerId])
+    }
+  }
+  const promisifyCustom = Symbol.for("nodejs.util.promisify.custom")
+  const setTimeoutWrapped = named("setTimeout", function setTimeout(callback, delay, ...args) {
+    const ms = delay === undefined ? 0 : Number(delay)
+    return new Timeout(nativeSetTimeout(callback, ms, ...args), callback, ms, args, false)
+  })
+  define(setTimeoutWrapped, promisifyCustom, (delay, value) => new Promise((resolve) => nativeSetTimeout(() => resolve(value), delay ?? 0)))
+  const setIntervalWrapped = named("setInterval", function setInterval(callback, delay, ...args) {
+    const ms = delay === undefined ? 0 : Number(delay)
+    return new Timeout(nativeSetInterval(callback, ms, ...args), callback, ms, args, true)
+  })
+  const clearWrapped = (label) =>
+    named(label, function (handle) {
+      const id = timerId(handle)
+      if (id >= 0) nativeClear(id)
+      if (handle !== null && typeof handle === "object" && kTimerId in handle) handle._destroyed = true
+    })
+  const setImmediateWrapped = named("setImmediate", function setImmediate(callback, ...args) {
+    return new Immediate(nativeSetTimeout(callback, 0, ...args), callback, args)
+  })
+  define(setImmediateWrapped, promisifyCustom, (value) => new Promise((resolve) => nativeSetTimeout(() => resolve(value), 0)))
+  define(globalThis, "setTimeout", setTimeoutWrapped)
+  define(globalThis, "setInterval", setIntervalWrapped)
+  define(globalThis, "clearTimeout", clearWrapped("clearTimeout"))
+  define(globalThis, "clearInterval", clearWrapped("clearInterval"))
+  define(globalThis, "setImmediate", setImmediateWrapped)
+  define(globalThis, "clearImmediate", clearWrapped("clearImmediate"))
+  delete globalThis["%unrefTimer%"]
+  delete globalThis["%refTimer%"]
+}
 define(globalThis, "reportError", named("reportError", function reportError(error) {
   console.error("Uncaught", error)
 }))
@@ -1492,6 +1629,15 @@ define(globalThis, "navigator", {
   const marks = new Map()
   const origin = Date.now() - performance.now()
   define(performance, "timeOrigin", origin)
+  define(performance, "nodeTiming", { name: "node", entryType: "node", startTime: 0, duration: 0, nodeStart: 0, v8Start: 0, environment: 0, bootstrapComplete: 0, loopStart: 0, loopExit: -1, idleTime: 0, uvMetricsInfo: { loopCount: 0, events: 0, eventsWaiting: 0 } })
+  defineAll(performance, {
+    eventLoopUtilization() {
+      return { idle: 0, active: 0, utilization: 0 }
+    },
+    timerify(fn) {
+      return fn
+    },
+  })
   defineAll(performance, {
     markResourceTiming(timingInfo, requestedUrl, initiatorType) {
       const entry = { name: String(requestedUrl), entryType: "resource", startTime: performance.now(), duration: 0, initiatorType: String(initiatorType ?? "other") }
