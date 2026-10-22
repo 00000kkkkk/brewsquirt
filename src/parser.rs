@@ -741,10 +741,19 @@ impl Parser {
         } else {
             let saved = self.no_in;
             self.no_in = true;
+            let lhs_start = self.pos;
             let e = self.expression()?;
             self.no_in = saved;
             if self.is_kw("of") || self.is_kw("in") {
                 let is_of = self.is_kw("of");
+                let plain_async = self.pos == lhs_start + 1
+                    && !self.toks[lhs_start].escaped
+                    && matches!(&e.kind, ExprKind::Ident(n) if &**n == "async");
+                if is_of && !is_await && plain_async {
+                    return Err(
+                        self.error("The left-hand side of a for-of loop may not be 'async'")
+                    );
+                }
                 self.advance();
                 let pattern = self.expr_to_pattern(e)?;
                 let rhs = if is_of {

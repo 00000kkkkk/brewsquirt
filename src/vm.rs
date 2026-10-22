@@ -2885,7 +2885,17 @@ impl Vm {
             }
         };
         let (iterator, next) = protocol;
-        let r = self.call_value(&next, iterator, &[])?;
+        let step = self.protocol_step(&iterator, &next);
+        if !matches!(step, Ok(Some(_))) {
+            if let ObjKind::Iter(state) = &o.kind {
+                *state.borrow_mut() = IterState::List(Vec::new(), 0);
+            }
+        }
+        step
+    }
+
+    fn protocol_step(&mut self, iterator: &Value, next: &Value) -> Result<Option<Value>, Value> {
+        let r = self.call_value(next, iterator.clone(), &[])?;
         if !r.is_object() {
             return Err(self.type_error(format!(
                 "Iterator result {} is not an object",
@@ -2893,9 +2903,6 @@ impl Vm {
             )));
         }
         if self.get_prop(&r, "done")?.truthy() {
-            if let ObjKind::Iter(state) = &o.kind {
-                *state.borrow_mut() = IterState::List(Vec::new(), 0);
-            }
             return Ok(None);
         }
         Ok(Some(self.get_prop(&r, "value")?))
@@ -4530,6 +4537,23 @@ impl Vm {
                 Op::IterCloseTop => {
                     let it = pop!();
                     tri!(self.iter_close(&it));
+                }
+                Op::IterCloseQuiet(slot) => {
+                    let it = self.stack[base + slot as usize].clone();
+                    let _ = self.iter_close(&it);
+                }
+                Op::IterCloseUnder => {
+                    let exc = pop!();
+                    let it = pop!();
+                    let _ = self.iter_close(&it);
+                    self.stack.push(exc);
+                }
+                Op::TryBeginTop(t) => {
+                    self.handlers.push(Handler {
+                        frame: fi,
+                        stack_len: self.stack.len(),
+                        catch_ip: t as usize,
+                    });
                 }
                 Op::YieldReturn(t) => {
                     if self.gen_return_pending {

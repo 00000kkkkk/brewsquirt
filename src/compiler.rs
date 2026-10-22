@@ -523,6 +523,7 @@ impl Compiler {
             Op::JumpIfNotUndef(_) => Op::JumpIfNotUndef(t),
             Op::IterNext(_) => Op::IterNext(t),
             Op::TryBegin(_, s) => Op::TryBegin(t, s),
+            Op::TryBeginTop(_) => Op::TryBeginTop(t),
             Op::YieldReturn(_) => Op::YieldReturn(t),
             Op::TemplateCache(s, _) => Op::TemplateCache(s, t),
             Op::CmpJump(c, _) => Op::CmpJump(c, t),
@@ -1581,24 +1582,62 @@ impl Compiler {
     ) -> R<()> {
         let labels = std::mem::take(&mut self.pending_labels);
         self.begin_scope();
+        let decl = decl.filter(|k| *k != DeclKind::Var);
+        let mut head_names = Vec::new();
+        if let Some(kind) = decl {
+            pattern.bound_names(&mut head_names);
+            for (i, n) in head_names.iter().enumerate() {
+                if &**n == "let" {
+                    return Err(self.err("let is disallowed as a lexically bound name"));
+                }
+                if head_names[..i].contains(n) {
+                    return Err(self.err(format!("Identifier '{n}' has already been declared")));
+                }
+            }
+            let mut vars = Vec::new();
+            collect_var_names(body, &mut vars);
+            if let Some(n) = head_names.iter().find(|n| vars.contains(n)) {
+                return Err(self.err(format!("Identifier '{n}' has already been declared")));
+            }
+            for n in &head_names {
+                self.emit(Op::Uninit);
+                self.add_lexical(n.clone(), kind == DeclKind::Const);
+            }
+        }
+        let tdz_base = self.locals_len() - head_names.len();
         self.expr(source)?;
         self.pending_labels = labels;
         self.emit(if keys { Op::ForInIter } else { Op::GetIter });
+        if !head_names.is_empty() {
+            let first = tdz_base as u32;
+            self.emit(Op::CloseUpvalues(first));
+            self.emit(Op::SetLocal(first));
+            self.emit(Op::PopTo(first + 1));
+            self.st().locals.truncate(tdz_base);
+        }
         let iter_name = self.hidden_name("iter");
         let iter_slot = self.add_local(iter_name, true);
         let start = self.here();
         self.begin_scope();
-        let decl = decl.filter(|k| *k != DeclKind::Var);
         if let Some(kind) = decl {
-            let mut names = Vec::new();
-            pattern.bound_names(&mut names);
-            for n in names {
+            for n in &head_names {
                 self.emit(Op::Undefined);
-                self.add_local(n, kind == DeclKind::Const);
+                self.add_local(n.clone(), kind == DeclKind::Const);
             }
         }
         self.emit(Op::GetLocal(iter_slot));
         let next = self.emit(Op::IterNext(0));
+        let try_depth = self.st_ref().tries.len();
+        let guard = if keys {
+            None
+        } else {
+            let g = self.emit(Op::TryBegin(0, iter_slot + 1));
+            self.st().tries.push(TryCtx {
+                has_handler: true,
+                finally: None,
+            });
+            Some(g)
+        };
         self.bind_pattern(
             pattern,
             if decl.is_some() {
@@ -1607,7 +1646,6 @@ impl Compiler {
                 BindMode::Assign
             },
         )?;
-        let try_depth = self.st_ref().tries.len();
         let continue_locals = iter_slot as usize + 1;
         let labels = std::mem::take(&mut self.pending_labels);
         self.st().loops.push(LoopCtx {
@@ -1626,8 +1664,17 @@ impl Compiler {
         for j in ctx.continue_jumps {
             self.patch_to(j, start);
         }
+        if guard.is_some() {
+            self.emit(Op::TryEnd);
+            self.st().tries.pop();
+        }
         self.end_scope();
         self.emit(Op::Jump(start));
+        if let Some(g) = guard {
+            self.patch(g);
+            self.emit(Op::IterCloseQuiet(iter_slot));
+            self.emit(Op::Throw);
+        }
         self.patch(next);
         self.end_scope();
         for j in ctx.break_jumps {
@@ -1999,6 +2046,7 @@ impl Compiler {
             }
             Pattern::Array { elems, rest } => {
                 self.emit(Op::GetIter);
+                let guard = self.emit(Op::TryBeginTop(0));
                 for el in elems {
                     self.emit(Op::Dup);
                     self.emit(Op::IterNextOrUndef);
@@ -2020,6 +2068,7 @@ impl Compiler {
                         }
                     }
                 }
+                self.emit(Op::TryEnd);
                 if let Some(r) = rest {
                     self.emit(Op::Dup);
                     self.emit(Op::IterRest);
@@ -2028,6 +2077,11 @@ impl Compiler {
                 } else {
                     self.emit(Op::IterCloseTop);
                 }
+                let end = self.emit(Op::Jump(0));
+                self.patch(guard);
+                self.emit(Op::IterCloseUnder);
+                self.emit(Op::Throw);
+                self.patch(end);
             }
         }
         Ok(())
