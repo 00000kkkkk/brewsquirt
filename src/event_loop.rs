@@ -114,7 +114,7 @@ impl Vm {
         let mut handlers = Vec::new();
         while self.handlers.last().is_some_and(|h| h.frame >= fi) {
             let h = self.handlers.pop().expect("handler");
-            handlers.push((h.stack_len - seg, h.catch_ip));
+            handlers.push((h.stack_len - seg, h.catch_ip, h.guard));
         }
         handlers.reverse();
         let mut upvalues = Vec::new();
@@ -207,11 +207,12 @@ impl Vm {
             co: Some(co_obj.clone()),
             new_target: None,
         });
-        for (rel, catch_ip) in saved.handlers {
+        for (rel, catch_ip, guard) in saved.handlers {
             self.handlers.push(Handler {
                 frame: fi,
                 stack_len: seg + rel,
                 catch_ip,
+                guard,
             });
         }
         co.state.set(CoState::Running);

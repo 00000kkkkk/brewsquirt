@@ -96,9 +96,14 @@ fn parse_goal(src: &str, script: bool) -> R<Vec<Stmt>> {
         nt_ok: false,
         strict: !script,
         static_block: false,
+        in_params: false,
+        last_paren: (usize::MAX, usize::MAX),
         at_top: false,
     };
     parser.strict = !script || parser.has_use_strict_from(0);
+    if script && parser.strict {
+        parser.check_prologue_octal(0)?;
+    }
     parser.program()
 }
 
@@ -119,9 +124,14 @@ pub fn parse_eval(src: &str, ctx: &EvalCtx) -> R<Vec<Stmt>> {
         nt_ok: ctx.in_function,
         strict: ctx.strict,
         static_block: false,
+        in_params: false,
+        last_paren: (usize::MAX, usize::MAX),
         at_top: false,
     };
     parser.strict = ctx.strict || parser.has_use_strict_from(0);
+    if parser.strict {
+        parser.check_prologue_octal(0)?;
+    }
     parser.program()
 }
 
@@ -155,6 +165,8 @@ struct Parser {
     nt_ok: bool,
     strict: bool,
     static_block: bool,
+    in_params: bool,
+    last_paren: (usize, usize),
     at_top: bool,
     args_used: Vec<bool>,
     span_start: Option<u32>,
@@ -347,18 +359,26 @@ impl Parser {
         }
     }
 
+    fn check_binding_name(&self, s: &str) -> R<()> {
+        if self.strict && matches!(s, "eval" | "arguments") {
+            return Err(self.error("Unexpected eval or arguments in strict mode"));
+        }
+        if s == "await" && self.static_block {
+            return Err(self.error("Unexpected reserved word 'await'"));
+        }
+        if self.reserved(s) && !(s == "await" && self.script && !self.in_async) {
+            return Err(self.error(format!("Unexpected reserved word '{s}'")));
+        }
+        Ok(())
+    }
+
     fn binding_ident(&mut self) -> R<Rc<str>> {
         match self.word() {
             Some(s) if self.reserved(&s) && self.peek().escaped => {
                 Err(self.error("Keyword must not contain escaped characters"))
             }
-            Some(s) if self.strict && matches!(&*s, "eval" | "arguments") => {
-                Err(self.error("Unexpected eval or arguments in strict mode"))
-            }
-            Some(s) if self.reserved(&s) && !(&*s == "await" && self.script && !self.in_async) => {
-                Err(self.error(format!("Unexpected reserved word '{s}'")))
-            }
             Some(s) => {
+                self.check_binding_name(&s)?;
                 self.advance();
                 Ok(s)
             }
@@ -546,7 +566,16 @@ impl Parser {
                 let mut handler = None;
                 if self.eat_kw("catch") {
                     if self.eat(P::LParen) {
-                        param = Some(self.binding_pattern()?);
+                        let p = self.binding_pattern()?;
+                        let mut names = Vec::new();
+                        p.bound_names(&mut names);
+                        for (i, n) in names.iter().enumerate() {
+                            if names[..i].contains(n) {
+                                return Err(self
+                                    .error(format!("Identifier '{n}' has already been declared")));
+                            }
+                        }
+                        param = Some(p);
                         self.expect(P::RParen)?;
                     }
                     handler = Some(self.block()?);
@@ -753,6 +782,9 @@ impl Parser {
             self.no_in = saved;
             if self.is_kw("of") || self.is_kw("in") {
                 let is_of = self.is_kw("of");
+                if matches!(e.kind, ExprKind::Array(_) | ExprKind::Object(_)) {
+                    self.check_rest_position(lhs_start, self.pos)?;
+                }
                 let plain_async = self.pos == lhs_start + 1
                     && !self.toks[lhs_start].escaped
                     && matches!(&e.kind, ExprKind::Ident(n) if &**n == "async");
@@ -1047,11 +1079,13 @@ impl Parser {
         self.in_generator = is_generator;
         self.args_used.push(false);
         let saved_field = std::mem::take(&mut self.field_init);
+        let saved_sb = std::mem::take(&mut self.static_block);
         let nt = std::mem::replace(&mut self.nt_ok, true);
         let parsed = self
             .params()
             .and_then(|(params, rest)| Ok((params, rest, self.function_body()?)));
         self.nt_ok = nt;
+        self.static_block = saved_sb;
         self.field_init = saved_field;
         let uses_arguments = self.args_used.pop().unwrap_or(false);
         let end = self.prev_end();
@@ -1079,10 +1113,11 @@ impl Parser {
         let saved_strict = self.strict;
         if !self.strict && self.has_use_strict() {
             self.strict = true;
+            self.check_prologue_octal(self.pos + 1)?;
         }
-        let saved_sb = std::mem::take(&mut self.static_block);
+        let saved_ip = std::mem::take(&mut self.in_params);
         let body = self.block();
-        self.static_block = saved_sb;
+        self.in_params = saved_ip;
         self.strict = saved_strict;
         self.fn_depth -= 1;
         self.no_in = saved;
@@ -1091,6 +1126,98 @@ impl Parser {
 
     fn has_use_strict(&self) -> bool {
         self.has_use_strict_from(self.pos + 1)
+    }
+
+    fn check_prologue_octal(&self, start: usize) -> R<()> {
+        let mut i = start;
+        while let Some(t) = self.toks.get(i) {
+            match &t.tok {
+                Tok::Str(_) if t.escaped => {
+                    return Err(SyntaxError::new(
+                        "Octal escape sequences are not allowed in strict mode.",
+                        t.line,
+                        t.col,
+                    ));
+                }
+                Tok::Str(_) | Tok::Punct(P::Semi) => i += 1,
+                _ => break,
+            }
+        }
+        Ok(())
+    }
+
+    fn check_rest_position(&self, start: usize, end: usize) -> R<()> {
+        let mut depth = 0i32;
+        let mut rest_depth: Option<i32> = None;
+        let mut init_depth: Option<i32> = None;
+        for t in &self.toks[start..end.min(self.toks.len())] {
+            match &t.tok {
+                Tok::Punct(P::LParen) | Tok::Punct(P::LBracket) | Tok::Punct(P::LBrace) => {
+                    depth += 1;
+                }
+                Tok::Punct(P::RParen) | Tok::Punct(P::RBracket) | Tok::Punct(P::RBrace) => {
+                    depth -= 1;
+                    if rest_depth.is_some_and(|d| depth < d) {
+                        rest_depth = None;
+                    }
+                    if init_depth.is_some_and(|d| depth < d) {
+                        init_depth = None;
+                    }
+                }
+                Tok::Punct(P::Eq) if init_depth.is_none() => init_depth = Some(depth),
+                Tok::Punct(P::Comma) if init_depth == Some(depth) => init_depth = None,
+                _ if init_depth.is_some() => {}
+                Tok::Punct(P::Ellipsis) => {
+                    if rest_depth.is_none() {
+                        rest_depth = Some(depth);
+                    }
+                }
+                Tok::Punct(P::Comma) if rest_depth == Some(depth) => {
+                    return Err(SyntaxError::new(
+                        "Rest element must be last element",
+                        t.line,
+                        t.col,
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn check_ident_ref(&self, name: &str) -> R<()> {
+        if name == "arguments" && self.field_init > 0 {
+            return Err(self.error(
+                "'arguments' is not allowed in class field initializer or static initialization block",
+            ));
+        }
+        if name == "await" && self.static_block {
+            return Err(self.error("Unexpected reserved word 'await'"));
+        }
+        Ok(())
+    }
+
+    fn fn_expr_name(&mut self) -> R<Option<Rc<str>>> {
+        if !matches!(self.peek().tok, Tok::Ident(_)) {
+            return Ok(None);
+        }
+        let saved_sb = std::mem::take(&mut self.static_block);
+        let name = self.binding_ident();
+        self.static_block = saved_sb;
+        Ok(Some(name?))
+    }
+
+    fn check_fn_expr_name(
+        &self,
+        name: &Option<Rc<str>>,
+        is_async: bool,
+        is_generator: bool,
+    ) -> R<()> {
+        match name.as_deref() {
+            Some("yield") if is_generator => Err(self.error("Unexpected reserved word 'yield'")),
+            Some("await") if is_async => Err(self.error("Unexpected reserved word 'await'")),
+            _ => Ok(()),
+        }
     }
 
     fn has_use_strict_from(&self, start: usize) -> bool {
@@ -1116,6 +1243,7 @@ impl Parser {
     fn params(&mut self) -> R<(Vec<Param>, Option<Pattern>)> {
         self.expect(P::LParen)?;
         let saved = self.no_in;
+        let saved_ip = std::mem::replace(&mut self.in_params, true);
         self.no_in = false;
         let mut params = Vec::new();
         let mut rest = None;
@@ -1136,6 +1264,7 @@ impl Parser {
             }
         }
         self.no_in = saved;
+        self.in_params = saved_ip;
         self.expect(P::RParen)?;
         Ok((params, rest))
     }
@@ -1148,6 +1277,11 @@ impl Parser {
                 Ok((PropKey::Named(s), true))
             }
             Tok::Str(s) => {
+                if self.strict && self.peek().escaped {
+                    return Err(
+                        self.error("Octal escape sequences are not allowed in strict mode.")
+                    );
+                }
                 let s = s.clone();
                 self.advance();
                 Ok((PropKey::Named(s), false))
@@ -1223,6 +1357,9 @@ impl Parser {
                     self.expect(P::RBrace)?;
                     break;
                 }
+                if self.is(P::Hash) {
+                    return Err(self.error("Unexpected private field"));
+                }
                 let (key, is_ident) = self.prop_key()?;
                 let (value, default) = if self.eat(P::Colon) {
                     let v = self.binding_pattern()?;
@@ -1235,9 +1372,7 @@ impl Parser {
                 } else {
                     match &key {
                         PropKey::Named(n) if is_ident => {
-                            if self.reserved(n) {
-                                return Err(self.error(format!("Unexpected reserved word '{n}'")));
-                            }
+                            self.check_binding_name(n)?;
                             let d = if self.eat(P::Eq) {
                                 Some(self.assignment()?)
                             } else {
@@ -1564,19 +1699,26 @@ impl Parser {
             )
         };
         self.expect(P::Arrow)?;
+        let saved_sb = std::mem::take(&mut self.static_block);
         let body = if self.is(P::LBrace) {
             FuncBody::Block(self.function_body()?)
         } else {
             self.fn_depth += 1;
+            let saved_ip = std::mem::take(&mut self.in_params);
             let e = self.assignment();
+            self.in_params = saved_ip;
             self.fn_depth -= 1;
             FuncBody::Expr(Box::new(e?))
         };
+        self.static_block = saved_sb;
         Ok((params, rest, body))
     }
 
     fn yield_expr(&mut self) -> R<Expr> {
         let line = self.line();
+        if self.in_params {
+            return Err(self.error("Yield expression not allowed in formal parameter"));
+        }
         self.advance();
         let delegate = !self.peek().nl_before && self.eat(P::Star);
         let ends = self.peek().nl_before
@@ -1646,12 +1788,17 @@ impl Parser {
             return Err(self.error("yield is only valid in generator functions"));
         }
         let line = self.line();
+        let lhs_start = self.pos;
         let lhs = self.conditional()?;
         if let Some(op) = self.assign_op() {
+            let parenthesized = self.last_paren == (lhs_start, self.pos);
             if let ExprKind::Ident(n) = &lhs.kind {
                 if self.strict && matches!(&**n, "eval" | "arguments") {
                     return Err(self.error("Unexpected eval or arguments in strict mode"));
                 }
+            }
+            if parenthesized && matches!(lhs.kind, ExprKind::Array(_) | ExprKind::Object(_)) {
+                return Err(self.error("Invalid left-hand side in assignment"));
             }
             let target = match (&lhs.kind, op) {
                 (ExprKind::SuperMember(_), _) | (ExprKind::SuperIndex(_), _) => {
@@ -1671,12 +1818,21 @@ impl Parser {
                     _,
                 ) => AssignTarget::Simple(Box::new(lhs)),
                 (ExprKind::Array(_), None) | (ExprKind::Object(_), None) => {
+                    self.check_rest_position(lhs_start, self.pos)?;
                     AssignTarget::Pattern(self.expr_to_pattern(lhs)?)
                 }
                 _ => return Err(self.error("Invalid left-hand side in assignment")),
             };
             self.advance();
             let value = self.assignment()?;
+            let value = if parenthesized && op.is_none() {
+                Expr {
+                    line: value.line,
+                    kind: ExprKind::Seq(vec![value]),
+                }
+            } else {
+                value
+            };
             return Ok(Expr {
                 kind: ExprKind::Assign {
                     op,
@@ -1693,6 +1849,13 @@ impl Parser {
         let line = e.line;
         match e.kind {
             ExprKind::Ident(n) => {
+                if self.strict && matches!(&*n, "eval" | "arguments") {
+                    return Err(SyntaxError::new(
+                        "Unexpected eval or arguments in strict mode",
+                        line,
+                        1,
+                    ));
+                }
                 if self.reserved(&n) {
                     return Err(SyntaxError::new(
                         "Invalid destructuring assignment target",
@@ -1745,12 +1908,18 @@ impl Parser {
                         }
                         PropDef::Shorthand(n) => out.push(ObjPatProp {
                             key: PropKey::Named(n.clone()),
-                            value: Pattern::Ident(n),
+                            value: self.expr_to_pattern(Expr {
+                                kind: ExprKind::Ident(n),
+                                line,
+                            })?,
                             default: None,
                         }),
                         PropDef::ShorthandDefault(n, d) => out.push(ObjPatProp {
                             key: PropKey::Named(n.clone()),
-                            value: Pattern::Ident(n),
+                            value: self.expr_to_pattern(Expr {
+                                kind: ExprKind::Ident(n),
+                                line,
+                            })?,
                             default: Some(d),
                         }),
                         PropDef::Spread(x) => rest = Some(Box::new(self.expr_to_pattern(x)?)),
@@ -1855,7 +2024,11 @@ impl Parser {
             Tok::Punct(P::Bang) | Tok::Punct(P::Minus) | Tok::Punct(P::Plus) | Tok::Punct(P::Tilde)
         ) || (!t.escaped
             && matches!(&t.tok, Tok::Ident(s) if matches!(&**s, "typeof" | "void" | "delete")));
+        if self.is(P::Hash) && (min > 8 || !self.is_kw_at(2, "in")) {
+            return Err(self.error("Unexpected private name"));
+        }
         let mut left = self.unary()?;
+        let mut built: Option<LogicalOp> = None;
         while let Some((prec, op)) = self.binop_info() {
             if prec < min {
                 break;
@@ -1867,12 +2040,31 @@ impl Parser {
             }
             unary_left = false;
             let line = self.line();
+            if let BinKind::Logical(l) = op {
+                if built.is_some_and(|b| mixes_nullish(b, l)) {
+                    return Err(self.error("Cannot mix '??' with '||' or '&&' without parentheses"));
+                }
+            }
             self.advance();
+            let right_start = self.pos;
             let right = if matches!(op, BinKind::Bin(BinOp::Pow)) {
                 self.binary(prec)?
             } else {
                 self.binary(prec + 1)?
             };
+            match op {
+                BinKind::Logical(l) => {
+                    if let ExprKind::Logical(r, ..) = &right.kind {
+                        if mixes_nullish(*r, l) && self.last_paren != (right_start, self.pos) {
+                            return Err(
+                                self.error("Cannot mix '??' with '||' or '&&' without parentheses")
+                            );
+                        }
+                    }
+                    built = Some(l);
+                }
+                BinKind::Bin(_) => built = None,
+            }
             let kind = match op {
                 BinKind::Bin(b) => ExprKind::Binary(b, Box::new(left), Box::new(right)),
                 BinKind::Logical(l) => ExprKind::Logical(l, Box::new(left), Box::new(right)),
@@ -1919,6 +2111,10 @@ impl Parser {
                     return Err(self.error(
                         "await is only valid in async functions and the top level of modules",
                     ));
+                }
+                if self.in_params && self.in_async {
+                    return Err(self
+                        .error("Illegal await-expression in formal parameters of async function"));
                 }
                 self.advance();
                 let operand = self.unary()?;
@@ -2246,7 +2442,9 @@ impl Parser {
                         script: self.script,
                         nt_ok: self.nt_ok,
                         strict: self.strict,
-                        static_block: false,
+                        static_block: self.static_block,
+                        in_params: self.in_params,
+                        last_paren: (usize::MAX, usize::MAX),
                         at_top: false,
                         args_used: vec![false],
                         span_start: None,
@@ -2284,6 +2482,11 @@ impl Parser {
                 ExprKind::Number(n)
             }
             Tok::Str(s) => {
+                if self.strict && self.peek().escaped {
+                    return Err(
+                        self.error("Octal escape sequences are not allowed in strict mode.")
+                    );
+                }
                 let s = s.clone();
                 self.advance();
                 ExprKind::Str(s)
@@ -2300,6 +2503,7 @@ impl Parser {
                 return self.template(parts, line);
             }
             Tok::Punct(P::LParen) => {
+                let start = self.pos;
                 self.advance();
                 let saved = self.no_in;
                 self.no_in = false;
@@ -2307,6 +2511,7 @@ impl Parser {
                 self.no_in = saved;
                 let e = e?;
                 self.expect(P::RParen)?;
+                self.last_paren = (start, self.pos);
                 return Ok(e);
             }
             Tok::Punct(P::LBracket) => {
@@ -2349,6 +2554,7 @@ impl Parser {
             }
             Tok::Ident(name) if self.peek().escaped => {
                 let name = name.clone();
+                self.check_ident_ref(&name)?;
                 self.advance();
                 ExprKind::Ident(name)
             }
@@ -2375,11 +2581,8 @@ impl Parser {
                         self.span_start = Some(self.peek().start);
                         self.advance();
                         let is_generator = self.eat(P::Star);
-                        let fname = if matches!(self.peek().tok, Tok::Ident(_)) {
-                            Some(self.binding_ident()?)
-                        } else {
-                            None
-                        };
+                        let fname = self.fn_expr_name()?;
+                        self.check_fn_expr_name(&fname, false, is_generator)?;
                         ExprKind::Function(self.function_full(
                             fname,
                             FuncKind::Normal,
@@ -2394,6 +2597,9 @@ impl Parser {
                         if self.is(P::LParen) {
                             ExprKind::SuperCall(self.arguments()?)
                         } else if self.eat(P::Dot) {
+                            if self.is(P::Hash) {
+                                return Err(self.error("Unexpected private field"));
+                            }
                             ExprKind::SuperMember(self.ident_name()?)
                         } else if self.eat(P::LBracket) {
                             let saved = self.no_in;
@@ -2412,11 +2618,8 @@ impl Parser {
                         self.advance();
                         self.advance();
                         let is_generator = self.eat(P::Star);
-                        let fname = if matches!(self.peek().tok, Tok::Ident(_)) {
-                            Some(self.binding_ident()?)
-                        } else {
-                            None
-                        };
+                        let fname = self.fn_expr_name()?;
+                        self.check_fn_expr_name(&fname, true, is_generator)?;
                         ExprKind::Function(self.function_full(
                             fname,
                             FuncKind::Normal,
@@ -2457,13 +2660,9 @@ impl Parser {
                         return Err(self.unexpected());
                     }
                     _ => {
+                        self.check_ident_ref(&name)?;
                         self.advance();
                         if &*name == "arguments" {
-                            if self.field_init > 0 {
-                                return Err(self.error(
-                                    "'arguments' is not allowed in class field initializer or static initialization block",
-                                ));
-                            }
                             if let Some(top) = self.args_used.last_mut() {
                                 *top = true;
                             }
@@ -2515,6 +2714,9 @@ impl Parser {
                 {
                     accessor = Some(self.is_kw("set"));
                     self.advance();
+                }
+                if self.is(P::Hash) {
+                    return Err(self.error("Unexpected private field"));
                 }
                 let (key, is_ident) = self.prop_key()?;
                 let name = match &key {
@@ -2675,6 +2877,10 @@ fn body_use_strict(body: &[Stmt]) -> bool {
         }
     }
     false
+}
+
+fn mixes_nullish(a: LogicalOp, b: LogicalOp) -> bool {
+    (a == LogicalOp::Nullish) != (b == LogicalOp::Nullish)
 }
 
 fn check_strict_params(

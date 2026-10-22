@@ -21,6 +21,8 @@ pub fn tokenize_goal(src: &str, html: bool) -> Result<Vec<Token>, SyntaxError> {
         pos: 0,
         line: 1,
         col: 1,
+        legacy_escape: false,
+        in_template: false,
     };
     if lexer.chars.first() == Some(&'#') && lexer.chars.get(1) == Some(&'!') {
         while let Some(c) = lexer.peek() {
@@ -107,6 +109,8 @@ struct Lexer {
     pos: usize,
     line: u32,
     col: u32,
+    legacy_escape: bool,
+    in_template: bool,
 }
 
 impl Lexer {
@@ -183,8 +187,11 @@ impl Lexer {
             } else {
                 self.next_token(c)?
             };
-            let escaped =
-                matches!(tok, Tok::Ident(_)) && self.chars[begin..self.pos].contains(&'\\');
+            let escaped = match &tok {
+                Tok::Ident(_) => self.chars[begin..self.pos].contains(&'\\'),
+                Tok::Str(_) => std::mem::take(&mut self.legacy_escape),
+                _ => false,
+            };
             out.push(Token {
                 tok,
                 line,
@@ -495,6 +502,33 @@ impl Lexer {
             'f' => s.push('\u{c}'),
             'v' => s.push('\u{b}'),
             '0' if !self.peek().is_some_and(|d| d.is_ascii_digit()) => s.push('\0'),
+            '0'..='7' => {
+                if self.in_template {
+                    return Err(
+                        self.err("Octal escape sequences are not allowed in template strings")
+                    );
+                }
+                self.legacy_escape = true;
+                let mut v = c.to_digit(8).unwrap_or(0);
+                let more = if c <= '3' { 2 } else { 1 };
+                for _ in 0..more {
+                    match self.peek().and_then(|d| d.to_digit(8)) {
+                        Some(d) => {
+                            v = v * 8 + d;
+                            self.bump();
+                        }
+                        None => break,
+                    }
+                }
+                s.push(char::from_u32(v).unwrap_or('\u{fffd}'));
+            }
+            '8' | '9' => {
+                if self.in_template {
+                    return Err(self.err("\\8 and \\9 are not allowed in template strings"));
+                }
+                self.legacy_escape = true;
+                s.push(c);
+            }
             'x' => {
                 let v = self.hex(2)?;
                 s.push(char::from_u32(v).unwrap_or('\u{fffd}'));
@@ -538,7 +572,7 @@ impl Lexer {
         let mut in_class = false;
         loop {
             match self.bump() {
-                None | Some('\n') => {
+                None | Some('\n') | Some('\r') | Some('\u{2028}') | Some('\u{2029}') => {
                     return Err(SyntaxError::new(
                         "Invalid regular expression: missing /",
                         line,
@@ -548,7 +582,7 @@ impl Lexer {
                 Some('\\') => {
                     body.push('\\');
                     match self.bump() {
-                        None | Some('\n') => {
+                        None | Some('\n') | Some('\r') | Some('\u{2028}') | Some('\u{2029}') => {
                             return Err(SyntaxError::new(
                                 "Invalid regular expression: missing /",
                                 line,
@@ -608,7 +642,10 @@ impl Lexer {
                 Some('`') => break,
                 Some('\\') => {
                     let save = (self.pos, self.line, self.col);
-                    if let Err(e) = self.escape(&mut cur) {
+                    self.in_template = true;
+                    let escaped = self.escape(&mut cur);
+                    self.in_template = false;
+                    if let Err(e) = escaped {
                         bad.get_or_insert(e);
                         (self.pos, self.line, self.col) = save;
                         self.bump();

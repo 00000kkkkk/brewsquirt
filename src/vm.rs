@@ -263,6 +263,7 @@ pub(crate) struct Handler {
     pub(crate) frame: usize,
     pub(crate) stack_len: usize,
     pub(crate) catch_ip: usize,
+    pub(crate) guard: bool,
 }
 
 pub struct Vm {
@@ -3441,13 +3442,12 @@ impl Vm {
         };
         let ok = match start {
             Some(s) => self.op_set(&s, key.clone(), val, this)?,
-            None => match this {
-                Value::Object(o) => {
-                    let o = o.clone();
-                    self.op_set(&o, key.clone(), val, this)?
-                }
-                _ => false,
-            },
+            None => {
+                return Err(self.type_error(format!(
+                    "Cannot set properties of null (setting '{}')",
+                    crate::props::key_text(&key)
+                )));
+            }
         };
         if !ok {
             return Err(self.type_error(format!(
@@ -4893,11 +4893,26 @@ impl Vm {
                         frame: fi,
                         stack_len: self.stack.len(),
                         catch_ip: t as usize,
+                        guard: true,
                     });
+                }
+                Op::Pick(d) => {
+                    let n = self.stack.len();
+                    let v = self.stack[n - 1 - d as usize].clone();
+                    self.stack.push(v);
                 }
                 Op::YieldReturn(t) => {
                     if self.gen_return_pending {
                         self.gen_return_pending = false;
+                        while self
+                            .handlers
+                            .last()
+                            .is_some_and(|h| h.frame == fi && h.guard)
+                        {
+                            let h = self.handlers.pop().expect("handler");
+                            let it = self.stack[h.stack_len - 1].clone();
+                            tri!(self.iter_close(&it));
+                        }
                     } else {
                         ip = t as usize;
                     }
@@ -4937,9 +4952,15 @@ impl Vm {
                         }
                     }
                 }
-                Op::ObjRest(n) => {
-                    let keys = self.stack.split_off(self.stack.len() - n as usize);
+                Op::ObjRest(n, saved) => {
+                    let mut keys = self.stack.split_off(self.stack.len() - n as usize);
                     let src = pop!();
+                    if saved > 0 {
+                        let orig = pop!();
+                        let extra = self.stack.split_off(self.stack.len() - saved as usize);
+                        self.stack.push(orig);
+                        keys.extend(extra);
+                    }
                     let excluded: Vec<Rc<str>> = keys
                         .iter()
                         .filter_map(|k| match k {
@@ -5028,6 +5049,7 @@ impl Vm {
                         frame: fi,
                         stack_len: base + slot as usize,
                         catch_ip: t as usize,
+                        guard: false,
                     });
                 }
                 Op::TryEnd => {

@@ -14,6 +14,22 @@ pub enum Mode {
     Repl,
 }
 
+enum TargetRef {
+    None,
+    Member(Rc<str>),
+    Index,
+}
+
+impl TargetRef {
+    fn width(&self) -> u32 {
+        match self {
+            TargetRef::None => 0,
+            TargetRef::Member(_) => 1,
+            TargetRef::Index => 2,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BindMode {
     Init,
@@ -1111,6 +1127,14 @@ impl Compiler {
                 && !n.starts_with("%import")
                 && !import_names.contains(n);
             let lexical = (!repl || self.script_eval == 1) && lexical_kind;
+            if top
+                && lexical_kind
+                && self.mode != Mode::Module
+                && self.script_eval == 0
+                && matches!(&**n, "undefined" | "NaN" | "Infinity")
+            {
+                return Err(self.err(format!("Identifier '{n}' has already been declared")));
+            }
             if lexical {
                 self.emit(Op::Uninit);
                 self.add_lexical(n.clone(), *c);
@@ -1289,6 +1313,7 @@ impl Compiler {
 
     fn sub_stmt(&mut self, s: &Stmt) -> R<()> {
         match &s.kind {
+            StmtKind::Decl(DeclKind::Var, _) => self.stmt(s),
             StmtKind::Decl(..) | StmtKind::Class(_) | StmtKind::Function(_) => {
                 Err(SyntaxError::new(
                     "Lexical declaration cannot appear in a single-statement context",
@@ -1420,7 +1445,20 @@ impl Compiler {
                 let mut loop_base = None;
                 if let Some(init) = init {
                     match &init.kind {
-                        StmtKind::Decl(..) => {
+                        StmtKind::Decl(kind, decls) => {
+                            if *kind != DeclKind::Var {
+                                let mut head = Vec::new();
+                                for (p, _) in decls {
+                                    p.bound_names(&mut head);
+                                }
+                                let mut vars = Vec::new();
+                                collect_var_names(body, &mut vars);
+                                if let Some(n) = head.iter().find(|n| vars.contains(n)) {
+                                    return Err(self.err(format!(
+                                        "Identifier '{n}' has already been declared"
+                                    )));
+                                }
+                            }
                             let base = self.locals_len();
                             self.hoist(std::slice::from_ref(init.as_ref()))?;
                             self.stmt(init)?;
@@ -2043,6 +2081,54 @@ impl Compiler {
         Ok(())
     }
 
+    fn target_ref(&mut self, p: &Pattern) -> R<TargetRef> {
+        let Pattern::Target(e) = p else {
+            return Ok(TargetRef::None);
+        };
+        match &e.kind {
+            ExprKind::Member { obj, name, .. } => {
+                self.expr(obj)?;
+                Ok(TargetRef::Member(name.clone()))
+            }
+            ExprKind::Index { obj, index, .. } => {
+                self.expr(obj)?;
+                self.expr(index)?;
+                Ok(TargetRef::Index)
+            }
+            _ => Err(self.err("Invalid destructuring assignment target")),
+        }
+    }
+
+    fn pattern_default(&mut self, p: &Pattern, default: Option<&Expr>) -> R<()> {
+        if let Some(d) = default {
+            let j = self.emit(Op::JumpIfNotUndef(0));
+            let name = match p {
+                Pattern::Ident(n) => Some(n.clone()),
+                _ => None,
+            };
+            self.expr_named(d, name.as_ref())?;
+            self.patch(j);
+        }
+        Ok(())
+    }
+
+    fn store_target(&mut self, p: &Pattern, target: &TargetRef, mode: BindMode) -> R<()> {
+        match target {
+            TargetRef::None => self.bind_pattern(p, mode),
+            TargetRef::Member(name) => {
+                let k = self.str_const(name);
+                self.emit(Op::SetProp(k));
+                self.emit(Op::Pop);
+                Ok(())
+            }
+            TargetRef::Index => {
+                self.emit(Op::SetIndex);
+                self.emit(Op::Pop);
+                Ok(())
+            }
+        }
+    }
+
     fn bind_pattern(&mut self, p: &Pattern, mode: BindMode) -> R<()> {
         match p {
             Pattern::Ident(n) => {
@@ -2069,28 +2155,39 @@ impl Compiler {
             },
             Pattern::Object { props, rest } => {
                 self.emit(Op::RequireObject);
+                let mut saved = 0u32;
                 for prop in props {
-                    self.emit(Op::Dup);
-                    match &prop.key {
-                        PropKey::Named(k) => {
-                            let k = self.str_const(k);
-                            self.emit(Op::GetProp(k));
-                        }
+                    let named = match &prop.key {
+                        PropKey::Named(k) => Some(self.str_const(k)),
                         PropKey::Computed(e) => {
                             self.expr(e)?;
+                            self.emit(Op::ToPropertyKey);
+                            if rest.is_some() {
+                                self.emit(Op::Dup);
+                                self.emit(Op::Rot3);
+                                saved += 1;
+                            }
+                            None
+                        }
+                    };
+                    let target = self.target_ref(&prop.value)?;
+                    let w = target.width();
+                    match named {
+                        Some(k) => {
+                            self.emit(Op::Pick(w));
+                            self.emit(Op::GetProp(k));
+                        }
+                        None => {
+                            self.emit(Op::Pick(w + 1));
+                            self.emit(Op::Pick(w + 1));
                             self.emit(Op::GetIndex);
                         }
                     }
-                    if let Some(d) = &prop.default {
-                        let j = self.emit(Op::JumpIfNotUndef(0));
-                        let name = match &prop.value {
-                            Pattern::Ident(n) => Some(n.clone()),
-                            _ => None,
-                        };
-                        self.expr_named(d, name.as_ref())?;
-                        self.patch(j);
+                    self.pattern_default(&prop.value, prop.default.as_ref())?;
+                    self.store_target(&prop.value, &target, mode)?;
+                    if named.is_none() {
+                        self.emit(Op::Pop);
                     }
-                    self.bind_pattern(&prop.value, mode)?;
                 }
                 if let Some(r) = rest {
                     self.emit(Op::Dup);
@@ -2102,7 +2199,7 @@ impl Compiler {
                             n += 1;
                         }
                     }
-                    self.emit(Op::ObjRest(n));
+                    self.emit(Op::ObjRest(n, saved));
                     self.bind_pattern(r, mode)?;
                 }
                 self.emit(Op::Pop);
@@ -2111,31 +2208,30 @@ impl Compiler {
                 self.emit(Op::GetIter);
                 let guard = self.emit(Op::TryBeginTop(0));
                 for el in elems {
-                    self.emit(Op::Dup);
-                    self.emit(Op::IterNextOrUndef);
                     match el {
                         None => {
+                            self.emit(Op::Dup);
+                            self.emit(Op::IterNextOrUndef);
                             self.emit(Op::Pop);
                         }
                         Some(PatElem { pattern, default }) => {
-                            if let Some(d) = default {
-                                let j = self.emit(Op::JumpIfNotUndef(0));
-                                let name = match pattern {
-                                    Pattern::Ident(n) => Some(n.clone()),
-                                    _ => None,
-                                };
-                                self.expr_named(d, name.as_ref())?;
-                                self.patch(j);
-                            }
-                            self.bind_pattern(pattern, mode)?;
+                            let target = self.target_ref(pattern)?;
+                            self.emit(Op::Pick(target.width()));
+                            self.emit(Op::IterNextOrUndef);
+                            self.pattern_default(pattern, default.as_ref())?;
+                            self.store_target(pattern, &target, mode)?;
                         }
                     }
                 }
+                let rest_target = match rest {
+                    Some(r) => self.target_ref(r)?,
+                    None => TargetRef::None,
+                };
                 self.emit(Op::TryEnd);
                 if let Some(r) = rest {
-                    self.emit(Op::Dup);
+                    self.emit(Op::Pick(rest_target.width()));
                     self.emit(Op::IterRest);
-                    self.bind_pattern(r, mode)?;
+                    self.store_target(r, &rest_target, mode)?;
                     self.emit(Op::Pop);
                 } else {
                     self.emit(Op::IterCloseTop);
@@ -3617,7 +3713,9 @@ impl Compiler {
                     let is_static = self.super_info(false)?;
                     self.load_var(&"this".into());
                     self.expr(key)?;
-                    self.emit(Op::ToPropertyKey);
+                    if op.is_some() {
+                        self.emit(Op::ToPropertyKey);
+                    }
                     match op {
                         None => {
                             self.expr(value)?;

@@ -915,7 +915,7 @@ pub struct SavedFrame {
     pub closure: Rc<Closure>,
     pub ip: usize,
     pub stack: Vec<Value>,
-    pub handlers: Vec<(usize, usize)>,
+    pub handlers: Vec<(usize, usize, bool)>,
     pub upvalues: Vec<(Rc<UpCell>, usize)>,
     pub started: bool,
 }
