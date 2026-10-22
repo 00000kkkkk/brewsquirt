@@ -138,7 +138,7 @@ const allResolver = (values, index, remaining, cap) => {
   return (x) => {
     if (called) return undefined
     called = true
-    values[index] = x
+    Object.defineProperty(values, index, { value: x, writable: true, enumerable: true, configurable: true })
     if (--remaining.n === 0) {
       const resolve = cap.resolve
       resolve(values.slice())
@@ -151,7 +151,7 @@ const settledResolver = (values, index, remaining, cap, flag, rejected) => {
   return (x) => {
     if (flag.called) return undefined
     flag.called = true
-    values[index] = rejected ? { status: "rejected", reason: x } : { status: "fulfilled", value: x }
+    Object.defineProperty(values, index, { value: rejected ? { status: "rejected", reason: x } : { status: "fulfilled", value: x }, writable: true, enumerable: true, configurable: true })
     if (--remaining.n === 0) {
       const resolve = cap.resolve
       resolve(values.slice())
@@ -578,6 +578,12 @@ fn promise_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         Value::Object(o) if matches!(o.kind, ObjKind::Promise(_)) => o.clone(),
         _ => return Err(vm.type_error("Promise constructor cannot be invoked without 'new'")),
     };
+    if let ObjKind::Promise(data) = &p.kind {
+        if data.borrow().initialized {
+            return Err(vm.type_error("Promise constructor cannot be invoked without 'new'"));
+        }
+        data.borrow_mut().initialized = true;
+    }
     let executor = arg(args, 0);
     if !executor.is_callable() {
         return Err(vm.type_error(format!(

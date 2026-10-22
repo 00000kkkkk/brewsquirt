@@ -2781,10 +2781,10 @@ impl Vm {
                     return Ok(crate::builtins::typed::valid_index(t, n).is_some());
                 }
             }
-            ObjKind::Function(_) | ObjKind::Native(_) => {
-                if matches!(&*k, "name" | "length" | "prototype") {
-                    return Ok(true);
-                }
+            ObjKind::Function(_) | ObjKind::Native(_) | ObjKind::Bound(_)
+                if self.own_property(o, &k).is_some() =>
+            {
+                return Ok(true);
             }
             _ => {}
         }
@@ -3287,16 +3287,22 @@ impl Vm {
                 keys.push(Value::Str("length".into()));
             }
             if o.is_callable() {
-                let mut virtual_keys = vec!["length", "name"];
                 if let ObjKind::Function(c) = &o.kind {
                     if c.proto.is_constructor() {
                         let _ = self.get_obj(o, "prototype");
                     }
                 }
-                virtual_keys.retain(|k| !o.has_own(k));
-                for k in virtual_keys {
-                    keys.push(Value::Str(k.into()));
+                for k in ["length", "name", "prototype"] {
+                    if self.own_property(o, k).is_some() {
+                        keys.push(Value::Str(k.into()));
+                    }
                 }
+                for k in o.props.borrow().keys() {
+                    if !is_symbol_key(k) && !matches!(&**k, "length" | "name" | "prototype") {
+                        keys.push(Value::Str(k.clone()));
+                    }
+                }
+                return keys;
             }
             for k in o.props.borrow().keys() {
                 if !is_symbol_key(k) {
@@ -4206,6 +4212,17 @@ impl Vm {
                         let n = items.len();
                         self.stack.extend(items);
                         n
+                    } else if argc == u32::MAX - 1 {
+                        let arr = pop!();
+                        let items = match &arr {
+                            Value::Object(o) => {
+                                o.array().map(|a| a.borrow().clone()).unwrap_or_default()
+                            }
+                            _ => Vec::new(),
+                        };
+                        let n = items.len();
+                        self.stack.extend(items);
+                        n
                     } else {
                         argc as usize
                     };
@@ -4272,6 +4289,21 @@ impl Vm {
                                     *ro.proto.borrow_mut() = p;
                                 }
                             }
+                            self.stack.push(if r.is_object() { r } else { this });
+                        }
+                        ObjKind::Bound(_) | ObjKind::Proxy(_) => {
+                            let nt = self
+                                .next_new_target
+                                .take()
+                                .map(Value::Object)
+                                .unwrap_or(Value::Undefined);
+                            let args = self.stack.split_off(ti + 1);
+                            let this = pop!();
+                            let r = tri!(self.construct_with_target(
+                                &Value::Object(sup.clone()),
+                                &args,
+                                &nt
+                            ));
                             self.stack.push(if r.is_object() { r } else { this });
                         }
                         _ => throw!(self.type_error("Super constructor is not a constructor")),
@@ -5170,6 +5202,7 @@ impl Vm {
                     let key = pop!();
                     let class = peek!();
                     let k = tri!(self.to_property_key(&key));
+                    name_anonymous(&f, &k, if setter { "set " } else { "get " });
                     tri!(self.define_class_accessor(&class, k, f, setter, is_static));
                 }
                 Op::ExportAll => {
@@ -5310,8 +5343,8 @@ impl Vm {
                 self.realm.function_proto.clone(),
             ),
             Some(Value::Null) => (None, self.realm.function_proto.clone()),
-            Some(Value::Object(s)) if s.is_callable() => {
-                let sp = self.get_obj(&s, "prototype");
+            Some(Value::Object(s)) if self.is_constructor(&Value::Object(s.clone())) => {
+                let sp = self.get_prop(&Value::Object(s.clone()), "prototype")?;
                 let pp = match sp {
                     Value::Object(p) => Some(p),
                     Value::Null => None,

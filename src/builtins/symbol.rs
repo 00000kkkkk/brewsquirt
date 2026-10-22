@@ -292,6 +292,9 @@ fn array_values(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 }
 
 fn string_iter(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
+    if this.is_nullish() {
+        return Err(vm.type_error("String.prototype[Symbol.iterator] called on null or undefined"));
+    }
     let s = vm.to_string(&this)?;
     Ok(vm.new_iter(IterState::Str(s, 0)))
 }

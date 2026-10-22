@@ -890,6 +890,7 @@ pub struct PromiseData {
     pub state: PromiseState,
     pub reactions: Vec<Reaction>,
     pub handled: bool,
+    pub initialized: bool,
 }
 
 impl Default for PromiseData {
@@ -898,6 +899,7 @@ impl Default for PromiseData {
             state: PromiseState::Pending,
             reactions: Vec::new(),
             handled: false,
+            initialized: false,
         }
     }
 }

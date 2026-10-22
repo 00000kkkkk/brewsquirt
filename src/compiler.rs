@@ -2428,7 +2428,7 @@ impl Compiler {
                     vec![Stmt {
                         kind: StmtKind::Expr(Expr {
                             kind: ExprKind::SuperCall(vec![Arg::Spread(Expr {
-                                kind: ExprKind::Ident("args".into()),
+                                kind: ExprKind::Ident("%args".into()),
                                 line: c.line,
                             })]),
                             line: c.line,
@@ -2442,7 +2442,7 @@ impl Compiler {
                     name: Some(name.clone()),
                     params: Vec::new(),
                     rest: if has_super {
-                        Some(Pattern::Ident("args".into()))
+                        Some(Pattern::Ident("%args".into()))
                     } else {
                         None
                     },
@@ -3405,7 +3405,14 @@ impl Compiler {
             ExprKind::SuperCall(args) => {
                 self.super_info(true)?;
                 self.load_this_raw();
-                if Self::has_spread(args) {
+                let forwarded = matches!(
+                    args.as_slice(),
+                    [Arg::Spread(Expr { kind: ExprKind::Ident(n), .. })] if &**n == "%args"
+                );
+                if forwarded {
+                    self.load_var(&"%args".into());
+                    self.emit(Op::SuperCall(u32::MAX - 1));
+                } else if Self::has_spread(args) {
                     self.args_array(args)?;
                     self.emit(Op::SuperCall(u32::MAX));
                 } else {

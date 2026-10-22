@@ -282,7 +282,7 @@ fn offset_text(t: f64) -> String {
 
 fn year_text(y: f64) -> String {
     if y < 0.0 {
-        format!("-{}", pad(-y, 6))
+        format!("-{}", pad(-y, 4))
     } else {
         pad(y, 4)
     }
@@ -704,6 +704,9 @@ fn digits(s: &[u8], i: &mut usize, n: usize) -> Option<f64> {
 }
 
 fn parse_iso(s: &str) -> Option<f64> {
+    if s.starts_with("-000000") {
+        return None;
+    }
     let b = s.as_bytes();
     let mut i = 0;
     let year = if b.first() == Some(&b'+') || b.first() == Some(&b'-') {

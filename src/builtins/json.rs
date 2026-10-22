@@ -321,15 +321,48 @@ fn parse(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(v)
 }
 
+fn array_like_value(vm: &mut Vm, o: &Rc<Obj>) -> Result<bool, Value> {
+    let mut cur = o.clone();
+    loop {
+        let next = match &cur.kind {
+            ObjKind::Array(_) => return Ok(true),
+            ObjKind::Proxy(p) => match p.target.borrow().clone() {
+                Some(t) => t,
+                None => {
+                    return Err(
+                        vm.type_error("Cannot perform 'IsArray' on a proxy that has been revoked")
+                    );
+                }
+            },
+            _ => return Ok(false),
+        };
+        cur = next;
+    }
+}
+
 fn revive(vm: &mut Vm, f: &Value, holder: &Value, key: Rc<str>) -> R {
     let v = vm.get_prop(holder, &key)?;
-    if v.is_object() {
-        for (k, _) in vm.own_entries(&v) {
+    if let Value::Object(o) = &v {
+        let keys: Vec<Rc<str>> = if array_like_value(vm, o)? {
+            let len = vm.get_prop(&v, "length")?;
+            let n = super::to_integer(vm, &len)?.clamp(0.0, 9007199254740991.0) as usize;
+            (0..n).map(|i| i.to_string().into()).collect()
+        } else {
+            vm.op_own_enumerable_keys(o)?
+        };
+        for k in keys {
             let nv = revive(vm, f, &v, k.clone())?;
             if nv.is_undefined() {
-                vm.delete_prop(&v, &k)?;
+                vm.op_delete(o, &k)?;
             } else {
-                vm.set_prop(&v, k, nv)?;
+                let d = crate::props::PropDesc {
+                    value: Some(nv),
+                    writable: Some(true),
+                    enumerable: Some(true),
+                    configurable: Some(true),
+                    ..Default::default()
+                };
+                vm.op_define_own_property(o, k, d, false)?;
             }
         }
     }
