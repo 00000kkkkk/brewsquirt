@@ -577,7 +577,7 @@ pub fn validate(source: &str, flags: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn prescan(chars: &[char], v: bool) -> (usize, bool) {
+pub fn prescan(chars: &[char], v: bool) -> (usize, bool) {
     let mut groups = 0;
     let mut named = false;
     let mut depth = 0usize;

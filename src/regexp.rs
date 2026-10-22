@@ -60,8 +60,25 @@ fn is_quantifier(chars: &[char], i: usize) -> Option<usize> {
     }
 }
 
+fn octal_at(chars: &[char], i: usize) -> (u32, usize) {
+    let mut v = 0u32;
+    let mut n = 0;
+    while n < 3 {
+        let Some(d) = chars.get(i + n).and_then(|c| c.to_digit(8)) else {
+            break;
+        };
+        if v * 8 + d > 255 {
+            break;
+        }
+        v = v * 8 + d;
+        n += 1;
+    }
+    (v, n.max(1))
+}
+
 pub fn translate(source: &str, flags: &str) -> Result<String, String> {
     let chars: Vec<char> = source.chars().collect();
+    let (groups, _) = crate::regexp_syntax::prescan(&chars, flags.contains('v'));
     let mut out = String::new();
     let mut inline = String::new();
     if flags.contains('i') {
@@ -102,12 +119,23 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                     '0' if !chars.get(i + 1).is_some_and(|d| d.is_ascii_digit()) => {
                         out.push_str("\\x00")
                     }
-                    '1'..='9' if !in_class => {
-                        out.push('\\');
-                        out.push(e);
-                        while chars.get(i + 1).is_some_and(|d| d.is_ascii_digit()) {
-                            i += 1;
-                            out.push(chars[i]);
+                    '0'..='9' => {
+                        let mut j = i;
+                        let mut n: usize = 0;
+                        while let Some(d) = chars.get(j).and_then(|c| c.to_digit(10)) {
+                            n = n.saturating_mul(10).saturating_add(d as usize);
+                            j += 1;
+                        }
+                        if !in_class && e != '0' && n <= groups {
+                            out.push('\\');
+                            out.extend(chars[i..j].iter());
+                            i = j - 1;
+                        } else if e == '8' || e == '9' {
+                            out.push(e);
+                        } else {
+                            let (v, used) = octal_at(&chars, i);
+                            push_code_point(&mut out, v);
+                            i += used - 1;
                         }
                     }
                     'k' if chars.get(i + 1) == Some(&'<') => out.push_str("\\k"),
