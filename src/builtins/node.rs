@@ -2148,8 +2148,98 @@ const NODE_SRC: &str = r##"
   }
   const httpClient = { request: httpRequest, get: httpGet, Agent, globalAgent: new Agent(), ClientRequest, IncomingMessage: IncomingResponse, METHODS: ["ACL", "BIND", "CHECKOUT", "CONNECT", "COPY", "DELETE", "GET", "HEAD", "LINK", "LOCK", "M-SEARCH", "MERGE", "MKACTIVITY", "MKCALENDAR", "MKCOL", "MOVE", "NOTIFY", "OPTIONS", "PATCH", "POST", "PROPFIND", "PROPPATCH", "PURGE", "PUT", "QUERY", "REBIND", "REPORT", "SEARCH", "SOURCE", "SUBSCRIBE", "TRACE", "UNBIND", "UNLINK", "UNLOCK", "UNSUBSCRIBE"] }
 
+  const zlibConstants = {
+    Z_NO_FLUSH: 0, Z_PARTIAL_FLUSH: 1, Z_SYNC_FLUSH: 2, Z_FULL_FLUSH: 3, Z_FINISH: 4, Z_BLOCK: 5,
+    Z_OK: 0, Z_STREAM_END: 1, Z_NEED_DICT: 2, Z_ERRNO: -1, Z_STREAM_ERROR: -2, Z_DATA_ERROR: -3,
+    Z_MEM_ERROR: -4, Z_BUF_ERROR: -5, Z_VERSION_ERROR: -6,
+    Z_NO_COMPRESSION: 0, Z_BEST_SPEED: 1, Z_BEST_COMPRESSION: 9, Z_DEFAULT_COMPRESSION: -1,
+    Z_FILTERED: 1, Z_HUFFMAN_ONLY: 2, Z_RLE: 3, Z_FIXED: 4, Z_DEFAULT_STRATEGY: 0,
+    Z_MIN_LEVEL: -1, Z_MAX_LEVEL: 9, Z_DEFAULT_LEVEL: -1,
+  }
+  const zlibDecodes = new Set(["gunzip", "inflate", "inflateRaw", "unzip"])
+  const zlibRun = (op, data, options) => {
+    const level = typeof options === "number" ? options : options?.level ?? -1
+    const input = typeof data === "string" ? Buffer.from(data) : cryptoBytes(data, undefined, "buffer")
+    try {
+      const out = native.zlib(op, input, level)
+      return Buffer.from(out.buffer, out.byteOffset, out.byteLength)
+    } catch (e) {
+      const err = new Error(e?.message ?? String(e))
+      err.code = zlibDecodes.has(op) ? "Z_DATA_ERROR" : "Z_STREAM_ERROR"
+      err.errno = zlibDecodes.has(op) ? -3 : -2
+      throw err
+    }
+  }
+  const zlibAsync = (op) => (data, options, cb) => {
+    if (typeof options === "function") [options, cb] = [undefined, options]
+    if (typeof cb !== "function") throw new TypeError('The "callback" argument must be of type function')
+    let out
+    let err = null
+    try {
+      out = zlibRun(op, data, options)
+    } catch (e) {
+      err = e
+    }
+    queueMicrotask(() => (err ? cb(err) : cb(null, out)))
+  }
+  class ZlibStream extends Transform {
+    #op
+    #options
+    #chunks = []
+    constructor(op, options) {
+      super({ highWaterMark: options?.highWaterMark })
+      this.#op = op
+      this.#options = options
+      this.bytesWritten = 0
+    }
+    _transform(chunk, encoding, cb) {
+      this.#chunks.push(chunk)
+      this.bytesWritten += chunk.length
+      cb()
+    }
+    _flush(cb) {
+      try {
+        cb(null, zlibRun(this.#op, Buffer.concat(this.#chunks), this.#options))
+      } catch (e) {
+        cb(e)
+      }
+    }
+    flush(kind, cb) {
+      if (typeof kind === "function") cb = kind
+      if (typeof cb === "function") queueMicrotask(cb)
+    }
+    close(cb) {
+      if (typeof cb === "function") this.once("close", cb)
+      this.destroy()
+    }
+    params(level, strategy, cb) {
+      if (typeof cb === "function") queueMicrotask(cb)
+    }
+    reset() {
+      this.#chunks = []
+    }
+  }
+  const zlib = {
+    constants: zlibConstants,
+    ...zlibConstants,
+    crc32: (data, value = 0) => native.crc32(typeof data === "string" ? Buffer.from(data) : cryptoBytes(data, undefined, "data"), value),
+  }
+  for (const op of ["gzip", "gunzip", "deflate", "inflate", "deflateRaw", "inflateRaw", "unzip"]) {
+    const Name = op[0].toUpperCase() + op.slice(1)
+    zlib[op + "Sync"] = (data, options) => zlibRun(op, data, options)
+    zlib[op] = zlibAsync(op)
+    zlib["create" + Name] = (options) => new ZlibStream(op, options)
+    zlib[Name] = class extends ZlibStream {
+      constructor(options) {
+        super(op, options)
+      }
+    }
+    Object.defineProperty(zlib[Name], "name", { value: Name })
+  }
+
   return {
     crypto,
+    zlib,
     stream,
     streamPromises,
     httpClient,
@@ -2191,7 +2281,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let n = vm.new_object();
-    let natives: [(&str, u32, crate::object::NativeFn); 25] = [
+    let natives: [(&str, u32, crate::object::NativeFn); 27] = [
         ("read", 1, fs_read),
         ("write", 3, fs_write),
         ("exists", 1, fs_exists),
@@ -2217,6 +2307,8 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         ("digest", 2, crypto_digest),
         ("hmac", 3, crypto_hmac),
         ("randomBytes", 1, crypto_random_bytes),
+        ("zlib", 3, zlib_op),
+        ("crc32", 2, zlib_crc32),
     ];
     for (name, arity, f) in natives {
         method(vm, &n, name, arity, f);
@@ -2301,6 +2393,11 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 let n = load(vm)?;
                 let p = vm.get_prop(&n, "streamPromises")?;
                 with_default(vm, p)?
+            }
+            "zlib" => {
+                let n = load(vm)?;
+                let z = vm.get_prop(&n, "zlib")?;
+                with_default(vm, z)?
             }
             "events" => {
                 let n = load(vm)?;
@@ -2480,6 +2577,91 @@ fn crypto_random_bytes(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         vm,
         super::binary::random_vec(n as usize),
     ))
+}
+
+fn zlib_bytes(op: &str, data: &[u8], level: i32) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Write};
+    let level = if level < 0 {
+        flate2::Compression::default()
+    } else {
+        flate2::Compression::new(level.min(9) as u32)
+    };
+    match op {
+        "gzip" => {
+            let mut e = flate2::write::GzEncoder::new(Vec::new(), level);
+            e.write_all(data)?;
+            e.finish()
+        }
+        "deflate" => {
+            let mut e = flate2::write::ZlibEncoder::new(Vec::new(), level);
+            e.write_all(data)?;
+            e.finish()
+        }
+        "deflateRaw" => {
+            let mut e = flate2::write::DeflateEncoder::new(Vec::new(), level);
+            e.write_all(data)?;
+            e.finish()
+        }
+        "gunzip" => {
+            let mut out = Vec::new();
+            flate2::read::MultiGzDecoder::new(data).read_to_end(&mut out)?;
+            Ok(out)
+        }
+        "inflate" => {
+            let mut out = Vec::new();
+            flate2::read::ZlibDecoder::new(data).read_to_end(&mut out)?;
+            Ok(out)
+        }
+        "inflateRaw" => {
+            let mut out = Vec::new();
+            flate2::read::DeflateDecoder::new(data).read_to_end(&mut out)?;
+            Ok(out)
+        }
+        "unzip" => {
+            if data.starts_with(&[0x1f, 0x8b]) {
+                zlib_bytes("gunzip", data, -1)
+            } else {
+                zlib_bytes("inflate", data, -1)
+            }
+        }
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unknown zlib operation {op}"),
+        )),
+    }
+}
+
+fn zlib_op(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let op = vm.to_string(&arg(args, 0))?;
+    let data = crypto_input(vm, &arg(args, 1), "buffer")?;
+    let level = match arg(args, 2) {
+        Value::Number(n) if n.is_finite() => n as i32,
+        _ => -1,
+    };
+    match zlib_bytes(&op, &data, level) {
+        Ok(out) => Ok(super::typed::new_uint8(vm, out)),
+        Err(e) => {
+            let msg = match e.kind() {
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData => {
+                    "incorrect header check".to_string()
+                }
+                std::io::ErrorKind::UnexpectedEof => "unexpected end of file".to_string(),
+                _ => e.to_string(),
+            };
+            Err(vm.make_error(ErrorKind::Error, msg))
+        }
+    }
+}
+
+fn zlib_crc32(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let data = crypto_input(vm, &arg(args, 0), "data")?;
+    let init = match arg(args, 1) {
+        Value::Number(n) if n.is_finite() => n as u32,
+        _ => 0,
+    };
+    let mut h = crc32fast::Hasher::new_with_initial(init);
+    h.update(&data);
+    Ok(Value::Number(h.finalize() as f64))
 }
 
 fn timers_set_timeout(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

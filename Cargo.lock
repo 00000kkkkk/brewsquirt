@@ -418,7 +418,9 @@ version = "1.0.0"
 dependencies = [
  "chrono",
  "clap",
+ "crc32fast",
  "fancy-regex",
+ "flate2",
  "getrandom",
  "hmac",
  "indexmap",

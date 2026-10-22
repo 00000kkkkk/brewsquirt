@@ -38,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `node:stream`: `Readable`, `Writable`, `Duplex`, `Transform`, `PassThrough`, `Readable.from`,
   `pipeline`, `finished` and the `stream/promises` versions, with backpressure, `drain`,
   object mode, encodings and async iteration.
+- `node:zlib`: gzip, zlib and raw deflate compression and decompression in sync, callback and
+  stream forms, `unzip`, `crc32` and the `constants` table.
 - `http.request`, `http.get`, `http.Agent` and the `node:https` module: client requests built
   on `fetch` whose responses are readable streams with `statusCode`, `headers`, `setEncoding`
   and `json()`.
