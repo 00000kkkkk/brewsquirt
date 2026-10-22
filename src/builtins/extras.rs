@@ -1265,10 +1265,10 @@ define(globalThis, "%makeCallSite%", function makeCallSite(file, line, name, top
 })
 define(globalThis, "global", globalThis)
 {
-  const registry = new Map()
+  const registry = Object.create(null)
   const listOf = (name) => {
-    let l = registry.get(name)
-    if (!l) registry.set(name, (l = []))
+    let l = registry[name]
+    if (!l) registry[name] = l = []
     return l
   }
   const check = (fn) => {
@@ -1282,7 +1282,7 @@ define(globalThis, "global", globalThis)
     return process
   }
   const remove = (name, fn) => {
-    const l = registry.get(name)
+    const l = registry[name]
     if (!l) return process
     const i = l.findIndex((e) => e.fn === fn)
     if (i >= 0) l.splice(i, 1)
@@ -1398,30 +1398,30 @@ define(globalThis, "global", globalThis)
       return remove(name, fn)
     },
     removeAllListeners(name) {
-      if (name === undefined) registry.clear()
-      else registry.delete(name)
+      if (name === undefined) for (const k of Reflect.ownKeys(registry)) delete registry[k]
+      else delete registry[name]
       return process
     },
     emit(name, ...args) {
-      const l = registry.get(name)
+      const l = registry[name]
       if (!l || l.length === 0) return false
-      for (const entry of l.slice()) {
+      for (const entry of [...l]) {
         if (entry.once) remove(name, entry.fn)
         entry.fn.apply(process, args)
       }
       return true
     },
     listeners(name) {
-      return (registry.get(name) ?? []).map((e) => e.fn)
+      return (registry[name] ?? []).map((e) => e.fn)
     },
     rawListeners(name) {
-      return (registry.get(name) ?? []).map((e) => e.fn)
+      return (registry[name] ?? []).map((e) => e.fn)
     },
     listenerCount(name) {
-      return registry.get(name)?.length ?? 0
+      return registry[name]?.length ?? 0
     },
     eventNames() {
-      return [...registry.keys()].filter((k) => registry.get(k).length > 0)
+      return Reflect.ownKeys(registry).filter((k) => registry[k].length > 0)
     },
     setMaxListeners() {
       return process

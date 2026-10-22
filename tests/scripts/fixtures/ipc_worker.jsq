@@ -1,0 +1,5 @@
+const { parentPort, workerData, isMainThread, threadId } = require("node:worker_threads")
+parentPort.on("message", (m) => {
+  if (m === "boom") throw new Error("worker exploded")
+  parentPort.postMessage({ doubled: m * 2, workerData, isMainThread, threadId })
+})

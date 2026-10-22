@@ -665,6 +665,7 @@ impl Vm {
             let code = crate::builtins::exit_code(self);
             self.emit_process("exit", &[Value::Number(code as f64)])?;
         }
+        crate::builtins::netio::flush_sockets(self);
         Ok(())
     }
 

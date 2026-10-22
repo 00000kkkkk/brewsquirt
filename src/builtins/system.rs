@@ -394,6 +394,7 @@ fn exit(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         vm.emit_process("exit", &[Value::Number(code as f64)])?;
     }
     let code = exit_code(vm);
+    super::netio::flush_sockets(vm);
     vm.flush();
     std::process::exit(code)
 }

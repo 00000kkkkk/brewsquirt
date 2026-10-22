@@ -431,9 +431,15 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
             '-' if in_class
                 && class_last.is_some()
                 && pending_dash.is_none()
-                && chars.get(i + 1) != Some(&']') =>
+                && chars.get(i + 1) != Some(&']')
+                && chars.get(i + 1) != Some(&'-') =>
             {
                 pending_dash = Some(out.len());
+                out.push('-');
+            }
+            '-' if in_class => {
+                class_last = None;
+                pending_dash = None;
                 out.push('-');
             }
             _ => {

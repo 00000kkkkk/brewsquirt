@@ -469,6 +469,9 @@ impl Vm {
         crate::gc::configure_from_env();
         builtins::install(&mut vm);
         builtins::run_prelude(&mut vm);
+        if std::env::var_os("JSQ_IPC").is_some() {
+            let _ = builtins::node::setup_ipc(&mut vm);
+        }
         builtins::hide_builtin_members(&mut vm);
         builtins::array::capture_species(&mut vm);
         vm.capture_pristine();
@@ -883,7 +886,7 @@ impl Vm {
             }
         };
         let name = path.display().to_string();
-        let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let abs = module::canonical(path);
         let dir = abs.parent().map(Path::to_path_buf).unwrap_or_default();
         let proto = match self.compile(&src, &name, dir, Mode::Module) {
             Ok(p) => p,
@@ -1092,6 +1095,11 @@ impl Vm {
         }
         let spec = path.display().to_string();
         let exports = self.require_path(path, &spec)?;
+        if !module::is_commonjs(path) {
+            if let Some(v) = self.modules.get(path) {
+                return Ok(v.clone());
+            }
+        }
         let ns = self.new_object();
         ns.set_own("default", exports.clone());
         if let Value::Object(o) = &exports {
@@ -1525,7 +1533,20 @@ impl Vm {
             format!("(function (exports, require, module, __filename, __dirname) {{{body}\n}})");
         let proto = match self.compile_unit(&wrapped, &key, dir.clone(), Mode::Repl, true) {
             Ok(p) => p,
-            Err(e) => return Err(self.syntax_error_value(&e, &key)),
+            Err(e) => {
+                if ext == "js" && module::esm_only_error(&e.message) {
+                    module::mark_esm(path);
+                    let from = Rc::new(ModuleInfo {
+                        name: key.clone(),
+                        dir: dir.clone(),
+                        source: "".into(),
+                        sloppy: false,
+                    });
+                    let ns = self.import_module(&path.display().to_string(), &from)?;
+                    return self.require_esm_result(&ns);
+                }
+                return Err(self.syntax_error_value(&e, &key));
+            }
         };
         let wrapper = self.run_script_proto(proto)?;
         let module = self.new_object();

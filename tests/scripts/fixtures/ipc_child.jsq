@@ -1,0 +1,5 @@
+process.on("message", (m) => {
+  if (m === "bye") return process.disconnect()
+  process.send({ echo: m, connected: process.connected })
+})
+process.send("ready")

@@ -79,6 +79,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `net.createServer` accepts connections with `connection`, `listening` and `close` events,
   `address`, `maxConnections` and `getConnections`; `tls.connect` opens TLS 1.2/1.3 client
   connections verified against the Mozilla root store, with `secureConnect`.
+- `zlib` exposes the Brotli and Zstandard constants, classes and functions; they report
+  `ERR_ZLIB_UNSUPPORTED` when used, which lets `undici` and `jsdom` load.
 - A global `WebSocket` client (RFC 6455 over `net`/`tls` and the HTTP upgrade path) with
   `open`, `message`, `close` and `error` events, `send` of strings, `ArrayBuffer`s, views and
   `Blob`s, `close(code, reason)`, `binaryType` (`blob`, `arraybuffer` or `nodebuffer`),
@@ -88,7 +90,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   WebSocket client works; `https.request(options)` defaults the protocol to `https:`.
 - Asynchronous `child_process`: `spawn` with piped or inherited stdio, `stdin`/`stdout`/`stderr`
   streams, `spawn`, `exit` and `close` events and `kill`; `exec`, `execFile` (with `maxBuffer`,
-  `timeout`, `encoding` and `util.promisify` support) and `fork` (without IPC).
+  `timeout`, `encoding` and `util.promisify` support) and `fork` with an IPC channel
+  (`child.send`, `child.on("message")`, `process.send`, `process.on("message")`, `disconnect`)
+  carried over a loopback socket with JSON serialisation.
+- `worker_threads.Worker` runs the worker file in a separate `jsq` process: `postMessage`,
+  `on("message")`, `online`, `error` and `exit` events, `terminate`, `workerData`,
+  `parentPort`, `isMainThread` and `threadId`; `SharedArrayBuffer` and transfer lists are not
+  shared between the processes.
 - `TextDecoder` accepts `utf-16le`, `utf-16be`, `latin1`, `ascii`, `iso-8859-1` and
   `windows-1252` labels.
 - Import attributes: `import data from "./x.json" with { type: "json" }` and the legacy `assert`
@@ -139,6 +147,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `require()` of an ES module returns a plain object with the exports, `__esModule: true` when
   there is a default export, or the value of a `"module.exports"` export, as Node does, so
   Babel-style interop (`mod.__esModule ? mod.default : mod`) picks the default export.
+- A `.js` file without `import`/`export` that fails to compile as CommonJS because of top-level
+  `await` or `import.meta` is loaded as an ES module, like Node's module detection.
+- Running a file whose path needs Windows' `\\?\` form no longer evaluates it twice when it
+  imports itself.
 - Module syntax detection tokenises the file instead of scanning lines, so `import`/`export`
   inside strings, comments or template literals and dynamic `import()` no longer make a CommonJS
   bundle (such as `xlsx`, `typescript` or the `svelte` compiler) load as an ES module.

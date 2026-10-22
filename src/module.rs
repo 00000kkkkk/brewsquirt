@@ -31,7 +31,7 @@ pub fn display_path_abs(p: &Path) -> String {
     s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
 }
 
-fn canonical(p: &Path) -> PathBuf {
+pub fn canonical(p: &Path) -> PathBuf {
     let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let text = c.to_string_lossy();
     if let Some(rest) = text.strip_prefix(r"\\?\") {
@@ -218,7 +218,14 @@ pub fn has_module_syntax(src: &str) -> bool {
         return false;
     }
     let Ok(tokens) = crate::lexer::tokenize(src) else {
-        return false;
+        return src.lines().any(|line| {
+            let t = line.trim_start();
+            t.starts_with("import ")
+                || t.starts_with("import{")
+                || t.starts_with("export ")
+                || t.starts_with("export{")
+                || t.starts_with("import.meta")
+        });
     };
     use crate::token::{P, Tok};
     let ident = |t: &Token, name: &str| matches!(&t.tok, Tok::Ident(n) if &**n == name);
@@ -284,6 +291,17 @@ fn package_type(dir: &Path) -> Option<String> {
         cur = d.parent().map(Path::to_path_buf);
     }
     None
+}
+
+pub fn mark_esm(path: &Path) {
+    CJS_CACHE.with(|c| c.borrow_mut().insert(path.to_path_buf(), false));
+}
+
+pub fn esm_only_error(message: &str) -> bool {
+    message.contains("top level of modules")
+        || message.contains("import.meta")
+        || message.contains("Cannot use import statement")
+        || message.contains("Unexpected token 'export'")
 }
 
 pub fn is_commonjs(path: &Path) -> bool {

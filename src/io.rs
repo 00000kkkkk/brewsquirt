@@ -84,6 +84,7 @@ pub enum SocketCmd {
     Write(Vec<u8>),
     End,
     Destroy,
+    Flush(Sender<()>),
 }
 
 pub enum ChildEvent {
@@ -235,6 +236,11 @@ fn socket_cmd<S: Write>(
             } else {
                 Flow::Continue
             }
+        }
+        SocketCmd::Flush(ack) => {
+            let _ = stream.flush();
+            let _ = ack.send(());
+            Flow::Continue
         }
         SocketCmd::Destroy => Flow::Stop,
     }

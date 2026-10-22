@@ -346,6 +346,19 @@ pub fn child_ref(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(Value::Undefined)
 }
 
+pub fn flush_sockets(vm: &mut Vm) {
+    let mut acks = Vec::new();
+    for entry in vm.io_sockets.values() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        if entry.cmd.send(SocketCmd::Flush(tx)).is_ok() {
+            acks.push(rx);
+        }
+    }
+    for rx in acks {
+        let _ = rx.recv_timeout(std::time::Duration::from_millis(500));
+    }
+}
+
 fn addr_values(addr: &SocketAddr) -> [Value; 2] {
     [
         addr.ip().to_string().into(),

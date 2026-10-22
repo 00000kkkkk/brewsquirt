@@ -1463,7 +1463,10 @@ to stdin) and, for `spawnSync`, `shell: true` to go through the shell.
 `signalCode` and `killed`; `exec(command, options?, callback)` runs through the shell and
 `execFile(file, args?, options?, callback)` without it, both collecting output with `encoding`,
 `maxBuffer` and `timeout` options and working with `util.promisify`; `fork(module, args?)`
-starts another `jsq` with inherited stdio (there is no IPC channel).
+starts another `jsq` with inherited stdio and an IPC channel: the parent uses `child.send`,
+`child.on("message")`, `child.disconnect()` and `child.connected`, the child uses
+`process.send`, `process.on("message")` and `process.disconnect()`. Messages travel as JSON
+over a loopback socket, so functions and handles cannot be sent.
 
 ```js
 const { spawn, exec } = require("node:child_process")
@@ -1836,7 +1839,8 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:vm`                      | `Script`, `runInThisContext`, `runInNewContext` and `runInContext` (sandboxes are plain objects scoped with `with`), `createContext`, `compileFunction` |
 | `node:async_hooks`             | `AsyncLocalStorage` whose store is visible to synchronous callees of `run` and `enterWith`, `AsyncResource`, `createHook` as a no-op |
 | `node:punycode`                | `encode`, `decode`, `toASCII`, `toUnicode`, `ucs2`                |
-| `node:http2`, `node:worker_threads`, `node:cluster`, `node:v8`, `node:inspector`, `node:diagnostics_channel`, `node:constants` | Load with their constants and classes so that packages importing them work; operations that need threads, HTTP/2 or the inspector throw `ENOTSUP` |
+| `node:worker_threads`          | `Worker` runs a file (or `eval: true` source) in a separate `jsq` process and exchanges JSON messages: `postMessage`, `message`, `online`, `error` and `exit` events, `terminate`, `ref`/`unref`; inside the worker `isMainThread` is `false` and `parentPort`, `workerData` and `threadId` are set. `SharedArrayBuffer`, transfer lists and `resourceLimits` are not shared between the processes |
+| `node:http2`, `node:cluster`, `node:v8`, `node:inspector`, `node:diagnostics_channel`, `node:constants` | Load with their constants and classes so that packages importing them work; operations that need HTTP/2 or the inspector throw `ENOTSUP` |
 | `node:net`                     | Real TCP: `connect`/`createConnection` return a `Socket` (a duplex stream with `connect`, `ready`, `data`, `end`, `close`, `error` and `timeout` events, `setTimeout`, `setEncoding`, `ref`/`unref`, `address`, `remoteAddress`/`remotePort`, `bytesRead`/`bytesWritten`); `createServer` listens with `connection`, `listening` and `close` events, `address`, `maxConnections`, `getConnections` and `closeAllConnections`; plus `isIP`, `isIPv4`, `isIPv6`, `SocketAddress`, `BlockList`. Unix domain sockets and IPC are not available |
 | `node:tls`                     | `connect` opens a TLS 1.2/1.3 connection verified against the bundled Mozilla root store and emits `secureConnect`; `TLSSocket` reports `encrypted`, `authorized`, `getProtocol` and `getCipher`. `createServer` is not available |
 | `node:zlib`                    | `gzip`, `gunzip`, `deflate`, `inflate`, `deflateRaw`, `inflateRaw` and `unzip` as sync, callback and `create*` stream forms, `crc32` and `constants`; no brotli |

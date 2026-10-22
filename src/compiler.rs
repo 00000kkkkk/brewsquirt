@@ -429,6 +429,8 @@ pub fn compile_eval(
     outer.strict = strict;
     outer.depth = 1;
     for (name, is_const, lexical) in &scope.locals {
+        let slot = outer.locals.len() as u32;
+        outer.index.entry(name.clone()).or_default().push(slot);
         outer.locals.push(Local {
             name: name.clone(),
             depth: 1,

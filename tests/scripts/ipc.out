@@ -1,0 +1,12 @@
+main thread true
+forked function true
+child says ready
+reply {"echo":{"n":1,"list":[1,2]},"connected":true}
+disconnected false
+child exit 0
+worker online 1
+worker said {"doubled":42,"workerData":{"tag":"w"},"isMainThread":false,"threadId":1}
+worker error worker exploded
+worker exit 1
+inline 7
+terminated number

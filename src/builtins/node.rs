@@ -3170,6 +3170,43 @@ const NODE_SRC: &str = r##"
     }
     Object.defineProperty(zlib[Name], "name", { value: Name })
   }
+  const unsupportedCodec = (name) => {
+    const e = new Error(`${name} compression is not supported in this runtime`)
+    e.code = "ERR_ZLIB_UNSUPPORTED"
+    return e
+  }
+  for (const [op, label] of [["brotliCompress", "brotli"], ["brotliDecompress", "brotli"], ["zstdCompress", "zstd"], ["zstdDecompress", "zstd"]]) {
+    const Name = op[0].toUpperCase() + op.slice(1)
+    zlib[op + "Sync"] = () => {
+      throw unsupportedCodec(label)
+    }
+    zlib[op] = (data, options, cb) => {
+      if (typeof options === "function") cb = options
+      queueMicrotask(() => cb(unsupportedCodec(label)))
+    }
+    zlib[Name] = class extends Transform {
+      constructor(options) {
+        super(options)
+        queueMicrotask(() => this.destroy(unsupportedCodec(label)))
+      }
+    }
+    Object.defineProperty(zlib[Name], "name", { value: Name })
+    zlib["create" + Name] = (options) => new zlib[Name](options)
+  }
+  Object.assign(zlibConstants, {
+    BROTLI_OPERATION_PROCESS: 0, BROTLI_OPERATION_FLUSH: 1, BROTLI_OPERATION_FINISH: 2, BROTLI_OPERATION_EMIT_METADATA: 3,
+    BROTLI_PARAM_MODE: 0, BROTLI_MODE_GENERIC: 0, BROTLI_MODE_TEXT: 1, BROTLI_MODE_FONT: 2, BROTLI_DEFAULT_MODE: 0,
+    BROTLI_PARAM_QUALITY: 1, BROTLI_MIN_QUALITY: 0, BROTLI_MAX_QUALITY: 11, BROTLI_DEFAULT_QUALITY: 11,
+    BROTLI_PARAM_LGWIN: 2, BROTLI_MIN_WINDOW_BITS: 10, BROTLI_MAX_WINDOW_BITS: 24, BROTLI_LARGE_MAX_WINDOW_BITS: 30, BROTLI_DEFAULT_WINDOW: 22,
+    BROTLI_PARAM_LGBLOCK: 3, BROTLI_MIN_INPUT_BLOCK_BITS: 16, BROTLI_MAX_INPUT_BLOCK_BITS: 24,
+    BROTLI_PARAM_SIZE_HINT: 5, BROTLI_PARAM_LARGE_WINDOW: 6, BROTLI_DECODER_PARAM_LARGE_WINDOW: 1,
+    BROTLI_DECODER_RESULT_ERROR: 0, BROTLI_DECODER_RESULT_SUCCESS: 1, BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT: 2, BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT: 3,
+    ZSTD_e_continue: 0, ZSTD_e_flush: 1, ZSTD_e_end: 2,
+    ZSTD_c_compressionLevel: 100, ZSTD_c_windowLog: 101, ZSTD_c_strategy: 107, ZSTD_c_checksumFlag: 201, ZSTD_c_nbWorkers: 400,
+    ZSTD_d_windowLogMax: 100, ZSTD_CLEVEL_DEFAULT: 3,
+  })
+  Object.assign(zlib, zlibConstants)
+  zlib.constants = zlibConstants
 
   const utilExtras = {
     inspectCustom: Symbol.for("nodejs.util.inspect.custom"),
@@ -3854,11 +3891,92 @@ const NODE_SRC: &str = r##"
     })
   exec[Symbol.for("nodejs.util.promisify.custom")] = promisified(exec)
   execFile[Symbol.for("nodejs.util.promisify.custom")] = promisified(execFile)
+  const ipcWire = (emitter, sock, pending, unwrap) => {
+    for (const line of pending) sock.write(line)
+    pending.length = 0
+    let buffered = ""
+    sock.on("data", (chunk) => {
+      buffered += chunk.toString("utf8")
+      let i
+      while ((i = buffered.indexOf("\n")) >= 0) {
+        const line = buffered.slice(0, i)
+        buffered = buffered.slice(i + 1)
+        if (!line) continue
+        let message
+        try {
+          message = JSON.parse(line)
+        } catch {
+          continue
+        }
+        unwrap(message)
+      }
+    })
+    sock.on("error", () => {})
+    sock.on("close", () => {
+      if (emitter.connected) {
+        emitter.connected = false
+        emitter.emit("disconnect")
+      }
+    })
+  }
+  const ipcServer = () => {
+    const server = net.createServer()
+    server.listen(0, "127.0.0.1")
+    server.unref()
+    return server
+  }
+  const attachIpc = (child, server, unwrap) => {
+    child.connected = true
+    let sock = null
+    const pending = []
+    server.once("connection", (s) => {
+      sock = s
+      s.unref()
+      server.close()
+      ipcWire(child, s, pending, unwrap)
+    })
+    child.send = (message, sendHandle, options, cb) => {
+      if (typeof sendHandle === "function") cb = sendHandle
+      else if (typeof options === "function") cb = options
+      if (!child.connected) {
+        const e = new Error("Channel closed")
+        e.code = "ERR_IPC_CHANNEL_CLOSED"
+        if (typeof cb === "function") queueMicrotask(() => cb(e))
+        else queueMicrotask(() => child.emit("error", e))
+        return false
+      }
+      const line = JSON.stringify(message === undefined ? null : message) + "\n"
+      if (sock) sock.write(line)
+      else pending.push(line)
+      if (typeof cb === "function") queueMicrotask(() => cb(null))
+      return true
+    }
+    child.disconnect = () => {
+      if (!child.connected) return
+      child.connected = false
+      if (sock) sock.end()
+      else server.close()
+      queueMicrotask(() => child.emit("disconnect"))
+    }
+    child.on("exit", () => {
+      if (child.connected) {
+        child.connected = false
+        child.emit("disconnect")
+      }
+      if (!sock) server.close()
+    })
+  }
   function fork(modulePath, args, options) {
     if (!Array.isArray(args)) [args, options] = [[], args]
     options = options ?? {}
     const execArgv = options.execArgv ?? []
-    return spawn(options.execPath ?? process.execPath, [...execArgv, String(modulePath), ...args], { ...options, stdio: options.stdio ?? "inherit" })
+    const server = ipcServer()
+    const env = { ...(options.env ?? process.env), JSQ_IPC: String(server.address().port) }
+    let file = String(modulePath)
+    if (file.startsWith("file:")) file = fileURLToPath(file)
+    const child = spawn(options.execPath ?? process.execPath, [...execArgv, file, ...args.map(String)], { ...options, env, stdio: options.stdio ?? "inherit" })
+    attachIpc(child, server, (message) => child.emit("message", message))
+    return child
   }
   const childProcessAsync = { spawn, exec, execFile, fork, ChildProcess }
 
@@ -3932,34 +4050,180 @@ const NODE_SRC: &str = r##"
     },
   }
 
+  let workerSeq = 0
+  const workerError = (payload) => {
+    const e = new Error(payload?.message ?? "Worker error")
+    if (payload?.name) e.name = payload.name
+    if (payload?.stack) e.stack = payload.stack
+    if (payload?.code) e.code = payload.code
+    return e
+  }
+  class Worker extends EventEmitter {
+    #child
+    #server
+    #exited = false
+    constructor(filename, options = {}) {
+      super()
+      this.threadId = ++workerSeq
+      this.resourceLimits = {}
+      this.performance = { eventLoopUtilization: () => ({ idle: 0, active: 0, utilization: 0 }) }
+      const server = ipcServer()
+      this.#server = server
+      const baseEnv = options.env === workerThreads.SHARE_ENV || options.env === undefined ? process.env : options.env
+      const env = { ...baseEnv, JSQ_IPC: String(server.address().port), JSQ_WORKER: String(this.threadId), JSQ_WORKER_DATA: JSON.stringify(options.workerData === undefined ? null : options.workerData) }
+      let file = String(filename)
+      if (file.startsWith("file:")) file = fileURLToPath(file)
+      const args = options.eval ? ["-e", file] : [file]
+      const stdio = ["pipe", options.stdout ? "pipe" : "inherit", options.stderr ? "pipe" : "inherit"]
+      const child = spawn(process.execPath, [...(options.execArgv ?? []), ...args, ...(options.argv ?? []).map(String)], { env, stdio })
+      this.#child = child
+      this.stdin = options.stdin ? child.stdin : null
+      this.stdout = child.stdout
+      this.stderr = child.stderr
+      attachIpc(child, server, (message) => {
+        if (message && typeof message === "object" && "__workerMessage" in message) this.emit("message", message.__workerMessage)
+        else if (message && typeof message === "object" && "__workerError" in message) this.emit("error", workerError(message.__workerError))
+        else if (message && typeof message === "object" && message.__workerOnline) this.emit("online")
+      })
+      child.on("error", (e) => this.emit("error", e))
+      child.on("exit", (code) => {
+        this.#exited = true
+        this.emit("exit", code ?? 1)
+      })
+    }
+    postMessage(message) {
+      if (!this.#exited) this.#child.send({ __workerMessage: message === undefined ? null : message })
+    }
+    terminate() {
+      return new Promise((resolve) => {
+        if (this.#exited) return resolve(1)
+        this.#child.once("exit", (code) => resolve(code ?? 1))
+        this.#child.kill()
+      })
+    }
+    ref() {
+      this.#child.ref()
+      return this
+    }
+    unref() {
+      this.#child.unref()
+      return this
+    }
+    getHeapSnapshot() {
+      try {
+        notSupported("worker.getHeapSnapshot")()
+      } catch (e) {
+        return Promise.reject(e)
+      }
+    }
+  }
   const workerThreads = {
     isMainThread: true,
     threadId: 0,
     parentPort: null,
     workerData: null,
     resourceLimits: {},
-    SHARE_ENV: Symbol("nodejs.worker_threads.SHARE_ENV"),
-    Worker: class Worker {
-      constructor() {
-        notSupported("worker_threads.Worker")()
-      }
-    },
-    MessageChannel: class MessageChannel {
-      constructor() {
-        notSupported("MessageChannel")()
-      }
-    },
-    MessagePort: class MessagePort extends EventEmitter {},
-    BroadcastChannel: class BroadcastChannel {
-      constructor() {
-        notSupported("BroadcastChannel")()
-      }
-    },
+    SHARE_ENV: Symbol.for("nodejs.worker_threads.SHARE_ENV"),
+    Worker,
+    MessageChannel: globalThis.MessageChannel,
+    MessagePort: globalThis.MessagePort,
+    BroadcastChannel: globalThis.BroadcastChannel,
     markAsUntransferable() {},
-    moveMessagePortToContext: notSupported("moveMessagePortToContext"),
+    isMarkedAsUntransferable: () => false,
+    markAsUncloneable() {},
+    moveMessagePortToContext: (port) => port,
     receiveMessageOnPort: () => undefined,
-    setEnvironmentData() {},
-    getEnvironmentData: () => undefined,
+    setEnvironmentData(key, value) {
+      environmentData.set(key, value)
+    },
+    getEnvironmentData: (key) => environmentData.get(key),
+  }
+  const environmentData = new Map()
+  function setupIpc() {
+    const port = Number(process.env.JSQ_IPC)
+    if (!port) return
+    const sock = net.connect({ port, host: "127.0.0.1" })
+    let connected = false
+    let listening = false
+    const queue = []
+    sock.on("connect", () => {
+      connected = true
+      for (const line of queue) sock.write(line)
+      queue.length = 0
+      if (!listening) sock.unref()
+    })
+    process.connected = true
+    process.channel = { ref: () => sock.ref(), unref: () => sock.unref() }
+    process.send = (message, sendHandle, options, cb) => {
+      if (typeof sendHandle === "function") cb = sendHandle
+      else if (typeof options === "function") cb = options
+      if (!process.connected) {
+        const e = new Error("Channel closed")
+        e.code = "ERR_IPC_CHANNEL_CLOSED"
+        if (typeof cb === "function") queueMicrotask(() => cb(e))
+        else throw e
+        return false
+      }
+      const line = JSON.stringify(message === undefined ? null : message) + "\n"
+      if (connected) sock.write(line)
+      else queue.push(line)
+      if (typeof cb === "function") queueMicrotask(() => cb(null))
+      return true
+    }
+    process.disconnect = () => {
+      if (!process.connected) return
+      process.connected = false
+      sock.end()
+      queueMicrotask(() => process.emit("disconnect"))
+    }
+    const isWorker = process.env.JSQ_WORKER !== undefined
+    const deliver = (message) => {
+      if (isWorker) {
+        if (message && typeof message === "object" && "__workerMessage" in message) parentPort.emit("message", message.__workerMessage)
+        return
+      }
+      process.emit("message", message)
+    }
+    ipcWire(process, sock, [], deliver)
+    const refOn = (fn) =>
+      function (name, listener) {
+        if (name === "message") {
+          listening = true
+          sock.ref()
+        }
+        return fn.call(this, name, listener)
+      }
+    process.on = refOn(process.on)
+    process.addListener = refOn(process.addListener)
+    process.once = refOn(process.once)
+    if (!isWorker) return
+    const parentPort = new EventEmitter()
+    parentPort.postMessage = (message) => process.send({ __workerMessage: message === undefined ? null : message })
+    parentPort.close = () => process.disconnect()
+    parentPort.ref = () => sock.ref()
+    parentPort.unref = () => sock.unref()
+    parentPort.start = () => {}
+    const portOn = parentPort.on.bind(parentPort)
+    parentPort.on = parentPort.addListener = (name, fn) => {
+      if (name === "message") {
+        listening = true
+        sock.ref()
+      }
+      return portOn(name, fn)
+    }
+    workerThreads.isMainThread = false
+    workerThreads.threadId = Number(process.env.JSQ_WORKER) || 1
+    workerThreads.parentPort = parentPort
+    try {
+      workerThreads.workerData = JSON.parse(process.env.JSQ_WORKER_DATA ?? "null")
+    } catch {
+      workerThreads.workerData = null
+    }
+    process.on("uncaughtException", (e) => {
+      process.send({ __workerError: { message: e?.message ?? String(e), name: e?.name, stack: e?.stack, code: e?.code } })
+      process.exit(1)
+    })
+    process.send({ __workerOnline: true })
   }
 
   const v8 = {
@@ -4851,6 +5115,7 @@ const NODE_SRC: &str = r##"
     makeNodeTest,
     urlLegacy,
     childProcessAsync,
+    setupIpc,
     EventEmitter,
     fs,
     promises,
@@ -4966,6 +5231,13 @@ fn with_default(vm: &mut Vm, v: Value) -> Result<Value, Value> {
         return Ok(Value::Object(copy));
     }
     Ok(v)
+}
+
+pub fn setup_ipc(vm: &mut Vm) -> Result<(), Value> {
+    let n = load(vm)?;
+    let setup = vm.get_prop(&n, "setupIpc")?;
+    vm.call_value(&setup, Value::Undefined, &[])?;
+    Ok(())
 }
 
 pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
