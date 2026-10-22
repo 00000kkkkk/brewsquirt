@@ -34,41 +34,96 @@ fn canonical(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
+pub const EXTENSIONS: [&str; 5] = [EXT, "js", "mjs", "cjs", "json"];
+
+fn with_extension(p: &Path, ext: &str) -> PathBuf {
+    let mut s = p.as_os_str().to_owned();
+    s.push(".");
+    s.push(ext);
+    PathBuf::from(s)
+}
+
 fn package_main(dir: &Path) -> Option<PathBuf> {
-    let manifest = dir.join(MANIFEST);
-    if let Ok(text) = std::fs::read_to_string(&manifest) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-            if let Some(main) = v.get("main").and_then(|m| m.as_str()) {
-                let p = dir.join(main);
-                if p.is_file() {
-                    return Some(p);
+    for manifest in [MANIFEST, "package.json"] {
+        let Ok(text) = std::fs::read_to_string(dir.join(manifest)) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let main = v
+            .get("main")
+            .and_then(|m| m.as_str())
+            .or_else(|| v.get("exports").and_then(|e| e.as_str()))
+            .or_else(|| {
+                v.get("exports").and_then(|e| e.get(".")).and_then(|e| {
+                    e.as_str()
+                        .or_else(|| e.get("default").and_then(|d| d.as_str()))
+                })
+            });
+        if let Some(main) = main {
+            let p = dir.join(main);
+            if p.is_file() {
+                return Some(p);
+            }
+            for ext in EXTENSIONS {
+                let q = with_extension(&p, ext);
+                if q.is_file() {
+                    return Some(q);
                 }
-                let with_ext = p.with_extension(EXT);
-                if with_ext.is_file() {
-                    return Some(with_ext);
+            }
+            if p.is_dir() {
+                if let Some(found) = index_file(&p) {
+                    return Some(found);
                 }
             }
         }
     }
-    let index = dir.join(format!("index.{EXT}"));
-    index.is_file().then_some(index)
+    index_file(dir)
+}
+
+fn index_file(dir: &Path) -> Option<PathBuf> {
+    EXTENSIONS
+        .iter()
+        .filter(|e| **e != "json")
+        .map(|e| dir.join(format!("index.{e}")))
+        .find(|p| p.is_file())
 }
 
 fn resolve_file(p: &Path) -> Option<PathBuf> {
     if p.is_file() {
         return Some(p.to_path_buf());
     }
-    let mut with_ext = p.as_os_str().to_owned();
-    with_ext.push(".");
-    with_ext.push(EXT);
-    let with_ext = PathBuf::from(with_ext);
-    if with_ext.is_file() {
-        return Some(with_ext);
+    for ext in EXTENSIONS {
+        let q = with_extension(p, ext);
+        if q.is_file() {
+            return Some(q);
+        }
     }
     if p.is_dir() {
         return package_main(p);
     }
     None
+}
+
+pub fn has_module_syntax(src: &str) -> bool {
+    src.lines().any(|line| {
+        let t = line.trim_start();
+        t.starts_with("import ")
+            || t.starts_with("import{")
+            || t.starts_with("import(")
+            || t.starts_with("export ")
+            || t.starts_with("export{")
+            || t.starts_with("import.meta")
+    })
+}
+
+pub fn looks_like_commonjs(src: &str) -> bool {
+    let has_cjs = src.lines().any(|line| {
+        let t = line.trim_start();
+        t.contains("module.exports") || t.contains("exports.") || t.contains("require(")
+    });
+    has_cjs && !has_module_syntax(src)
 }
 
 pub fn resolve(spec: &str, from_dir: &Path) -> Result<PathBuf, String> {

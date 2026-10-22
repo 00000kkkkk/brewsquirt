@@ -2399,6 +2399,20 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 let z = vm.get_prop(&n, "zlib")?;
                 with_default(vm, z)?
             }
+            "module" => {
+                let o = vm.new_object();
+                let require = vm.globals.get("require").cloned().unwrap_or_default();
+                let create = native_fn(vm, "createRequire", 1, module_create_require);
+                o.set_own("createRequire", create);
+                let is_builtin = native_fn(vm, "isBuiltin", 1, module_is_builtin);
+                o.set_own("isBuiltin", is_builtin);
+                let names: Vec<Value> = BUILTIN_MODULES.iter().map(|n| Value::from(*n)).collect();
+                let list = vm.new_array(names);
+                o.set_own("builtinModules", list);
+                o.set_own("require", require);
+                o.set_own("default", Value::Object(o.clone()));
+                Value::Object(o)
+            }
             "events" => {
                 let n = load(vm)?;
                 let ee = vm.get_prop(&n, "EventEmitter")?;
@@ -2662,6 +2676,47 @@ fn zlib_crc32(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let mut h = crc32fast::Hasher::new_with_initial(init);
     h.update(&data);
     Ok(Value::Number(h.finalize() as f64))
+}
+
+pub const BUILTIN_MODULES: [&str; 26] = [
+    "assert",
+    "assert/strict",
+    "buffer",
+    "child_process",
+    "crypto",
+    "events",
+    "fs",
+    "fs/promises",
+    "http",
+    "https",
+    "module",
+    "os",
+    "path",
+    "path/posix",
+    "path/win32",
+    "perf_hooks",
+    "process",
+    "querystring",
+    "readline",
+    "readline/promises",
+    "stream",
+    "stream/promises",
+    "string_decoder",
+    "timers",
+    "timers/promises",
+    "tty",
+];
+
+fn module_create_require(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    Ok(vm.globals.get("require").cloned().unwrap_or_default())
+}
+
+fn module_is_builtin(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let name = vm.to_string(&arg(args, 0))?;
+    let bare = name.strip_prefix("node:").unwrap_or(&name);
+    Ok(Value::Bool(
+        BUILTIN_MODULES.contains(&bare) || bare == "url" || bare == "util" || bare == "zlib",
+    ))
 }
 
 fn timers_set_timeout(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

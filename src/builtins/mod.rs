@@ -5,7 +5,7 @@ mod date;
 mod extras;
 pub mod intl;
 pub mod intrinsics;
-mod json;
+pub(crate) mod json;
 pub mod node;
 pub mod reflect;
 pub mod typed;

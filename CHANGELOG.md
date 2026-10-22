@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `console.dir`, `console.dirxml` and `console.trace`.
 
 - `jsq -p "<code>"` evaluates a snippet and prints its value.
+- CommonJS: a global `require` loads `node:` and `squirt:` builtins, JSON files and `.js` or
+  `.cjs` files wrapped with `exports`, `module`, `__filename` and `__dirname`, with
+  `require.resolve`, `require.cache` and `node:module`'s `createRequire`; `import` of a `.cjs`
+  file, or of a `.js` file that uses `module.exports` or `require` without `import` or `export`,
+  gets its exports as the default export and as named exports; module resolution tries
+  `.jsq`, `.js`, `.mjs`, `.cjs` and `.json` extensions, `index` files, and `package.json`
+  `main` or `exports` next to `squirt.json`.
 - Globals `setImmediate`, `clearImmediate`, `global`, `navigator`, `reportError` and
   `CustomEvent`; `performance.mark`, `measure`, `timeOrigin` and entry queries;
   `process.availableParallelism`.

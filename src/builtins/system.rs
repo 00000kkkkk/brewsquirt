@@ -109,6 +109,16 @@ pub fn install(vm: &mut Vm) {
     process.set_own("stdin", Value::Object(accessor));
     vm.define_global("process", Value::Object(process));
 
+    let require = native_fn(vm, "require", 1, require);
+    if let Value::Object(r) = &require {
+        method(vm, r, "resolve", 1, require_resolve);
+        let cache = vm.require_cache_object_public();
+        r.set_own("cache", Value::Object(cache));
+        let main = vm.new_object();
+        r.set_own("main", Value::Object(main));
+    }
+    vm.define_global("require", require);
+
     let performance = vm.new_object();
     method(vm, &performance, "now", 0, perf_now);
     vm.define_global("performance", Value::Object(performance));
@@ -296,6 +306,60 @@ fn assert(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         vm.write_err(&line);
     }
     Ok(Value::Undefined)
+}
+
+fn caller_module(vm: &Vm) -> std::rc::Rc<crate::bytecode::ModuleInfo> {
+    for f in vm.frames.iter().rev() {
+        let m = &f.closure.proto.module;
+        if !m.name.starts_with("<squirt:") && &*m.name != "<prelude>" {
+            return m.clone();
+        }
+    }
+    std::rc::Rc::new(crate::bytecode::ModuleInfo {
+        name: "<require>".into(),
+        dir: std::env::current_dir().unwrap_or_default(),
+        source: "".into(),
+        sloppy: true,
+    })
+}
+
+fn require(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let spec = match arg(args, 0) {
+        Value::Str(s) => s,
+        other => {
+            return Err(vm.type_error(format!(
+                "The \"id\" argument must be of type string. Received {}",
+                crate::inspect::inspect_plain(&other)
+            )));
+        }
+    };
+    if spec.is_empty() {
+        return Err(vm.type_error("The argument 'id' must be a non-empty string. Received ''"));
+    }
+    let from = caller_module(vm);
+    vm.require_module(&spec, &from)
+}
+
+fn require_resolve(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let spec = vm.to_string(&arg(args, 0))?;
+    let bare = !spec.starts_with('.') && !spec.starts_with('/') && !spec.contains(':');
+    if spec.starts_with("node:") || spec.starts_with("squirt:") {
+        return Ok(Value::Str(spec));
+    }
+    if bare && vm.import_node(&spec)?.is_some() {
+        return Ok(Value::Str(spec));
+    }
+    let from = caller_module(vm);
+    match crate::module::resolve(&spec, &from.dir) {
+        Ok(p) => Ok(Value::Str(p.display().to_string().into())),
+        Err(msg) => {
+            let e = vm.make_error(ErrorKind::Error, msg);
+            if let Value::Object(o) = &e {
+                o.set_own("code", "MODULE_NOT_FOUND".into());
+            }
+            Err(e)
+        }
+    }
 }
 
 fn available_parallelism(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {

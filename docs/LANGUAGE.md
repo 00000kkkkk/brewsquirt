@@ -1303,13 +1303,34 @@ A specifier is resolved in this order:
 2. **Relative paths**: specifiers starting with `./` or `../` are resolved against the directory
    of the importing file. For `./x`, the loader tries:
    1. `x` as written, if it is a file
-   2. `x.jsq`
-   3. `x/index.jsq`
+   2. `x.jsq`, `x.js`, `x.mjs`, `x.cjs`, `x.json`
+   3. `x/index.jsq`, `x/index.js`, `x/index.mjs`, `x/index.cjs`
 3. **Bare names**: any other specifier, such as `left-pad`, is a package installed in
-   `nude_modules/<name>/`. The entry file is the `main` field of that package's `squirt.json`,
-   or `index.jsq` when there is no manifest or no `main`.
+   `nude_modules/<name>/`. The entry file is the `main` field of that package's `squirt.json`
+   or `package.json` (or its string `exports`), or an `index` file when there is no manifest or
+   no `main`.
 
 A specifier that cannot be resolved is an error.
+
+### CommonJS
+
+Files ending in `.cjs`, and `.js` files that use `module.exports`, `exports` or `require(...)`
+without any `import` or `export` statement, are loaded as CommonJS modules. They run in a
+function that receives `exports`, `require`, `module`, `__filename` and `__dirname`, and whatever
+ends up in `module.exports` becomes the module's default export, with its properties also
+available as named imports. `.json` files export the parsed value.
+
+`require` is a global in every file. It loads builtin modules by bare name or with a `node:` or
+`squirt:` prefix, relative files and packages with the resolution rules above, caches modules in
+`require.cache`, and `require.resolve(spec)` returns the resolved path. Requiring a file with
+`import` or `export` statements loads it as an ES module and returns its namespace object.
+`node:module` provides `createRequire`, `builtinModules` and `isBuiltin`.
+
+```js
+const fs = require("node:fs")
+const { add } = require("./math.cjs")
+console.log(typeof fs.readFileSync, add(2, 3))
+```
 
 ### Live bindings and cycles
 
@@ -1726,6 +1747,7 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:string_decoder`          | `StringDecoder` that keeps incomplete UTF-8, UTF-16 and base64 sequences between chunks |
 | `node:querystring`             | `parse`, `stringify`, `escape`, `unescape`, `encode`, `decode`      |
 | `node:tty`, `node:perf_hooks`  | `isatty`; `performance` with `mark`, `measure` and entries, and a `PerformanceObserver` stub |
+| `node:module`                  | `createRequire`, `builtinModules` and `isBuiltin`                   |
 | `node:zlib`                    | `gzip`, `gunzip`, `deflate`, `inflate`, `deflateRaw`, `inflateRaw` and `unzip` as sync, callback and `create*` stream forms, `crc32` and `constants`; no brotli |
 | `node:stream`, `node:stream/promises` | `Readable` (with `Readable.from`, `read`, `push`, `pipe`, async iteration and `toArray`), `Writable`, `Duplex`, `Transform`, `PassThrough`, `pipeline` and `finished` in callback and promise forms |
 | `node:http`, `node:https`      | `request`, `get`, `Agent` and `ClientRequest` built on `fetch`, responses are readable streams with `statusCode` and `headers`; `createServer` and `STATUS_CODES`; requests have `on("data")`, `on("end")`, `setEncoding`, `pipe`, `text()` and `json()`, responses have `writeHead`, `setHeader`, `write`, `end` and `finish` events |

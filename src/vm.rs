@@ -322,6 +322,7 @@ pub struct Vm {
     builders: Vec<(usize, String)>,
     pub realm: Realm,
     modules: FxHashMap<PathBuf, Value>,
+    pub(crate) require_cache: Option<Rc<Obj>>,
     proto_cache: FxHashMap<PathBuf, Rc<FunctionProto>>,
     ns_cache: FxHashMap<PathBuf, Value>,
     ns_get_fn: Option<Value>,
@@ -402,6 +403,7 @@ impl Vm {
             builders: Vec::new(),
             realm: Realm::new(),
             modules: FxHashMap::default(),
+            require_cache: None,
             proto_cache: FxHashMap::default(),
             ns_cache: FxHashMap::default(),
             ns_get_fn: None,
@@ -1313,6 +1315,30 @@ impl Vm {
         if let Some(v) = self.modules.get(&path) {
             return Ok(v.clone());
         }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let commonjs = ext == "cjs"
+            || ext == "json"
+            || (ext == "js"
+                && std::fs::read_to_string(&path)
+                    .map(|s| module::looks_like_commonjs(&s))
+                    .unwrap_or(false));
+        if commonjs {
+            let exports = self.require_path(&path, spec)?;
+            let ns = self.new_object();
+            ns.set_own("default", exports.clone());
+            if let Value::Object(o) = &exports {
+                if !o.is_callable() {
+                    for (k, v) in self.own_entries(&exports) {
+                        if &*k != "default" {
+                            ns.set_own(k, v);
+                        }
+                    }
+                }
+            }
+            let ns = Value::Object(ns);
+            self.modules.insert(path, ns.clone());
+            return Ok(ns);
+        }
         let proto = self.load_proto(&path, spec)?;
         self.link_module(&path, &proto)?;
         let is_async = proto.is_async;
@@ -1332,6 +1358,140 @@ impl Vm {
             return Err(e);
         }
         Ok(ns)
+    }
+
+    pub fn require_cache_object_public(&mut self) -> Rc<Obj> {
+        self.require_cache_object()
+    }
+
+    fn require_cache_object(&mut self) -> Rc<Obj> {
+        if let Some(c) = &self.require_cache {
+            return c.clone();
+        }
+        let c = self.new_object();
+        self.require_cache = Some(c.clone());
+        c
+    }
+
+    pub fn require_module(&mut self, spec: &str, from: &Rc<ModuleInfo>) -> Result<Value, Value> {
+        let unwrap = |v: Value| match &v {
+            Value::Object(o) => o.get_own("default").unwrap_or(v),
+            _ => v,
+        };
+        if let Some(name) = spec.strip_prefix("squirt:") {
+            return self.import_builtin(name).map(unwrap);
+        }
+        if let Some(name) = spec.strip_prefix("node:") {
+            return match self.import_node(name)? {
+                Some(v) => Ok(unwrap(v)),
+                None => {
+                    Err(self
+                        .make_error(ErrorKind::Error, format!("No such built-in module: {spec}")))
+                }
+            };
+        }
+        if !spec.starts_with('.') && !spec.starts_with('/') && !spec.contains(':') {
+            if let Some(v) = self.import_node(spec)? {
+                return Ok(unwrap(v));
+            }
+        }
+        let path = match module::resolve(spec, &from.dir) {
+            Ok(p) => p,
+            Err(msg) => return Err(self.make_error(ErrorKind::Error, msg)),
+        };
+        self.require_path(&path, spec)
+    }
+
+    fn require_path(&mut self, path: &PathBuf, spec: &str) -> Result<Value, Value> {
+        let key: Rc<str> = path.display().to_string().into();
+        let cache = self.require_cache_object();
+        if let Some(Value::Object(m)) = cache.get_own(&key) {
+            return Ok(m.get_own("exports").unwrap_or_default());
+        }
+        if let Some(ns) = self.modules.get(path) {
+            let ns = ns.clone();
+            if let Value::Object(o) = &ns {
+                if let Some(d) = o.get_own("default") {
+                    return Ok(d);
+                }
+            }
+            return Ok(ns);
+        }
+        let src = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(self.make_error(
+                    ErrorKind::Error,
+                    format!("Cannot read module '{spec}': {e}"),
+                ));
+            }
+        };
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if ext == "json" {
+            let value = builtins::json::json_parse(self, &src)?;
+            let module = self.new_object();
+            module.set_own("exports", value.clone());
+            module.set_own("id", Value::Str(key.clone()));
+            module.set_own("filename", Value::Str(key.clone()));
+            module.set_own("loaded", Value::Bool(true));
+            cache.set_own(key, Value::Object(module));
+            return Ok(value);
+        }
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        if ext == "mjs" || (ext != "cjs" && module::has_module_syntax(&src)) {
+            let from = Rc::new(ModuleInfo {
+                name: key.clone(),
+                dir: dir.clone(),
+                source: "".into(),
+                sloppy: false,
+            });
+            return self.import_module(&path.display().to_string(), &from);
+        }
+        let body = if src.starts_with("#!") {
+            match src.find('\n') {
+                Some(i) => &src[i..],
+                None => "",
+            }
+        } else {
+            &src
+        };
+        let wrapped =
+            format!("(function (exports, require, module, __filename, __dirname) {{{body}\n}})");
+        let proto = match self.compile_unit(&wrapped, &key, dir.clone(), Mode::Repl, true) {
+            Ok(p) => p,
+            Err(e) => return Err(self.syntax_error_value(&e, &key)),
+        };
+        let wrapper = self.run_script_proto(proto)?;
+        let module = self.new_object();
+        let exports = self.new_object();
+        module.set_own("exports", Value::Object(exports.clone()));
+        module.set_own("id", Value::Str(key.clone()));
+        module.set_own("filename", Value::Str(key.clone()));
+        module.set_own("path", Value::Str(dir.display().to_string().into()));
+        module.set_own("loaded", Value::Bool(false));
+        let children = self.new_array(Vec::new());
+        module.set_own("children", children);
+        let paths = self.new_array(Vec::new());
+        module.set_own("paths", paths);
+        cache.set_own(key.clone(), Value::Object(module.clone()));
+        let require = self.globals.get("require").cloned().unwrap_or_default();
+        let r = self.call_value(
+            &wrapper,
+            Value::Object(exports.clone()),
+            &[
+                Value::Object(exports),
+                require,
+                Value::Object(module.clone()),
+                Value::Str(key.clone()),
+                Value::Str(dir.display().to_string().into()),
+            ],
+        );
+        if let Err(e) = r {
+            cache.props.borrow_mut().shift_remove(&key);
+            return Err(e);
+        }
+        module.set_own("loaded", Value::Bool(true));
+        Ok(module.get_own("exports").unwrap_or_default())
     }
 
     pub fn stack_trace(&self) -> String {
