@@ -73,6 +73,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and scrypt functions exist but throw errors with `code`s so that packages such as
   `jsonwebtoken` fall back to HMAC.
 - `fs.realpath.native` and `fs.realpathSync.native`.
+- `TextDecoder` accepts `utf-16le`, `utf-16be`, `latin1`, `ascii`, `iso-8859-1` and
+  `windows-1252` labels.
+- Import attributes: `import data from "./x.json" with { type: "json" }` and the legacy `assert`
+  form parse on static imports and re-exports.
+- `node:url` gained the legacy API: `parse`, `format`, `resolve`, `resolveObject`, `Url`,
+  `domainToASCII`, `domainToUnicode` and `urlToHttpOptions`.
+- `Buffer` gained `copy`, `lastIndexOf`, `swap16`/`swap32`/`swap64`, the `BigInt64` and
+  variable-width `readIntLE`/`readUIntBE`-style readers and writers, `toLocaleString`, the
+  `*Slice`/`*Write` helpers and `parent`/`offset`.
+- `Readable`, `Writable`, `Duplex`, `Transform` and `PassThrough` are function constructors that
+  initialise an existing object when called as `Readable.call(this, options)`, so
+  `util.inherits`-style stream subclasses from `readable-stream`, `light-my-request` and older
+  packages work.
 - `require("stream")` is the legacy callable `Stream` constructor with `pipe`, and `Readable`
   and `Writable` extend it, so `readable-stream` and packages that call `Stream.call(this)` work.
 - `\p{RGI_Emoji}` and the other emoji sequence properties under the `v` flag match emoji
@@ -88,6 +101,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so `string-width` and `yargs` load.
 - `{ arguments }` as a shorthand property inside a function refers to the arguments object
   instead of throwing a ReferenceError.
+- Compiling a scope with many declarations is linear instead of quadratic: local variables are
+  indexed by name and the hoisting pass uses hash sets, so a 40,000-declaration bundle compiles in
+  a fraction of a second instead of half a minute and `typescript`'s 8 MB library loads.
+- `charCodeAt`, `charAt`, `codePointAt`, `at`, `slice`, `substring`, `substr`, `indexOf`,
+  `includes`, `startsWith`, `endsWith`, indexing and `.length` on large strings use a cached
+  UTF-16 index instead of rescanning the string, so scanners such as the TypeScript parser run in
+  linear time (parsing `lib.es5.d.ts` went from two minutes to about a second).
+- Capturing a variable from an enclosing function is logarithmic in the number of open
+  upvalues instead of linear, which matters for bundles that define thousands of closures in one
+  scope.
+- `Object.freeze` and `Object.seal` leave private fields writable, as the specification requires,
+  so frozen class instances such as ESLint's `SourceCode` can still update their private state.
+- A `.js` file without `import`/`export` syntax is CommonJS unless the nearest `package.json`
+  says `"type": "module"`, matching Node, so packages such as `xlsx` that export through
+  `module.exports` detection load.
+- Character class ranges whose bounds are out of order after surrogate mangling in non-Unicode
+  regular expressions are emitted as single characters instead of failing to compile.
+- `vrotdaem add name@range` replaces an installed top-level copy that does not satisfy the new
+  range instead of reporting it as already installed.
+- `require()` of an ES module returns a plain object with the exports, `__esModule: true` when
+  there is a default export, or the value of a `"module.exports"` export, as Node does, so
+  Babel-style interop (`mod.__esModule ? mod.default : mod`) picks the default export.
+- Module syntax detection tokenises the file instead of scanning lines, so `import`/`export`
+  inside strings, comments or template literals and dynamic `import()` no longer make a CommonJS
+  bundle (such as `xlsx`, `typescript` or the `svelte` compiler) load as an ES module.
 - `export * as name from "pkg"`, `export { x } from "pkg"` and `export * from "pkg"` now link
   when the source is a package or a CommonJS file; previously only relative ES modules were
   re-exported, which broke `htmlparser2`, `cheerio` and similar packages.

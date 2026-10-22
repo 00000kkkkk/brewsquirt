@@ -3,7 +3,7 @@ use crate::bytecode::Cmp;
 use crate::bytecode::*;
 use crate::token::SyntaxError;
 use crate::value::Value;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::rc::Rc;
 
 type R<T> = Result<T, SyntaxError>;
@@ -91,6 +91,7 @@ struct FnState {
     functions: Vec<Rc<FunctionProto>>,
     upvalues: Vec<UpvalDesc>,
     locals: Vec<Local>,
+    index: FxHashMap<Rc<str>, Vec<u32>>,
     depth: u32,
     loops: Vec<LoopCtx>,
     tries: Vec<TryCtx>,
@@ -104,7 +105,7 @@ struct FnState {
     is_async: bool,
     is_generator: bool,
     fields: Option<Rc<Vec<ClassMember>>>,
-    vars: Vec<Rc<str>>,
+    vars: FxHashSet<Rc<str>>,
     span: (u32, u32),
     template_sites: u32,
     eval_upvals: Option<EvalUpvals>,
@@ -128,6 +129,7 @@ impl FnState {
             functions: Vec::new(),
             upvalues: Vec::new(),
             locals: Vec::new(),
+            index: FxHashMap::default(),
             depth: 0,
             loops: Vec::new(),
             tries: Vec::new(),
@@ -141,7 +143,7 @@ impl FnState {
             is_async: false,
             is_generator: false,
             fields: None,
-            vars: Vec::new(),
+            vars: FxHashSet::default(),
             span: (0, 0),
             template_sites: 0,
             eval_upvals: None,
@@ -311,13 +313,7 @@ fn annexb_stmt(s: &Stmt, enclosing: &mut Vec<Rc<str>>, out: &mut AnnexB) {
 }
 fn collect_var_names(s: &Stmt, out: &mut Vec<Rc<str>>) {
     let push = |p: &Pattern, out: &mut Vec<Rc<str>>| {
-        let mut v = Vec::new();
-        p.bound_names(&mut v);
-        for n in v {
-            if !out.contains(&n) {
-                out.push(n);
-            }
-        }
+        p.bound_names(out);
     };
     match &s.kind {
         StmtKind::Decl(DeclKind::Var, decls) => {
@@ -906,6 +902,8 @@ impl Compiler {
     fn add_local(&mut self, name: Rc<str>, is_const: bool) -> u32 {
         let st = self.st();
         let depth = st.depth;
+        let slot = st.locals.len() as u32;
+        st.index.entry(name.clone()).or_default().push(slot);
         st.locals.push(Local {
             name,
             depth,
@@ -915,7 +913,31 @@ impl Compiler {
             sticky: false,
             lexical: false,
         });
-        (st.locals.len() - 1) as u32
+        slot
+    }
+
+    fn truncate_locals(&mut self, n: usize) {
+        let st = self.st();
+        while st.locals.len() > n {
+            let local = st.locals.pop().expect("local");
+            if let Some(slots) = st.index.get_mut(&local.name) {
+                slots.pop();
+                if slots.is_empty() {
+                    st.index.remove(&local.name);
+                }
+            }
+        }
+    }
+
+    fn local_slots(&self, name: &str) -> &[u32] {
+        self.st_ref().index.get(name).map_or(&[], |v| v.as_slice())
+    }
+
+    fn local_at_depth(&self, name: &str, depth: u32) -> bool {
+        let st = self.st_ref();
+        self.local_slots(name)
+            .iter()
+            .any(|&i| st.locals[i as usize].depth == depth)
     }
 
     fn add_lexical(&mut self, name: Rc<str>, is_const: bool) -> u32 {
@@ -927,7 +949,8 @@ impl Compiler {
 
     fn mark_init(&mut self, name: &str) {
         let st = self.st();
-        if let Some(l) = st.locals.iter_mut().rev().find(|l| &*l.name == name) {
+        if let Some(&slot) = st.index.get(name).and_then(|v| v.last()) {
+            let l = &mut st.locals[slot as usize];
             if !l.sticky {
                 l.tdz = false;
             }
@@ -1055,7 +1078,7 @@ impl Compiler {
             n -= 1;
         }
         if n < st.locals.len() {
-            st.locals.truncate(n);
+            self.truncate_locals(n);
             Some(n)
         } else {
             None
@@ -1074,10 +1097,10 @@ impl Compiler {
 
     fn resolve_local(&self, si: usize, name: &str) -> Option<(u32, bool)> {
         let st = &self.states[si];
-        st.locals
-            .iter()
-            .rposition(|l| &*l.name == name)
-            .map(|i| (i as u32, st.locals[i].is_const))
+        st.index
+            .get(name)
+            .and_then(|v| v.last())
+            .map(|&i| (i, st.locals[i as usize].is_const))
     }
 
     fn add_upvalue(&mut self, si: usize, is_local: bool, index: u32) -> u32 {
@@ -1532,7 +1555,7 @@ impl Compiler {
             let mut cands = Vec::new();
             annexb_list(&refs, &mut enclosing, false, &mut cands);
             for (n, ptr) in cands {
-                let bound = self.st_ref().locals.iter().any(|l| l.name == n);
+                let bound = !self.local_slots(&n).is_empty();
                 if bound {
                     continue;
                 }
@@ -1547,12 +1570,14 @@ impl Compiler {
             if self.st_ref().vars.contains(&n) {
                 continue;
             }
-            let exists = self
-                .st_ref()
-                .locals
-                .iter()
-                .any(|l| l.name == n && l.depth <= self.st_ref().depth);
-            self.st().vars.push(n.clone());
+            let cur_depth = self.st_ref().depth;
+            let exists = {
+                let st = self.st_ref();
+                self.local_slots(&n)
+                    .iter()
+                    .any(|&i| st.locals[i as usize].depth <= cur_depth)
+            };
+            self.st().vars.insert(n.clone());
             if exists {
                 if self.st_ref().param_exprs && self.st_ref().param_names.contains(&n) {
                     if let Some((slot, _)) = self.resolve_local(self.states.len() - 1, &n) {
@@ -1600,58 +1625,54 @@ impl Compiler {
         for s in stmts {
             collect_var_names(s, &mut var_names);
         }
+        let var_set: FxHashSet<Rc<str>> = var_names.iter().cloned().collect();
+        let fn_names: FxHashSet<Rc<str>> = funcs.iter().filter_map(|f| f.name.clone()).collect();
+        let fn_map: FxHashMap<usize, bool> = fn_idx.iter().copied().collect();
         for (n, _) in &names {
-            let is_fn = funcs.iter().any(|f| f.name.as_ref() == Some(n));
+            let is_fn = fn_names.contains(n);
             if var_scope && is_fn && !(top && self.mode == Mode::Module) {
                 continue;
             }
-            if var_names.contains(n) {
+            if var_set.contains(n) {
                 return Err(self.err(format!("Identifier '{n}' has already been declared")));
             }
         }
         let depth = self.st_ref().depth;
         let mut fresh = Vec::new();
+        let mut positions: FxHashMap<Rc<str>, Vec<usize>> = FxHashMap::default();
         for (i, (n, c)) in names.iter().enumerate() {
-            let is_fn = funcs.iter().any(|f| f.name.as_ref() == Some(n));
-            let earlier: Vec<usize> = names[..i]
-                .iter()
-                .enumerate()
-                .filter(|(_, (m, _))| m == n)
-                .map(|(j, _)| j)
-                .collect();
-            let me_fn = fn_idx.iter().find(|(j, _)| *j == i).map(|(_, p)| *p);
-            let earlier_fns = earlier.iter().all(|j| fn_idx.iter().any(|(k, _)| k == j));
-            let earlier_plain = earlier
-                .iter()
-                .all(|j| fn_idx.iter().any(|(k, p)| k == j && *p));
+            let is_fn = fn_names.contains(n);
+            let earlier: Vec<usize> = positions.get(n).cloned().unwrap_or_default();
+            positions.entry(n.clone()).or_default().push(i);
+            let me_fn = fn_map.get(&i).copied();
+            let earlier_fns = earlier.iter().all(|j| fn_map.contains_key(j));
+            let earlier_plain = earlier.iter().all(|j| fn_map.get(j) == Some(&true));
             let redeclared_fn = me_fn.is_some()
                 && earlier_fns
                 && !(top && self.mode == Mode::Module)
                 && (var_scope || (!self.st_ref().strict && me_fn == Some(true) && earlier_plain));
             let dup_new = !earlier.is_empty() && !redeclared_fn;
-            let var_clash = self.st_ref().vars.contains(n)
-                && self
-                    .st_ref()
-                    .locals
-                    .iter()
-                    .any(|l| l.depth == depth && &l.name == n);
+            let var_clash = self.st_ref().vars.contains(n) && self.local_at_depth(n, depth);
             if var_clash && is_fn {
                 continue;
             }
             let self_slot = self.st_ref().self_slot;
-            let dup_old =
-                &**n != "arguments"
-                    && self.st_ref().locals.iter().enumerate().any(|(i, l)| {
-                        l.depth == depth && &l.name == n && Some(i as u32) != self_slot
-                    });
+            let dup_old = &**n != "arguments" && {
+                let st = self.st_ref();
+                self.local_slots(n)
+                    .iter()
+                    .any(|&i| st.locals[i as usize].depth == depth && Some(i) != self_slot)
+            };
             if dup_old && is_fn && var_scope && !dup_new {
                 let params = self.st_ref().num_params as usize + self.st_ref().has_rest as usize;
-                let param_dup = self
-                    .st_ref()
-                    .locals
-                    .iter()
-                    .enumerate()
-                    .any(|(i, l)| l.depth == depth && &l.name == n && i >= 1 && i <= params);
+                let param_dup = {
+                    let st = self.st_ref();
+                    self.local_slots(n).iter().any(|&i| {
+                        st.locals[i as usize].depth == depth
+                            && i as usize >= 1
+                            && i as usize <= params
+                    })
+                };
                 if param_dup {
                     continue;
                 }
@@ -1669,9 +1690,8 @@ impl Compiler {
         let import_names: Vec<Rc<str>> =
             imports.iter().filter_map(|i| i.namespace.clone()).collect();
         for (n, c) in &names {
-            let lexical_kind = !funcs.iter().any(|f| f.name.as_ref() == Some(n))
-                && !n.starts_with("%import")
-                && !import_names.contains(n);
+            let lexical_kind =
+                !fn_names.contains(n) && !n.starts_with("%import") && !import_names.contains(n);
             let lexical = (!repl || self.script_eval == 1) && lexical_kind;
             if top
                 && lexical_kind
@@ -1704,7 +1724,7 @@ impl Compiler {
                 }
                 let k = self.str_const(n);
                 let mut flags = self.define_flags(*c, false, lexical_kind);
-                if funcs.iter().any(|f| f.name.as_ref() == Some(n)) {
+                if fn_names.contains(n) {
                     flags |= crate::bytecode::DG_FUNCTION;
                 }
                 self.emit(Op::DefineGlobal(k, flags));
@@ -1739,9 +1759,9 @@ impl Compiler {
             }
             for (exported, local) in &pre {
                 self.load_var(&"%ns".into());
-                if funcs.iter().any(|f| f.name.as_ref() == Some(local)) {
+                if fn_names.contains(local) {
                     self.load_var(local);
-                } else if var_names.contains(local) {
+                } else if var_set.contains(local) {
                     self.emit(Op::Undefined);
                 } else {
                     self.emit(Op::Uninit);
@@ -1820,7 +1840,7 @@ impl Compiler {
 
     fn annexb_copy(&mut self, n: &Rc<str>) {
         let st = self.st_ref();
-        let inner = st.locals.iter().rposition(|l| &l.name == n);
+        let inner = st.index.get(n).and_then(|v| v.last()).map(|&i| i as usize);
         let outer = st
             .locals
             .iter()
@@ -1871,12 +1891,12 @@ impl Compiler {
         }
         if self.states[1..]
             .iter()
-            .any(|st| st.locals.iter().any(|l| &*l.name == name))
+            .any(|st| st.index.contains_key(name))
         {
             return false;
         }
-        match self.states[0].locals.iter().rposition(|l| &*l.name == name) {
-            Some(i) => self.states[0].locals[i].depth == 1,
+        match self.states[0].index.get(name).and_then(|v| v.last()) {
+            Some(&i) => self.states[0].locals[i as usize].depth == 1,
             None => false,
         }
     }
@@ -2350,7 +2370,7 @@ impl Compiler {
             self.emit(Op::CloseUpvalues(first));
             self.emit(Op::SetLocal(first));
             self.emit(Op::PopTo(first + 1));
-            self.st().locals.truncate(tdz_base);
+            self.truncate_locals(tdz_base);
         }
         let iter_name = self.hidden_name("iter");
         let iter_slot = self.add_local(iter_name, true);
@@ -2617,7 +2637,8 @@ impl Compiler {
             let slot = self.add_local(name, true);
             self.unwind_tries(0)?;
             self.emit(Op::GetLocal(slot));
-            self.st().locals.pop();
+            let n = self.st_ref().locals.len() - 1;
+            self.truncate_locals(n);
         } else {
             let n = self.st_ref().tries.iter().filter(|t| t.has_handler).count();
             for _ in 0..n {

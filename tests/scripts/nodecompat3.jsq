@@ -1,0 +1,54 @@
+import data from "./fixtures/data.json" with { type: "json" }
+import { items } from "./fixtures/data.json" with { type: "json" }
+console.log(data.name, items.length)
+
+const esm = require("./fixtures/esm_default.mjs")
+console.log(esm.__esModule, typeof esm.default, esm.named, Object.keys(esm).join())
+const cjs = require("./fixtures/cjs_strings.js")
+console.log(cjs.kind, cjs.describe())
+
+const { Readable, Writable, Duplex, Transform } = require("node:stream")
+function Legacy(options) {
+  Readable.call(this, options)
+}
+Object.setPrototypeOf(Legacy.prototype, Readable.prototype)
+const legacy = new Legacy({ objectMode: true })
+legacy.push("a")
+legacy.push(null)
+function Both() {
+  Readable.call(this)
+  Writable.call(this)
+}
+Object.setPrototypeOf(Both.prototype, Duplex.prototype)
+const both = new Both()
+console.log(legacy instanceof Readable, legacy._readableState.objectMode, both._writableState !== undefined, typeof Readable(), new Transform() instanceof Duplex)
+legacy.on("data", (c) => console.log("data", c))
+
+const b = Buffer.alloc(12)
+b.writeUIntBE(0x123456, 0, 3)
+b.writeIntLE(-2, 3, 2)
+b.writeBigUInt64LE(2n ** 40n, 4)
+console.log(b.readUIntBE(0, 3).toString(16), b.readIntLE(3, 2), b.readBigUInt64LE(4), Buffer.from("abcabc").lastIndexOf("abc"), Buffer.from([1, 2, 3]).copy(b, 0), Buffer.from([1, 2, 3, 4]).swap32().join(), typeof Buffer.prototype.utf8Slice)
+
+const url = require("node:url")
+const parsed = url.parse("http://user:pw@host.com:8080/p/a?x=1&y=2#frag", true)
+console.log(parsed.protocol, parsed.auth, parsed.host, parsed.port, parsed.hostname, parsed.pathname, parsed.search, JSON.stringify(parsed.query), parsed.hash, parsed.path)
+console.log(url.format({ protocol: "https", hostname: "a.b", pathname: "/x", query: { q: 1 } }), url.format(parsed), url.resolve("http://a.com/b/c", "../d"), url.domainToASCII("mañana.com"))
+
+const td = new TextDecoder("ascii")
+console.log(td.encoding, td.decode(new Uint8Array([0x80, 0x41, 0xe9])), new TextDecoder("utf-16le").decode(new Uint8Array([0x41, 0, 0x42, 0])), new TextDecoder("utf-16be").decode(new Uint8Array([0, 0x43])), new TextDecoder("latin1").encoding)
+
+console.log(/[󯰀-\uDFFF]/.test("x"), new RegExp("[\uD800-󯰀-\uDFFF]").test("a"), /[a-z\x41-\x43]/.test("B"))
+
+class Frozen {
+  #count = 0
+  constructor() {
+    Object.freeze(this)
+  }
+  bump() {
+    this.#count++
+    return this.#count
+  }
+}
+const frozen = new Frozen()
+console.log(frozen.bump(), frozen.bump(), Object.isFrozen(frozen))

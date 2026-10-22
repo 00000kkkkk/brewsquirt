@@ -238,6 +238,171 @@ const NODE_SRC: &str = r##"
     Object.defineProperty(Buffer, key, { value: Buffer[key], writable: true, enumerable: true, configurable: true })
   }
   Buffer.poolSize = 8192
+  const bufferView = (b) => new DataView(b.buffer, b.byteOffset, b.byteLength)
+  Object.assign(Buffer.prototype, {
+    copy(target, targetStart = 0, sourceStart = 0, sourceEnd = this.length) {
+      sourceEnd = Math.min(sourceEnd, this.length)
+      const n = Math.max(0, Math.min(sourceEnd - sourceStart, target.length - targetStart))
+      if (n > 0) target.set(this.subarray(sourceStart, sourceStart + n), targetStart)
+      return n
+    },
+    lastIndexOf(value, byteOffset = this.length - 1, encoding) {
+      if (typeof byteOffset === "string") [byteOffset, encoding] = [this.length - 1, byteOffset]
+      const needle = typeof value === "number" ? Uint8Array.of(value & 255) : typeof value === "string" ? Buffer.from(value, encoding) : value
+      if (byteOffset < 0) byteOffset += this.length
+      if (needle.length === 0) return Math.min(byteOffset + 1, this.length)
+      for (let i = Math.min(byteOffset, this.length - needle.length); i >= 0; i--) {
+        let ok = true
+        for (let j = 0; j < needle.length; j++) {
+          if (this[i + j] !== needle[j]) {
+            ok = false
+            break
+          }
+        }
+        if (ok) return i
+      }
+      return -1
+    },
+    swap16() {
+      if (this.length % 2 !== 0) throw new RangeError("Buffer size must be a multiple of 16-bits")
+      for (let i = 0; i < this.length; i += 2) [this[i], this[i + 1]] = [this[i + 1], this[i]]
+      return this
+    },
+    swap32() {
+      if (this.length % 4 !== 0) throw new RangeError("Buffer size must be a multiple of 32-bits")
+      for (let i = 0; i < this.length; i += 4) [this[i], this[i + 1], this[i + 2], this[i + 3]] = [this[i + 3], this[i + 2], this[i + 1], this[i]]
+      return this
+    },
+    swap64() {
+      if (this.length % 8 !== 0) throw new RangeError("Buffer size must be a multiple of 64-bits")
+      for (let i = 0; i < this.length; i += 8) this.subarray(i, i + 8).reverse()
+      return this
+    },
+    readBigInt64LE(offset = 0) {
+      return bufferView(this).getBigInt64(offset, true)
+    },
+    readBigInt64BE(offset = 0) {
+      return bufferView(this).getBigInt64(offset, false)
+    },
+    readBigUInt64LE(offset = 0) {
+      return bufferView(this).getBigUint64(offset, true)
+    },
+    readBigUInt64BE(offset = 0) {
+      return bufferView(this).getBigUint64(offset, false)
+    },
+    writeBigInt64LE(value, offset = 0) {
+      bufferView(this).setBigInt64(offset, value, true)
+      return offset + 8
+    },
+    writeBigInt64BE(value, offset = 0) {
+      bufferView(this).setBigInt64(offset, value, false)
+      return offset + 8
+    },
+    writeBigUInt64LE(value, offset = 0) {
+      bufferView(this).setBigUint64(offset, value, true)
+      return offset + 8
+    },
+    writeBigUInt64BE(value, offset = 0) {
+      bufferView(this).setBigUint64(offset, value, false)
+      return offset + 8
+    },
+    readUIntLE(offset = 0, byteLength = 1) {
+      let v = 0
+      let mul = 1
+      for (let i = 0; i < byteLength; i++) {
+        v += this[offset + i] * mul
+        mul *= 256
+      }
+      return v
+    },
+    readUIntBE(offset = 0, byteLength = 1) {
+      let v = 0
+      for (let i = 0; i < byteLength; i++) v = v * 256 + this[offset + i]
+      return v
+    },
+    readIntLE(offset = 0, byteLength = 1) {
+      const v = this.readUIntLE(offset, byteLength)
+      const limit = 2 ** (8 * byteLength - 1)
+      return v >= limit ? v - 2 * limit : v
+    },
+    readIntBE(offset = 0, byteLength = 1) {
+      const v = this.readUIntBE(offset, byteLength)
+      const limit = 2 ** (8 * byteLength - 1)
+      return v >= limit ? v - 2 * limit : v
+    },
+    writeUIntLE(value, offset = 0, byteLength = 1) {
+      let v = value
+      for (let i = 0; i < byteLength; i++) {
+        this[offset + i] = v % 256
+        v = Math.floor(v / 256)
+      }
+      return offset + byteLength
+    },
+    writeUIntBE(value, offset = 0, byteLength = 1) {
+      let v = value
+      for (let i = byteLength - 1; i >= 0; i--) {
+        this[offset + i] = v % 256
+        v = Math.floor(v / 256)
+      }
+      return offset + byteLength
+    },
+    writeIntLE(value, offset = 0, byteLength = 1) {
+      const limit = 2 ** (8 * byteLength)
+      return this.writeUIntLE(value < 0 ? value + limit : value, offset, byteLength)
+    },
+    writeIntBE(value, offset = 0, byteLength = 1) {
+      const limit = 2 ** (8 * byteLength)
+      return this.writeUIntBE(value < 0 ? value + limit : value, offset, byteLength)
+    },
+    toLocaleString(encoding, start, end) {
+      return this.toString(encoding, start, end)
+    },
+    inspect() {
+      const shown = Array.from(this.subarray(0, 50), (b) => b.toString(16).padStart(2, "0")).join(" ")
+      return `<Buffer ${shown}${this.length > 50 ? ` ... ${this.length - 50} more bytes` : ""}>`
+    },
+    hexSlice(start, end) {
+      return this.toString("hex", start, end)
+    },
+    utf8Slice(start, end) {
+      return this.toString("utf8", start, end)
+    },
+    latin1Slice(start, end) {
+      return this.toString("latin1", start, end)
+    },
+    asciiSlice(start, end) {
+      return this.toString("ascii", start, end)
+    },
+    base64Slice(start, end) {
+      return this.toString("base64", start, end)
+    },
+    ucs2Slice(start, end) {
+      return this.toString("ucs2", start, end)
+    },
+    hexWrite(string, offset, length) {
+      return this.write(string, offset, length, "hex")
+    },
+    utf8Write(string, offset, length) {
+      return this.write(string, offset, length, "utf8")
+    },
+    latin1Write(string, offset, length) {
+      return this.write(string, offset, length, "latin1")
+    },
+    asciiWrite(string, offset, length) {
+      return this.write(string, offset, length, "ascii")
+    },
+    base64Write(string, offset, length) {
+      return this.write(string, offset, length, "base64")
+    },
+    ucs2Write(string, offset, length) {
+      return this.write(string, offset, length, "ucs2")
+    },
+  })
+  for (const [alias, name] of [["readBigUint64LE", "readBigUInt64LE"], ["readBigUint64BE", "readBigUInt64BE"], ["writeBigUint64LE", "writeBigUInt64LE"], ["writeBigUint64BE", "writeBigUInt64BE"], ["readUintLE", "readUIntLE"], ["readUintBE", "readUIntBE"], ["writeUintLE", "writeUIntLE"], ["writeUintBE", "writeUIntBE"]]) {
+    Buffer.prototype[alias] = Buffer.prototype[name]
+  }
+  Object.defineProperty(Buffer.prototype, "parent", { get() { return this.buffer }, configurable: true })
+  Object.defineProperty(Buffer.prototype, "offset", { get() { return this.byteOffset }, configurable: true })
   const kMaxLength = 2 ** 32
   const kStringMaxLength = 2 ** 29 - 24
   function SlowBuffer(size) {
@@ -1804,147 +1969,145 @@ const NODE_SRC: &str = r##"
     return dest
   }
 
-  class Readable extends Stream {
-    get _readableState() {
-      return this[kRead]
+  function initReadable(stream, options) {
+    stream[kRead] = {
+      buffer: [],
+      ended: false,
+      endEmitted: false,
+      flowing: null,
+      reading: false,
+      scheduled: false,
+      destroyed: false,
+      encoding: options.encoding ?? null,
+      objectMode: !!options.objectMode,
+      highWaterMark: options.highWaterMark ?? (options.objectMode ? 16 : 65536),
+      autoDestroy: options.autoDestroy !== false,
+      pipes: [],
     }
-    constructor(options = {}) {
-      super()
-      this[kRead] = {
-        buffer: [],
-        ended: false,
-        endEmitted: false,
-        flowing: null,
-        reading: false,
-        scheduled: false,
-        destroyed: false,
-        encoding: options.encoding ?? null,
-        objectMode: !!options.objectMode,
-        highWaterMark: options.highWaterMark ?? (options.objectMode ? 16 : 65536),
-        autoDestroy: options.autoDestroy !== false,
-        pipes: [],
-      }
-      this.readable = true
-      this.readableEnded = false
-      this.destroyed = false
-      if (typeof options.read === "function") this._read = options.read
-      if (typeof options.destroy === "function") this._destroy = options.destroy
-      if (typeof options.construct === "function") queueMicrotask(() => options.construct.call(this, (e) => e && this.destroy(e)))
+    stream.readable = true
+    stream.readableEnded = false
+    stream.destroyed = false
+    if (typeof options.read === "function") stream._read = options.read
+    if (typeof options.destroy === "function") stream._destroy = options.destroy
+    if (typeof options.construct === "function") queueMicrotask(() => options.construct.call(stream, (e) => e && stream.destroy(e)))
+  }
+  function scheduleRead(stream) {
+    const r = stream[kRead]
+    if (r.scheduled) return
+    r.scheduled = true
+    queueMicrotask(() => {
+      r.scheduled = false
+      flowRead(stream)
+    })
+  }
+  function flowRead(stream) {
+    const r = stream[kRead]
+    if (r.destroyed) return
+    if (r.flowing) {
+      while (r.flowing && r.buffer.length && !r.destroyed) stream.emit("data", r.buffer.shift())
+      if (r.flowing && !r.buffer.length && !r.ended && !r.destroyed) callRead(stream)
+    } else if (r.buffer.length && stream.listenerCount("readable") > 0) {
+      stream.emit("readable")
     }
-    get readableObjectMode() {
-      return this[kRead].objectMode
+    maybeEndRead(stream)
+  }
+  function callRead(stream) {
+    const r = stream[kRead]
+    if (r.reading || r.ended || r.destroyed) return
+    r.reading = true
+    try {
+      stream._read(r.highWaterMark)
+    } catch (e) {
+      stream.destroy(e)
     }
-    get readableHighWaterMark() {
-      return this[kRead].highWaterMark
+    r.reading = false
+  }
+  function maybeEndRead(stream) {
+    const r = stream[kRead]
+    if (r.ended && r.buffer.length === 0 && !r.endEmitted && !r.destroyed) {
+      r.endEmitted = true
+      stream.readable = false
+      stream.readableEnded = true
+      queueMicrotask(() => {
+        if (stream.listenerCount("readable") > 0) stream.emit("readable")
+        stream.emit("end")
+        if (r.autoDestroy && !stream[kWrite]) stream.destroy()
+        else if (r.autoDestroy && stream[kWrite] && stream[kWrite].finished) stream.destroy()
+      })
     }
-    get readableLength() {
-      return this[kRead].buffer.reduce((n, c) => n + (this[kRead].objectMode ? 1 : c.length), 0)
-    }
-    get readableFlowing() {
-      return this[kRead].flowing
-    }
-    get readableEncoding() {
-      return this[kRead].encoding
-    }
-    _read() {}
+  }
+
+  function Readable(options) {
+    options = options ?? {}
+    if (this === undefined || this === globalThis) return new Readable(options)
+    Stream.call(this, options)
+    initReadable(this, options)
+  }
+  Object.setPrototypeOf(Readable.prototype, Stream.prototype)
+  Object.setPrototypeOf(Readable, Stream)
+  Object.defineProperties(Readable.prototype, {
+    _readableState: { get() { return this[kRead] }, configurable: true },
+    readableObjectMode: { get() { return this[kRead].objectMode }, configurable: true },
+    readableHighWaterMark: { get() { return this[kRead].highWaterMark }, configurable: true },
+    readableLength: { get() { return this[kRead].buffer.reduce((n, c) => n + (this[kRead].objectMode ? 1 : c.length), 0) }, configurable: true },
+    readableFlowing: { get() { return this[kRead].flowing }, configurable: true },
+    readableEncoding: { get() { return this[kRead].encoding }, configurable: true },
+  })
+  Object.assign(Readable.prototype, {
+    _read() {},
     push(chunk, encoding) {
       const r = this[kRead]
       if (r.destroyed) return false
       if (chunk === null) {
         r.ended = true
-        this.#maybeEnd()
+        maybeEndRead(this)
         return false
       }
       let c = toChunk(this, chunk, encoding, r.objectMode)
       if (!r.objectMode && r.encoding && typeof c !== "string") c = c.toString(r.encoding)
       r.buffer.push(c)
-      this.#schedule()
+      scheduleRead(this)
       return this.readableLength < r.highWaterMark
-    }
+    },
     unshift(chunk) {
       this[kRead].buffer.unshift(chunk)
-    }
-    #schedule() {
-      const r = this[kRead]
-      if (r.scheduled) return
-      r.scheduled = true
-      queueMicrotask(() => {
-        r.scheduled = false
-        this.#flow()
-      })
-    }
-    #flow() {
-      const r = this[kRead]
-      if (r.destroyed) return
-      if (r.flowing) {
-        while (r.flowing && r.buffer.length && !r.destroyed) this.emit("data", r.buffer.shift())
-        if (r.flowing && !r.buffer.length && !r.ended && !r.destroyed) this.#callRead()
-      } else if (r.buffer.length && this.listenerCount("readable") > 0) {
-        this.emit("readable")
-      }
-      this.#maybeEnd()
-    }
-    #callRead() {
-      const r = this[kRead]
-      if (r.reading || r.ended || r.destroyed) return
-      r.reading = true
-      try {
-        this._read(r.highWaterMark)
-      } catch (e) {
-        this.destroy(e)
-      }
-      r.reading = false
-    }
-    #maybeEnd() {
-      const r = this[kRead]
-      if (r.ended && r.buffer.length === 0 && !r.endEmitted && !r.destroyed) {
-        r.endEmitted = true
-        this.readable = false
-        this.readableEnded = true
-        queueMicrotask(() => {
-          if (this.listenerCount("readable") > 0) this.emit("readable")
-          this.emit("end")
-          if (r.autoDestroy && !this[kWrite]) this.destroy()
-          else if (r.autoDestroy && this[kWrite] && this[kWrite].finished) this.destroy()
-        })
-      }
-    }
+    },
     on(event, fn) {
-      super.on(event, fn)
+      Stream.prototype.on.call(this, event, fn)
       if (event === "data" && this[kRead].flowing !== false) this.resume()
       if (event === "readable") {
         this[kRead].flowing = false
-        this.#schedule()
-        if (!this[kRead].buffer.length) queueMicrotask(() => this.#callRead())
+        scheduleRead(this)
+        if (!this[kRead].buffer.length) queueMicrotask(() => callRead(this))
       }
       return this
-    }
+    },
     resume() {
       const r = this[kRead]
       if (r.flowing !== true) {
         r.flowing = true
-        this.#schedule()
+        scheduleRead(this)
       }
       return this
-    }
+    },
     pause() {
       this[kRead].flowing = false
       return this
-    }
+    },
     isPaused() {
       return this[kRead].flowing === false
-    }
+    },
     read(size) {
       const r = this[kRead]
-      if (!r.buffer.length && !r.ended) this.#callRead()
+      if (!r.buffer.length && !r.ended) callRead(this)
       if (!r.buffer.length) {
-        this.#maybeEnd()
+        maybeEndRead(this)
         return null
       }
       if (r.objectMode || size === undefined) {
         const c = r.buffer.shift()
-        this.#maybeEnd()
-        if (!r.buffer.length && !r.ended) queueMicrotask(() => this.#callRead())
+        maybeEndRead(this)
+        if (!r.buffer.length && !r.ended) queueMicrotask(() => callRead(this))
         return c
       }
       let out = typeof r.buffer[0] === "string" ? r.buffer.join("") : Buffer.concat(r.buffer)
@@ -1953,15 +2116,15 @@ const NODE_SRC: &str = r##"
         r.buffer.push(out.slice(size))
         out = out.slice(0, size)
       }
-      this.#maybeEnd()
+      maybeEndRead(this)
       return out
-    }
+    },
     setEncoding(encoding) {
       const r = this[kRead]
       r.encoding = encoding ?? "utf8"
       r.buffer = r.buffer.map((c) => (typeof c === "string" ? c : c.toString(r.encoding)))
       return this
-    }
+    },
     pipe(dest, options) {
       const r = this[kRead]
       r.pipes.push(dest)
@@ -1975,15 +2138,15 @@ const NODE_SRC: &str = r##"
       if (options?.end !== false) this.once("end", () => dest.end())
       if (typeof dest.emit === "function") dest.emit("pipe", this)
       return dest
-    }
+    },
     unpipe(dest) {
       const r = this[kRead]
       r.pipes = dest ? r.pipes.filter((d) => d !== dest) : []
       return this
-    }
+    },
     destroy(err) {
       return destroyStream(this, err)
-    }
+    },
     async *[Symbol.asyncIterator]() {
       const queue = []
       let done = false
@@ -2019,28 +2182,28 @@ const NODE_SRC: &str = r##"
       } finally {
         if (!done && !error) this.destroy()
       }
-    }
+    },
     async toArray() {
       const out = []
       for await (const c of this) out.push(c)
       return out
-    }
-    static from(iterable, options = {}) {
-      const r = new Readable({ objectMode: true, ...options })
-      const source = typeof iterable === "string" || iterable instanceof Uint8Array ? [iterable] : iterable
-      ;(async () => {
-        try {
-          for await (const c of source) {
-            if (r.destroyed) return
-            r.push(c)
-          }
-          r.push(null)
-        } catch (e) {
-          r.destroy(e)
+    },
+  })
+  Readable.from = function from(iterable, options = {}) {
+    const r = new Readable({ objectMode: true, ...options })
+    const source = typeof iterable === "string" || iterable instanceof Uint8Array ? [iterable] : iterable
+    ;(async () => {
+      try {
+        for await (const c of source) {
+          if (r.destroyed) return
+          r.push(c)
         }
-      })()
-      return r
-    }
+        r.push(null)
+      } catch (e) {
+        r.destroy(e)
+      }
+    })()
+    return r
   }
 
   function initWritable(stream, options) {
@@ -2184,66 +2347,51 @@ const NODE_SRC: &str = r##"
     } else fin()
   }
 
-  class Writable extends Stream {
-    get _writableState() {
-      return this[kWrite]
-    }
-    constructor(options = {}) {
-      super()
-      initWritable(this, options)
-      if (typeof options.construct === "function") queueMicrotask(() => options.construct.call(this, (e) => e && this.destroy(e)))
-    }
-    get writableObjectMode() {
-      return this[kWrite].objectMode
-    }
-    get writableHighWaterMark() {
-      return this[kWrite].highWaterMark
-    }
-    get writableLength() {
-      return this[kWrite].queue.length
-    }
-    get writableNeedDrain() {
-      return this[kWrite].needDrain
-    }
-    get writableCorked() {
-      return this[kWrite].corked
-    }
+  function Writable(options) {
+    options = options ?? {}
+    if (this === undefined || this === globalThis) return new Writable(options)
+    Stream.call(this, options)
+    initWritable(this, options)
+    if (typeof options.construct === "function") queueMicrotask(() => options.construct.call(this, (e) => e && this.destroy(e)))
   }
+  Object.setPrototypeOf(Writable.prototype, Stream.prototype)
+  Object.setPrototypeOf(Writable, Stream)
+  const writableGetters = {
+    _writableState: { get() { return this[kWrite] }, configurable: true },
+    writableObjectMode: { get() { return this[kWrite].objectMode }, configurable: true },
+    writableHighWaterMark: { get() { return this[kWrite].highWaterMark }, configurable: true },
+    writableLength: { get() { return this[kWrite].queue.length }, configurable: true },
+    writableNeedDrain: { get() { return this[kWrite].needDrain }, configurable: true },
+    writableCorked: { get() { return this[kWrite].corked }, configurable: true },
+  }
+  Object.defineProperties(Writable.prototype, writableGetters)
   Object.assign(Writable.prototype, writableMethods)
 
-  class Duplex extends Readable {
-    get _writableState() {
-      return this[kWrite]
-    }
-    constructor(options = {}) {
-      super({ ...options, read: options.read, objectMode: options.objectMode || options.readableObjectMode, highWaterMark: options.readableHighWaterMark ?? options.highWaterMark })
-      initWritable(this, options)
-      this.allowHalfOpen = options.allowHalfOpen !== false
-    }
-    get writableObjectMode() {
-      return this[kWrite].objectMode
-    }
-    get writableHighWaterMark() {
-      return this[kWrite].highWaterMark
-    }
-    get writableLength() {
-      return this[kWrite].queue.length
-    }
-    get writableNeedDrain() {
-      return this[kWrite].needDrain
-    }
+  function Duplex(options) {
+    options = options ?? {}
+    if (this === undefined || this === globalThis) return new Duplex(options)
+    Readable.call(this, { ...options, read: options.read, objectMode: options.objectMode || options.readableObjectMode, highWaterMark: options.readableHighWaterMark ?? options.highWaterMark })
+    initWritable(this, options)
+    this.allowHalfOpen = options.allowHalfOpen !== false
   }
+  Object.setPrototypeOf(Duplex.prototype, Readable.prototype)
+  Object.setPrototypeOf(Duplex, Readable)
+  Object.defineProperties(Duplex.prototype, writableGetters)
   for (const name of Object.keys(writableMethods)) if (name !== "destroy") Duplex.prototype[name] = writableMethods[name]
 
-  class Transform extends Duplex {
-    constructor(options = {}) {
-      super(options)
-      if (typeof options.transform === "function") this._transform = options.transform
-      if (typeof options.flush === "function") this._flush = options.flush
-    }
+  function Transform(options) {
+    options = options ?? {}
+    if (this === undefined || this === globalThis) return new Transform(options)
+    Duplex.call(this, options)
+    if (typeof options.transform === "function") this._transform = options.transform
+    if (typeof options.flush === "function") this._flush = options.flush
+  }
+  Object.setPrototypeOf(Transform.prototype, Duplex.prototype)
+  Object.setPrototypeOf(Transform, Duplex)
+  Object.assign(Transform.prototype, {
     _transform(chunk, encoding, cb) {
       cb(streamError("ERR_METHOD_NOT_IMPLEMENTED", "The _transform() method is not implemented"))
-    }
+    },
     _write(chunk, encoding, cb) {
       let called = false
       try {
@@ -2257,7 +2405,7 @@ const NODE_SRC: &str = r##"
       } catch (e) {
         cb(e)
       }
-    }
+    },
     _final(cb) {
       const finish = (err, data) => {
         if (err) return cb(err)
@@ -2272,13 +2420,17 @@ const NODE_SRC: &str = r##"
           cb(e)
         }
       } else finish()
-    }
-  }
+    },
+  })
 
-  class PassThrough extends Transform {
-    _transform(chunk, encoding, cb) {
-      cb(null, chunk)
-    }
+  function PassThrough(options) {
+    if (this === undefined || this === globalThis) return new PassThrough(options)
+    Transform.call(this, options)
+  }
+  Object.setPrototypeOf(PassThrough.prototype, Transform.prototype)
+  Object.setPrototypeOf(PassThrough, Transform)
+  PassThrough.prototype._transform = function _transform(chunk, encoding, cb) {
+    cb(null, chunk)
   }
 
   function finished(stream, options, cb) {
@@ -3653,6 +3805,126 @@ const NODE_SRC: &str = r##"
     return test
   }
 
+  function Url() {
+    this.protocol = null
+    this.slashes = null
+    this.auth = null
+    this.host = null
+    this.port = null
+    this.hostname = null
+    this.hash = null
+    this.search = null
+    this.query = null
+    this.pathname = null
+    this.path = null
+    this.href = null
+  }
+  const slashedProtocols = /^(https?|ftp|gopher|file|ws|wss):$/
+  function urlFormat(obj, options) {
+    if (typeof obj === "string") obj = urlParse(obj)
+    if (obj instanceof URL) {
+      let href = obj.href
+      if (options?.fragment === false) href = href.replace(/#.*$/, "")
+      if (options?.search === false) href = href.replace(/\?[^#]*/, "")
+      if (options?.auth === false && (obj.username || obj.password)) href = href.replace(`${obj.username}${obj.password ? ":" + obj.password : ""}@`, "")
+      return href
+    }
+    if (obj === null || typeof obj !== "object") throw new TypeError('The "urlObject" argument must be one of type object or string')
+    const auth = obj.auth ? encodeURIComponent(obj.auth).replace(/%3A/i, ":") + "@" : ""
+    let protocol = obj.protocol ?? ""
+    if (protocol && !protocol.endsWith(":")) protocol += ":"
+    let host = ""
+    if (obj.host) host = auth + obj.host
+    else if (obj.hostname) host = auth + (obj.hostname.includes(":") ? `[${obj.hostname}]` : obj.hostname) + (obj.port ? `:${obj.port}` : "")
+    let pathname = obj.pathname ?? ""
+    let search = obj.search ?? ""
+    if (!search && obj.query) search = typeof obj.query === "object" ? (Object.keys(obj.query).length ? "?" + querystring.stringify(obj.query) : "") : `?${obj.query}`
+    let hash = obj.hash ?? ""
+    if (search && !search.startsWith("?")) search = "?" + search
+    if (hash && !hash.startsWith("#")) hash = "#" + hash
+    const slashes = obj.slashes || (protocol && slashedProtocols.test(protocol))
+    if (slashes || host) {
+      host = "//" + host
+      if (pathname && !pathname.startsWith("/")) pathname = "/" + pathname
+    }
+    pathname = pathname.replace(/[?#]/g, encodeURIComponent)
+    search = search.replace("#", "%23")
+    return protocol + host + pathname + search + hash
+  }
+  function urlParse(input, parseQueryString = false, slashesDenoteHost = false) {
+    if (input instanceof Url) return input
+    if (typeof input !== "string") throw new TypeError('The "url" argument must be of type string')
+    const u = new Url()
+    let rest = input.trim()
+    const hashIdx = rest.indexOf("#")
+    if (hashIdx >= 0) {
+      u.hash = rest.slice(hashIdx)
+      rest = rest.slice(0, hashIdx)
+    }
+    const qIdx = rest.indexOf("?")
+    if (qIdx >= 0) {
+      u.search = rest.slice(qIdx)
+      rest = rest.slice(0, qIdx)
+    }
+    const m = /^([a-zA-Z][a-zA-Z0-9+.-]*:)/.exec(rest)
+    if (m) {
+      u.protocol = m[1].toLowerCase()
+      rest = rest.slice(m[1].length)
+    }
+    if (rest.startsWith("//") && (u.protocol || slashesDenoteHost)) {
+      u.slashes = true
+      rest = rest.slice(2)
+      const end = rest.search(/[/\\?#]/)
+      let authority = end >= 0 ? rest.slice(0, end) : rest
+      rest = end >= 0 ? rest.slice(end) : ""
+      const at = authority.lastIndexOf("@")
+      if (at >= 0) {
+        u.auth = decodeURIComponent(authority.slice(0, at))
+        authority = authority.slice(at + 1)
+      }
+      const portMatch = /:(\d*)$/.exec(authority)
+      if (portMatch && !authority.endsWith("]")) {
+        u.port = portMatch[1] || null
+        authority = authority.slice(0, authority.length - portMatch[0].length)
+      }
+      const lower = authority.toLowerCase()
+      u.hostname = lower.startsWith("[") && lower.endsWith("]") ? lower.slice(1, -1) : lower
+      u.host = u.port ? `${lower}:${u.port}` : lower
+      if (!rest && u.protocol) rest = "/"
+    }
+    u.pathname = rest || null
+    if (parseQueryString) u.query = querystring.parse(u.search ? u.search.slice(1) : "")
+    else u.query = u.search !== null ? u.search.slice(1) : null
+    if (u.search === "" || u.search === "?") u.search = u.search === null ? null : u.search
+    u.path = u.pathname === null && u.search === null ? null : (u.pathname ?? "") + (u.search ?? "")
+    u.href = urlFormat(u)
+    return u
+  }
+  const urlLegacy = {
+    Url,
+    parse: urlParse,
+    format: urlFormat,
+    resolve(from, to) {
+      try {
+        return new URL(to, from).href
+      } catch {
+        return to
+      }
+    },
+    resolveObject(from, to) {
+      return urlParse(urlLegacy.resolve(typeof from === "string" ? from : urlFormat(from), to))
+    },
+    domainToASCII: (domain) => punycode.toASCII(String(domain).toLowerCase()),
+    domainToUnicode: (domain) => punycode.toUnicode(String(domain)),
+    urlToHttpOptions(url) {
+      const hostname = url.hostname.startsWith("[") ? url.hostname.slice(1, -1) : url.hostname
+      const options = { protocol: url.protocol, hostname, hash: url.hash, search: url.search, pathname: url.pathname, path: `${url.pathname || ""}${url.search || ""}`, href: url.href }
+      if (url.port !== "") options.port = Number(url.port)
+      if (url.username || url.password) options.auth = `${decodeURIComponent(url.username)}:${decodeURIComponent(url.password)}`
+      return options
+    },
+  }
+
   const nodeConstants = { O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, S_IFMT: 61440, S_IFREG: 32768, S_IFDIR: 16384, S_IFLNK: 40960, F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, SIGINT: 2, SIGTERM: 15, SIGKILL: 9, SIGHUP: 1, E2BIG: 7, EACCES: 13, EEXIST: 17, ENOENT: 2, ENOTDIR: 20, EISDIR: 21, EINVAL: 22, ENOTEMPTY: 39, UV_UDP_REUSEADDR: 4 }
 
   return {
@@ -3691,6 +3963,7 @@ const NODE_SRC: &str = r##"
     sea,
     wasi,
     makeNodeTest,
+    urlLegacy,
     EventEmitter,
     fs,
     promises,
@@ -4040,6 +4313,10 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 for key in ["fileURLToPath", "pathToFileURL"] {
                     let v = vm.get_prop(&n, key)?;
                     o.set_own(key, v);
+                }
+                let legacy = vm.get_prop(&n, "urlLegacy")?;
+                for (k, v) in vm.own_entries(&legacy) {
+                    o.set_own(k, v);
                 }
                 o.set_hidden("default", Value::Object(o.clone()));
                 Value::Object(o)

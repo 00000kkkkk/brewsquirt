@@ -448,6 +448,28 @@ impl Parser {
         }
     }
 
+    fn import_attributes(&mut self) -> R<()> {
+        if !(self.is_kw("with") || (self.is_kw("assert") && self.is_at(1, P::LBrace))) {
+            return Ok(());
+        }
+        self.advance();
+        self.expect(P::LBrace)?;
+        while !self.is(P::RBrace) {
+            if matches!(self.peek().tok, Tok::Str(_)) {
+                self.string_lit()?;
+            } else {
+                self.ident_name()?;
+            }
+            self.expect(P::Colon)?;
+            self.string_lit()?;
+            if !self.eat(P::Comma) {
+                break;
+            }
+        }
+        self.expect(P::RBrace)?;
+        Ok(())
+    }
+
     fn string_lit(&mut self) -> R<Rc<str>> {
         match &self.peek().tok {
             Tok::Str(s) => {
@@ -1081,6 +1103,7 @@ impl Parser {
         }
         self.expect_kw("from")?;
         let source = self.string_lit()?;
+        self.import_attributes()?;
         self.semicolon()?;
         let mut bound: Vec<&Rc<str>> = default.iter().chain(namespace.iter()).collect();
         bound.extend(named.iter().map(|(_, local)| local));
@@ -1184,6 +1207,7 @@ impl Parser {
                 self.check_export_name(&exported)?;
                 self.expect_kw("from")?;
                 let source = self.string_lit()?;
+                self.import_attributes()?;
                 self.semicolon()?;
                 return Ok(StmtKind::Export(ExportDecl::From {
                     source,
@@ -1192,6 +1216,7 @@ impl Parser {
             }
             self.expect_kw("from")?;
             let source = self.string_lit()?;
+            self.import_attributes()?;
             self.semicolon()?;
             return Ok(StmtKind::Export(ExportDecl::From {
                 source,
@@ -1202,6 +1227,7 @@ impl Parser {
             let (names, string_local) = self.export_names()?;
             if self.eat_kw("from") {
                 let source = self.string_lit()?;
+                self.import_attributes()?;
                 self.semicolon()?;
                 return Ok(StmtKind::Export(ExportDecl::From {
                     source,

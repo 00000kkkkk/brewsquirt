@@ -84,6 +84,33 @@ fn octal_at(chars: &[char], i: usize) -> (u32, usize) {
     (v, n.max(1))
 }
 
+fn class_atom(
+    out: &mut String,
+    in_class: bool,
+    class_last: &mut Option<u32>,
+    pending_dash: &mut Option<usize>,
+    code: u32,
+) {
+    if !in_class {
+        return;
+    }
+    match (*pending_dash, *class_last) {
+        (Some(dash), Some(start)) => {
+            *pending_dash = None;
+            if start > code {
+                out.truncate(dash);
+                *class_last = Some(code);
+            } else {
+                *class_last = None;
+            }
+        }
+        _ => {
+            *pending_dash = None;
+            *class_last = Some(code);
+        }
+    }
+}
+
 const EMOJI_SEQUENCE: &str = r"(?:[\x{1F1E6}-\x{1F1FF}]{2}|[0-9#*]\x{FE0F}?\x{20E3}|\x{1F3F4}[\x{E0020}-\x{E007E}]+\x{E007F}|(?:\p{Emoji_Presentation}|\p{Emoji}\x{FE0F})[\x{1F3FB}-\x{1F3FF}]?(?:\x{200D}(?:\p{Emoji_Presentation}|\p{Emoji}\x{FE0F}?)[\x{1F3FB}-\x{1F3FF}]?)*)";
 
 pub fn translate(source: &str, flags: &str) -> Result<String, String> {
@@ -106,15 +133,24 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
     let dot_all = flags.contains('s');
     let unicode = flags.contains('u') || flags.contains('v');
     let mut in_class = false;
+    let mut class_last: Option<u32> = None;
+    let mut pending_dash: Option<usize> = None;
     let mut groups_open: Vec<Option<usize>> = Vec::new();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
         match c {
             '\\' => {
+                let saved_last = class_last.take();
+                let saved_dash = pending_dash.take();
                 i += 1;
                 let Some(&e) = chars.get(i) else {
                     return Err("\\ at end of pattern".to_string());
+                };
+                let mut atom = |out: &mut String, code: u32| {
+                    class_last = saved_last;
+                    pending_dash = saved_dash;
+                    class_atom(out, in_class, &mut class_last, &mut pending_dash, code);
                 };
                 match e {
                     'd' if !in_class => out.push_str("[0-9]"),
@@ -144,6 +180,7 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                         out.push(e);
                     }
                     '0' if !chars.get(i + 1).is_some_and(|d| d.is_ascii_digit()) => {
+                        atom(&mut out, 0);
                         out.push_str("\\x00")
                     }
                     '0'..='9' => {
@@ -167,6 +204,7 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                             out.push(e);
                         } else {
                             let (v, used) = octal_at(&chars, i);
+                            atom(&mut out, v);
                             push_code_point(&mut out, v);
                             i += used - 1;
                         }
@@ -189,6 +227,7 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                     }
                     'x' => match hex_digits(&chars, i + 1, 2) {
                         Some(v) => {
+                            atom(&mut out, v);
                             push_code_point(&mut out, v);
                             i += 2;
                         }
@@ -203,6 +242,7 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                             let hex: String = chars[i + 2..i + 1 + end].iter().collect();
                             let v = u32::from_str_radix(&hex, 16)
                                 .map_err(|_| "Invalid Unicode escape".to_string())?;
+                            atom(&mut out, v);
                             push_code_point(&mut out, v);
                             i += 1 + end;
                         } else if let Some(v) = hex_digits(&chars, i + 1, 4) {
@@ -222,6 +262,7 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                             if (0xd800..0xe000).contains(&cp) {
                                 cp = 0xfffd;
                             }
+                            atom(&mut out, cp);
                             push_code_point(&mut out, cp);
                         } else {
                             out.push('u');
@@ -288,10 +329,20 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                         }
                         out.push(e);
                     }
-                    '/' => out.push('/'),
-                    '-' => out.push_str("\\-"),
-                    e if e.is_ascii_alphanumeric() => out.push(e),
+                    '/' => {
+                        atom(&mut out, '/' as u32);
+                        out.push('/')
+                    }
+                    '-' => {
+                        atom(&mut out, '-' as u32);
+                        out.push_str("\\-")
+                    }
+                    e if e.is_ascii_alphanumeric() => {
+                        atom(&mut out, e as u32);
+                        out.push(e)
+                    }
                     e => {
+                        atom(&mut out, e as u32);
                         out.push('\\');
                         out.push(e);
                     }
@@ -309,6 +360,8 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                     continue;
                 }
                 in_class = true;
+                class_last = None;
+                pending_dash = None;
                 out.push('[');
                 if chars.get(i + 1) == Some(&'^') {
                     out.push('^');
@@ -375,7 +428,24 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                 None => out.push_str("\\{"),
             },
             '}' if !in_class => out.push_str("\\}"),
-            _ => out.push(c),
+            '-' if in_class
+                && class_last.is_some()
+                && pending_dash.is_none()
+                && chars.get(i + 1) != Some(&']') =>
+            {
+                pending_dash = Some(out.len());
+                out.push('-');
+            }
+            _ => {
+                class_atom(
+                    &mut out,
+                    in_class,
+                    &mut class_last,
+                    &mut pending_dash,
+                    c as u32,
+                );
+                out.push(c);
+            }
         }
         i += 1;
     }

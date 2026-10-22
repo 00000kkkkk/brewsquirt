@@ -1141,7 +1141,7 @@ impl Parser {
                 let b = self.class_atom()?;
                 match (a, b) {
                     (Some(x), Some(y)) => {
-                        if x > y {
+                        if x > y && (self.unicode || (x < 0xD800 && y < 0xD800)) {
                             return Err("Range out of order in character class".to_string());
                         }
                     }

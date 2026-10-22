@@ -11,7 +11,7 @@ use crate::object::{
 };
 use crate::parser;
 use crate::token::SyntaxError;
-use crate::value::{Value, char_at16, compare_strings, len16};
+use crate::value::{Value, char_at16, char_at16_rc, compare_strings, len16, len16_rc};
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
@@ -315,7 +315,7 @@ pub struct Vm {
     pub stack: Vec<Value>,
     pub(crate) frames: Vec<Frame>,
     pub(crate) handlers: Vec<Handler>,
-    pub(crate) open_upvalues: Vec<Rc<UpCell>>,
+    pub(crate) open_upvalues: BTreeMap<usize, Rc<UpCell>>,
     pub(crate) console_indent: usize,
     pub globals: Globals,
     arg_buf: Vec<Value>,
@@ -397,7 +397,7 @@ impl Vm {
             stack: Vec::with_capacity(1024),
             frames: Vec::with_capacity(64),
             handlers: Vec::new(),
-            open_upvalues: Vec::new(),
+            open_upvalues: BTreeMap::new(),
             console_indent: 0,
             globals: Globals::default(),
             arg_buf: Vec::new(),
@@ -1400,6 +1400,31 @@ impl Vm {
         Ok(ns)
     }
 
+    fn require_esm_result(&mut self, ns: &Value) -> Result<Value, Value> {
+        let Value::Object(nso) = ns else {
+            return Ok(ns.clone());
+        };
+        if nso.get_own("module.exports").is_some() {
+            return self.get_prop(ns, "module.exports");
+        }
+        let out = self.new_object();
+        let mut has_default = false;
+        for key in self.op_own_keys(nso)? {
+            if key.starts_with('\u{0}') {
+                continue;
+            }
+            let v = self.get_prop(ns, &key)?;
+            if &*key == "default" {
+                has_default = true;
+            }
+            out.set_own(key, v);
+        }
+        if has_default {
+            out.set_hidden("__esModule", Value::Bool(true));
+        }
+        Ok(Value::Object(out))
+    }
+
     pub fn require_cache_object_public(&mut self) -> Rc<Obj> {
         self.require_cache_object()
     }
@@ -1472,14 +1497,15 @@ impl Vm {
             return Ok(value);
         }
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-        if ext == "mjs" || (ext != "cjs" && module::has_module_syntax(&src)) {
+        if !module::is_commonjs(path) {
             let from = Rc::new(ModuleInfo {
                 name: key.clone(),
                 dir: dir.clone(),
                 source: "".into(),
                 sloppy: false,
             });
-            return self.import_module(&path.display().to_string(), &from);
+            let ns = self.import_module(&path.display().to_string(), &from)?;
+            return self.require_esm_result(&ns);
         }
         let body = if src.starts_with("#!") {
             match src.find('\n') {
@@ -1619,22 +1645,11 @@ impl Vm {
     }
 
     pub(crate) fn capture_upvalue(&mut self, idx: usize) -> Rc<UpCell> {
-        let mut i = self.open_upvalues.len();
-        while i > 0 {
-            let ui = match &*self.open_upvalues[i - 1].borrow() {
-                Upvalue::Open(x) => *x,
-                Upvalue::Closed(_) => 0,
-            };
-            if ui == idx {
-                return self.open_upvalues[i - 1].clone();
-            }
-            if ui < idx {
-                break;
-            }
-            i -= 1;
+        if let Some(u) = self.open_upvalues.get(&idx) {
+            return u.clone();
         }
         let u = UpCell::new(Upvalue::Open(idx));
-        self.open_upvalues.insert(i, u.clone());
+        self.open_upvalues.insert(idx, u.clone());
         u
     }
 
@@ -1719,10 +1734,7 @@ impl Vm {
                 }
             };
             let total = cur.len() + piece.len();
-            let captured = self
-                .open_upvalues
-                .iter()
-                .any(|u| matches!(&*u.borrow(), Upvalue::Open(i) if *i == abs));
+            let captured = self.open_upvalues.contains_key(&abs);
             if total >= 256 && !captured {
                 let mut buf = String::with_capacity(total * 2);
                 buf.push_str(cur);
@@ -1746,19 +1758,17 @@ impl Vm {
     }
 
     fn close_upvalues(&mut self, from: usize) {
-        while let Some(u) = self.open_upvalues.last() {
-            let idx = match &*u.borrow() {
-                Upvalue::Open(x) => *x,
-                Upvalue::Closed(_) => usize::MAX,
-            };
-            if idx < from {
-                break;
-            }
-            let u = self.open_upvalues.pop().expect("upvalue");
-            if idx != usize::MAX {
-                let v = self.stack[idx].clone();
-                *u.borrow_mut() = Upvalue::Closed(v);
-            }
+        if self
+            .open_upvalues
+            .last_key_value()
+            .is_none_or(|(k, _)| *k < from)
+        {
+            return;
+        }
+        let tail = self.open_upvalues.split_off(&from);
+        for (idx, u) in tail {
+            let v = self.stack[idx].clone();
+            *u.borrow_mut() = Upvalue::Closed(v);
         }
     }
 
@@ -2350,10 +2360,10 @@ impl Vm {
             }
             ObjKind::Primitive(Value::Str(s)) => {
                 if key == "length" {
-                    return Value::Number(len16(s) as f64);
+                    return Value::Number(len16_rc(s) as f64);
                 }
                 if let Some(i) = array_index(key) {
-                    if let Some(c) = char_at16(s, i) {
+                    if let Some(c) = char_at16_rc(s, i) {
                         return Value::from(c);
                     }
                 }
@@ -2483,10 +2493,10 @@ impl Vm {
             }
             Value::Str(s) => {
                 if key == "length" {
-                    return Ok(Value::Number(len16(s) as f64));
+                    return Ok(Value::Number(len16_rc(s) as f64));
                 }
                 if let Some(i) = array_index(key) {
-                    return Ok(char_at16(s, i).map(Value::from).unwrap_or_default());
+                    return Ok(char_at16_rc(s, i).map(Value::from).unwrap_or_default());
                 }
                 let raw = self.realm.string_proto.get_chain(key).unwrap_or_default();
                 self.resolve_accessor(raw, v)
@@ -2862,7 +2872,7 @@ impl Vm {
                         }
                     }
                     Value::Str(s) => {
-                        return Ok(char_at16(s, i).map(Value::from).unwrap_or_default());
+                        return Ok(char_at16_rc(s, i).map(Value::from).unwrap_or_default());
                     }
                     _ => {}
                 }

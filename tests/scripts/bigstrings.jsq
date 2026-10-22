@@ -1,0 +1,15 @@
+const big = "é".repeat(300) + "abc𝒳def" + "x".repeat(300)
+console.log(big.length, big.charCodeAt(300), big.charCodeAt(303), big.charCodeAt(304), big.charCodeAt(1000))
+console.log(big.slice(301, 306), big.substring(303, 304).length, big.substr(303, 2) === "𝒳", big.slice(304, 306) === "\udcb3d")
+console.log(big.indexOf("def"), big.indexOf("x", 310), big.indexOf("é", 299), big.indexOf("zz"), big.lastIndexOf("é"), big.includes("c𝒳d"))
+console.log(big[2], big.at(-1), big.at(303).charCodeAt(0), big.codePointAt(303), big.codePointAt(304), big.charAt(305))
+console.log(big.startsWith("é"), big.endsWith("xx"), big.startsWith("abc", 300), big.endsWith("def", 308))
+
+const ascii = "0123456789".repeat(100)
+console.log(ascii.length, ascii.charCodeAt(999), ascii.slice(995), ascii.indexOf("7890", 990), ascii[500], ascii.at(-2))
+
+let text = ""
+for (let i = 0; i < 2000; i++) text += i % 7 === 0 ? "ü" : "a"
+let count = 0
+for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 252) count++
+console.log(text.length, count, text.slice(1995), text.indexOf("ü", 1990))

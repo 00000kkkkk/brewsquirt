@@ -1,3 +1,4 @@
+use crate::token::Token;
 use std::path::{Path, PathBuf};
 
 pub const DEPS_DIR: &str = "nude_modules";
@@ -213,25 +214,99 @@ fn resolve_file(p: &Path) -> Option<PathBuf> {
 }
 
 pub fn has_module_syntax(src: &str) -> bool {
-    src.lines().any(|line| {
-        let t = line.trim_start();
-        t.starts_with("import ")
-            || t.starts_with("import{")
-            || t.starts_with("import(")
-            || t.starts_with("export ")
-            || t.starts_with("export{")
-            || t.starts_with("import.meta")
-    })
+    if !src.contains("import") && !src.contains("export") {
+        return false;
+    }
+    let Ok(tokens) = crate::lexer::tokenize(src) else {
+        return false;
+    };
+    use crate::token::{P, Tok};
+    let ident = |t: &Token, name: &str| matches!(&t.tok, Tok::Ident(n) if &**n == name);
+    let punct = |t: &Token, p: P| matches!(&t.tok, Tok::Punct(q) if *q == p);
+    for (i, t) in tokens.iter().enumerate() {
+        let prev_dot = i > 0 && punct(&tokens[i - 1], P::Dot);
+        if prev_dot {
+            continue;
+        }
+        let next = tokens.get(i + 1);
+        let after = tokens.get(i + 2);
+        if ident(t, "import") {
+            let Some(next) = next else {
+                continue;
+            };
+            if punct(next, P::LBrace) || punct(next, P::Star) || matches!(next.tok, Tok::Str(_)) {
+                return true;
+            }
+            if punct(next, P::Dot) && after.is_some_and(|a| ident(a, "meta")) {
+                return true;
+            }
+            if matches!(next.tok, Tok::Ident(_))
+                && after.is_some_and(|a| ident(a, "from") || punct(a, P::Comma))
+            {
+                return true;
+            }
+        } else if ident(t, "export") {
+            let Some(next) = next else {
+                continue;
+            };
+            if punct(next, P::LBrace) || punct(next, P::Star) {
+                return true;
+            }
+            if let Tok::Ident(n) = &next.tok {
+                if matches!(
+                    &**n,
+                    "default" | "const" | "let" | "var" | "function" | "class" | "async"
+                ) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+thread_local! {
+    static CJS_CACHE: std::cell::RefCell<std::collections::HashMap<PathBuf, bool>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn package_type(dir: &Path) -> Option<String> {
+    let mut cur = Some(dir.to_path_buf());
+    while let Some(d) = cur {
+        if let Some(doc) = package_json(&d) {
+            return Some(
+                doc.get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("commonjs")
+                    .to_string(),
+            );
+        }
+        cur = d.parent().map(Path::to_path_buf);
+    }
+    None
 }
 
 pub fn is_commonjs(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    ext == "cjs"
-        || ext == "json"
-        || (ext == "js"
-            && std::fs::read_to_string(path)
-                .map(|s| looks_like_commonjs(&s))
-                .unwrap_or(false))
+    match ext {
+        "cjs" | "json" => return true,
+        "js" => {}
+        _ => return false,
+    }
+    if let Some(v) = CJS_CACHE.with(|c| c.borrow().get(path).copied()) {
+        return v;
+    }
+    let src = std::fs::read_to_string(path).unwrap_or_default();
+    let result = if has_module_syntax(&src) {
+        false
+    } else if looks_like_commonjs(&src) {
+        true
+    } else {
+        let dir = path.parent().unwrap_or(Path::new("."));
+        !matches!(package_type(dir).as_deref(), Some("module"))
+    };
+    CJS_CACHE.with(|c| c.borrow_mut().insert(path.to_path_buf(), result));
+    result
 }
 
 pub fn looks_like_commonjs(src: &str) -> bool {

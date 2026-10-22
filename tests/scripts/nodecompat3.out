@@ -1,0 +1,11 @@
+fixture 3
+true function 42 default,named
+commonjs 61
+true true true object true
+123456 254 1099511627776n 3 3 4,3,2,1 function
+http: user:pw host.com:8080 8080 host.com /p/a ?x=1&y=2 {"x":"1","y":"2"} #frag /p/a?x=1&y=2
+https://a.b/x?q=1 http://user:pw@host.com:8080/p/a?x=1&y=2#frag http://a.com/d xn--maana-pta.com
+windows-1252 €Aé AB C windows-1252
+false false true
+1 2 true
+data a

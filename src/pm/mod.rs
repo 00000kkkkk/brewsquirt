@@ -251,9 +251,11 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
         let (dest, satisfied) = match &spec {
             Spec::Npm { range, .. } if top.exists() => match npm::installed_version(&top) {
                 Some(v) if range.matches(&v) => (top.clone(), true),
+                _ if holder.as_path() == root => (top.clone(), false),
                 _ => {
                     let nested = holder.join(DEPS_DIR).join(&name);
-                    let ok = nested.exists();
+                    let ok = nested.exists()
+                        && npm::installed_version(&nested).is_some_and(|v| range.matches(&v));
                     (nested, ok)
                 }
             },
@@ -275,6 +277,10 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
             report.skipped.push(name.clone());
         } else {
             log(&format!("injecting {name} ({raw})"));
+            if dest.exists() {
+                fs::remove_dir_all(&dest)
+                    .map_err(|e| format!("cannot replace {}: {e}", dest.display()))?;
+            }
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }

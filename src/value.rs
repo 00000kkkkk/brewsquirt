@@ -252,6 +252,235 @@ pub fn concat16(a: &str, b: &str) -> String {
     s
 }
 
+const INDEX_MIN: usize = 512;
+const MARK_STEP: usize = 128;
+
+pub struct StrIndex {
+    ascii: bool,
+    units: usize,
+    marks: Vec<(u32, u32)>,
+}
+
+thread_local! {
+    static STR_CACHE: std::cell::RefCell<Vec<(Rc<str>, Rc<StrIndex>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn build_index(s: &str) -> StrIndex {
+    if s.is_ascii() {
+        return StrIndex {
+            ascii: true,
+            units: s.len(),
+            marks: Vec::new(),
+        };
+    }
+    let mut marks = Vec::with_capacity(s.len() / MARK_STEP + 1);
+    let mut units = 0usize;
+    let mut next = 0usize;
+    for (byte, c) in s.char_indices() {
+        if units >= next {
+            marks.push((units as u32, byte as u32));
+            next = units + MARK_STEP;
+        }
+        units += char_len16(c);
+    }
+    StrIndex {
+        ascii: false,
+        units,
+        marks,
+    }
+}
+
+pub fn str_index(s: &Rc<str>) -> Rc<StrIndex> {
+    STR_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(pos) = cache.iter().position(|(k, _)| Rc::ptr_eq(k, s)) {
+            let entry = cache.remove(pos);
+            let idx = entry.1.clone();
+            cache.insert(0, entry);
+            return idx;
+        }
+        let idx = Rc::new(build_index(s));
+        if cache.len() >= 8 {
+            cache.pop();
+        }
+        cache.insert(0, (s.clone(), idx.clone()));
+        idx
+    })
+}
+
+impl StrIndex {
+    pub fn len16(&self) -> usize {
+        self.units
+    }
+
+    fn locate(&self, i: usize) -> (usize, usize) {
+        let k = self.marks.partition_point(|m| m.0 as usize <= i);
+        let (u, b) = self.marks[k.saturating_sub(1)];
+        (u as usize, b as usize)
+    }
+
+    pub fn code_unit_at(&self, s: &str, i: usize) -> Option<u16> {
+        if self.ascii {
+            return s.as_bytes().get(i).map(|b| *b as u16);
+        }
+        if i >= self.units {
+            return None;
+        }
+        let (mut pos, byte) = self.locate(i);
+        for c in s[byte..].chars() {
+            let n = char_len16(c);
+            if i < pos + n {
+                if is_lone(c) {
+                    return Some(lone_unit(c));
+                }
+                let mut buf = [0u16; 2];
+                return Some(c.encode_utf16(&mut buf)[i - pos]);
+            }
+            pos += n;
+        }
+        None
+    }
+
+    fn byte_at(&self, s: &str, i: usize) -> (usize, bool) {
+        if i >= self.units {
+            return (s.len(), false);
+        }
+        let (mut pos, mut byte) = self.locate(i);
+        for c in s[byte..].chars() {
+            let n = char_len16(c);
+            if pos == i {
+                return (byte, false);
+            }
+            if i < pos + n {
+                return (byte, true);
+            }
+            pos += n;
+            byte += c.len_utf8();
+        }
+        (s.len(), false)
+    }
+
+    fn unit_at_byte(&self, s: &str, byte: usize) -> usize {
+        let k = self.marks.partition_point(|m| m.1 as usize <= byte);
+        let (u, b) = self.marks[k.saturating_sub(1)];
+        let mut u = u as usize;
+        for c in s[b as usize..byte].chars() {
+            u += char_len16(c);
+        }
+        u
+    }
+
+    pub fn slice16(&self, s: &str, start: usize, end: usize) -> String {
+        if start >= end {
+            return String::new();
+        }
+        if self.ascii {
+            let end = end.min(s.len());
+            if start >= end {
+                return String::new();
+            }
+            return s[start..end].to_string();
+        }
+        let end = end.min(self.units);
+        if start >= end {
+            return String::new();
+        }
+        let (sb, smid) = self.byte_at(s, start);
+        let (eb, emid) = self.byte_at(s, end);
+        let mut out = String::with_capacity(eb.saturating_sub(sb) + 8);
+        let mut body_start = sb;
+        if smid {
+            let c = s[sb..].chars().next().unwrap_or('\u{fffd}');
+            let mut buf = [0u16; 2];
+            let units = c.encode_utf16(&mut buf);
+            out.push(lone_char(units[units.len() - 1]));
+            body_start = sb + c.len_utf8();
+        }
+        if body_start < eb {
+            out.push_str(&s[body_start..eb]);
+        }
+        if emid {
+            let c = s[eb..].chars().next().unwrap_or('\u{fffd}');
+            let mut buf = [0u16; 2];
+            let units = c.encode_utf16(&mut buf);
+            out.push(lone_char(units[0]));
+        }
+        out
+    }
+
+    pub fn index_of16(&self, s: &str, needle: &str, from: usize) -> Option<usize> {
+        if self.ascii {
+            if from > s.len() {
+                return if needle.is_empty() {
+                    Some(s.len())
+                } else {
+                    None
+                };
+            }
+            return s[from..].find(needle).map(|i| i + from);
+        }
+        if from > self.units {
+            return if needle.is_empty() {
+                Some(self.units)
+            } else {
+                None
+            };
+        }
+        let (fb, mid) = self.byte_at(s, from);
+        if needle.is_empty() {
+            return Some(from);
+        }
+        let start = if mid {
+            fb + s[fb..].chars().next().map_or(0, char::len_utf8)
+        } else {
+            fb
+        };
+        let found = s.get(start..)?.find(needle)? + start;
+        Some(self.unit_at_byte(s, found))
+    }
+}
+
+pub fn len16_rc(s: &Rc<str>) -> usize {
+    if s.len() < INDEX_MIN {
+        len16(s)
+    } else {
+        str_index(s).len16()
+    }
+}
+
+pub fn code_unit_at_rc(s: &Rc<str>, i: usize) -> Option<u16> {
+    if s.len() < INDEX_MIN {
+        code_unit_at(s, i)
+    } else {
+        str_index(s).code_unit_at(s, i)
+    }
+}
+
+pub fn char_at16_rc(s: &Rc<str>, i: usize) -> Option<String> {
+    if s.len() < INDEX_MIN {
+        char_at16(s, i)
+    } else {
+        str_index(s).code_unit_at(s, i).map(|u| from16(&[u]))
+    }
+}
+
+pub fn slice16_rc(s: &Rc<str>, start: usize, end: usize) -> String {
+    if s.len() < INDEX_MIN {
+        slice16(s, start, end)
+    } else {
+        str_index(s).slice16(s, start, end)
+    }
+}
+
+pub fn index_of16_rc(s: &Rc<str>, needle: &str, from: usize) -> Option<usize> {
+    if s.len() < INDEX_MIN || needle.chars().any(is_lone) {
+        index_of16(s, needle, from)
+    } else {
+        str_index(s).index_of16(s, needle, from)
+    }
+}
+
 pub fn len16(s: &str) -> usize {
     if s.is_ascii() {
         s.len()

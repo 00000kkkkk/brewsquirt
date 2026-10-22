@@ -154,6 +154,9 @@ impl PropMap {
             .collect();
         let x = self.extra.get_or_insert_with(Box::default);
         for (k, accessor) in keys {
+            if is_private_key(&k) {
+                continue;
+            }
             let b = if data_only && accessor {
                 bits & !READ_ONLY
             } else {
@@ -168,14 +171,17 @@ impl PropMap {
     }
 
     pub fn all_have(&self, bits: u8, data_only: bool) -> bool {
-        self.entries.iter().all(|(k, v)| {
-            let need = if data_only && matches!(v, Value::Object(o) if o.is_accessor()) {
-                bits & !READ_ONLY
-            } else {
-                bits
-            };
-            self.attrs(k) & need == need
-        })
+        self.entries
+            .iter()
+            .filter(|(k, _)| !is_private_key(k))
+            .all(|(k, v)| {
+                let need = if data_only && matches!(v, Value::Object(o) if o.is_accessor()) {
+                    bits & !READ_ONLY
+                } else {
+                    bits
+                };
+                self.attrs(k) & need == need
+            })
     }
 
     pub fn insert_fast(&mut self, key: Rc<str>, v: Value, adding_ok: bool) -> bool {

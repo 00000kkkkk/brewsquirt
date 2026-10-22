@@ -943,7 +943,7 @@ fn error_stack(
         let p = &f.closure.proto;
         if skipping {
             let hit = match skip_until {
-                Some(Value::Object(fo)) => match &fo.kind {
+                Some(Value::Object(func)) => match &func.kind {
                     ObjKind::Function(c) => Rc::ptr_eq(c, &f.closure),
                     _ => false,
                 },

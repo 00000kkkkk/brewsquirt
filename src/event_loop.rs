@@ -123,20 +123,11 @@ impl Vm {
         }
         handlers.reverse();
         let mut upvalues = Vec::new();
-        while let Some(u) = self.open_upvalues.last() {
-            let idx = match &*u.borrow() {
-                Upvalue::Open(i) => *i,
-                Upvalue::Closed(_) => break,
-            };
-            if idx < seg {
-                break;
-            }
-            let u = self.open_upvalues.pop().expect("upvalue");
+        for (idx, u) in self.open_upvalues.split_off(&seg) {
             let v = self.stack[idx].clone();
             *u.borrow_mut() = Upvalue::Closed(v);
             upvalues.push((u, idx - seg));
         }
-        upvalues.reverse();
         let frame = self.frames.pop().expect("frame");
         let stack = self.stack.split_off(seg);
         if let ObjKind::Coroutine(c) = &co.kind {
@@ -197,7 +188,7 @@ impl Vm {
             };
             self.stack[idx] = v;
             *u.borrow_mut() = Upvalue::Open(idx);
-            self.open_upvalues.push(u);
+            self.open_upvalues.insert(idx, u);
         }
         let delegate = matches!(
             saved.closure.proto.code.get(saved.ip.wrapping_sub(1)),

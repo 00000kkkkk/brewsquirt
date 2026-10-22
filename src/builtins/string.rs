@@ -1,6 +1,7 @@
 use super::{arg, make_ctor, method, relative_index, to_integer};
 use crate::value::{
-    Value, char_at16, code_unit_at, index_of16, last_index_of16, len16, slice16, units16,
+    Value, char_at16_rc, code_unit_at_rc, index_of16_rc, last_index_of16, len16, len16_rc,
+    slice16_rc, units16,
 };
 use crate::vm::Vm;
 use std::rc::Rc;
@@ -147,7 +148,7 @@ fn char_at(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     if i < 0.0 {
         return Ok("".into());
     }
-    Ok(char_at16(&s, i as usize).unwrap_or_default().into())
+    Ok(char_at16_rc(&s, i as usize).unwrap_or_default().into())
 }
 
 fn char_code_at(vm: &mut Vm, this: Value, args: &[Value]) -> R {
@@ -157,7 +158,7 @@ fn char_code_at(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         return Ok(Value::Number(f64::NAN));
     }
     Ok(Value::Number(
-        code_unit_at(&s, i as usize)
+        code_unit_at_rc(&s, i as usize)
             .map(|u| u as f64)
             .unwrap_or(f64::NAN),
     ))
@@ -169,13 +170,12 @@ fn code_point_at(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     if i < 0.0 {
         return Ok(Value::Undefined);
     }
-    let u = units16(&s);
     let i = i as usize;
-    let Some(&hi) = u.get(i) else {
+    let Some(hi) = code_unit_at_rc(&s, i) else {
         return Ok(Value::Undefined);
     };
     if (0xd800..0xdc00).contains(&hi) {
-        if let Some(&lo) = u.get(i + 1) {
+        if let Some(lo) = code_unit_at_rc(&s, i + 1) {
             if (0xdc00..0xe000).contains(&lo) {
                 let cp = 0x10000 + ((hi as u32 - 0xd800) << 10) + (lo as u32 - 0xdc00);
                 return Ok(Value::Number(cp as f64));
@@ -187,13 +187,13 @@ fn code_point_at(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 
 fn at(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_str(vm, &this)?;
-    let n = len16(&s) as f64;
+    let n = len16_rc(&s) as f64;
     let i = to_integer(vm, &arg(args, 0))?;
     let i = if i < 0.0 { n + i } else { i };
     if i < 0.0 || i >= n {
         return Ok(Value::Undefined);
     }
-    Ok(char_at16(&s, i as usize)
+    Ok(char_at16_rc(&s, i as usize)
         .map(Value::from)
         .unwrap_or_default())
 }
@@ -214,9 +214,9 @@ fn position(
 fn index_of(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_str(vm, &this)?;
     let needle = str_arg(vm, args, 0)?;
-    let from = position(vm, args, 1, 0, len16(&s))?;
+    let from = position(vm, args, 1, 0, len16_rc(&s))?;
     Ok(Value::Number(
-        index_of16(&s, &needle, from)
+        index_of16_rc(&s, &needle, from)
             .map(|i| i as f64)
             .unwrap_or(-1.0),
     ))
@@ -225,7 +225,7 @@ fn index_of(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 fn last_index_of(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_str(vm, &this)?;
     let needle = str_arg(vm, args, 0)?;
-    let n = len16(&s);
+    let n = len16_rc(&s);
     let from = match args.get(1) {
         Some(v) if !v.is_undefined() => {
             let num = vm.to_number(v)?;
@@ -257,16 +257,16 @@ fn includes(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_str(vm, &this)?;
     no_regexp(vm, args, "includes")?;
     let needle = str_arg(vm, args, 0)?;
-    let from = position(vm, args, 1, 0, len16(&s))?;
-    Ok(Value::Bool(index_of16(&s, &needle, from).is_some()))
+    let from = position(vm, args, 1, 0, len16_rc(&s))?;
+    Ok(Value::Bool(index_of16_rc(&s, &needle, from).is_some()))
 }
 
 fn starts_with(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_str(vm, &this)?;
     no_regexp(vm, args, "startsWith")?;
     let needle = str_arg(vm, args, 0)?;
-    let from = position(vm, args, 1, 0, len16(&s))?;
-    let rest = slice16(&s, from, usize::MAX);
+    let from = position(vm, args, 1, 0, len16_rc(&s))?;
+    let rest = slice16_rc(&s, from, usize::MAX);
     Ok(Value::Bool(rest.starts_with(&*needle)))
 }
 
@@ -274,15 +274,15 @@ fn ends_with(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_str(vm, &this)?;
     no_regexp(vm, args, "endsWith")?;
     let needle = str_arg(vm, args, 0)?;
-    let n = len16(&s);
+    let n = len16_rc(&s);
     let end = position(vm, args, 1, n, n)?;
-    let head = slice16(&s, 0, end);
+    let head = slice16_rc(&s, 0, end);
     Ok(Value::Bool(head.ends_with(&*needle)))
 }
 
 fn slice(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_str(vm, &this)?;
-    let n = len16(&s);
+    let n = len16_rc(&s);
     let start = match arg(args, 0) {
         Value::Undefined => 0,
         v => relative_index(to_integer(vm, &v)?, n),
@@ -291,21 +291,21 @@ fn slice(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         Value::Undefined => n,
         v => relative_index(to_integer(vm, &v)?, n),
     };
-    Ok(slice16(&s, start, end).into())
+    Ok(slice16_rc(&s, start, end).into())
 }
 
 fn substring(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_str(vm, &this)?;
-    let n = len16(&s);
+    let n = len16_rc(&s);
     let a = position(vm, args, 0, 0, n)?;
     let b = position(vm, args, 1, n, n)?;
     let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-    Ok(slice16(&s, lo, hi).into())
+    Ok(slice16_rc(&s, lo, hi).into())
 }
 
 fn substr(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_str(vm, &this)?;
-    let n = len16(&s);
+    let n = len16_rc(&s);
     let start = match arg(args, 0) {
         Value::Undefined => 0,
         v => relative_index(to_integer(vm, &v)?, n),
@@ -314,7 +314,7 @@ fn substr(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         Value::Undefined => n,
         v => to_integer(vm, &v)?.max(0.0) as usize,
     };
-    Ok(slice16(&s, start, start.saturating_add(count)).into())
+    Ok(slice16_rc(&s, start, start.saturating_add(count)).into())
 }
 
 fn to_upper(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
@@ -689,7 +689,7 @@ fn pad(vm: &mut Vm, this: Value, args: &[Value], start: bool) -> R {
         Value::Undefined => Rc::from(" "),
         v => vm.to_string(&v)?,
     };
-    let n = len16(&s);
+    let n = len16_rc(&s);
     if target <= n || fill.is_empty() {
         return Ok(Value::Str(s));
     }

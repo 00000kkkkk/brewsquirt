@@ -1315,17 +1315,23 @@ A specifier that cannot be resolved is an error.
 
 ### CommonJS
 
-Files ending in `.cjs`, and `.js` files that use `module.exports`, `exports` or `require(...)`
-without any `import` or `export` statement, are loaded as CommonJS modules. They run in a
-function that receives `exports`, `require`, `module`, `__filename` and `__dirname`, and whatever
-ends up in `module.exports` becomes the module's default export, with its properties also
-available as named imports. `.json` files export the parsed value.
+Files ending in `.cjs` are CommonJS. A `.js` file is CommonJS when it has no `import` or
+`export` statement (the file is tokenised, so the words inside strings and comments do not
+count, and dynamic `import()` is allowed) unless the nearest `package.json` says
+`"type": "module"`; a `.js` file that uses `module.exports`, `exports` or `require(...)` is
+CommonJS either way. CommonJS modules run in a function that receives `exports`, `require`,
+`module`, `__filename` and `__dirname`, and whatever ends up in `module.exports` becomes the
+module's default export, with its properties also available as named imports. `.json` files
+export the parsed value, and `import data from "./x.json" with { type: "json" }` (or the older
+`assert { type: "json" }`) is accepted on static imports and re-exports.
 
 `require` is a global in every file. It loads builtin modules by bare name or with a `node:` or
 `squirt:` prefix, relative files and packages with the resolution rules above, caches modules in
-`require.cache`, and `require.resolve(spec)` returns the resolved path. Requiring a file with
-`import` or `export` statements loads it as an ES module and returns its namespace object.
-`node:module` provides `createRequire`, `builtinModules` and `isBuiltin`.
+`require.cache`, and `require.resolve(spec)` returns the resolved path. Requiring an ES module
+evaluates it and returns an object with its exports; the object carries `__esModule: true` when
+the module has a default export, and a module that exports a value under the name
+`"module.exports"` is returned as that value, as in Node. `node:module` provides
+`createRequire`, `builtinModules` and `isBuiltin`.
 
 ```js
 const fs = require("node:fs")
@@ -1543,7 +1549,7 @@ Uint8ClampedArray(3) [ 255, 0, 2 ] Int8Array(1) [ -56 ]
 | API                                   | Description                                               |
 | ------------------------------------- | --------------------------------------------------------- |
 | `new TextEncoder().encode(text)`      | UTF-8 bytes of a string, as a `Uint8Array`                |
-| `new TextDecoder().decode(bytes)`     | A string from UTF-8 bytes; `{ fatal: true }` throws on bad input |
+| `new TextDecoder(label?).decode(bytes)` | A string from bytes in `utf-8` (default), `utf-16le`, `utf-16be` or `windows-1252` (also known as `latin1`, `ascii` and `iso-8859-1`); `{ fatal: true }` throws on bad input |
 | `btoa(text)`, `atob(base64)`          | Base64 of Latin-1 text and back                           |
 | `bytes.toHex()`, `Uint8Array.fromHex(text)` | Hex encoding of a `Uint8Array`                      |
 | `bytes.toBase64(options?)`, `Uint8Array.fromBase64(text, options?)` | Base64, or base64url with `{ alphabet: "base64url" }` |
@@ -1777,10 +1783,10 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:fs/promises`             | The promise versions                                                |
 | `node:path`, `node:os`, `node:child_process` | As `squirt:path`, `squirt:os` and `squirt:child_process` |
 | `node:events`                  | `EventEmitter` with `on`, `once`, `off`, `emit`, `prependListener`, `listenerCount`, `eventNames`, and `events.once` |
-| `node:buffer`                  | `Buffer`, `SlowBuffer`, `kMaxLength`, `constants`, `isUtf8`, `isAscii`, `transcode`, `atob`, `btoa`, `Blob`, `File` |
+| `node:buffer`                  | `Buffer` (with `copy`, `lastIndexOf`, `swap16/32/64`, the fixed-width and variable-width readers and writers including the `BigInt64` ones, `toLocaleString`, the `*Slice` and `*Write` helpers, `parent` and `offset`), `SlowBuffer`, `kMaxLength`, `constants`, `isUtf8`, `isAscii`, `transcode`, `atob`, `btoa`, `Blob`, `File` |
 | `node:assert`                  | `ok`, `equal`, `strictEqual`, `deepStrictEqual`, `throws`, `rejects`, `match` and the rest |
 | `node:util`                    | `inspect`, `format`, `promisify`, `callbackify`, `inherits`, `types`, `isDeepStrictEqual` |
-| `node:url`                     | `URL`, `URLSearchParams`, `fileURLToPath`, `pathToFileURL`          |
+| `node:url`                     | `URL`, `URLSearchParams`, `fileURLToPath`, `pathToFileURL`, and the legacy `parse`, `format`, `resolve`, `resolveObject`, `Url`, `domainToASCII`, `domainToUnicode`, `urlToHttpOptions` |
 | `node:readline`, `node:readline/promises` | `createInterface` with `line` events, async iteration and `question` |
 | `node:string_decoder`          | `StringDecoder` that keeps incomplete UTF-8, UTF-16 and base64 sequences between chunks |
 | `node:querystring`             | `parse`, `stringify`, `escape`, `unescape`, `encode`, `decode`      |
@@ -1799,7 +1805,7 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:http2`, `node:worker_threads`, `node:cluster`, `node:v8`, `node:inspector`, `node:diagnostics_channel`, `node:constants` | Load with their constants and classes so that packages importing them work; operations that need threads, HTTP/2 or the inspector throw `ENOTSUP` |
 | `node:net`, `node:tls`         | `isIP`, `isIPv4`, `isIPv6`, `SocketAddress`, `BlockList`; sockets and servers exist as classes but connecting throws `ENOTSUP` for now |
 | `node:zlib`                    | `gzip`, `gunzip`, `deflate`, `inflate`, `deflateRaw`, `inflateRaw` and `unzip` as sync, callback and `create*` stream forms, `crc32` and `constants`; no brotli |
-| `node:stream`, `node:stream/promises` | The legacy callable `Stream` constructor, `Readable` (with `Readable.from`, `read`, `push`, `pipe`, async iteration and `toArray`), `Writable`, `Duplex`, `Transform`, `PassThrough`, `_readableState`/`_writableState`, `pipeline` and `finished` in callback and promise forms |
+| `node:stream`, `node:stream/promises` | The legacy callable `Stream` constructor, `Readable` (with `Readable.from`, `read`, `push`, `pipe`, async iteration and `toArray`), `Writable`, `Duplex`, `Transform`, `PassThrough`, `_readableState`/`_writableState`, `pipeline` and `finished` in callback and promise forms. The stream classes are function constructors, so `Readable.call(this, options)` in a `util.inherits` subclass initialises the stream |
 | `node:http`, `node:https`      | `request`, `get`, `Agent` and `ClientRequest` built on `fetch`, responses are readable streams with `statusCode` and `headers`; `createServer` and `STATUS_CODES`; requests have `on("data")`, `on("end")`, `setEncoding`, `pipe`, `text()` and `json()`, responses have `writeHead`, `setHeader`, `write`, `end` and `finish` events |
 | `node:crypto`                  | `createHash` and `createHmac` (md5, sha1, sha224, sha256, sha384, sha512), `hash`, `randomBytes`, `randomInt`, `randomUUID`, `getRandomValues`, `timingSafeEqual`, `pbkdf2`/`pbkdf2Sync`, `hkdf`/`hkdfSync`, secret `KeyObject`s via `createSecretKey` and `generateKeySync`, `webcrypto` and `subtle.digest`; asymmetric keys, signatures, ciphers and scrypt throw errors with a `code` |
 | `node:timers`, `node:timers/promises` | Timers, and `setTimeout` as a promise                        |

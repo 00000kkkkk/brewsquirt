@@ -264,9 +264,20 @@ fn td_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         v => vm.to_string(&v)?,
     };
     let norm = label.trim().to_ascii_lowercase();
-    if !matches!(norm.as_str(), "utf-8" | "utf8" | "unicode-1-1-utf-8") {
-        return Err(vm.range_error(format!("The \"{label}\" encoding is not supported")));
-    }
+    let encoding = match norm.as_str() {
+        "utf-8" | "utf8" | "unicode-1-1-utf-8" | "unicode11utf8" | "unicode20utf8"
+        | "x-unicode20utf8" => "utf-8",
+        "utf-16le" | "utf-16" | "ucs-2" | "ucs2" | "csunicode" | "iso-10646-ucs-2" | "unicode"
+        | "unicodefeff" => "utf-16le",
+        "utf-16be" | "unicodefffe" => "utf-16be",
+        "latin1" | "latin-1" | "ascii" | "us-ascii" | "iso-8859-1" | "iso8859-1" | "iso88591"
+        | "iso_8859-1" | "iso_8859-1:1987" | "iso-ir-100" | "l1" | "cp819" | "ibm819"
+        | "csisolatin1" | "windows-1252" | "cp1252" | "x-cp1252" | "ansi_x3.4-1968" | "cp367"
+        | "csascii" | "ibm367" | "iso-ir-6" | "iso646-us" | "us" => "windows-1252",
+        _ => {
+            return Err(vm.range_error(format!("The \"{label}\" encoding is not supported")));
+        }
+    };
     let options = arg(args, 1);
     let (fatal, ignore_bom) = if options.is_object() {
         let f = vm.get_prop(&options, "fatal")?.truthy();
@@ -275,11 +286,17 @@ fn td_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     } else {
         (false, false)
     };
-    o.set_own("encoding", "utf-8".into());
+    o.set_own("encoding", encoding.into());
     o.set_own("fatal", Value::Bool(fatal));
     o.set_own("ignoreBOM", Value::Bool(ignore_bom));
     Ok(this)
 }
+
+const WINDOWS_1252_HIGH: [u16; 32] = [
+    0x20AC, 0x81, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039,
+    0x0152, 0x8D, 0x017D, 0x8F, 0x90, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+    0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x9D, 0x017E, 0x0178,
+];
 
 fn td_decode(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let input = arg(args, 0);
@@ -297,6 +314,51 @@ fn td_decode(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     };
     let fatal = vm.get_prop(&this, "fatal")?.truthy();
     let ignore_bom = vm.get_prop(&this, "ignoreBOM")?.truthy();
+    let encoding = vm.get_prop(&this, "encoding")?;
+    let encoding = vm.to_string(&encoding)?;
+    match &*encoding {
+        "utf-16le" | "utf-16be" => {
+            let be = &*encoding == "utf-16be";
+            let mut body = &bytes[..];
+            let bom: [u8; 2] = if be { [0xFE, 0xFF] } else { [0xFF, 0xFE] };
+            if !ignore_bom && body.len() >= 2 && body[..2] == bom {
+                body = &body[2..];
+            }
+            let units: Vec<u16> = body
+                .chunks(2)
+                .map(|c| {
+                    let a = c[0] as u16;
+                    let b = *c.get(1).unwrap_or(&0) as u16;
+                    if be { a << 8 | b } else { b << 8 | a }
+                })
+                .collect();
+            return if fatal {
+                match String::from_utf16(&units) {
+                    Ok(s) => Ok(s.into()),
+                    Err(_) => Err(vm.type_error(format!(
+                        "The encoded data was not valid for encoding {encoding}"
+                    ))),
+                }
+            } else {
+                Ok(String::from_utf16_lossy(&units).into())
+            };
+        }
+        "windows-1252" => {
+            let s: String = bytes
+                .iter()
+                .map(|&b| {
+                    if (0x80..0xA0).contains(&b) {
+                        char::from_u32(WINDOWS_1252_HIGH[(b - 0x80) as usize] as u32)
+                            .unwrap_or('\u{FFFD}')
+                    } else {
+                        b as char
+                    }
+                })
+                .collect();
+            return Ok(s.into());
+        }
+        _ => {}
+    }
     let body = if !ignore_bom && bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         &bytes[3..]
     } else {
