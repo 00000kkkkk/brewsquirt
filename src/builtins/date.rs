@@ -365,13 +365,13 @@ fn date_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
                 let p = vm.to_primitive_hint(v, "default")?;
                 match p {
                     Value::Str(s) => parse_date(&s),
-                    other => vm.to_number(&other)?,
+                    other => time_clip(vm.to_number(&other)?),
                 }
             }
         },
         _ => {
             let n = number_args(vm, args)?;
-            utc_from_local(from_components(&n))
+            time_clip(utc_from_local(from_components(&n)))
         }
     };
     if let Value::Object(o) = &this {

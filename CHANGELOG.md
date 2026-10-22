@@ -47,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   functions work as super constructors, `"prototype" in method` is `false`, accessors from
   computed keys and functions in private fields get names, and functions list `length`, `name`
   and `prototype` first in `Object.getOwnPropertyNames`.
+- `for await` closes its async iterator when the loop exits through `break`, `continue`,
+  `return` or an exception, awaiting the result of `return()` and ignoring its failures after a
+  throw; `delete super.x` throws a `ReferenceError` after checking `this`; and Annex B regular
+  expression forms compile: quantified lookaheads, identity escapes such as `\P` and class
+  escapes followed by `-`.
 
 ### Fixed
 
@@ -61,6 +66,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Array `includes` and `indexOf` check the length before coercing `fromIndex`, `fill` and
   `reverse` only throw on frozen arrays when they would write, and `Array.prototype.toString`
   falls back correctly when `join` is not callable.
+- `String.prototype.lastIndexOf` treats a `NaN` position as the end of the string, defining an
+  array `length` converts the value with ToUint32 and ToNumber before any other check and
+  reports mismatches as a `RangeError`, and `Date` constructed from local components clips the
+  resulting time value.
+- Compilation speed is unchanged from 0.9.0: scope lookups for `with` and `eval` only run when
+  such scopes exist, and rarely used interpreter operations live outside the main dispatch loop.
 
 ## [0.9.0] - 2026-10-22
 

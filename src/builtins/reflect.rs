@@ -346,6 +346,22 @@ impl Vm {
         if let ObjKind::Global = o.kind {
             return self.define_global_prop(key, d, throw);
         }
+        let mut d = d;
+        if matches!(o.kind, ObjKind::Array(_)) && &*key == "length" {
+            if let Some(v) = d.value.clone() {
+                let num = self.to_number(&v)?;
+                let uint = if num.is_finite() {
+                    num.trunc().rem_euclid(4294967296.0)
+                } else {
+                    0.0
+                };
+                let again = self.to_number(&v)?;
+                if uint != again {
+                    return Err(self.range_error("Invalid array length"));
+                }
+                d.value = Some(Value::Number(uint));
+            }
+        }
         self.define_own(o, key, d, throw)
     }
 

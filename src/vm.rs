@@ -2384,11 +2384,11 @@ impl Vm {
                     }
                 }
                 let mut props = o.props.borrow_mut();
-                if props.contains_key(&key) {
-                    let accessor = props
-                        .get(&key)
-                        .and_then(|raw| crate::props::accessor_parts(raw).map(|(_, s)| s));
-                    if let Some(setter) = accessor {
+                let hit = props
+                    .get(&key)
+                    .map(|raw| crate::props::accessor_parts(raw).map(|(_, s)| s));
+                match hit {
+                    Some(Some(setter)) => {
                         drop(props);
                         if setter.is_callable() {
                             self.call_value(&setter, target.clone(), &[val])?;
@@ -2399,12 +2399,15 @@ impl Vm {
                             inspect_plain(target)
                         )));
                     }
-                    if props.attrs(&key) & crate::object::READ_ONLY != 0 {
-                        drop(props);
-                        return Err(self.read_only_error(o, &key));
+                    Some(None) => {
+                        if props.attrs(&key) & crate::object::READ_ONLY != 0 {
+                            drop(props);
+                            return Err(self.read_only_error(o, &key));
+                        }
+                        props.insert(key, val);
+                        return Ok(());
                     }
-                    props.insert(key, val);
-                    return Ok(());
+                    None => {}
                 }
                 drop(props);
                 if self.readonly_used && self.inherited_read_only(o, &key) {
@@ -3905,47 +3908,11 @@ impl Vm {
                 Op::DefineGlobal(k, flags) => {
                     let n = name!(k);
                     let v = peek!();
-                    if flags & crate::bytecode::DG_CONST != 0 {
-                        if !self.const_globals.contains(&n) {
-                            self.const_globals.push(n.clone());
-                        }
-                    } else {
-                        self.const_globals.retain(|m| *m != n);
-                    }
-                    if flags & crate::bytecode::DG_KEEP != 0
-                        && (self.globals.slot(&n).is_some() || tri!(self.load_lazy_global(&n)))
-                    {
-                        continue;
-                    }
-                    let old = self.globals.attrs_of(&n);
-                    let exists = self.globals.slot(&n).is_some();
-                    let base = if flags & crate::bytecode::DG_FUNCTION != 0 {
-                        old & !(crate::object::NON_ENUM | crate::object::READ_ONLY)
-                    } else {
-                        old
-                    };
-                    let attrs = if exists && old & crate::object::NON_CONFIG != 0 {
-                        old
-                    } else if flags & crate::bytecode::DG_CONFIGURABLE != 0 {
-                        base & !crate::object::NON_CONFIG
-                    } else {
-                        base | crate::object::NON_CONFIG
-                    };
-                    self.globals.insert(n.clone(), v);
-                    self.globals.attrs.insert(n, attrs);
+                    tri!(self.define_global_binding(n, v, flags));
                 }
                 Op::CanDeclareGlobalFn(k) => {
                     let n = name!(k);
-                    if self.globals.slot(&n).is_some() {
-                        let a = self.globals.attrs_of(&n);
-                        if a & crate::object::NON_CONFIG != 0
-                            && a & (crate::object::READ_ONLY | crate::object::NON_ENUM) != 0
-                        {
-                            throw!(self.type_error(format!(
-                                "Cannot redefine non-configurable global property '{n}'"
-                            )));
-                        }
-                    }
+                    tri!(self.can_declare_global_fn(&n));
                 }
                 Op::EvalVar(k) => {
                     let obj = pop!();
@@ -3958,13 +3925,7 @@ impl Vm {
                 }
                 Op::DeleteGlobal(k) => {
                     let n = name!(k);
-                    let r = match self.globals.slot(&n) {
-                        None => true,
-                        Some(_) if self.globals.attrs_of(&n) & crate::object::NON_CONFIG != 0 => {
-                            false
-                        }
-                        Some(_) => self.globals.remove(&n),
-                    };
+                    let r = self.delete_global_binding(&n);
                     self.stack.push(Value::Bool(r));
                 }
                 Op::TypeofGlobal(k) => {
@@ -5058,62 +5019,20 @@ impl Vm {
                 Op::WithHas(k) => {
                     let obj = pop!();
                     let n = name!(k);
-                    let mut has = match &obj {
-                        Value::Object(o) => tri!(self.op_has_property(o, &n)),
-                        _ => false,
-                    };
-                    if has {
-                        let u = tri!(self.get_prop(&obj, crate::object::UNSCOPABLES_KEY));
-                        if u.is_object() {
-                            let blocked = tri!(self.get_prop(&u, &n));
-                            if blocked.truthy() {
-                                has = false;
-                            }
-                        }
-                    }
+                    let has = tri!(self.with_has(&obj, &n));
                     self.stack.push(Value::Bool(has));
                 }
                 Op::WithGet(k) => {
                     let obj = pop!();
                     let n = name!(k);
-                    let has = match &obj {
-                        Value::Object(o) => tri!(self.op_has_property(o, &n)),
-                        _ => false,
-                    };
-                    if !has {
-                        if proto.sloppy {
-                            self.stack.push(Value::Undefined);
-                            continue;
-                        }
-                        throw!(
-                            self.make_error(
-                                ErrorKind::ReferenceError,
-                                format!("{n} is not defined")
-                            )
-                        );
-                    }
-                    let v = tri!(self.get_prop(&obj, &n));
+                    let v = tri!(self.with_get(&obj, &n, proto.sloppy));
                     self.stack.push(v);
                 }
                 Op::WithSet(k) => {
                     let obj = pop!();
                     let v = peek!();
                     let n = name!(k);
-                    if let Value::Object(o) = &obj {
-                        let has = tri!(self.op_has_property(o, &n));
-                        if !has && !proto.sloppy {
-                            throw!(self.make_error(
-                                ErrorKind::ReferenceError,
-                                format!("{n} is not defined")
-                            ));
-                        }
-                        self.silent_fail = false;
-                        if let Err(e) = self.set_prop(&obj, n, v) {
-                            if !(proto.sloppy && self.silent_fail) {
-                                throw!(e);
-                            }
-                        }
-                    }
+                    tri!(self.with_set(&obj, n, v, proto.sloppy));
                 }
                 Op::ToObject => {
                     let v = pop!();
@@ -5132,15 +5051,7 @@ impl Vm {
                 Op::YieldReturn(t) => {
                     if self.gen_return_pending {
                         self.gen_return_pending = false;
-                        while self
-                            .handlers
-                            .last()
-                            .is_some_and(|h| h.frame == fi && h.guard)
-                        {
-                            let h = self.handlers.pop().expect("handler");
-                            let it = self.stack[h.stack_len - 1].clone();
-                            tri!(self.iter_close(&it));
-                        }
+                        tri!(self.close_guards(fi));
                     } else {
                         ip = t as usize;
                     }
@@ -5189,21 +5100,8 @@ impl Vm {
                         self.stack.push(orig);
                         keys.extend(extra);
                     }
-                    let excluded: Vec<Rc<str>> = keys
-                        .iter()
-                        .filter_map(|k| match k {
-                            Value::Str(s) => Some(s.clone()),
-                            _ => None,
-                        })
-                        .collect();
-                    let o = self.new_object();
-                    let pairs = tri!(self.copy_data_entries(&src, &excluded));
-                    for (k, v) in pairs {
-                        if !excluded.contains(&k) {
-                            o.set_own(k, v);
-                        }
-                    }
-                    self.stack.push(Value::Object(o));
+                    let o = tri!(self.obj_rest(&src, &keys));
+                    self.stack.push(o);
                 }
                 Op::MakeClass(k, has_super) => {
                     let ctor = pop!();
@@ -5286,29 +5184,9 @@ impl Vm {
                 Op::AsyncIterReturn(slot) | Op::AsyncIterReturnQuiet(slot) => {
                     let quiet = matches!(op, Op::AsyncIterReturnQuiet(_));
                     let it = self.stack[base + slot as usize].clone();
-                    let called = match self.get_prop(&it, "return") {
-                        Ok(ret) if ret.is_nullish() => Ok(None),
-                        Ok(ret) => self.call_value(&ret, it, &[]).map(Some),
-                        Err(e) => Err(e),
-                    };
-                    match called {
-                        Ok(Some(r)) => {
-                            self.stack.push(r);
-                            self.stack.push(Value::Bool(true));
-                        }
-                        Ok(None) => {
-                            self.stack.push(Value::Undefined);
-                            self.stack.push(Value::Bool(false));
-                        }
-                        Err(e) => {
-                            if quiet {
-                                self.stack.push(Value::Undefined);
-                                self.stack.push(Value::Bool(false));
-                            } else {
-                                throw!(e);
-                            }
-                        }
-                    }
+                    let (r, called) = tri!(self.async_iter_return(it, quiet));
+                    self.stack.push(r);
+                    self.stack.push(Value::Bool(called));
                 }
                 Op::CheckIterResult => {
                     if !self.stack.last().is_some_and(|v| v.is_object()) {
@@ -5523,6 +5401,162 @@ impl Vm {
 
     pub fn own_entries(&self, v: &Value) -> Vec<(Rc<str>, Value)> {
         self.own_entries_raw(v, false)
+    }
+
+    #[inline(never)]
+    fn close_guards(&mut self, fi: usize) -> Result<(), Value> {
+        while self
+            .handlers
+            .last()
+            .is_some_and(|h| h.frame == fi && h.guard)
+        {
+            let h = self.handlers.pop().expect("handler");
+            let it = self.stack[h.stack_len - 1].clone();
+            self.iter_close(&it)?;
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn with_has(&mut self, obj: &Value, n: &str) -> Result<bool, Value> {
+        let mut has = match obj {
+            Value::Object(o) => self.op_has_property(o, n)?,
+            _ => false,
+        };
+        if has {
+            let u = self.get_prop(obj, crate::object::UNSCOPABLES_KEY)?;
+            if u.is_object() {
+                let blocked = self.get_prop(&u, n)?;
+                if blocked.truthy() {
+                    has = false;
+                }
+            }
+        }
+        Ok(has)
+    }
+
+    #[inline(never)]
+    fn with_get(&mut self, obj: &Value, n: &str, sloppy: bool) -> Result<Value, Value> {
+        let has = match obj {
+            Value::Object(o) => self.op_has_property(o, n)?,
+            _ => false,
+        };
+        if !has {
+            if sloppy {
+                return Ok(Value::Undefined);
+            }
+            return Err(self.make_error(ErrorKind::ReferenceError, format!("{n} is not defined")));
+        }
+        self.get_prop(obj, n)
+    }
+
+    #[inline(never)]
+    fn with_set(&mut self, obj: &Value, n: Rc<str>, v: Value, sloppy: bool) -> Result<(), Value> {
+        let Value::Object(o) = obj else {
+            return Ok(());
+        };
+        let has = self.op_has_property(o, &n)?;
+        if !has && !sloppy {
+            return Err(self.make_error(ErrorKind::ReferenceError, format!("{n} is not defined")));
+        }
+        self.silent_fail = false;
+        if let Err(e) = self.set_prop(obj, n, v) {
+            if !(sloppy && self.silent_fail) {
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn can_declare_global_fn(&mut self, n: &str) -> Result<(), Value> {
+        if self.globals.slot(n).is_some() {
+            let a = self.globals.attrs_of(n);
+            if a & crate::object::NON_CONFIG != 0
+                && a & (crate::object::READ_ONLY | crate::object::NON_ENUM) != 0
+            {
+                return Err(self.type_error(format!(
+                    "Cannot redefine non-configurable global property '{n}'"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn delete_global_binding(&mut self, n: &str) -> bool {
+        match self.globals.slot(n) {
+            None => true,
+            Some(_) if self.globals.attrs_of(n) & crate::object::NON_CONFIG != 0 => false,
+            Some(_) => self.globals.remove(n),
+        }
+    }
+
+    #[inline(never)]
+    fn define_global_binding(&mut self, n: Rc<str>, v: Value, flags: u8) -> Result<(), Value> {
+        if flags & crate::bytecode::DG_CONST != 0 {
+            if !self.const_globals.contains(&n) {
+                self.const_globals.push(n.clone());
+            }
+        } else {
+            self.const_globals.retain(|m| *m != n);
+        }
+        if flags & crate::bytecode::DG_KEEP != 0
+            && (self.globals.slot(&n).is_some() || self.load_lazy_global(&n)?)
+        {
+            return Ok(());
+        }
+        let old = self.globals.attrs_of(&n);
+        let exists = self.globals.slot(&n).is_some();
+        let base = if flags & crate::bytecode::DG_FUNCTION != 0 {
+            old & !(crate::object::NON_ENUM | crate::object::READ_ONLY)
+        } else {
+            old
+        };
+        let attrs = if exists && old & crate::object::NON_CONFIG != 0 {
+            old
+        } else if flags & crate::bytecode::DG_CONFIGURABLE != 0 {
+            base & !crate::object::NON_CONFIG
+        } else {
+            base | crate::object::NON_CONFIG
+        };
+        self.globals.insert(n.clone(), v);
+        self.globals.attrs.insert(n, attrs);
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn async_iter_return(&mut self, it: Value, quiet: bool) -> Result<(Value, bool), Value> {
+        let called = match self.get_prop(&it, "return") {
+            Ok(ret) if ret.is_nullish() => Ok(None),
+            Ok(ret) => self.call_value(&ret, it, &[]).map(Some),
+            Err(e) => Err(e),
+        };
+        match called {
+            Ok(Some(r)) => Ok((r, true)),
+            Ok(None) => Ok((Value::Undefined, false)),
+            Err(_) if quiet => Ok((Value::Undefined, false)),
+            Err(e) => Err(e),
+        }
+    }
+
+    #[inline(never)]
+    fn obj_rest(&mut self, src: &Value, keys: &[Value]) -> Result<Value, Value> {
+        let excluded: Vec<Rc<str>> = keys
+            .iter()
+            .filter_map(|k| match k {
+                Value::Str(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        let o = self.new_object();
+        let pairs = self.copy_data_entries(src, &excluded)?;
+        for (k, v) in pairs {
+            if !excluded.contains(&k) {
+                o.set_own(k, v);
+            }
+        }
+        Ok(Value::Object(o))
     }
 
     pub fn copy_data_entries(

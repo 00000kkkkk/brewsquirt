@@ -156,6 +156,7 @@ pub struct Compiler {
     exports: Vec<ExportEntry>,
     hidden: u32,
     next_with: u32,
+    dynamic_locals: u32,
     self_bind: Option<Rc<str>>,
     repl_consts: Vec<Rc<str>>,
     var_scope_next: bool,
@@ -391,6 +392,7 @@ fn new_compiler(module: Rc<ModuleInfo>, mode: Mode) -> Compiler {
         exports: Vec::new(),
         hidden: 0,
         next_with: 0,
+        dynamic_locals: 0,
         self_bind: None,
         repl_consts: Vec::new(),
         var_scope_next: false,
@@ -430,6 +432,12 @@ pub fn compile_eval(
         });
     }
     outer.eval_upvals = Some(scope.upvals.clone());
+    let dynamic = |n: &str| n.starts_with("%with") || n == "%evalvars";
+    if scope.locals.iter().any(|(n, _, _)| dynamic(n))
+        || scope.upvals.iter().any(|(n, _, _)| dynamic(n))
+    {
+        c.dynamic_locals = 1;
+    }
     c.states.push(outer);
     let mut inner = FnState::new("eval".into(), ProtoKind::Arrow, 1, false);
     inner.strict = strict;
@@ -1049,7 +1057,7 @@ impl Compiler {
     }
 
     fn dynamic_scopes(&self, name: &str) -> Vec<Rc<str>> {
-        if name.starts_with('%') || name == "this" {
+        if self.dynamic_locals == 0 || name.starts_with('%') || name == "this" {
             return Vec::new();
         }
         let mut out = Vec::new();
@@ -1844,6 +1852,7 @@ impl Compiler {
                 self.emit(Op::ToObject);
                 let id = self.next_with;
                 self.next_with += 1;
+                self.dynamic_locals += 1;
                 self.add_local(format!("%with{id}").into(), true);
                 self.sub_stmt(body)?;
                 self.end_scope();
@@ -2815,6 +2824,7 @@ impl Compiler {
         }
         if f.has_eval && !self.st_ref().strict {
             self.emit(Op::NewObject);
+            self.dynamic_locals += 1;
             self.add_local("%evalvars".into(), true);
         }
     }

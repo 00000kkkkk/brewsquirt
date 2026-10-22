@@ -226,7 +226,17 @@ fn last_index_of(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_str(vm, &this)?;
     let needle = str_arg(vm, args, 0)?;
     let n = len16(&s);
-    let from = position(vm, args, 1, n, n)?;
+    let from = match args.get(1) {
+        Some(v) if !v.is_undefined() => {
+            let num = vm.to_number(v)?;
+            if num.is_nan() {
+                n
+            } else {
+                num.trunc().max(0.0).min(n as f64) as usize
+            }
+        }
+        _ => n,
+    };
     Ok(Value::Number(
         last_index_of16(&s, &needle, from)
             .map(|i| i as f64)
