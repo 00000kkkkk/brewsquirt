@@ -1032,7 +1032,7 @@ impl Vm {
         }
     }
 
-    fn link_module(&mut self, path: &PathBuf, proto: &Rc<FunctionProto>) -> Result<(), Value> {
+    fn link_module(&mut self, path: &Path, proto: &Rc<FunctionProto>) -> Result<(), Value> {
         let Some(link) = proto.link.clone() else {
             return Ok(());
         };
