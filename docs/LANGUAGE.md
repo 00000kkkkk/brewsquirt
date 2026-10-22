@@ -1,12 +1,12 @@
 # JavaSquirt Language Reference
 
-This document describes JavaSquirt 0.8.0. JavaSquirt follows JavaScript semantics: for every
+This document describes JavaSquirt 0.9.0. JavaSquirt follows JavaScript semantics: for every
 supported feature, a program should print the same output under `jsq` as under Node.js. Features
 that are not implemented yet are listed in [Not yet supported](#not-yet-supported).
 
 JavaSquirt is checked against [test262](https://github.com/tc39/test262), the official
-ECMAScript conformance suite. JavaSquirt 0.8.0 passes 89% of the strict mode tests it runs
-(about 36,500 of 41,000). Most remaining failures are edge cases; the larger gaps are listed in
+ECMAScript conformance suite. JavaSquirt 0.9.0 passes 95% of the strict mode tests it runs
+(about 39,500 of 41,500). Most remaining failures are edge cases; the larger gaps are listed in
 [Not yet supported](#not-yet-supported).
 
 ## Contents
@@ -1266,7 +1266,8 @@ export default function main() {
 }
 ```
 
-`export default` accepts any expression, function or class.
+`export default` accepts any expression, function or class. Export names may be string
+literals: `export { secret as "the answer" }` pairs with `import { "the answer" as x }`.
 
 ### Imports
 
@@ -1306,8 +1307,13 @@ A specifier that cannot be resolved is an error.
 
 Imported names are live: when the exporting module changes an exported variable, importers see
 the new value. Imported bindings are read-only in the importing module. Modules may import each
-other in a cycle; function declarations are available to the other module right away, and other
-exports become available once their declaration runs.
+other in a cycle; function declarations are available to the other module right away, `var`
+exports read as `undefined` until assigned, and `let`, `const` and `class` exports throw a
+`ReferenceError` until their declaration has run.
+
+Importing a name the module does not export, a name that two `export *` declarations provide,
+or a re-export that leads back to itself without a declaration is a `SyntaxError`, raised before
+any module in the graph runs. `import()` rejects its promise with the same error.
 
 ### Dynamic import and `import.meta`
 
@@ -1974,16 +1980,22 @@ Dependency specs:
 
 These are on the roadmap and currently produce a `SyntaxError` or are absent:
 
-- `SharedArrayBuffer`, `Atomics`, `Float16Array`, `Blob` and `FormData`
+- `Blob` and `FormData`
 - Streaming bodies, WebSockets and HTTPS servers
 - `node:net`, `node:worker_threads` and `node:crypto`
 - `Intl` covers numbers, plural rules, lists, relative times, collation and segmentation in a
   handful of locales; dates are formatted in English
-- Regular expressions: the `v` flag's set operations, duplicate named groups and some early
-  errors for invalid patterns
-- Direct `eval` sees only global variables, not the locals of the calling function
-- Sloppy mode: every program runs with strict mode semantics. The one exception is functions
-  created with the `Function` constructor, which receive `globalThis` as `this`
+- Regular expressions: the `v` flag's set operations, most `\p{...}` property escapes, lookbehind
+  containing back-references, duplicate named groups and some early errors for invalid patterns
+- Direct `eval` sees the calling function's locals, but `var` declarations inside it stay in the
+  `eval` instead of joining the caller's scope
+- Sloppy mode: scripts and `Function` bodies parse with sloppy rules, but run with strict
+  semantics: assigning to an undeclared name throws, `this` in a plain call is `undefined`, and
+  `with` is not supported. Functions created with the `Function` constructor receive
+  `globalThis` as `this`
+- Module namespace objects are ordinary objects: they are extensible and their properties are
+  configurable
+- Several realms in one process; `Atomics.wait` never blocks because there is one thread
 - `Temporal`, `ShadowRealm`, decorators and `using` declarations
 - Tracing garbage collection
 - JIT compilation

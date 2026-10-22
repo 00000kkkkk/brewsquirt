@@ -278,9 +278,10 @@ typos
 - [x] `ArrayBuffer`, typed arrays and binary bodies
 - [x] Node.js core modules
 - [x] `BigInt`, `Proxy`, `Reflect` and `Intl`
-- [x] 89% of test262
-- [ ] 95% of test262
-- [ ] `SharedArrayBuffer` and `Atomics`
+- [x] `SharedArrayBuffer` and `Atomics`
+- [x] 95% of test262
+- [ ] 97% of test262
+- [ ] Own regular expression engine with lookbehind back-references and the `v` flag
 - [ ] WebSockets
 - [ ] Rope strings for fast `+=` in loops
 - [ ] Shapes and inline caches for property access

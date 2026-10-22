@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-22
+
+### Added
+
+- `SharedArrayBuffer` with `grow`, `Atomics`, `Float16Array` and float16 access on `DataView`.
+- Direct `eval` sees the locals, `this`, `new.target`, `super` and private names of the calling
+  code and returns the completion value of its last statement; indirect `eval` runs as a script.
+- Scripts and `Function` bodies parse in sloppy mode: duplicate parameters, `eval` and
+  `arguments` as names and identifiers such as `static` are accepted until a `"use strict"`
+  directive or a class body switches to strict mode.
+- Module linking: importing a name a module does not export, a name two `export *` declarations
+  provide, or a re-export that cycles back to itself is a `SyntaxError` before any module runs, and
+  `import()` rejects with the same error. Re-exports are live bindings, `export * as default from`
+  works, export names may be strings such as `export { x as "☿" }`, and `export default` accepts
+  anonymous and `async` functions and generators as hoisted declarations.
+- Imported `let`, `const` and `class` bindings throw a `ReferenceError` when read before the
+  exporting module initializes them, including in cycles.
+- `Proxy` enforces every invariant of its traps, proxies work as prototypes,
+  `Object.prototype.toString` sees through proxies to arrays and `Function.prototype.apply` reads
+  array-likes.
+- Derived class constructors: `this` is in a temporal dead zone until `super()` runs, calling
+  `super()` twice or returning a non-object is an error, `class extends null` cannot be
+  constructed, and the class name is a constant binding inside the class body.
+- Private brand checks: private methods and accessors are a `TypeError` on objects of another
+  class, and accessor or read-only array elements can be defined with `Object.defineProperty`.
+- `%ArrayIteratorPrototype%`, `%MapIteratorPrototype%`, `%SetIteratorPrototype%` and
+  `%StringIteratorPrototype%` with their `toStringTag`s, `Array.prototype[Symbol.unscopables]`,
+  and `keys`, `values` and `entries` on array-likes.
+- Destructuring and `for...of` call `return()` on the iterator when a target or the loop body
+  throws, and skip it when the iterator's own `next()` threw.
+- The iterator helpers follow the specification's closing semantics, and `Iterator.prototype`
+  gains the proposed `includes`, `chunks`, `windows` and `join`.
+- `escape`, `unescape`, `RegExp.prototype.compile`, HTML-like comments in scripts and the Annex B
+  HTML string methods such as `anchor` and `bold`.
+- `Date.prototype[Symbol.toPrimitive]`, `Object.fromEntries` closing its iterator,
+  `Object.assign` on primitives, `Function.prototype.bind` with the specified `length` and
+  `name`, and `Set` and `Map` constructors that call an overridden `add` or `set`.
+
+### Changed
+
+- `Function.prototype` is itself callable and returns `undefined`.
+- `Math.round`, `Math.hypot`, `toExponential` and `toPrecision` follow the specification for
+  ties, `NaN` with `Infinity`, negative zero and omitted precision.
+- `Number` and `Math` constants and the global `NaN`, `Infinity` and `undefined` are read-only
+  and non-configurable, and `Number.parseFloat` and `Number.parseInt` are the global functions.
+- Array `length` cannot shrink past a non-configurable element, a dense array may grow by at most
+  50,000,000 elements at once, and indices at or above 2^32 - 1 are plain properties.
+- `obj[key] op= value` converts `key` to a property key once, and reading or writing an index on
+  `null` or `undefined` throws before the key is converted.
+- JavaSquirt 0.9.0 passes 95% of the test262 strict mode tests it runs.
+
+### Fixed
+
+- `lastIndexOf` honours `fromIndex`, `concat` honours `Symbol.isConcatSpreadable`, `reduce`,
+  `forEach` and the other callbacks skip elements deleted during iteration, and `Array.prototype`
+  is itself an array.
+- `Error.prototype.toString`, `Object.prototype.valueOf`, `isPrototypeOf`, `__lookupGetter__`
+  and `propertyIsEnumerable` coerce `this` as specified.
+- Static methods and accessors print without the `static` keyword in `toString`, and builtin
+  functions written in JavaScript print as native code.
+
 ## [0.8.0] - 2026-10-22
 
 ### Added
