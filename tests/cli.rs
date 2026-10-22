@@ -59,10 +59,17 @@ fn modules_resolve_and_link() {
 }
 
 #[test]
-fn eval_prints_expression_value() {
-    let out = run_in(&root(), &["-e", "[1, 2, 3].map((x) => x * 2)"]);
+fn print_shows_expression_value() {
+    let out = run_in(&root(), &["-p", "[1, 2, 3].map((x) => x * 2)"]);
     assert!(out.status.success());
     assert_eq!(normalize(&out.stdout), "[ 2, 4, 6 ]\n");
+}
+
+#[test]
+fn eval_is_silent() {
+    let out = run_in(&root(), &["-e", "[1, 2, 3].map((x) => x * 2)"]);
+    assert!(out.status.success());
+    assert_eq!(normalize(&out.stdout), "");
 }
 
 #[test]
@@ -120,7 +127,7 @@ fn deep_recursion_is_a_range_error() {
     let out = run_in(
         &root(),
         &[
-            "-e",
+            "-p",
             "function r() { return r() }\nlet n\ntry { r() } catch (e) { n = e.name }\nn",
         ],
     );
@@ -151,7 +158,7 @@ fn top_level_await_in_eval() {
     let out = run_in(
         &root(),
         &[
-            "-e",
+            "-p",
             "const v = await sleep(5).then(() => 41)
 v + 1",
         ],
