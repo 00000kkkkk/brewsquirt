@@ -70,6 +70,7 @@ struct LoopCtx {
     is_block: bool,
     labels: Vec<Rc<str>>,
     iter_slot: Option<u32>,
+    async_iter: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -2081,6 +2082,7 @@ impl Compiler {
             is_block: false,
             labels,
             iter_slot: None,
+            async_iter: None,
         });
     }
 
@@ -2118,6 +2120,7 @@ impl Compiler {
             is_block: true,
             labels,
             iter_slot: None,
+            async_iter: None,
         });
         let r = self.sub_stmt(cur);
         let ctx = self.st().loops.pop().expect("label");
@@ -2214,6 +2217,7 @@ impl Compiler {
             is_block: false,
             labels,
             iter_slot: if keys { None } else { Some(iter_slot) },
+            async_iter: None,
         });
         self.sub_stmt(body)?;
         let ctx = self.st().loops.pop().expect("loop");
@@ -2294,6 +2298,12 @@ impl Compiler {
         let value: Rc<str> = "value".into();
         let k = self.str_const(&value);
         self.emit(Op::GetProp(k));
+        let try_depth = self.st_ref().tries.len();
+        let guard = self.emit(Op::TryBegin(0, iter_slot + 1));
+        self.st().tries.push(TryCtx {
+            has_handler: true,
+            finally: None,
+        });
         self.bind_pattern(
             pattern,
             if decl.is_some() {
@@ -2302,7 +2312,6 @@ impl Compiler {
                 BindMode::Assign
             },
         )?;
-        let try_depth = self.st_ref().tries.len();
         let labels = std::mem::take(&mut self.pending_labels);
         self.st().loops.push(LoopCtx {
             break_jumps: Vec::new(),
@@ -2314,20 +2323,58 @@ impl Compiler {
             is_block: false,
             labels,
             iter_slot: None,
+            async_iter: Some(iter_slot),
         });
         self.sub_stmt(body)?;
         let ctx = self.st().loops.pop().expect("loop");
         for j in ctx.continue_jumps {
             self.patch_to(j, start);
         }
+        self.emit(Op::TryEnd);
+        self.st().tries.pop();
         self.end_scope();
         self.emit(Op::Jump(start));
+        self.patch(guard);
+        self.emit_async_close(iter_slot, true);
+        self.emit(Op::Throw);
         self.patch(exit);
         self.end_scope();
         for j in ctx.break_jumps {
             self.patch(j);
         }
         Ok(())
+    }
+
+    fn emit_async_close(&mut self, slot: u32, quiet: bool) {
+        if quiet {
+            self.emit(Op::AsyncIterReturnQuiet(slot));
+        } else {
+            self.emit(Op::AsyncIterReturn(slot));
+        }
+        let skip = self.emit(Op::JumpIfFalse(0));
+        if quiet {
+            let guard = self.emit(Op::TryBeginTop(0));
+            self.emit(Op::Await);
+            self.emit(Op::TryEnd);
+            self.emit(Op::Pop);
+            let done = self.emit(Op::Jump(0));
+            self.patch(guard);
+            self.emit(Op::Pop);
+            self.emit(Op::Pop);
+            let done2 = self.emit(Op::Jump(0));
+            self.patch(skip);
+            self.emit(Op::Pop);
+            self.patch(done);
+            self.patch(done2);
+        } else {
+            self.emit(Op::Await);
+            self.emit(Op::CheckIterResult);
+            self.emit(Op::Pop);
+            let done = self.emit(Op::Jump(0));
+            self.patch(skip);
+            self.emit(Op::Pop);
+            self.patch(done);
+        }
     }
 
     fn unwind_tries(&mut self, to_depth: usize) -> R<()> {
@@ -2370,13 +2417,18 @@ impl Compiler {
     }
 
     fn close_iterators(&mut self, from: usize) {
-        let slots: Vec<u32> = self.st_ref().loops[from..]
+        let slots: Vec<(Option<u32>, Option<u32>)> = self.st_ref().loops[from..]
             .iter()
             .rev()
-            .filter_map(|l| l.iter_slot)
+            .map(|l| (l.iter_slot, l.async_iter))
             .collect();
-        for slot in slots {
-            self.emit(Op::IterClose(slot));
+        for (sync, asynch) in slots {
+            if let Some(slot) = sync {
+                self.emit(Op::IterClose(slot));
+            }
+            if let Some(slot) = asynch {
+                self.emit_async_close(slot, false);
+            }
         }
     }
 

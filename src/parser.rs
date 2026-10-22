@@ -1775,8 +1775,8 @@ impl Parser {
         };
         let saved = (self.in_async, self.in_generator);
         let saved_eval = std::mem::take(&mut self.saw_eval);
-        self.in_async = is_async;
-        let parsed = self.arrow_parts();
+        self.in_async |= is_async;
+        let parsed = self.arrow_parts(is_async);
         (self.in_async, self.in_generator) = saved;
         let has_eval = std::mem::replace(&mut self.saw_eval, saved_eval);
         let (params, rest, body) = parsed?;
@@ -1805,7 +1805,7 @@ impl Parser {
         })
     }
 
-    fn arrow_parts(&mut self) -> R<(Vec<Param>, Option<Pattern>, FuncBody)> {
+    fn arrow_parts(&mut self, is_async: bool) -> R<(Vec<Param>, Option<Pattern>, FuncBody)> {
         let (params, rest) = if self.is(P::LParen) {
             self.params()?
         } else {
@@ -1819,6 +1819,7 @@ impl Parser {
             )
         };
         self.expect(P::Arrow)?;
+        self.in_async = is_async;
         let saved_sb = std::mem::take(&mut self.static_block);
         let saved_gen = std::mem::take(&mut self.in_generator);
         let body = if self.is(P::LBrace) {

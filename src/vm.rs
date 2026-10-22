@@ -5283,6 +5283,38 @@ impl Vm {
                 Op::TryEnd => {
                     self.handlers.pop();
                 }
+                Op::AsyncIterReturn(slot) | Op::AsyncIterReturnQuiet(slot) => {
+                    let quiet = matches!(op, Op::AsyncIterReturnQuiet(_));
+                    let it = self.stack[base + slot as usize].clone();
+                    let called = match self.get_prop(&it, "return") {
+                        Ok(ret) if ret.is_nullish() => Ok(None),
+                        Ok(ret) => self.call_value(&ret, it, &[]).map(Some),
+                        Err(e) => Err(e),
+                    };
+                    match called {
+                        Ok(Some(r)) => {
+                            self.stack.push(r);
+                            self.stack.push(Value::Bool(true));
+                        }
+                        Ok(None) => {
+                            self.stack.push(Value::Undefined);
+                            self.stack.push(Value::Bool(false));
+                        }
+                        Err(e) => {
+                            if quiet {
+                                self.stack.push(Value::Undefined);
+                                self.stack.push(Value::Bool(false));
+                            } else {
+                                throw!(e);
+                            }
+                        }
+                    }
+                }
+                Op::CheckIterResult => {
+                    if !self.stack.last().is_some_and(|v| v.is_object()) {
+                        throw!(self.type_error("Iterator result is not an object"));
+                    }
+                }
                 Op::ThrowRef(k) => {
                     throw!(self.make_error_at(
                         ErrorKind::ReferenceError,
