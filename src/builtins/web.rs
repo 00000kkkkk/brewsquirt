@@ -2205,185 +2205,284 @@ const WEB_SRC: &str = r##"
     return server
   }
 
-  class IncomingMessage {
-    #bytes
-    #encoding = null
-    #listeners = {}
-    constructor(req) {
+  const kEvents = Symbol("messageEvents")
+  const eventList = (target, event, create) => {
+    let table = target[kEvents]
+    if (!table) {
+      if (!create) return undefined
+      table = Object.create(null)
+      Object.defineProperty(target, kEvents, { value: table, configurable: true, writable: true })
+    }
+    if (create) return (table[event] ??= [])
+    return table[event]
+  }
+  const onceWrapper = (target, event, fn) => {
+    const wrapper = function (...args) {
+      target.off(event, wrapper)
+      return fn.apply(this, args)
+    }
+    wrapper.listener = fn
+    return wrapper
+  }
+  const messageEmitter = {
+    on(event, fn) {
+      eventList(this, event, true).push(fn)
+      return this
+    },
+    addListener(event, fn) {
+      return this.on(event, fn)
+    },
+    prependListener(event, fn) {
+      eventList(this, event, true).unshift(fn)
+      return this
+    },
+    once(event, fn) {
+      return this.on(event, onceWrapper(this, event, fn))
+    },
+    prependOnceListener(event, fn) {
+      return this.prependListener(event, onceWrapper(this, event, fn))
+    },
+    off(event, fn) {
+      const list = eventList(this, event, false)
+      if (list) {
+        const i = list.findIndex((f) => f === fn || f.listener === fn)
+        if (i >= 0) list.splice(i, 1)
+      }
+      return this
+    },
+    removeListener(event, fn) {
+      return this.off(event, fn)
+    },
+    removeAllListeners(event) {
+      const table = this[kEvents]
+      if (table) {
+        if (event === undefined) for (const k of Reflect.ownKeys(table)) delete table[k]
+        else delete table[event]
+      }
+      return this
+    },
+    emit(event, ...args) {
+      const list = eventList(this, event, false)
+      if (!list || list.length === 0) return false
+      for (const fn of list.slice()) fn.apply(this, args)
+      return true
+    },
+    listenerCount(event) {
+      return eventList(this, event, false)?.length ?? 0
+    },
+    listeners(event) {
+      return (eventList(this, event, false) ?? []).map((f) => f.listener ?? f)
+    },
+    rawListeners(event) {
+      return (eventList(this, event, false) ?? []).slice()
+    },
+    eventNames() {
+      const table = this[kEvents]
+      return table ? Reflect.ownKeys(table).filter((k) => table[k].length > 0) : []
+    },
+    setMaxListeners() {
+      return this
+    },
+    getMaxListeners() {
+      return 10
+    },
+  }
+  const defineMethods = (proto, methods) => {
+    for (const key of Reflect.ownKeys(methods)) Object.defineProperty(proto, key, { value: methods[key], writable: true, configurable: true })
+  }
+  const nullSocket = (remoteAddress) => ({
+    remoteAddress,
+    remotePort: 0,
+    localAddress: "127.0.0.1",
+    localPort: 0,
+    encrypted: false,
+    readable: true,
+    writable: true,
+    destroyed: false,
+    setTimeout() {},
+    setNoDelay() {},
+    setKeepAlive() {},
+    on() {},
+    once() {},
+    off() {},
+    removeListener() {},
+    destroy() {},
+    address: () => ({ address: "127.0.0.1", family: "IPv4", port: 0 }),
+  })
+
+  const kMessage = Symbol("messageState")
+  function IncomingMessage(req) {
+    const state = { bytes: new Uint8Array(0), encoding: null }
+    Object.defineProperty(this, kMessage, { value: state, configurable: true })
+    this.method = "GET"
+    this.url = "/"
+    this.headers = {}
+    this.rawHeaders = []
+    this.httpVersion = "1.1"
+    this.httpVersionMajor = 1
+    this.httpVersionMinor = 1
+    this.complete = false
+    this.readable = true
+    this.aborted = false
+    this.destroyed = false
+    if (req && typeof req.url === "string" && req.headers && typeof req.headers.entries === "function") {
       const u = new URL(req.url)
       this.method = req.method
       this.url = u.pathname + u.search
       this.headers = Object.fromEntries(req.headers)
       this.rawHeaders = [...req.headers].flat()
-      this.httpVersion = "1.1"
-      this.httpVersionMajor = 1
-      this.httpVersionMinor = 1
-      this.complete = false
-      this.readable = true
-      this.aborted = false
-      this.destroyed = false
-      this.socket = {
-        remoteAddress: req.remoteAddress,
-        remotePort: 0,
-        localAddress: "127.0.0.1",
-        localPort: 0,
-        encrypted: false,
-        readable: true,
-        writable: true,
-        destroyed: false,
-        setTimeout() {},
-        setNoDelay() {},
-        setKeepAlive() {},
-        on() {},
-        once() {},
-        off() {},
-        removeListener() {},
-        destroy() {},
-        address: () => ({ address: "127.0.0.1", family: "IPv4", port: 0 }),
-      }
-      this.connection = this.socket
+      this.socket = nullSocket(req.remoteAddress)
       const b = req[kRaw]
-      this.#bytes = b == null ? new Uint8Array(0) : typeof b === "string" ? encoder.encode(b) : b
+      state.bytes = b == null ? new Uint8Array(0) : typeof b === "string" ? encoder.encode(b) : b
+    } else {
+      this.socket = req && typeof req === "object" ? req : nullSocket(undefined)
     }
-    #chunk() {
-      if (this.#encoding !== null) return decoder.decode(this.#bytes)
-      return typeof Buffer === "function" ? Buffer.from(this.#bytes) : this.#bytes
+    this.connection = this.socket
+  }
+  const messageState = (msg) => {
+    let state = msg[kMessage]
+    if (!state) {
+      state = { bytes: new Uint8Array(0), encoding: null }
+      Object.defineProperty(msg, kMessage, { value: state, configurable: true })
     }
+    return state
+  }
+  const messageChunk = (msg) => {
+    const state = messageState(msg)
+    if (state.encoding !== null) return decoder.decode(state.bytes)
+    return typeof Buffer === "function" ? Buffer.from(state.bytes) : state.bytes
+  }
+  defineMethods(IncomingMessage.prototype, messageEmitter)
+  defineMethods(IncomingMessage.prototype, {
     setEncoding(encoding) {
-      this.#encoding = encoding ?? "utf8"
+      messageState(this).encoding = encoding ?? "utf8"
       return this
-    }
+    },
     on(event, fn) {
-      ;(this.#listeners[event] ??= []).push(fn)
-      if (event === "data" && this.#bytes.length !== 0) queueMicrotask(() => fn(this.#chunk()))
+      messageEmitter.on.call(this, event, fn)
+      const state = messageState(this)
+      if (event === "data" && state.bytes.length !== 0) queueMicrotask(() => fn.call(this, messageChunk(this)))
       if (event === "end")
         queueMicrotask(() =>
           queueMicrotask(() => {
             this.complete = true
             this.readable = false
-            fn()
+            fn.call(this)
           }),
         )
-      if (event === "close") queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => fn())))
+      if (event === "close") queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => fn.call(this))))
       return this
-    }
-    once(event, fn) {
-      return this.on(event, fn)
-    }
+    },
     addListener(event, fn) {
       return this.on(event, fn)
-    }
-    off(event, fn) {
-      const list = this.#listeners[event]
-      if (list) this.#listeners[event] = list.filter((f) => f !== fn)
-      return this
-    }
-    removeListener(event, fn) {
-      return this.off(event, fn)
-    }
-    removeAllListeners(event) {
-      if (event === undefined) this.#listeners = {}
-      else delete this.#listeners[event]
-      return this
-    }
-    emit(event, ...args) {
-      const list = this.#listeners[event] ?? []
-      for (const fn of list) fn(...args)
-      return list.length > 0
-    }
+    },
     pause() {
       return this
-    }
+    },
     resume() {
       return this
-    }
+    },
     destroy() {
       return this
-    }
+    },
     pipe(dest) {
       queueMicrotask(() => {
-        if (this.#bytes.length !== 0) dest.write(this.#chunk())
+        if (messageState(this).bytes.length !== 0) dest.write(messageChunk(this))
         queueMicrotask(() => dest.end())
       })
       return dest
-    }
+    },
     text() {
-      return Promise.resolve(decoder.decode(this.#bytes))
-    }
+      return Promise.resolve(decoder.decode(messageState(this).bytes))
+    },
     json() {
       return this.text().then((t) => JSON.parse(t))
-    }
+    },
     arrayBuffer() {
-      return Promise.resolve(this.#bytes.slice().buffer)
-    }
+      return Promise.resolve(messageState(this).bytes.slice().buffer)
+    },
     async *[Symbol.asyncIterator]() {
-      if (this.#bytes.length !== 0) yield this.#chunk()
-    }
-  }
+      if (messageState(this).bytes.length !== 0) yield messageChunk(this)
+    },
+  })
 
-  class ServerResponse {
-    #headers = new Headers()
-    #chunks = []
-    #done
-    #listeners = {}
-    constructor(done) {
-      this.#done = done
-      this.statusCode = 200
-      this.statusMessage = ""
-      this.headersSent = false
-      this.writableEnded = false
-      this.finished = false
+  const kResponse = Symbol("responseState")
+  const responseState = (res) => {
+    let state = res[kResponse]
+    if (!state) {
+      state = { headers: new Headers(), chunks: [], done: null }
+      Object.defineProperty(res, kResponse, { value: state, configurable: true })
     }
-    on(event, fn) {
-      ;(this.#listeners[event] ??= []).push(fn)
-      return this
-    }
-    once(event, fn) {
-      return this.on(event, fn)
-    }
-    off(event, fn) {
-      const list = this.#listeners[event]
-      if (list) this.#listeners[event] = list.filter((f) => f !== fn)
-      return this
-    }
-    removeListener(event, fn) {
-      return this.off(event, fn)
-    }
-    emit(event, ...args) {
-      const list = this.#listeners[event] ?? []
-      for (const fn of list) fn(...args)
-      return list.length > 0
-    }
+    return state
+  }
+  function ServerResponse(req) {
+    const state = responseState(this)
+    if (typeof req === "function") state.done = req
+    else if (req && typeof req === "object") this.req = req
+    this.statusCode = 200
+    this.statusMessage = ""
+    this.headersSent = false
+    this.writableEnded = false
+    this.writableFinished = false
+    this.finished = false
+    this.destroyed = false
+    this.sendDate = true
+    this.socket = null
+    this.connection = null
+  }
+  defineMethods(ServerResponse.prototype, messageEmitter)
+  defineMethods(ServerResponse.prototype, {
     flushHeaders() {
       this.headersSent = true
-    }
-    cork() {}
-    uncork() {}
+    },
+    cork() {},
+    uncork() {},
     setTimeout(ms, cb) {
       if (typeof cb === "function") this.on("timeout", cb)
       return this
-    }
+    },
     status(code) {
       this.statusCode = code
       return this
-    }
-    setHeader(name, value) {
-      this.#headers.delete(name)
-      for (const v of Array.isArray(value) ? value : [value]) this.#headers.append(name, v)
+    },
+    assignSocket(socket) {
+      this.socket = socket
+      this.connection = socket
       return this
-    }
+    },
+    detachSocket(socket) {
+      if (this.socket === socket) {
+        this.socket = null
+        this.connection = null
+      }
+      return this
+    },
+    setHeader(name, value) {
+      const { headers } = responseState(this)
+      headers.delete(name)
+      for (const v of Array.isArray(value) ? value : [value]) headers.append(name, v)
+      return this
+    },
+    appendHeader(name, value) {
+      const { headers } = responseState(this)
+      for (const v of Array.isArray(value) ? value : [value]) headers.append(name, v)
+      return this
+    },
     getHeader(name) {
-      return this.#headers.get(name) ?? undefined
-    }
+      return responseState(this).headers.get(name) ?? undefined
+    },
     getHeaders() {
-      return Object.fromEntries(this.#headers)
-    }
+      return Object.fromEntries(responseState(this).headers)
+    },
+    getHeaderNames() {
+      return [...responseState(this).headers.keys()]
+    },
     hasHeader(name) {
-      return this.#headers.has(name)
-    }
+      return responseState(this).headers.has(name)
+    },
     removeHeader(name) {
-      this.#headers.delete(name)
-    }
+      responseState(this).headers.delete(name)
+    },
     writeHead(status, message, headers) {
       if (typeof message === "object" && message !== null) [message, headers] = [undefined, message]
       this.statusCode = status
@@ -2391,25 +2490,35 @@ const WEB_SRC: &str = r##"
       if (headers) for (const k of Object.keys(headers)) this.setHeader(k, headers[k])
       this.headersSent = true
       return this
-    }
-    write(chunk) {
-      if (chunk != null) this.#chunks.push(chunk)
+    },
+    writeContinue() {},
+    writeEarlyHints() {},
+    addTrailers() {},
+    write(chunk, encoding, cb) {
+      if (typeof encoding === "function") [encoding, cb] = [undefined, encoding]
+      if (chunk != null) {
+        const encoded = typeof chunk === "string" && typeof encoding === "string" && !/^utf-?8$/i.test(encoding) && typeof Buffer === "function" ? Buffer.from(chunk, encoding) : chunk
+        responseState(this).chunks.push(encoded)
+      }
       this.headersSent = true
+      if (typeof cb === "function") queueMicrotask(cb)
       return true
-    }
-    end(chunk, cb) {
-      if (typeof chunk === "function") [chunk, cb] = [undefined, chunk]
+    },
+    end(chunk, encoding, cb) {
+      if (typeof chunk === "function") [chunk, encoding, cb] = [undefined, undefined, chunk]
+      else if (typeof encoding === "function") [encoding, cb] = [undefined, encoding]
       if (this.writableEnded) return this
-      if (chunk != null) this.#chunks.push(chunk)
+      const state = responseState(this)
+      if (chunk != null) this.write(chunk, encoding)
       this.writableEnded = true
       this.finished = true
       this.headersSent = true
-      const textual = this.#chunks.every((c) => typeof c !== "object")
+      const textual = state.chunks.every((c) => typeof c !== "object")
       let body
       if (textual) {
-        body = this.#chunks.join("")
+        body = state.chunks.join("")
       } else {
-        const parts = this.#chunks.map((c) => (typeof c === "object" ? new Uint8Array(c.buffer ?? c, c.byteOffset ?? 0, c.byteLength) : encoder.encode(String(c))))
+        const parts = state.chunks.map((c) => (typeof c === "object" ? new Uint8Array(c.buffer ?? c, c.byteOffset ?? 0, c.byteLength) : encoder.encode(String(c))))
         body = new Uint8Array(parts.reduce((n, p) => n + p.length, 0))
         let at = 0
         for (const p of parts) {
@@ -2417,20 +2526,30 @@ const WEB_SRC: &str = r##"
           at += p.length
         }
       }
-      internal = true
-      try {
-        this.#done(new Response(body, { status: this.statusCode, headers: this.#headers }))
-      } finally {
-        internal = false
+      if (state.done) {
+        internal = true
+        try {
+          state.done(new Response(body, { status: this.statusCode, headers: state.headers }))
+        } finally {
+          internal = false
+        }
       }
       if (typeof cb === "function") queueMicrotask(cb)
       queueMicrotask(() => {
+        this.writableFinished = true
         this.emit("finish")
         this.emit("close")
       })
       return this
-    }
-  }
+    },
+    destroy(error) {
+      if (this.destroyed) return this
+      this.destroyed = true
+      if (error) queueMicrotask(() => this.emit("error", error))
+      if (!this.writableEnded) queueMicrotask(() => this.emit("close"))
+      return this
+    },
+  })
 
   function createServer(options, listener) {
     if (typeof options === "function") [options, listener] = [{}, options]

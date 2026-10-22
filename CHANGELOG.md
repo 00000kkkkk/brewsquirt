@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exports.
 - `\uD800`-style escapes and `\u{...}` surrogate code points in regular expressions match the
   lone surrogates stored in strings instead of failing to compile.
+- `http.ServerResponse` and `http.IncomingMessage` are function constructors with real
+  `once`/`off`/`listenerCount` semantics, `assignSocket`, `appendHeader` and `getHeaderNames`, so
+  `util.inherits` subclasses that call them (`light-my-request`, and therefore `fastify.inject`)
+  work.
 
 ### Added
 

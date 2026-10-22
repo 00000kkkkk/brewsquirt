@@ -24,6 +24,29 @@ console.log(zlib.gunzipSync(packed).toString())
 const gunzip = new zlib.Gunzip()
 console.log(gunzip._processChunk(packed, zlib.constants.Z_FINISH).toString())
 
+const http = require("node:http")
+const util = require("node:util")
+function MockResponse() {
+  http.ServerResponse.call(this, {})
+  this.chunks = []
+}
+util.inherits(MockResponse, http.ServerResponse)
+MockResponse.prototype.write = function (data, encoding, cb) {
+  http.ServerResponse.prototype.write.call(this, data, encoding, cb)
+  this.chunks.push(String(data))
+  return true
+}
+const mock = new MockResponse()
+mock.once("finish", () => console.log("finish once", mock.writableFinished))
+mock.setHeader("x-a", "1")
+mock.setHeader("x-a", ["2", "3"])
+mock.writeHead(201, { "content-type": "text/plain" })
+mock.write("he")
+mock.end("llo")
+console.log(mock instanceof http.ServerResponse, mock.statusCode, mock.getHeader("x-a"), mock.getHeaderNames().join(), mock.chunks.join(""), mock.headersSent, mock.writableEnded, mock.listenerCount("finish"))
+const message = new http.IncomingMessage()
+console.log(message.method, message.url, typeof message.socket.address, message.listenerCount("end"))
+
 const nodeCrypto = require("node:crypto")
 ;(async () => {
   const enc = new TextEncoder()
