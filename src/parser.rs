@@ -69,6 +69,8 @@ const STRICT_RESERVED: &[&str] = &[
     "static",
 ];
 
+type ExportList = Vec<(Rc<str>, Rc<str>)>;
+
 pub fn parse(src: &str) -> R<Vec<Stmt>> {
     parse_goal(src, false)
 }
@@ -871,6 +873,13 @@ impl Parser {
         self.expect_kw("from")?;
         let source = self.string_lit()?;
         self.semicolon()?;
+        let mut bound: Vec<&Rc<str>> = default.iter().chain(namespace.iter()).collect();
+        bound.extend(named.iter().map(|(_, local)| local));
+        for (i, n) in bound.iter().enumerate() {
+            if bound[..i].contains(n) {
+                return Err(self.error(format!("Identifier '{n}' has already been declared")));
+            }
+        }
         Ok(StmtKind::Import(ImportDecl {
             source,
             default,
@@ -879,7 +888,7 @@ impl Parser {
         }))
     }
 
-    fn export_names(&mut self) -> R<(Vec<(Rc<str>, Rc<str>)>, bool)> {
+    fn export_names(&mut self) -> R<(ExportList, bool)> {
         let mut names = Vec::new();
         let mut string_local = false;
         while !self.eat(P::RBrace) {

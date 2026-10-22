@@ -141,6 +141,7 @@ pub struct Compiler {
     script_eval: u8,
     link_imports: Vec<(Rc<str>, Vec<Rc<str>>)>,
     reexport_sources: Vec<(Rc<str>, Rc<str>)>,
+    ns_imports: Vec<(Rc<str>, Rc<str>)>,
 }
 
 fn collect_var_names(s: &Stmt, out: &mut Vec<Rc<str>>) {
@@ -243,6 +244,7 @@ fn new_compiler(module: Rc<ModuleInfo>, mode: Mode) -> Compiler {
         script_eval: 0,
         link_imports: Vec::new(),
         reexport_sources: Vec::new(),
+        ns_imports: Vec::new(),
     }
 }
 
@@ -351,6 +353,9 @@ fn compile_unit(
     for entry in &exports {
         match entry {
             ExportEntry::Local(local, exported) => {
+                if c.import_binding(local).is_some() {
+                    continue;
+                }
                 c.load_var(local);
                 let k = c.str_const(exported);
                 c.emit(Op::InitProp(k));
@@ -366,14 +371,22 @@ fn compile_unit(
             .map(|(_, s)| s.clone())
             .unwrap_or_else(|| "".into())
     };
+    let src = &c.module.source;
+    let cjs =
+        src.contains("module.exports") || src.contains("exports.") || src.contains("require(");
     let mut link = ModuleLink {
-        esm: !exports.is_empty() || !c.link_imports.is_empty(),
+        esm: !exports.is_empty() || !c.link_imports.is_empty() || !cjs,
         imports: c.link_imports.clone(),
         ..ModuleLink::default()
     };
     for entry in &exports {
         match entry {
-            ExportEntry::Local(_, exported) => link.local_exports.push(exported.clone()),
+            ExportEntry::Local(local, exported) => match c.import_binding(local) {
+                Some((source, imported)) => {
+                    link.indirect.push((exported.clone(), source, imported))
+                }
+                None => link.local_exports.push(exported.clone()),
+            },
             ExportEntry::All(hidden) => link.stars.push(source_of(&c, hidden)),
             ExportEntry::Named(hidden, imported, exported) => {
                 link.indirect
@@ -1126,7 +1139,12 @@ impl Compiler {
                 .exports
                 .iter()
                 .filter_map(|e| match e {
-                    ExportEntry::Local(l, x) => Some((x.clone(), l.clone())),
+                    ExportEntry::Local(l, x)
+                        if !self.import_aliases.iter().any(|(a, _, _)| a == l)
+                            && !imports.iter().any(|i| i.namespace.as_ref() == Some(l)) =>
+                    {
+                        Some((x.clone(), l.clone()))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -1163,6 +1181,9 @@ impl Compiler {
                 requested.push(imported.clone());
             }
             self.link_imports.push((imp.source.clone(), requested));
+            if let Some(ns) = &imp.namespace {
+                self.ns_imports.push((ns.clone(), imp.source.clone()));
+            }
             let src = self.str_const(&imp.source);
             self.emit(Op::Import(src));
             if let Some(ns) = &imp.namespace {
@@ -1199,6 +1220,18 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    fn import_binding(&self, local: &str) -> Option<(Rc<str>, Rc<str>)> {
+        if let Some((_, hidden, key)) = self.import_aliases.iter().find(|(l, _, _)| &**l == local) {
+            let n: usize = hidden.strip_prefix("%import")?.parse().ok()?;
+            let (source, _) = self.link_imports.get(n)?;
+            return Some((source.clone(), key.clone()));
+        }
+        self.ns_imports
+            .iter()
+            .find(|(l, _)| &**l == local)
+            .map(|(_, source)| (source.clone(), "*".into()))
     }
 
     fn alias(&self, name: &str) -> Option<(Rc<str>, Rc<str>)> {
