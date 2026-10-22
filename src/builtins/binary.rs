@@ -12,6 +12,12 @@ pub use super::typed::{buffer_source_bytes, new_buffer, new_typed, new_uint8};
 pub fn install(vm: &mut Vm) {
     super::typed::install(vm);
     let tep = vm.new_object();
+    let tag_attrs = crate::object::NON_ENUM | crate::object::READ_ONLY;
+    tep.set_with_attrs(
+        crate::object::TO_STRING_TAG_KEY,
+        "TextEncoder".into(),
+        tag_attrs,
+    );
     method(vm, &tep, "encode", 0, te_encode);
     method(vm, &tep, "encodeInto", 2, te_encode_into);
     let te = make_ctor(
@@ -24,6 +30,11 @@ pub fn install(vm: &mut Vm) {
     );
     vm.define_global("TextEncoder", Value::Object(te));
     let tdp = vm.new_object();
+    tdp.set_with_attrs(
+        crate::object::TO_STRING_TAG_KEY,
+        "TextDecoder".into(),
+        tag_attrs,
+    );
     method(vm, &tdp, "decode", 1, td_decode);
     let td = make_ctor(
         vm,
@@ -43,9 +54,15 @@ pub fn install(vm: &mut Vm) {
     vm.define_global("structuredClone", f);
 
     let crypto = vm.new_object();
+    crypto.set_with_attrs(crate::object::TO_STRING_TAG_KEY, "Crypto".into(), tag_attrs);
     method(vm, &crypto, "getRandomValues", 1, get_random_values);
     method(vm, &crypto, "randomUUID", 0, random_uuid);
     let subtle = vm.new_object();
+    subtle.set_with_attrs(
+        crate::object::TO_STRING_TAG_KEY,
+        "SubtleCrypto".into(),
+        tag_attrs,
+    );
     method(vm, &subtle, "digest", 2, subtle_digest);
     let delegates: [(&str, u32, crate::object::NativeFn); 11] = [
         ("importKey", 5, subtle_import_key),

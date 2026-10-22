@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- TLS servers: `https.createServer({ key, cert })`, `tls.createServer` with `secureConnection`
+  events and `ALPNProtocols`, and `serve({ tls: { key, cert } })`, all from PEM keys and
+  certificates on top of rustls. TLS clients accept `ca` and `rejectUnauthorized: false` in
+  `tls.connect`, `https.request` (also through `agent.options`) and `fetch(url, { tls })`, and
+  `NODE_TLS_REJECT_UNAUTHORIZED=0` disables verification as in Node.
+- `Symbol.toStringTag` on `URL`, `URLSearchParams`, `Headers`, `Request`, `Response`,
+  `AbortController`, `AbortSignal`, `Event`, `EventTarget`, `DOMException`, `TextEncoder`,
+  `TextDecoder`, `crypto`, `crypto.subtle` and `performance`, so type checks based on
+  `Object.prototype.toString` (such as `got`'s URL validation) recognise them.
+
 - IANA time zones in `Intl.DateTimeFormat` and the `toLocale*String` methods: the `timeZone`
   option accepts any zone from the bundled tz database (case-insensitively), fixed offsets such
   as `+05:30` and the UTC aliases, invalid names throw a `RangeError`, `timeZoneName` renders
@@ -56,6 +66,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `http.request` no longer follows redirects itself: like Node it hands `3xx` responses to the
+  caller, and redirect-following libraries such as `axios` and `got` report the right final URL.
+  Request failures carry Node's error codes (`ECONNREFUSED`, `ENOTFOUND`,
+  `DEPTH_ZERO_SELF_SIGNED_CERT`, `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, `ECONNRESET`).
 - Running a CommonJS `.js` file directly (`jsq app.js`) executed it twice, once as an ES module
   and once as CommonJS while collecting its exports. The entry point now runs once through the
   CommonJS loader, so `__dirname`, `__filename`, `module`, `exports` and

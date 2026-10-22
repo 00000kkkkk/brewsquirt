@@ -121,17 +121,93 @@ fn port_arg(vm: &mut Vm, v: &Value) -> Result<u16, Value> {
     Ok(port as u16)
 }
 
+pub fn pem_bytes(vm: &mut Vm, v: &Value) -> Result<Option<Vec<u8>>, Value> {
+    if v.is_nullish() {
+        return Ok(None);
+    }
+    if let Value::Object(o) = v {
+        if matches!(o.kind, crate::object::ObjKind::Array(_)) {
+            let mut out = Vec::new();
+            for item in vm.iterate(v)? {
+                if let Some(bytes) = pem_bytes(vm, &item)? {
+                    out.extend_from_slice(&bytes);
+                    out.push(b'\n');
+                }
+            }
+            return Ok(Some(out));
+        }
+    }
+    Ok(Some(bytes_arg(vm, v)?))
+}
+
+pub fn server_tls(
+    vm: &mut Vm,
+    key: &Value,
+    cert: &Value,
+    alpn: &Value,
+) -> Result<Option<std::sync::Arc<rustls::ServerConfig>>, Value> {
+    let (Some(key), Some(cert)) = (pem_bytes(vm, key)?, pem_bytes(vm, cert)?) else {
+        return Ok(None);
+    };
+    let mut protocols = Vec::new();
+    if alpn.is_object() {
+        for p in vm.iterate(alpn)? {
+            protocols.push(vm.to_string(&p)?.to_string());
+        }
+    }
+    let refs: Vec<&str> = protocols.iter().map(String::as_str).collect();
+    match io::tls_server_config(&cert, &key, &refs) {
+        Ok(config) => Ok(Some(config)),
+        Err(message) => {
+            let err = vm.make_error(ErrorKind::Error, message);
+            if let Value::Object(o) = &err {
+                o.set_own("code", "ERR_OSSL_PEM_NO_START_LINE".into());
+            }
+            Err(err)
+        }
+    }
+}
+
+fn insecure_env() -> bool {
+    std::env::var("NODE_TLS_REJECT_UNAUTHORIZED").is_ok_and(|v| v == "0")
+}
+
+pub fn tls_client_options(
+    vm: &mut Vm,
+    options: &Value,
+    servername: String,
+) -> Result<io::TlsClientOptions, Value> {
+    let mut opts = io::TlsClientOptions {
+        servername,
+        insecure: insecure_env(),
+        ca: None,
+    };
+    if options.is_object() {
+        if let Value::Bool(false) = vm.get_prop(options, "rejectUnauthorized")? {
+            opts.insecure = true;
+        }
+        let ca = vm.get_prop(options, "ca")?;
+        opts.ca = pem_bytes(vm, &ca)?;
+    }
+    Ok(opts)
+}
+
 pub fn net_connect(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let host = vm.to_string(&arg(args, 0))?.to_string();
     let port = port_arg(vm, &arg(args, 1))?;
-    let tls = arg(args, 2).truthy();
+    let tls_arg = arg(args, 2);
     let servername = match arg(args, 3) {
         Value::Undefined | Value::Null => host.clone(),
         v => vm.to_string(&v)?.to_string(),
     };
+    let tls = if tls_arg.truthy() {
+        Some(tls_client_options(vm, &tls_arg, servername)?)
+    } else {
+        None
+    };
     let handler = arg(args, 4);
     let id = vm.io.next_id();
-    let cmd = io::socket_connect(id, host, port, tls.then_some(servername), vm.io.tx.clone());
+    let cmd = io::socket_connect(id, host, port, tls, vm.io.tx.clone());
     vm.io.pending += 1;
     vm.io_sockets.insert(
         id,
@@ -203,8 +279,10 @@ pub fn net_listen(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let host = vm.to_string(&arg(args, 0))?.to_string();
     let port = port_arg(vm, &arg(args, 1))?;
     let handler = arg(args, 2);
+    let tls = server_tls(vm, &arg(args, 3), &arg(args, 4), &arg(args, 5))?;
     let id = vm.io.next_id();
-    let handle = match io::socket_listen(&host, port, id, vm.io.ids.clone(), vm.io.tx.clone()) {
+    let handle = match io::socket_listen(&host, port, id, vm.io.ids.clone(), vm.io.tx.clone(), tls)
+    {
         Ok(h) => h,
         Err(e) => {
             let code = io::error_code(&e);

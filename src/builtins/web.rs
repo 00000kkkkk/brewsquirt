@@ -2119,6 +2119,7 @@ const WEB_SRC: &str = r##"
       payload,
       Number(init.timeout ?? 0),
       req.redirect !== "manual",
+      init.tls ?? null,
     )
     const raw = await new Promise((resolve, reject) => {
       const onAbort = () => {
@@ -2172,12 +2173,13 @@ const WEB_SRC: &str = r##"
     handler ??= options.fetch
     if (typeof handler !== "function") throw new TypeError("serve() needs a handler function")
     const onError = options.error
-    const [id, port, address] = native.serve(String(options.hostname ?? "127.0.0.1"), Number(options.port ?? 3000), dispatch, typeof options.upgrade === "function" ? options.upgrade : null)
+    const tls = options.tls ?? null
+    const [id, port, address] = native.serve(String(options.hostname ?? "127.0.0.1"), Number(options.port ?? 3000), dispatch, typeof options.upgrade === "function" ? options.upgrade : null, tls?.key ?? null, tls?.cert ?? null)
     let open = true
     const server = {
       hostname: address,
       port,
-      url: new URL(`http://${address.includes(":") ? `[${address}]` : address}:${port}/`),
+      url: new URL(`${tls ? "https" : "http"}://${address.includes(":") ? `[${address}]` : address}:${port}/`),
       pendingRequests: 0,
       stop() {
         if (open) {
@@ -2579,8 +2581,25 @@ const WEB_SRC: &str = r##"
     },
   })
 
+  const SECURE = Symbol("secureServer")
+  function createSecureServer(options, listener) {
+    if (typeof options === "function") [options, listener] = [{}, options]
+    const opts = { ...(options ?? {}) }
+    const ctx = opts.secureContext ?? {}
+    opts.key ??= ctx.key
+    opts.cert ??= ctx.cert
+    if (opts.pfx) {
+      const e = new Error("PFX/PKCS#12 certificates are not supported in this runtime; pass PEM key and cert")
+      e.code = "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM"
+      throw e
+    }
+    opts[SECURE] = true
+    return createServer(opts, listener)
+  }
   function createServer(options, listener) {
     if (typeof options === "function") [options, listener] = [{}, options]
+    const secure = options?.[SECURE] === true
+    const tls = secure ? { key: options.key, cert: options.cert } : null
     let srv = null
     const handlers = { request: listener ? [listener] : [], listening: [], close: [] }
     const onceWrappers = new WeakMap()
@@ -2669,11 +2688,22 @@ const WEB_SRC: &str = r##"
           req.connection = socket
           emit("upgrade", req, socket, Buffer.from(head.buffer, head.byteOffset, head.byteLength))
         }
-        srv = serve({ port, hostname: host ?? "127.0.0.1", upgrade: onUpgrade }, (req) =>
-          new Promise((resolve) => {
-            emit("request", new IncomingMessage(req), new ServerResponse(resolve))
-          }),
-        )
+        try {
+          if (secure && (tls.key == null || tls.cert == null)) {
+            const e = new Error("An HTTPS server needs a PEM key and cert")
+            e.code = "ERR_MISSING_ARGS"
+            throw e
+          }
+          srv = serve({ port, hostname: host ?? "127.0.0.1", upgrade: onUpgrade, tls }, (req) =>
+            new Promise((resolve) => {
+              emit("request", new IncomingMessage(req), new ServerResponse(resolve))
+            }),
+          )
+        } catch (e) {
+          if ((handlers.error?.length ?? 0) === 0) throw e
+          queueMicrotask(() => emit("error", e))
+          return server
+        }
         server.listening = true
         if (typeof cb === "function") handlers.listening.push(cb)
         queueMicrotask(() => emit("listening"))
@@ -2694,6 +2724,27 @@ const WEB_SRC: &str = r##"
   }
 
   const STATUS_CODES = native.statusCodes
+
+  for (const [C, tag] of [
+    [URL, "URL"],
+    [URLSearchParams, "URLSearchParams"],
+    [Headers, "Headers"],
+    [Request, "Request"],
+    [Response, "Response"],
+    [AbortController, "AbortController"],
+    [AbortSignal, "AbortSignal"],
+    [Event, "Event"],
+    [CustomEvent, "CustomEvent"],
+    [MessageEvent, "MessageEvent"],
+    [EventTarget, "EventTarget"],
+    [MessagePort, "MessagePort"],
+    [MessageChannel, "MessageChannel"],
+    [DOMException, "DOMException"],
+  ]) {
+    if (!Object.prototype.hasOwnProperty.call(C.prototype, Symbol.toStringTag)) {
+      Object.defineProperty(C.prototype, Symbol.toStringTag, { value: tag, configurable: true })
+    }
+  }
 
   const inspectCustom = Symbol.for("nodejs.util.inspect.custom")
   const quoteInspect = (v) => {
@@ -2749,6 +2800,7 @@ const WEB_SRC: &str = r##"
     fetch,
     serve,
     createServer,
+    createSecureServer,
     IncomingMessage,
     ServerResponse,
     STATUS_CODES,
@@ -2964,6 +3016,7 @@ fn native_fetch(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let ms = vm.to_number(&arg(args, 4))?;
     let timeout = (ms > 0.0).then(|| Duration::from_millis(ms as u64));
     let follow = arg(args, 5).truthy();
+    let tls = super::netio::tls_client_options(vm, &arg(args, 6), String::new())?;
     let p = vm.new_promise();
     let id = vm.io.next_id();
     vm.io.pending += 1;
@@ -2979,6 +3032,7 @@ fn native_fetch(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             body,
             timeout,
             follow,
+            tls,
         },
     );
     Ok(pair)
@@ -3006,8 +3060,17 @@ fn native_serve(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     }
     let dispatch = arg(args, 2);
     let upgrade = arg(args, 3);
+    let alpn = vm.new_array(vec!["http/1.1".into()]);
+    let tls = super::netio::server_tls(vm, &arg(args, 4), &arg(args, 5), &alpn)?;
     let id = vm.io.next_id();
-    let handle = match io::listen(&host, port as u16, id, vm.io.ids.clone(), vm.io.tx.clone()) {
+    let handle = match io::listen(
+        &host,
+        port as u16,
+        id,
+        vm.io.ids.clone(),
+        vm.io.tx.clone(),
+        tls,
+    ) {
         Ok(h) => h,
         Err(e) => {
             return Err(vm.make_error(

@@ -14,6 +14,7 @@ pub struct FetchRequest {
     pub body: Option<Vec<u8>>,
     pub timeout: Option<Duration>,
     pub follow: bool,
+    pub tls: TlsClientOptions,
 }
 
 pub struct FetchResponse {
@@ -294,13 +295,151 @@ fn tls_config() -> Arc<rustls::ClientConfig> {
         .clone()
 }
 
+#[derive(Clone, Default)]
+pub struct TlsClientOptions {
+    pub servername: String,
+    pub insecure: bool,
+    pub ca: Option<Vec<u8>>,
+}
+
+#[derive(Debug)]
+struct AcceptAnyCert(Arc<rustls::crypto::CryptoProvider>);
+
+impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.0.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+pub fn pem_certificates(
+    pem: &[u8],
+) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+    use rustls::pki_types::pem::PemObject;
+    let certs = rustls::pki_types::CertificateDer::pem_slice_iter(pem)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("invalid certificate: {e}"))?;
+    if certs.is_empty() {
+        return Err("no PEM certificate found".to_string());
+    }
+    Ok(certs)
+}
+
+fn client_config_for(opts: &TlsClientOptions) -> Result<Arc<rustls::ClientConfig>, String> {
+    if !opts.insecure && opts.ca.is_none() {
+        return Ok(tls_config());
+    }
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?;
+    let config = if opts.insecure {
+        builder
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAnyCert(provider)))
+            .with_no_client_auth()
+    } else {
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in pem_certificates(opts.ca.as_deref().unwrap_or_default())? {
+            roots
+                .add(cert)
+                .map_err(|e| format!("invalid CA certificate: {e}"))?;
+        }
+        builder.with_root_certificates(roots).with_no_client_auth()
+    };
+    Ok(Arc::new(config))
+}
+
+pub fn tls_server_config(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+    alpn: &[&str],
+) -> Result<Arc<rustls::ServerConfig>, String> {
+    use rustls::pki_types::pem::PemObject;
+    let certs = pem_certificates(cert_pem)?;
+    let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem)
+        .map_err(|e| format!("invalid private key: {e}"))?;
+    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| e.to_string())?
+    .with_no_client_auth()
+    .with_single_cert(certs, key)
+    .map_err(|e| e.to_string())?;
+    config.alpn_protocols = alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
+    Ok(Arc::new(config))
+}
+
+trait ReadTimeout {
+    fn read_timeout(&self, d: Duration);
+    fn close_notify(&mut self) {}
+}
+
+impl ReadTimeout for TcpStream {
+    fn read_timeout(&self, d: Duration) {
+        let _ = self.set_read_timeout(Some(d));
+    }
+}
+
+impl ReadTimeout for rustls::StreamOwned<rustls::ServerConnection, TcpStream> {
+    fn read_timeout(&self, d: Duration) {
+        let _ = self.sock.set_read_timeout(Some(d));
+    }
+
+    fn close_notify(&mut self) {
+        self.conn.send_close_notify();
+        let _ = self.conn.complete_io(&mut self.sock);
+    }
+}
+
 fn tls_wrap(
     tcp: TcpStream,
-    servername: &str,
+    opts: &TlsClientOptions,
 ) -> Result<rustls::StreamOwned<rustls::ClientConnection, TcpStream>, String> {
+    let servername = opts.servername.as_str();
     let name = rustls::pki_types::ServerName::try_from(servername.to_string())
         .map_err(|e| format!("invalid server name {servername}: {e}"))?;
-    let conn = rustls::ClientConnection::new(tls_config(), name).map_err(|e| e.to_string())?;
+    let conn =
+        rustls::ClientConnection::new(client_config_for(opts)?, name).map_err(|e| e.to_string())?;
     let mut stream = rustls::StreamOwned::new(conn, tcp);
     while stream.conn.is_handshaking() {
         stream
@@ -458,7 +597,7 @@ pub fn socket_connect(
     id: u64,
     host: String,
     port: u16,
-    tls: Option<String>,
+    tls: Option<TlsClientOptions>,
     tx: Sender<IoEvent>,
 ) -> Sender<SocketCmd> {
     let (ctx, crx) = channel::<SocketCmd>();
@@ -523,7 +662,7 @@ pub fn socket_connect(
                 });
                 socket_loop(tcp, stream, id, crx, tx);
             }
-            Some(servername) => match tls_wrap(stream, &servername) {
+            Some(opts) => match tls_wrap(stream, &opts) {
                 Ok(secure) => {
                     let _ = secure
                         .sock
@@ -547,6 +686,7 @@ pub fn socket_listen(
     server: u64,
     ids: Arc<AtomicU64>,
     tx: Sender<IoEvent>,
+    tls: Option<Arc<rustls::ServerConfig>>,
 ) -> std::io::Result<ServerHandle> {
     let listener = TcpListener::bind((host, port))?;
     let addr = listener.local_addr()?;
@@ -565,18 +705,53 @@ pub fn socket_listen(
                 continue;
             };
             let _ = stream.set_nodelay(true);
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
             let id = ids.fetch_add(1, Ordering::SeqCst) + 1;
             let (ctx, crx) = channel::<SocketCmd>();
             let tx2 = tx.clone();
-            let _ = tx.send(IoEvent::Accept {
-                server,
-                id,
-                local,
-                remote,
-                cmd: ctx,
-            });
-            std::thread::spawn(move || socket_loop(tcp, stream, id, crx, tx2));
+            match tls.clone() {
+                None => {
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
+                    let _ = tx.send(IoEvent::Accept {
+                        server,
+                        id,
+                        local,
+                        remote,
+                        cmd: ctx,
+                    });
+                    std::thread::spawn(move || socket_loop(tcp, stream, id, crx, tx2));
+                }
+                Some(config) => {
+                    std::thread::spawn(move || {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                        let Ok(conn) = rustls::ServerConnection::new(config) else {
+                            return;
+                        };
+                        let mut secure = rustls::StreamOwned::new(conn, stream);
+                        while secure.conn.is_handshaking() {
+                            if secure.conn.complete_io(&mut secure.sock).is_err() {
+                                let _ = tcp.shutdown(std::net::Shutdown::Both);
+                                return;
+                            }
+                        }
+                        let _ = secure
+                            .sock
+                            .set_read_timeout(Some(Duration::from_millis(20)));
+                        if tx2
+                            .send(IoEvent::Accept {
+                                server,
+                                id,
+                                local,
+                                remote,
+                                cmd: ctx,
+                            })
+                            .is_err()
+                        {
+                            return;
+                        }
+                        socket_loop(tcp, secure, id, crx, tx2);
+                    });
+                }
+            }
         }
     });
     Ok(ServerHandle { addr, stop })
@@ -871,6 +1046,20 @@ pub fn status_text(status: u16) -> &'static str {
     }
 }
 
+fn fetch_tls_config(opts: &TlsClientOptions) -> Result<ureq::tls::TlsConfig, String> {
+    let mut builder = ureq::tls::TlsConfig::builder();
+    if opts.insecure {
+        builder = builder.disable_verification(true);
+    } else if let Some(ca) = &opts.ca {
+        let certs = pem_certificates(ca)?
+            .into_iter()
+            .map(|c| ureq::tls::Certificate::from_der(c.as_ref()).to_owned())
+            .collect::<Vec<_>>();
+        builder = builder.root_certs(ureq::tls::RootCerts::Specific(Arc::new(certs)));
+    }
+    Ok(builder.build())
+}
+
 fn run_fetch(req: FetchRequest) -> Result<FetchResponse, String> {
     use ureq::RequestExt;
     let mut builder = ureq::http::Request::builder()
@@ -880,6 +1069,7 @@ fn run_fetch(req: FetchRequest) -> Result<FetchResponse, String> {
         builder = builder.header(k.as_str(), v.as_str());
     }
     let redirects = if req.follow { 20 } else { 0 };
+    let tls = fetch_tls_config(&req.tls)?;
     let mut resp = match req.body {
         Some(body) => builder
             .body(body)
@@ -890,6 +1080,7 @@ fn run_fetch(req: FetchRequest) -> Result<FetchResponse, String> {
             .max_redirects_will_error(false)
             .timeout_global(req.timeout)
             .allow_non_standard_methods(true)
+            .tls_config(tls)
             .build()
             .run(),
         None => builder
@@ -901,6 +1092,7 @@ fn run_fetch(req: FetchRequest) -> Result<FetchResponse, String> {
             .max_redirects_will_error(false)
             .timeout_global(req.timeout)
             .allow_non_standard_methods(true)
+            .tls_config(tls)
             .build()
             .run(),
     }
@@ -967,6 +1159,7 @@ pub fn listen(
     server: u64,
     ids: Arc<AtomicU64>,
     tx: Sender<IoEvent>,
+    tls: Option<Arc<rustls::ServerConfig>>,
 ) -> std::io::Result<ServerHandle> {
     let listener = TcpListener::bind((host, port))?;
     let addr = listener.local_addr()?;
@@ -981,7 +1174,8 @@ pub fn listen(
             let tx = tx.clone();
             let flag = flag.clone();
             let ids = ids.clone();
-            std::thread::spawn(move || serve_connection(stream, server, tx, flag, ids));
+            let tls = tls.clone();
+            std::thread::spawn(move || serve_connection(stream, server, tx, flag, ids, tls));
         }
     });
     Ok(ServerHandle { addr, stop })
@@ -1035,9 +1229,10 @@ struct Parsed {
 }
 
 fn read_request(
-    r: &mut BufReader<TcpStream>,
+    r: &mut impl BufRead,
     local: &SocketAddr,
     remote: &SocketAddr,
+    secure: bool,
 ) -> Option<Parsed> {
     let mut budget = MAX_HEAD;
     let mut line = read_line(r, &mut budget)?;
@@ -1087,6 +1282,8 @@ fn read_request(
         .unwrap_or_else(|| local.to_string());
     let url = if target.starts_with("http://") || target.starts_with("https://") {
         target
+    } else if secure {
+        format!("https://{host}{target}")
     } else {
         format!("http://{host}{target}")
     };
@@ -1111,7 +1308,7 @@ fn http_date() -> String {
 }
 
 fn write_reply(
-    w: &mut TcpStream,
+    w: &mut impl Write,
     reply: &HttpReply,
     keep_alive: bool,
     head: bool,
@@ -1169,25 +1366,51 @@ fn serve_connection(
     tx: Sender<IoEvent>,
     stop: Arc<AtomicBool>,
     ids: Arc<AtomicU64>,
+    tls: Option<Arc<rustls::ServerConfig>>,
 ) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let (Ok(local), Ok(remote)) = (stream.local_addr(), stream.peer_addr()) else {
         return;
     };
-    let Ok(mut writer) = stream.try_clone() else {
+    let Ok(tcp) = stream.try_clone() else {
         return;
     };
+    match tls {
+        None => serve_stream(tcp, stream, local, remote, server, tx, stop, ids, false),
+        Some(config) => {
+            let Ok(conn) = rustls::ServerConnection::new(config) else {
+                return;
+            };
+            let secure = rustls::StreamOwned::new(conn, stream);
+            serve_stream(tcp, secure, local, remote, server, tx, stop, ids, true);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn serve_stream<S: Read + Write + ReadTimeout + Send + 'static>(
+    tcp: TcpStream,
+    stream: S,
+    local: SocketAddr,
+    remote: SocketAddr,
+    server: u64,
+    tx: Sender<IoEvent>,
+    stop: Arc<AtomicBool>,
+    ids: Arc<AtomicU64>,
+    secure: bool,
+) {
     let mut reader = BufReader::new(stream);
     while !stop.load(Ordering::SeqCst) {
-        let Some(parsed) = read_request(&mut reader, &local, &remote) else {
+        let Some(parsed) = read_request(&mut reader, &local, &remote, secure) else {
+            let _ = tcp.shutdown(std::net::Shutdown::Both);
             return;
         };
         if wants_upgrade(&parsed.request.headers) {
             let head = reader.buffer().to_vec();
             let stream = reader.into_inner();
-            let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
-            let Ok(tcp) = stream.try_clone() else {
+            stream.read_timeout(Duration::from_millis(20));
+            let Ok(tcp2) = tcp.try_clone() else {
                 return;
             };
             let id = ids.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1206,7 +1429,7 @@ fn serve_connection(
             {
                 return;
             }
-            socket_loop(tcp, stream, id, crx, tx);
+            socket_loop(tcp2, stream, id, crx, tx);
             return;
         }
         let (reply_tx, reply_rx) = channel();
@@ -1224,7 +1447,11 @@ fn serve_connection(
             return;
         };
         let keep_alive = parsed.keep_alive && !stop.load(Ordering::SeqCst);
-        if write_reply(&mut writer, &reply, keep_alive, parsed.head).is_err() || !keep_alive {
+        let writer = reader.get_mut();
+        if write_reply(writer, &reply, keep_alive, parsed.head).is_err() || !keep_alive {
+            let _ = writer.flush();
+            writer.close_notify();
+            let _ = tcp.shutdown(std::net::Shutdown::Both);
             return;
         }
     }

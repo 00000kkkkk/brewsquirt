@@ -1,0 +1,8 @@
+https.request with ca: 200 {"method":"POST","url":"/hello?x=1","body":"payload","encrypted":true}
+https.request insecure: 200 {"method":"POST","url":"/hello?x=1","body":"payload","encrypted":true}
+https.request untrusted: Error string
+fetch with ca: 200 /fetched
+fetch untrusted: fetch failed
+tls echo: echo:ping true
+tls untrusted: error ERR_TLS_HANDSHAKE
+missing key: ERR_MISSING_ARGS

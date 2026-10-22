@@ -135,6 +135,11 @@ pub fn install(vm: &mut Vm) {
     vm.define_global("require", require);
 
     let performance = vm.new_object();
+    performance.set_with_attrs(
+        crate::object::TO_STRING_TAG_KEY,
+        "Performance".into(),
+        crate::object::NON_ENUM | crate::object::READ_ONLY,
+    );
     method(vm, &performance, "now", 0, perf_now);
     vm.define_global("performance", Value::Object(performance));
 

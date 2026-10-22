@@ -3271,7 +3271,8 @@ const NODE_SRC: &str = r##"
       const secure = this.#url.protocol === "https:" || this.#url.protocol === "wss:"
       const port = Number(this.#url.port) || (secure ? 443 : 80)
       const host = this.#url.hostname.replace(/^\[|\]$/g, "")
-      const sock = secure ? tls.connect({ host, port, servername: this.#options.servername ?? host }) : net.connect({ host, port })
+      const agentOptions = this.#options.agent?.options ?? {}
+      const sock = secure ? tls.connect({ host, port, servername: this.#options.servername ?? host, rejectUnauthorized: this.#options.rejectUnauthorized ?? agentOptions.rejectUnauthorized, ca: this.#options.ca ?? agentOptions.ca }) : net.connect({ host, port })
       this.socket = sock
       this.connection = sock
       this.emit("socket", sock)
@@ -3344,7 +3345,9 @@ const NODE_SRC: &str = r##"
       this.headersSent = true
       const body = this.#chunks.length ? Buffer.concat(this.#chunks) : undefined
       if (this.#headers.has("upgrade") || this.#options.createConnection) return this.#rawRequest(body, cb)
-      fetch(this.#url, { method: this.method, headers: this.#headers, body, signal: this.#controller.signal, redirect: "follow" }).then(
+      const agentOptions = this.#options.agent?.options ?? {}
+      const tlsOptions = { rejectUnauthorized: this.#options.rejectUnauthorized ?? agentOptions.rejectUnauthorized, ca: this.#options.ca ?? agentOptions.ca }
+      fetch(this.#url, { method: this.method, headers: this.#headers, body, signal: this.#controller.signal, redirect: "manual", tls: tlsOptions }).then(
         (res) => {
           const incoming = new IncomingResponse(res)
           incoming.req = this
@@ -3354,10 +3357,25 @@ const NODE_SRC: &str = r##"
         },
         (e) => {
           cb()
-          if (!this.destroyed) this.destroy(e)
+          if (!this.destroyed) this.destroy(nodeRequestError(e, this.#url))
         },
       )
     }
+  }
+
+  const nodeRequestError = (e, url) => {
+    if (e?.name === "AbortError") return e
+    const detail = String(e?.cause?.message ?? e?.message ?? e)
+    const host = url.hostname
+    const port = url.port || (url.protocol === "https:" ? "443" : "80")
+    const make = (code, message) => Object.assign(new Error(message), { code, cause: e?.cause })
+    if (/refused/i.test(detail)) return Object.assign(make("ECONNREFUSED", `connect ECONNREFUSED ${host}:${port}`), { errno: -4078, syscall: "connect", address: host, port: Number(port) })
+    if (/self[- ]signed/i.test(detail)) return make("DEPTH_ZERO_SELF_SIGNED_CERT", "self-signed certificate")
+    if (/UnknownIssuer|unknown issuer|not valid for name|NotValidForName|certificate/i.test(detail)) return make(/name/i.test(detail) ? "ERR_TLS_CERT_ALTNAME_INVALID" : "UNABLE_TO_VERIFY_LEAF_SIGNATURE", detail)
+    if (/dns|resolve|lookup|No such host/i.test(detail)) return Object.assign(make("ENOTFOUND", `getaddrinfo ENOTFOUND ${host}`), { syscall: "getaddrinfo", hostname: host })
+    if (/timed? ?out/i.test(detail)) return make("ETIMEDOUT", detail)
+    if (/reset|closed/i.test(detail)) return make("ECONNRESET", "socket hang up")
+    return make(e?.code ?? "ECONNRESET", detail)
   }
 
   function httpRequest(url, options, cb) {
@@ -4224,7 +4242,7 @@ const NODE_SRC: &str = r##"
   class Socket extends Duplex {
     constructor(options = {}) {
       super({ ...options, allowHalfOpen: options.allowHalfOpen ?? false, objectMode: false })
-      this[kSock] = { id: null, connected: false, queued: [], pendingEnd: false, closed: false, hadError: false, timeout: 0, timer: null, host: undefined, port: undefined, tls: !!options[kTls], servername: options.servername }
+      this[kSock] = { id: null, connected: false, queued: [], pendingEnd: false, closed: false, hadError: false, timeout: 0, timer: null, host: undefined, port: undefined, tls: !!options[kTls], servername: options.servername, rejectUnauthorized: options.rejectUnauthorized, ca: options.ca }
       this.connecting = false
       this.pending = true
       this.readyState = "closed"
@@ -4272,8 +4290,9 @@ const NODE_SRC: &str = r##"
       this.connecting = true
       this.readyState = "opening"
       if (cb) this.once("connect", cb)
-      const servername = st.servername ?? options.servername ?? (isIPv4(host) || isIPv6(host) ? undefined : host)
-      const id = native.netConnect(host, port, st.tls, servername, null)
+      const servername = st.servername ?? options.servername ?? host
+      const tlsOptions = st.tls ? { rejectUnauthorized: st.rejectUnauthorized ?? options.rejectUnauthorized, ca: st.ca ?? options.ca } : false
+      const id = native.netConnect(host, port, tlsOptions, servername, null)
       attachSocket(this, id)
       if (options.timeout) this.setTimeout(options.timeout)
       return this
@@ -4391,6 +4410,7 @@ const NODE_SRC: &str = r##"
       if (cb) this.once("listening", cb)
       let result
       try {
+        const material = this instanceof TLSServer ? tlsMaterial(st.options) : [null, null]
         result = native.netListen(host, port, (id, localAddress, localPort, remoteAddress, remotePort) => {
           if (this.maxConnections !== undefined && st.connections.size >= this.maxConnections) {
             native.netDestroy(id)
@@ -4405,7 +4425,7 @@ const NODE_SRC: &str = r##"
             if (st.closing && st.connections.size === 0) this.emit("close")
           })
           this.emit("connection", sock)
-        })
+        }, material[0], material[1], st.options.ALPNProtocols ?? null)
       } catch (e) {
         queueMicrotask(() => this.emit("error", e))
         return this
@@ -4515,11 +4535,9 @@ const NODE_SRC: &str = r##"
       sock.connect(options)
       return sock
     },
-    createSecureContext: () => ({ context: {} }),
-    createServer() {
-      const e = new Error("tls.createServer is not supported in this runtime")
-      e.code = "ENOTSUP"
-      throw e
+    createSecureContext: (options = {}) => ({ context: {}, key: options.key, cert: options.cert, ca: options.ca }),
+    createServer(options, listener) {
+      return new TLSServer(options, listener)
     },
     checkServerIdentity: () => undefined,
     getCiphers: () => ["tls_aes_128_gcm_sha256", "tls_aes_256_gcm_sha384", "tls_chacha20_poly1305_sha256"],
@@ -4530,10 +4548,40 @@ const NODE_SRC: &str = r##"
     DEFAULT_CIPHERS: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256",
     TLSSocket,
   }
-  tls.Server = class TLSServer extends NetServer {
-    listen() {
-      throw tls.createServer()
+  class TLSServer extends NetServer {
+    constructor(options, listener) {
+      if (typeof options === "function") [options, listener] = [{}, options]
+      super(options ?? {})
+      if (typeof listener === "function") this.on("secureConnection", listener)
+      this.on("connection", (sock) => {
+        sock.encrypted = true
+        sock.authorized = false
+        sock.alpnProtocol = false
+        Object.setPrototypeOf(sock, TLSSocket.prototype)
+        this.emit("secureConnection", sock)
+      })
     }
+    setSecureContext(options) {
+      Object.assign(this[kSock].options, options)
+    }
+    addContext() {}
+  }
+  tls.Server = TLSServer
+  const tlsMaterial = (options) => {
+    const ctx = options?.secureContext ?? {}
+    const key = options?.key ?? ctx.key
+    const cert = options?.cert ?? ctx.cert
+    if (options?.pfx) {
+      const e = new Error("PFX/PKCS#12 certificates are not supported in this runtime; pass PEM key and cert")
+      e.code = "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM"
+      throw e
+    }
+    if (key == null || cert == null) {
+      const e = new Error("A TLS server needs both key and cert")
+      e.code = "ERR_MISSING_ARGS"
+      throw e
+    }
+    return [key, cert]
   }
 
   const kChild = Symbol("child")
@@ -6236,6 +6284,9 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 for (k, v) in vm.own_entries(&client) {
                     o.set_own(k, v);
                 }
+                let web = super::web::load(vm)?;
+                let secure = vm.get_prop(&web, "createSecureServer")?;
+                o.set_own("createServer", secure);
                 o.set_hidden("default", Value::Object(o.clone()));
                 Value::Object(o)
             }
