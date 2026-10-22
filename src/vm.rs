@@ -1409,13 +1409,7 @@ impl Vm {
             return Ok(m.get_own("exports").unwrap_or_default());
         }
         if let Some(ns) = self.modules.get(path) {
-            let ns = ns.clone();
-            if let Value::Object(o) = &ns {
-                if let Some(d) = o.get_own("default") {
-                    return Ok(d);
-                }
-            }
-            return Ok(ns);
+            return Ok(ns.clone());
         }
         let src = match std::fs::read_to_string(path) {
             Ok(s) => s,

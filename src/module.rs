@@ -43,39 +43,127 @@ fn with_extension(p: &Path, ext: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn package_main(dir: &Path) -> Option<PathBuf> {
-    for manifest in [MANIFEST, "package.json"] {
-        let Ok(text) = std::fs::read_to_string(dir.join(manifest)) else {
-            continue;
-        };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
-            continue;
-        };
-        let main = v
-            .get("main")
-            .and_then(|m| m.as_str())
-            .or_else(|| v.get("exports").and_then(|e| e.as_str()))
-            .or_else(|| {
-                v.get("exports").and_then(|e| e.get(".")).and_then(|e| {
-                    e.as_str()
-                        .or_else(|| e.get("default").and_then(|d| d.as_str()))
-                })
-            });
-        if let Some(main) = main {
-            let p = dir.join(main);
-            if p.is_file() {
-                return Some(p);
-            }
-            for ext in EXTENSIONS {
-                let q = with_extension(&p, ext);
-                if q.is_file() {
-                    return Some(q);
+const CONDITIONS: [&str; 5] = ["import", "require", "node", "module-sync", "default"];
+
+fn export_target(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Array(items) => items.iter().find_map(export_target),
+        serde_json::Value::Object(map) => {
+            for key in CONDITIONS {
+                if let Some(v) = map.get(key) {
+                    if let Some(t) = export_target(v) {
+                        return Some(t);
+                    }
                 }
             }
-            if p.is_dir() {
-                if let Some(found) = index_file(&p) {
+            None
+        }
+        _ => None,
+    }
+}
+
+fn exports_lookup(exports: &serde_json::Value, sub: &str) -> Option<String> {
+    let key = if sub.is_empty() {
+        ".".to_string()
+    } else {
+        format!("./{sub}")
+    };
+    match exports {
+        serde_json::Value::Object(map) => {
+            let is_map = map.keys().any(|k| k.starts_with('.'));
+            if !is_map {
+                return if sub.is_empty() {
+                    export_target(exports)
+                } else {
+                    None
+                };
+            }
+            if let Some(v) = map.get(&key) {
+                return export_target(v);
+            }
+            for (pattern, v) in map {
+                if let Some((prefix, suffix)) = pattern.split_once('*') {
+                    if key.starts_with(prefix)
+                        && key.ends_with(suffix)
+                        && key.len() >= prefix.len() + suffix.len()
+                    {
+                        let star = &key[prefix.len()..key.len() - suffix.len()];
+                        return export_target(v).map(|t| t.replace('*', star));
+                    }
+                }
+            }
+            None
+        }
+        _ => {
+            if sub.is_empty() {
+                export_target(exports)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn package_json(dir: &Path) -> Option<serde_json::Value> {
+    for manifest in [MANIFEST, "package.json"] {
+        if let Ok(text) = std::fs::read_to_string(dir.join(manifest)) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+fn resolve_in_package(dir: &Path, target: &str) -> Option<PathBuf> {
+    let p = dir.join(target);
+    if p.is_file() {
+        return Some(p);
+    }
+    for ext in EXTENSIONS {
+        let q = with_extension(&p, ext);
+        if q.is_file() {
+            return Some(q);
+        }
+    }
+    if p.is_dir() {
+        return index_file(&p);
+    }
+    None
+}
+
+pub fn package_subpath(dir: &Path, sub: &str) -> Option<PathBuf> {
+    if let Some(v) = package_json(dir) {
+        if let Some(exports) = v.get("exports") {
+            if let Some(target) = exports_lookup(exports, sub) {
+                if let Some(found) = resolve_in_package(dir, &target) {
                     return Some(found);
                 }
+            }
+        }
+    }
+    if sub.is_empty() {
+        package_main(dir)
+    } else {
+        resolve_file(&dir.join(sub))
+    }
+}
+
+fn package_main(dir: &Path) -> Option<PathBuf> {
+    if let Some(v) = package_json(dir) {
+        let mut candidates: Vec<String> = Vec::new();
+        if let Some(target) = v.get("exports").and_then(|e| exports_lookup(e, "")) {
+            candidates.push(target);
+        }
+        for key in ["main", "module"] {
+            if let Some(m) = v.get(key).and_then(|m| m.as_str()) {
+                candidates.push(m.to_string());
+            }
+        }
+        for main in candidates {
+            if let Some(found) = resolve_in_package(dir, &main) {
+                return Some(found);
             }
         }
     }
@@ -126,7 +214,52 @@ pub fn looks_like_commonjs(src: &str) -> bool {
     has_cjs && !has_module_syntax(src)
 }
 
+fn imports_lookup(imports: &serde_json::Value, spec: &str) -> Option<String> {
+    let map = imports.as_object()?;
+    if let Some(v) = map.get(spec) {
+        return export_target(v);
+    }
+    for (pattern, v) in map {
+        if let Some((prefix, suffix)) = pattern.split_once('*') {
+            if spec.starts_with(prefix)
+                && spec.ends_with(suffix)
+                && spec.len() >= prefix.len() + suffix.len()
+            {
+                let star = &spec[prefix.len()..spec.len() - suffix.len()];
+                return export_target(v).map(|t| t.replace('*', star));
+            }
+        }
+    }
+    None
+}
+
+fn resolve_import_alias(spec: &str, from_dir: &Path) -> Result<PathBuf, String> {
+    let mut dir = Some(from_dir.to_path_buf());
+    while let Some(d) = dir {
+        if d.join("package.json").is_file() || d.join(MANIFEST).is_file() {
+            let target = package_json(&d)
+                .and_then(|v| v.get("imports").cloned())
+                .and_then(|imports| imports_lookup(&imports, spec));
+            if let Some(target) = target {
+                if target.starts_with("./") || target.starts_with("../") {
+                    if let Some(found) = resolve_in_package(&d, &target) {
+                        return Ok(canonical(&found));
+                    }
+                } else {
+                    return resolve(&target, &d);
+                }
+            }
+            break;
+        }
+        dir = d.parent().map(Path::to_path_buf);
+    }
+    Err(format!("Cannot find module '{spec}'"))
+}
+
 pub fn resolve(spec: &str, from_dir: &Path) -> Result<PathBuf, String> {
+    if spec.starts_with('#') {
+        return resolve_import_alias(spec, from_dir);
+    }
     let relative = spec.starts_with("./")
         || spec.starts_with("../")
         || spec.starts_with('/')
@@ -151,11 +284,7 @@ pub fn resolve(spec: &str, from_dir: &Path) -> Result<PathBuf, String> {
     while let Some(d) = dir {
         let candidate = d.join(DEPS_DIR).join(&pkg);
         if candidate.is_dir() {
-            let found = if sub.is_empty() {
-                package_main(&candidate)
-            } else {
-                resolve_file(&candidate.join(sub))
-            };
+            let found = package_subpath(&candidate, sub);
             return found.map(|p| canonical(&p)).ok_or_else(|| {
                 format!("Cannot find module '{spec}': package '{pkg}' has no entry point")
             });

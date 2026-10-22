@@ -26,8 +26,10 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
     },
-    #[command(about = "Add a dependency (file:<path> or git:<url>[#ref]) and inject it")]
-    Add { name: String, spec: String },
+    #[command(
+        about = "Add a dependency and inject it: a package from npm (lodash, lodash@^4), npm:<name>@<range>, file:<path> or git:<url>[#ref]"
+    )]
+    Add { name: String, spec: Option<String> },
     #[command(about = "Remove a dependency from squirt.json and nude_modules")]
     Remove { name: String },
     #[command(about = "Inject every dependency deep into nude_modules")]
@@ -94,8 +96,8 @@ fn execute(command: Command) -> Result<ExitCode, String> {
         }
         Command::Add { name, spec } => {
             let root = root()?;
-            pm::add(&root, &name, &spec)?;
-            println!("added {name} -> {spec}");
+            let (dep, stored) = pm::add(&root, &name, spec.as_deref())?;
+            println!("added {dep} -> {stored}");
             install(&root, false)?;
         }
         Command::Remove { name } => {

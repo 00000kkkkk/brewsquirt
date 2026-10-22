@@ -140,13 +140,15 @@ Each archive has a matching `.sha256` checksum file. Unpack it and put `jsq` and
 | Command                          | What it does                                                    |
 | -------------------------------- | --------------------------------------------------------------- |
 | `vrotdaem init [--name <n>]`     | Create `squirt.json` in the current directory                   |
-| `vrotdaem add <name> <spec>`     | Add a dependency, `file:<path>` or `git:<url>[#ref]`            |
+| `vrotdaem add <name> [spec]`     | Add a dependency from npm (`lodash`, `lodash@^4`), or `npm:<name>@<range>`, `file:<path>`, `git:<url>[#ref]` |
 | `vrotdaem remove <name>`         | Remove a dependency                                             |
 | `vrotdaem gluboko [--force]`     | Install all dependencies into `nude_modules/`                   |
 | `vrotdaem run [args...]`         | Run the manifest's `main` with the given arguments              |
 
 ```sh
 vrotdaem init --name my-app
+vrotdaem add lodash
+vrotdaem add dayjs@^1.11
 vrotdaem add utils file:../utils
 vrotdaem add left-pad git:https://github.com/someone/left-pad#v1.0.0
 vrotdaem gluboko
@@ -170,15 +172,18 @@ A manifest looks like this:
   "version": "0.1.0",
   "main": "main.jsq",
   "dependencies": {
+    "lodash": "npm:lodash@^4.17.21",
     "utils": "file:../utils",
     "left-pad": "git:https://github.com/someone/left-pad#v1.0.0"
   }
 }
 ```
 
-Installed packages are imported by bare name:
+Installed packages are imported by bare name; npm packages written as CommonJS or ES modules
+both work, and their own dependencies are installed too, nested when versions conflict:
 
 ```js
+import _ from "lodash"
 import { pad } from "left-pad"
 import { readFile } from "squirt:fs"
 import helpers from "./helpers"

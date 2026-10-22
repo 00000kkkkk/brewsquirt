@@ -1305,10 +1305,11 @@ A specifier is resolved in this order:
    1. `x` as written, if it is a file
    2. `x.jsq`, `x.js`, `x.mjs`, `x.cjs`, `x.json`
    3. `x/index.jsq`, `x/index.js`, `x/index.mjs`, `x/index.cjs`
-3. **Bare names**: any other specifier, such as `left-pad`, is a package installed in
-   `nude_modules/<name>/`. The entry file is the `main` field of that package's `squirt.json`
-   or `package.json` (or its string `exports`), or an `index` file when there is no manifest or
-   no `main`.
+3. **Bare names**: any other specifier, such as `left-pad` or `lodash/fp`, is a package installed
+   in `nude_modules/<name>/`, searched upwards from the importing file so nested installs win.
+   The entry file comes from `exports` in `package.json` (string, array, or an object with
+   `import`, `require`, `node`, `module-sync` and `default` conditions, subpath keys and `*`
+   patterns), then `main`, then `module`, then an `index` file.
 
 A specifier that cannot be resolved is an error.
 
@@ -1775,6 +1776,12 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:querystring`             | `parse`, `stringify`, `escape`, `unescape`, `encode`, `decode`      |
 | `node:tty`, `node:perf_hooks`  | `isatty`; `performance` with `mark`, `measure` and entries, and a `PerformanceObserver` stub |
 | `node:module`                  | `createRequire`, `builtinModules` and `isBuiltin`                   |
+| `node:dns`, `node:dns/promises` | `lookup`, `resolve`, `resolve4`, `resolve6` through the system resolver |
+| `node:vm`                      | `Script`, `runInThisContext`, `runInNewContext` and `runInContext` (sandboxes are plain objects scoped with `with`), `createContext`, `compileFunction` |
+| `node:async_hooks`             | `AsyncLocalStorage` whose store is visible to synchronous callees of `run` and `enterWith`, `AsyncResource`, `createHook` as a no-op |
+| `node:punycode`                | `encode`, `decode`, `toASCII`, `toUnicode`, `ucs2`                |
+| `node:http2`, `node:worker_threads`, `node:cluster`, `node:v8`, `node:inspector`, `node:diagnostics_channel`, `node:constants` | Load with their constants and classes so that packages importing them work; operations that need threads, HTTP/2 or the inspector throw `ENOTSUP` |
+| `node:net`, `node:tls`         | `isIP`, `isIPv4`, `isIPv6`, `SocketAddress`, `BlockList`; sockets and servers exist as classes but connecting throws `ENOTSUP` for now |
 | `node:zlib`                    | `gzip`, `gunzip`, `deflate`, `inflate`, `deflateRaw`, `inflateRaw` and `unzip` as sync, callback and `create*` stream forms, `crc32` and `constants`; no brotli |
 | `node:stream`, `node:stream/promises` | `Readable` (with `Readable.from`, `read`, `push`, `pipe`, async iteration and `toArray`), `Writable`, `Duplex`, `Transform`, `PassThrough`, `pipeline` and `finished` in callback and promise forms |
 | `node:http`, `node:https`      | `request`, `get`, `Agent` and `ClientRequest` built on `fetch`, responses are readable streams with `statusCode` and `headers`; `createServer` and `STATUS_CODES`; requests have `on("data")`, `on("end")`, `setEncoding`, `pipe`, `text()` and `json()`, responses have `writeHead`, `setHeader`, `write`, `end` and `finish` events |
@@ -2012,7 +2019,7 @@ error or an uncaught exception.
 | Command                        | Behavior                                                                  |
 | ------------------------------ | ------------------------------------------------------------------------- |
 | `vrotdaem init [--name <n>]`   | Creates `squirt.json` in the current directory.                           |
-| `vrotdaem add <name> <spec>`   | Adds or replaces a dependency in `squirt.json`.                           |
+| `vrotdaem add <name> [spec]`   | Adds or replaces a dependency in `squirt.json`; without a spec the name is looked up on npm and pinned to `^latest`. |
 | `vrotdaem remove <name>`       | Removes a dependency from `squirt.json`.                                  |
 | `vrotdaem gluboko`             | Installs every dependency into `nude_modules/<name>`.                     |
 | `vrotdaem gluboko --force`     | Deletes `nude_modules/` and reinstalls everything from scratch.           |
@@ -2054,7 +2061,8 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
 
 - `URL.createObjectURL`, BYOB stream readers and `WebSocket`
 - Streaming bodies, WebSockets and HTTPS servers
-- `node:net`, `node:worker_threads`, and ciphers, key pairs and signatures in `node:crypto`
+- TCP sockets in `node:net` and `node:tls`, `node:worker_threads`, and ciphers, key pairs and
+  signatures in `node:crypto`
 - `Intl` covers numbers, plural rules, lists, relative times, collation and segmentation in a
   handful of locales; dates know the month and weekday names, date orders and separators of
   English (US, GB, AU, CA), Ukrainian, Russian, German, French, Spanish, Italian, Portuguese,

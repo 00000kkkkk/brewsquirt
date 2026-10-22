@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `vrotdaem add <name>` installs packages from the npm registry: `vrotdaem add lodash`,
+  `lodash@^4.17`, `@scope/pkg@1.x` or `npm:<name>@<range>`, with semver ranges (`^`, `~`, `x`,
+  `*`, hyphens, `||`, comparators, dist-tags), tarball download and extraction without external
+  tools, recursive installation of the packages' own dependencies and nested copies when
+  versions conflict. The registry can be changed with `JSQ_NPM_REGISTRY`.
+- `node:dns` with `lookup`, `resolve`, `resolve4` and `resolve6`; `node:net` and `node:tls`
+  with `isIP` and friends plus socket and server classes that report `ENOTSUP` instead of
+  failing to load, so packages that merely import them work; `util.formatWithOptions`,
+  `util.parseArgs`, `util.stripVTControlCharacters`, `util.debuglog`, `util.styleText`,
+  `util.aborted`, `util.toUSVString`, `util.getSystemErrorName` and `util.inspect.custom`.
+- `node:vm`, `node:async_hooks` (synchronous `AsyncLocalStorage`), `node:punycode`,
+  `node:diagnostics_channel`, `node:constants`, and loadable `node:http2`,
+  `node:worker_threads`, `node:cluster`, `node:v8` and `node:inspector` whose unsupported
+  operations throw `ENOTSUP`.
+- A regular expression literal may follow `export default`.
+- Package entry resolution honours `exports` conditions (`import`, `require`, `node`,
+  `module-sync`, `default`), subpath exports with `*` patterns, and the `module` field.
+
 ## [1.1.0] - 2026-10-22
 
 ### Added

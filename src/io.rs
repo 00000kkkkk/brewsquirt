@@ -88,6 +88,23 @@ fn agent() -> &'static ureq::Agent {
     })
 }
 
+pub fn http_get(url: &str, accept: Option<&str>) -> Result<Vec<u8>, String> {
+    let mut req = agent().get(url);
+    if let Some(a) = accept {
+        req = req.header("accept", a);
+    }
+    let mut resp = req.call().map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    if status >= 400 {
+        return Err(format!("HTTP {status} {}", status_text(status)));
+    }
+    resp.body_mut()
+        .with_config()
+        .limit(512 * 1024 * 1024)
+        .read_to_vec()
+        .map_err(|e| e.to_string())
+}
+
 pub fn status_text(status: u16) -> &'static str {
     match status {
         100 => "Continue",

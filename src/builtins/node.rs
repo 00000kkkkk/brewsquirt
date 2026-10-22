@@ -2237,10 +2237,636 @@ const NODE_SRC: &str = r##"
     Object.defineProperty(zlib[Name], "name", { value: Name })
   }
 
+  const utilExtras = {
+    inspectCustom: Symbol.for("nodejs.util.inspect.custom"),
+    formatWithOptions: (options, ...args) => native.format(...args),
+    stripVTControlCharacters: (s) => String(s).replace(/[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g, ""),
+    debuglog(section) {
+      const fn = () => {}
+      fn.enabled = false
+      return fn
+    },
+    getSystemErrorName: (code) => ({ "-2": "ENOENT", "-13": "EACCES", "-17": "EEXIST", "-22": "EINVAL", "-39": "ENOTEMPTY", "-98": "EADDRINUSE", "-111": "ECONNREFUSED", "-3008": "ENOTFOUND" })[String(code)] ?? `Unknown system error ${code}`,
+    toUSVString: (s) => String(s).toWellFormed(),
+    styleText: (format, text) => String(text),
+    aborted: (signal, resource) => new Promise((resolve) => signal.aborted ? resolve() : signal.addEventListener("abort", () => resolve(), { once: true })),
+    parseArgs(config = {}) {
+      const args = config.args ?? process.argv.slice(2)
+      const options = config.options ?? {}
+      const strict = config.strict !== false
+      const allowPositionals = config.allowPositionals ?? !strict
+      const values = Object.create(null)
+      const positionals = []
+      const tokens = []
+      const shortMap = {}
+      for (const [name, o] of Object.entries(options)) if (o.short) shortMap[o.short] = name
+      const define = (name, value, raw) => {
+        const o = options[name]
+        if (!o) {
+          if (strict) throw new TypeError(`Unknown option '${raw}'`)
+          values[name] = value ?? true
+          return
+        }
+        if (o.type === "string" && value === undefined) throw new TypeError(`Option '${raw}' argument missing`)
+        const v = o.type === "boolean" ? true : value
+        if (o.multiple) (values[name] ??= []).push(v)
+        else values[name] = v
+      }
+      let i = 0
+      while (i < args.length) {
+        const a = args[i]
+        if (a === "--") {
+          positionals.push(...args.slice(i + 1))
+          break
+        }
+        if (a.startsWith("--")) {
+          const eq = a.indexOf("=")
+          const name = eq < 0 ? a.slice(2) : a.slice(2, eq)
+          let value = eq < 0 ? undefined : a.slice(eq + 1)
+          if (value === undefined && options[name]?.type === "string" && i + 1 < args.length) value = args[++i]
+          define(name, value, a)
+          tokens.push({ kind: "option", name, rawName: a.split("=")[0], value, index: i })
+        } else if (a.startsWith("-") && a.length > 1) {
+          const letters = a.slice(1)
+          for (let j = 0; j < letters.length; j++) {
+            const name = shortMap[letters[j]] ?? letters[j]
+            let value
+            if (options[name]?.type === "string") {
+              value = j + 1 < letters.length ? letters.slice(j + 1) : args[++i]
+              define(name, value, `-${letters[j]}`)
+              break
+            }
+            define(name, undefined, `-${letters[j]}`)
+          }
+          tokens.push({ kind: "option", name: letters, rawName: a, index: i })
+        } else {
+          if (!allowPositionals) throw new TypeError(`Unexpected argument '${a}'`)
+          positionals.push(a)
+          tokens.push({ kind: "positional", value: a, index: i })
+        }
+        i++
+      }
+      for (const [name, o] of Object.entries(options)) if (!(name in values) && o.default !== undefined) values[name] = o.default
+      const result = { values, positionals }
+      if (config.tokens) result.tokens = tokens
+      return result
+    },
+  }
+
+  const isIPv4 = (s) => /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/.test(String(s))
+  const isIPv6 = (s) => {
+    s = String(s)
+    if (!s.includes(":")) return false
+    const zone = s.indexOf("%")
+    if (zone >= 0) s = s.slice(0, zone)
+    const parts = s.split("::")
+    if (parts.length > 2) return false
+    const check = (seg) => seg === "" || seg.split(":").every((h) => /^[0-9a-f]{1,4}$/i.test(h) || isIPv4(h))
+    const count = s.split(":").filter((x) => x !== "").length
+    return parts.every(check) && (parts.length === 2 ? count <= 7 : count === 8 || (s.includes(".") && count === 7))
+  }
+  const net = {
+    isIPv4,
+    isIPv6,
+    isIP: (s) => (isIPv4(s) ? 4 : isIPv6(s) ? 6 : 0),
+  }
+  class Socket extends EventEmitter {
+    constructor(options = {}) {
+      super()
+      this.connecting = false
+      this.destroyed = false
+      this.readable = false
+      this.writable = false
+      this.remoteAddress = undefined
+      this.remotePort = undefined
+    }
+    connect(...args) {
+      const cb = typeof args[args.length - 1] === "function" ? args.pop() : null
+      this.connecting = true
+      queueMicrotask(() => {
+        this.connecting = false
+        const e = new Error("net.Socket connections are not supported yet, use fetch or http.request")
+        e.code = "ENOTSUP"
+        this.emit("error", e)
+        this.emit("close", true)
+      })
+      if (cb) this.once("connect", cb)
+      return this
+    }
+    setEncoding() {
+      return this
+    }
+    setKeepAlive() {
+      return this
+    }
+    setNoDelay() {
+      return this
+    }
+    setTimeout(ms, cb) {
+      if (typeof cb === "function") this.once("timeout", cb)
+      return this
+    }
+    write(data, encoding, cb) {
+      if (typeof encoding === "function") cb = encoding
+      if (typeof cb === "function") queueMicrotask(() => cb(new Error("socket is not connected")))
+      return false
+    }
+    end() {
+      return this
+    }
+    destroy(err) {
+      if (this.destroyed) return this
+      this.destroyed = true
+      queueMicrotask(() => {
+        if (err) this.emit("error", err)
+        this.emit("close", !!err)
+      })
+      return this
+    }
+    ref() {
+      return this
+    }
+    unref() {
+      return this
+    }
+    address() {
+      return {}
+    }
+  }
+  net.Socket = Socket
+  net.Stream = Socket
+  net.createConnection = (...args) => new Socket().connect(...args)
+  net.connect = net.createConnection
+  class NetServer extends EventEmitter {
+    constructor(options, listener) {
+      super()
+      if (typeof options === "function") listener = options
+      if (typeof listener === "function") this.on("connection", listener)
+      this.listening = false
+    }
+    listen() {
+      throw new Error("net.createServer is not supported yet, use http.createServer or serve")
+    }
+    close(cb) {
+      if (typeof cb === "function") queueMicrotask(cb)
+      return this
+    }
+    address() {
+      return null
+    }
+    ref() {
+      return this
+    }
+    unref() {
+      return this
+    }
+  }
+  net.Server = NetServer
+  net.createServer = (options, listener) => new NetServer(options, listener)
+  net.BlockList = class BlockList {
+    addAddress() {}
+    addRange() {}
+    addSubnet() {}
+    check() {
+      return false
+    }
+  }
+  net.SocketAddress = class SocketAddress {
+    constructor(options = {}) {
+      this.address = options.address ?? "127.0.0.1"
+      this.port = options.port ?? 0
+      this.family = options.family ?? "ipv4"
+      this.flowlabel = options.flowlabel ?? 0
+    }
+  }
+
+  const tls = {
+    connect() {
+      throw new Error("tls.connect is not supported yet, use fetch or https.request")
+    },
+    createSecureContext: () => ({}),
+    createServer() {
+      throw new Error("tls.createServer is not supported yet")
+    },
+    checkServerIdentity: () => undefined,
+    getCiphers: () => [],
+    rootCertificates: [],
+    DEFAULT_MIN_VERSION: "TLSv1.2",
+    DEFAULT_MAX_VERSION: "TLSv1.3",
+    DEFAULT_ECDH_CURVE: "auto",
+  }
+  tls.TLSSocket = class TLSSocket extends Socket {}
+  tls.Server = class TLSServer extends NetServer {}
+
+  const dnsLookupAll = (host) => native.dnsLookup(host).map(([address, family]) => ({ address, family }))
+  const dnsPromises = {
+    async lookup(host, options) {
+      const opts = typeof options === "number" ? { family: options } : options ?? {}
+      let list = dnsLookupAll(String(host))
+      if (opts.family === 4 || opts.family === 6 || opts.family === "IPv4" || opts.family === "IPv6") {
+        const want = opts.family === "IPv4" ? 4 : opts.family === "IPv6" ? 6 : opts.family
+        const filtered = list.filter((e) => e.family === want)
+        if (filtered.length) list = filtered
+      }
+      if (!list.length) {
+        const e = new Error(`getaddrinfo ENOTFOUND ${host}`)
+        e.code = "ENOTFOUND"
+        throw e
+      }
+      return opts.all ? list : list[0]
+    },
+    async resolve4(host) {
+      return dnsLookupAll(String(host)).filter((e) => e.family === 4).map((e) => e.address)
+    },
+    async resolve6(host) {
+      return dnsLookupAll(String(host)).filter((e) => e.family === 6).map((e) => e.address)
+    },
+    async resolve(host) {
+      return dnsLookupAll(String(host)).map((e) => e.address)
+    },
+    getServers: () => [],
+    setServers() {},
+  }
+  const callbackify2 = (fn) => (...args) => {
+    const cb = args.pop()
+    fn(...args).then(
+      (v) => (Array.isArray(v) || typeof v !== "object" ? cb(null, v) : cb(null, v.address, v.family)),
+      (e) => cb(e),
+    )
+  }
+  const dns = {
+    lookup: callbackify2(dnsPromises.lookup),
+    resolve4: callbackify2(dnsPromises.resolve4),
+    resolve6: callbackify2(dnsPromises.resolve6),
+    resolve: callbackify2(dnsPromises.resolve),
+    getServers: () => [],
+    setServers() {},
+    promises: dnsPromises,
+    ADDRCONFIG: 1024,
+    V4MAPPED: 2048,
+    ALL: 256,
+  }
+
+  const notSupported = (what) => () => {
+    const e = new Error(`${what} is not supported yet`)
+    e.code = "ENOTSUP"
+    throw e
+  }
+  const http2 = {
+    connect: notSupported("http2.connect"),
+    createServer: notSupported("http2.createServer"),
+    createSecureServer: notSupported("http2.createSecureServer"),
+    getDefaultSettings: () => ({ headerTableSize: 4096, enablePush: true, initialWindowSize: 65535, maxFrameSize: 16384, maxConcurrentStreams: 4294967295, maxHeaderListSize: 65535 }),
+    getPackedSettings: () => Buffer.alloc(0),
+    sensitiveHeaders: Symbol("nodejs.http2.sensitiveHeaders"),
+    constants: {
+      HTTP2_HEADER_STATUS: ":status", HTTP2_HEADER_METHOD: ":method", HTTP2_HEADER_AUTHORITY: ":authority", HTTP2_HEADER_SCHEME: ":scheme", HTTP2_HEADER_PATH: ":path",
+      HTTP2_HEADER_CONTENT_TYPE: "content-type", HTTP2_HEADER_CONTENT_LENGTH: "content-length", HTTP2_HEADER_ACCEPT: "accept", HTTP2_HEADER_USER_AGENT: "user-agent", HTTP2_HEADER_COOKIE: "cookie", HTTP2_HEADER_SET_COOKIE: "set-cookie",
+      HTTP2_METHOD_GET: "GET", HTTP2_METHOD_POST: "POST", HTTP2_METHOD_PUT: "PUT", HTTP2_METHOD_DELETE: "DELETE", HTTP2_METHOD_HEAD: "HEAD", HTTP2_METHOD_PATCH: "PATCH", HTTP2_METHOD_OPTIONS: "OPTIONS",
+      NGHTTP2_NO_ERROR: 0, NGHTTP2_PROTOCOL_ERROR: 1, NGHTTP2_INTERNAL_ERROR: 2, NGHTTP2_CANCEL: 8, NGHTTP2_REFUSED_STREAM: 7,
+      HTTP_STATUS_OK: 200, HTTP_STATUS_CREATED: 201, HTTP_STATUS_NO_CONTENT: 204, HTTP_STATUS_BAD_REQUEST: 400, HTTP_STATUS_NOT_FOUND: 404, HTTP_STATUS_INTERNAL_SERVER_ERROR: 500,
+    },
+  }
+
+  const workerThreads = {
+    isMainThread: true,
+    threadId: 0,
+    parentPort: null,
+    workerData: null,
+    resourceLimits: {},
+    SHARE_ENV: Symbol("nodejs.worker_threads.SHARE_ENV"),
+    Worker: class Worker {
+      constructor() {
+        notSupported("worker_threads.Worker")()
+      }
+    },
+    MessageChannel: class MessageChannel {
+      constructor() {
+        notSupported("MessageChannel")()
+      }
+    },
+    MessagePort: class MessagePort extends EventEmitter {},
+    BroadcastChannel: class BroadcastChannel {
+      constructor() {
+        notSupported("BroadcastChannel")()
+      }
+    },
+    markAsUntransferable() {},
+    moveMessagePortToContext: notSupported("moveMessagePortToContext"),
+    receiveMessageOnPort: () => undefined,
+    setEnvironmentData() {},
+    getEnvironmentData: () => undefined,
+  }
+
+  const v8 = {
+    getHeapStatistics() {
+      const m = process.memoryUsage()
+      return { total_heap_size: m.heapTotal, total_heap_size_executable: 0, total_physical_size: m.rss, total_available_size: 0, used_heap_size: m.heapUsed, heap_size_limit: 0, malloced_memory: 0, peak_malloced_memory: 0, does_zap_garbage: 0, number_of_native_contexts: 1, number_of_detached_contexts: 0, external_memory: m.external ?? 0 }
+    },
+    getHeapSpaceStatistics: () => [],
+    getHeapCodeStatistics: () => ({}),
+    setFlagsFromString() {},
+    cachedDataVersionTag: () => 0,
+    serialize: (v) => Buffer.from(JSON.stringify(v)),
+    deserialize: (b) => JSON.parse(Buffer.from(b).toString()),
+    writeHeapSnapshot: notSupported("v8.writeHeapSnapshot"),
+    takeCoverage() {},
+    stopCoverage() {},
+  }
+
+  const indirectEval = eval
+  class VmScript {
+    #code
+    constructor(code, options) {
+      this.#code = String(code)
+      this.filename = typeof options === "string" ? options : options?.filename ?? "evalmachine.<anonymous>"
+    }
+    runInThisContext() {
+      return indirectEval(this.#code)
+    }
+    runInContext(context) {
+      return vmRun(this.#code, context)
+    }
+    runInNewContext(context = {}) {
+      return vmRun(this.#code, context)
+    }
+    createCachedData() {
+      return Buffer.alloc(0)
+    }
+  }
+  const contexts = new WeakSet()
+  const vmRun = (code, sandbox) => {
+    if (sandbox === undefined || sandbox === null) return indirectEval(String(code))
+    const fn = new Function("__sandbox__", `with (__sandbox__) { return eval(${JSON.stringify(String(code))}) }`)
+    return fn(sandbox)
+  }
+  const vmModule = {
+    Script: VmScript,
+    createContext(sandbox = {}) {
+      contexts.add(sandbox)
+      return sandbox
+    },
+    isContext: (o) => contexts.has(o),
+    runInThisContext: (code) => indirectEval(String(code)),
+    runInContext: (code, context) => vmRun(code, context),
+    runInNewContext: (code, context = {}) => vmRun(code, context),
+    compileFunction: (code, params = []) => new Function(...params, String(code)),
+    measureMemory: async () => ({ total: { jsMemoryEstimate: process.memoryUsage().heapUsed, jsMemoryRange: [0, 0] } }),
+  }
+
+  const cluster = Object.assign(new EventEmitter(), {
+    isPrimary: true,
+    isMaster: true,
+    isWorker: false,
+    workers: {},
+    worker: undefined,
+    settings: {},
+    SCHED_NONE: 1,
+    SCHED_RR: 2,
+    schedulingPolicy: 2,
+    fork: notSupported("cluster.fork"),
+    setupPrimary() {},
+    setupMaster() {},
+    disconnect(cb) {
+      if (typeof cb === "function") queueMicrotask(cb)
+    },
+  })
+
+  const inspector = {
+    open() {},
+    close() {},
+    url: () => undefined,
+    waitForDebugger() {},
+    console,
+    Session: class Session extends EventEmitter {
+      connect() {}
+      connectToMainThread() {}
+      disconnect() {}
+      post(method, params, cb) {
+        const callback = typeof params === "function" ? params : cb
+        if (typeof callback === "function") queueMicrotask(() => callback(new Error("inspector is not supported")))
+      }
+    },
+  }
+
+  const channels = new Map()
+  class Channel {
+    #subs = new Set()
+    constructor(name) {
+      this.name = name
+    }
+    get hasSubscribers() {
+      return this.#subs.size > 0
+    }
+    subscribe(fn) {
+      this.#subs.add(fn)
+    }
+    unsubscribe(fn) {
+      return this.#subs.delete(fn)
+    }
+    publish(message) {
+      for (const fn of this.#subs) fn(message, this.name)
+    }
+    bindStore() {}
+    unbindStore() {
+      return false
+    }
+    runStores(data, fn, thisArg, ...args) {
+      return fn.apply(thisArg, args)
+    }
+  }
+  const diagnosticsChannel = {
+    channel(name) {
+      if (!channels.has(name)) channels.set(name, new Channel(name))
+      return channels.get(name)
+    },
+    hasSubscribers: (name) => channels.get(name)?.hasSubscribers ?? false,
+    subscribe(name, fn) {
+      diagnosticsChannel.channel(name).subscribe(fn)
+    },
+    unsubscribe: (name, fn) => channels.get(name)?.unsubscribe(fn) ?? false,
+    tracingChannel(name) {
+      const prefix = typeof name === "string" ? name : ""
+      const mk = (k) => diagnosticsChannel.channel(`tracing:${prefix}:${k}`)
+      return { start: mk("start"), end: mk("end"), asyncStart: mk("asyncStart"), asyncEnd: mk("asyncEnd"), error: mk("error"), traceSync: (fn, ctx, thisArg, ...args) => fn.apply(thisArg, args), tracePromise: (fn, ctx, thisArg, ...args) => fn.apply(thisArg, args), traceCallback: (fn, pos, ctx, thisArg, ...args) => fn.apply(thisArg, args), subscribe() {}, unsubscribe() {} }
+    },
+    Channel,
+  }
+
+  class AsyncLocalStorage {
+    #store
+    #active = false
+    static bind(fn) {
+      return fn
+    }
+    static snapshot() {
+      return (fn, ...args) => fn(...args)
+    }
+    getStore() {
+      return this.#active ? this.#store : undefined
+    }
+    run(store, fn, ...args) {
+      const prev = [this.#active, this.#store]
+      this.#active = true
+      this.#store = store
+      try {
+        return fn(...args)
+      } finally {
+        ;[this.#active, this.#store] = prev
+      }
+    }
+    exit(fn, ...args) {
+      const prev = [this.#active, this.#store]
+      this.#active = false
+      try {
+        return fn(...args)
+      } finally {
+        ;[this.#active, this.#store] = prev
+      }
+    }
+    enterWith(store) {
+      this.#active = true
+      this.#store = store
+    }
+    disable() {
+      this.#active = false
+      this.#store = undefined
+    }
+  }
+  let asyncIdCounter = 1
+  const asyncHooks = {
+    AsyncLocalStorage,
+    AsyncResource: class AsyncResource {
+      constructor(type) {
+        this.type = type
+        this.id = asyncIdCounter++
+      }
+      runInAsyncScope(fn, thisArg, ...args) {
+        return fn.apply(thisArg, args)
+      }
+      emitDestroy() {
+        return this
+      }
+      asyncId() {
+        return this.id
+      }
+      triggerAsyncId() {
+        return 0
+      }
+      bind(fn) {
+        return fn
+      }
+      static bind(fn) {
+        return fn
+      }
+    },
+    createHook: () => ({ enable() { return this }, disable() { return this } }),
+    executionAsyncId: () => 1,
+    triggerAsyncId: () => 0,
+    executionAsyncResource: () => ({}),
+  }
+
+  const punycodeBase = 36
+  const punycodeAdapt = (delta, numPoints, firstTime) => {
+    delta = firstTime ? Math.floor(delta / 700) : delta >> 1
+    delta += Math.floor(delta / numPoints)
+    let k = 0
+    while (delta > 455) {
+      delta = Math.floor(delta / 35)
+      k += punycodeBase
+    }
+    return k + Math.floor((36 * delta) / (delta + 38))
+  }
+  const punycodeDigit = (d) => String.fromCharCode(d + 22 + 75 * (d < 26))
+  const punycodeEncode = (input) => {
+    const cps = [...input].map((c) => c.codePointAt(0))
+    let output = cps.filter((c) => c < 0x80).map((c) => String.fromCharCode(c)).join("")
+    const basicLength = output.length
+    let handled = basicLength
+    if (basicLength) output += "-"
+    let n = 128
+    let delta = 0
+    let bias = 72
+    while (handled < cps.length) {
+      const m = Math.min(...cps.filter((c) => c >= n))
+      delta += (m - n) * (handled + 1)
+      n = m
+      for (const c of cps) {
+        if (c < n) delta++
+        if (c === n) {
+          let q = delta
+          for (let k = punycodeBase; ; k += punycodeBase) {
+            const t = k <= bias ? 1 : k >= bias + 26 ? 26 : k - bias
+            if (q < t) break
+            output += punycodeDigit(t + ((q - t) % (punycodeBase - t)))
+            q = Math.floor((q - t) / (punycodeBase - t))
+          }
+          output += punycodeDigit(q)
+          bias = punycodeAdapt(delta, handled + 1, handled === basicLength)
+          delta = 0
+          handled++
+        }
+      }
+      delta++
+      n++
+    }
+    return output
+  }
+  const punycodeDecode = (input) => {
+    const out = []
+    const basic = Math.max(input.lastIndexOf("-"), 0)
+    for (let i = 0; i < basic; i++) out.push(input.charCodeAt(i))
+    let n = 128
+    let bias = 72
+    let i = 0
+    for (let idx = basic > 0 ? basic + 1 : 0; idx < input.length; ) {
+      const oldi = i
+      let w = 1
+      for (let k = punycodeBase; ; k += punycodeBase) {
+        const code = input.charCodeAt(idx++)
+        const digit = code - 48 < 10 ? code - 22 : code - 65 < 26 ? code - 65 : code - 97 < 26 ? code - 97 : punycodeBase
+        i += digit * w
+        const t = k <= bias ? 1 : k >= bias + 26 ? 26 : k - bias
+        if (digit < t) break
+        w *= punycodeBase - t
+      }
+      bias = punycodeAdapt(i - oldi, out.length + 1, oldi === 0)
+      n += Math.floor(i / (out.length + 1))
+      i %= out.length + 1
+      out.splice(i++, 0, n)
+    }
+    return String.fromCodePoint(...out)
+  }
+  const punycode = {
+    version: "2.3.1",
+    encode: punycodeEncode,
+    decode: punycodeDecode,
+    toASCII: (domain) => String(domain).split(".").map((label) => (/[^\x00-\x7f]/.test(label) ? "xn--" + punycodeEncode(label.toLowerCase()) : label)).join("."),
+    toUnicode: (domain) => String(domain).split(".").map((label) => (label.toLowerCase().startsWith("xn--") ? punycodeDecode(label.slice(4)) : label)).join("."),
+    ucs2: { decode: (s) => [...String(s)].map((c) => c.codePointAt(0)), encode: (cps) => String.fromCodePoint(...cps) },
+  }
+
+  const nodeConstants = { O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, S_IFMT: 61440, S_IFREG: 32768, S_IFDIR: 16384, S_IFLNK: 40960, F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, SIGINT: 2, SIGTERM: 15, SIGKILL: 9, SIGHUP: 1, E2BIG: 7, EACCES: 13, EEXIST: 17, ENOENT: 2, ENOTDIR: 20, EISDIR: 21, EINVAL: 22, ENOTEMPTY: 39, UV_UDP_REUSEADDR: 4 }
+
   return {
     crypto,
     zlib,
     stream,
+    utilExtras,
+    http2,
+    workerThreads,
+    v8,
+    vmModule,
+    cluster,
+    inspector,
+    diagnosticsChannel,
+    asyncHooks,
+    punycode,
+    nodeConstants,
+    net,
+    tls,
+    dns,
+    dnsPromises,
     streamPromises,
     httpClient,
     StringDecoder,
@@ -2281,7 +2907,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let n = vm.new_object();
-    let natives: [(&str, u32, crate::object::NativeFn); 27] = [
+    let natives: [(&str, u32, crate::object::NativeFn); 29] = [
         ("read", 1, fs_read),
         ("write", 3, fs_write),
         ("exists", 1, fs_exists),
@@ -2309,6 +2935,8 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         ("randomBytes", 1, crypto_random_bytes),
         ("zlib", 3, zlib_op),
         ("crc32", 2, zlib_crc32),
+        ("format", 0, native_format),
+        ("dnsLookup", 1, dns_lookup),
     ];
     for (name, arity, f) in natives {
         method(vm, &n, name, arity, f);
@@ -2399,6 +3027,51 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 let z = vm.get_prop(&n, "zlib")?;
                 with_default(vm, z)?
             }
+            "net" | "tls" | "http2" | "v8" | "cluster" | "inspector" | "punycode" => {
+                let n = load(vm)?;
+                let m = vm.get_prop(&n, name)?;
+                with_default(vm, m)?
+            }
+            "worker_threads" => {
+                let n = load(vm)?;
+                let m = vm.get_prop(&n, "workerThreads")?;
+                with_default(vm, m)?
+            }
+            "vm" => {
+                let n = load(vm)?;
+                let m = vm.get_prop(&n, "vmModule")?;
+                with_default(vm, m)?
+            }
+            "diagnostics_channel" => {
+                let n = load(vm)?;
+                let m = vm.get_prop(&n, "diagnosticsChannel")?;
+                with_default(vm, m)?
+            }
+            "async_hooks" => {
+                let n = load(vm)?;
+                let m = vm.get_prop(&n, "asyncHooks")?;
+                with_default(vm, m)?
+            }
+            "constants" => {
+                let n = load(vm)?;
+                let m = vm.get_prop(&n, "nodeConstants")?;
+                with_default(vm, m)?
+            }
+            "inspector/promises" => {
+                let n = load(vm)?;
+                let m = vm.get_prop(&n, "inspector")?;
+                with_default(vm, m)?
+            }
+            "dns" => {
+                let n = load(vm)?;
+                let d = vm.get_prop(&n, "dns")?;
+                with_default(vm, d)?
+            }
+            "dns/promises" => {
+                let n = load(vm)?;
+                let d = vm.get_prop(&n, "dnsPromises")?;
+                with_default(vm, d)?
+            }
             "module" => {
                 let o = vm.new_object();
                 let require = vm.globals.get("require").cloned().unwrap_or_default();
@@ -2448,6 +3121,24 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 for key in ["promisify", "callbackify", "deprecate", "inherits", "types"] {
                     let v = vm.get_prop(&n, key)?;
                     o.set_own(key, v);
+                }
+                let extras = vm.get_prop(&n, "utilExtras")?;
+                let custom = vm.get_prop(&extras, "inspectCustom")?;
+                for (k, x) in vm.own_entries(&extras) {
+                    if &*k != "inspectCustom" {
+                        o.set_own(k, x);
+                    }
+                }
+                if let Some(Value::Object(inspect)) = o.get_own("inspect") {
+                    if inspect.get_own("custom").is_none() {
+                        inspect.set_own("custom", custom);
+                        let defaults = vm.new_object();
+                        inspect.set_own("defaultOptions", Value::Object(defaults));
+                        let colors = vm.new_object();
+                        inspect.set_own("colors", Value::Object(colors));
+                        let styles = vm.new_object();
+                        inspect.set_own("styles", Value::Object(styles));
+                    }
                 }
                 let te = vm.globals.get("TextEncoder").cloned().unwrap_or_default();
                 let td = vm.globals.get("TextDecoder").cloned().unwrap_or_default();
@@ -2678,24 +3369,34 @@ fn zlib_crc32(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(Value::Number(h.finalize() as f64))
 }
 
-pub const BUILTIN_MODULES: [&str; 26] = [
+pub const BUILTIN_MODULES: [&str; 43] = [
     "assert",
     "assert/strict",
+    "async_hooks",
     "buffer",
     "child_process",
+    "cluster",
+    "constants",
     "crypto",
+    "diagnostics_channel",
+    "dns",
+    "dns/promises",
     "events",
     "fs",
     "fs/promises",
     "http",
+    "http2",
     "https",
+    "inspector",
     "module",
+    "net",
     "os",
     "path",
     "path/posix",
     "path/win32",
     "perf_hooks",
     "process",
+    "punycode",
     "querystring",
     "readline",
     "readline/promises",
@@ -2704,7 +3405,14 @@ pub const BUILTIN_MODULES: [&str; 26] = [
     "string_decoder",
     "timers",
     "timers/promises",
+    "tls",
     "tty",
+    "url",
+    "util",
+    "v8",
+    "vm",
+    "worker_threads",
+    "zlib",
 ];
 
 fn module_create_require(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
@@ -2714,9 +3422,7 @@ fn module_create_require(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
 fn module_is_builtin(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let name = vm.to_string(&arg(args, 0))?;
     let bare = name.strip_prefix("node:").unwrap_or(&name);
-    Ok(Value::Bool(
-        BUILTIN_MODULES.contains(&bare) || bare == "url" || bare == "util" || bare == "zlib",
-    ))
+    Ok(Value::Bool(BUILTIN_MODULES.contains(&bare)))
 }
 
 fn timers_set_timeout(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
@@ -2726,6 +3432,42 @@ fn timers_set_timeout(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let (resolve, _) = vm.resolving_functions(&p);
     vm.add_timer(resolve, ms, vec![value], false);
     Ok(Value::Object(p))
+}
+
+fn native_format(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    Ok(super::system::format_args(vm, args)?.into())
+}
+
+fn dns_lookup(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    use std::net::ToSocketAddrs;
+    let host = vm.to_string(&arg(args, 0))?;
+    let addrs = match (host.as_ref(), 0u16).to_socket_addrs() {
+        Ok(a) => a,
+        Err(e) => {
+            let err = vm.make_error(ErrorKind::Error, format!("getaddrinfo ENOTFOUND {host}"));
+            if let Value::Object(o) = &err {
+                o.set_own("code", "ENOTFOUND".into());
+                o.set_own("errno", Value::Number(-3008.0));
+                o.set_own("syscall", "getaddrinfo".into());
+                o.set_own("hostname", Value::Str(host.clone()));
+                o.set_own("cause", e.to_string().into());
+            }
+            return Err(err);
+        }
+    };
+    let mut out = Vec::new();
+    let mut seen = Vec::new();
+    for a in addrs {
+        let ip = a.ip().to_string();
+        if seen.contains(&ip) {
+            continue;
+        }
+        seen.push(ip.clone());
+        let family = if a.is_ipv4() { 4.0 } else { 6.0 };
+        let pair = vm.new_array(vec![Value::Str(ip.into()), Value::Number(family)]);
+        out.push(pair);
+    }
+    Ok(vm.new_array(out))
 }
 
 fn native_inspect(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {

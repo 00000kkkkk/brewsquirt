@@ -96,6 +96,7 @@ fn regex_allowed(prev: Option<&Tok>) -> bool {
                 | "yield"
                 | "await"
                 | "extends"
+                | "default"
         ),
         Some(Tok::Punct(p)) => !matches!(p, P::RParen | P::RBracket | P::PlusPlus | P::MinusMinus),
         Some(Tok::Eof) => true,

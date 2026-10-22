@@ -1,5 +1,9 @@
+pub mod npm;
+pub mod semver;
+
 use crate::module::{DEPS_DIR, MANIFEST};
 use indexmap::IndexMap;
+use semver::Range;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fs;
@@ -27,14 +31,41 @@ fn default_main() -> String {
     "index.jsq".to_string()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum Spec {
     File(PathBuf),
     Git { url: String, rev: Option<String> },
+    Npm { name: String, range: Range },
+}
+
+fn looks_like_package_name(s: &str) -> bool {
+    let (name, _) = npm::split_name_range(s);
+    if name.is_empty() || name.len() > 214 {
+        return false;
+    }
+    let body = name.strip_prefix('@').unwrap_or(&name);
+    let mut parts = body.split('/');
+    let first = parts.next().unwrap_or("");
+    let valid = |p: &str| {
+        !p.is_empty()
+            && p.chars().all(|c| {
+                c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '-' | '_' | '.')
+            })
+    };
+    if name.starts_with('@') {
+        matches!(parts.next(), Some(second) if valid(first) && valid(second))
+            && parts.next().is_none()
+    } else {
+        valid(first) && parts.next().is_none()
+    }
 }
 
 impl Spec {
     pub fn parse(s: &str) -> Result<Spec, String> {
+        Spec::parse_for(None, s)
+    }
+
+    pub fn parse_for(dep_name: Option<&str>, s: &str) -> Result<Spec, String> {
         if let Some(path) = s.strip_prefix("file:") {
             return Ok(Spec::File(PathBuf::from(path)));
         }
@@ -45,9 +76,28 @@ impl Spec {
             };
             return Ok(Spec::Git { url, rev });
         }
-        Err(format!(
-            "unsupported dependency spec '{s}', use file:<path> or git:<url>[#ref]"
-        ))
+        let npm_spec = s.strip_prefix("npm:").unwrap_or(s);
+        if npm_spec.contains("://") {
+            return Err(format!(
+                "unsupported dependency spec '{s}', use a package name like lodash@^4, npm:<name>@<range>, file:<path> or git:<url>[#ref]"
+            ));
+        }
+        let (name, range_text) = if looks_like_package_name(npm_spec) {
+            npm::split_name_range(npm_spec)
+        } else if let Some(dep) = dep_name {
+            (dep.to_string(), npm_spec.to_string())
+        } else {
+            return Err(format!(
+                "unsupported dependency spec '{s}', use a package name like lodash@^4, npm:<name>@<range>, file:<path> or git:<url>[#ref]"
+            ));
+        };
+        let range = Range::parse(&range_text)
+            .ok_or_else(|| format!("invalid version range '{range_text}' for {name}"))?;
+        Ok(Spec::Npm { name, range })
+    }
+
+    pub fn is_npm(&self) -> bool {
+        matches!(self, Spec::Npm { .. })
     }
 }
 
@@ -128,8 +178,12 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn fetch(spec: &Spec, base: &Path, dest: &Path) -> Result<(), String> {
+fn fetch(spec: &Spec, base: &Path, dest: &Path) -> Result<Option<String>, String> {
     match spec {
+        Spec::Npm { name, range } => {
+            let resolved = npm::install(name, range, dest)?;
+            Ok(Some(resolved.version.to_string()))
+        }
         Spec::File(p) => {
             let src = if p.is_absolute() {
                 p.clone()
@@ -139,7 +193,8 @@ fn fetch(spec: &Spec, base: &Path, dest: &Path) -> Result<(), String> {
             if !src.is_dir() {
                 return Err(format!("{} is not a directory", src.display()));
             }
-            copy_dir(&src, dest)
+            copy_dir(&src, dest)?;
+            Ok(None)
         }
         Spec::Git { url, rev } => {
             let mut cmd = Command::new("git");
@@ -153,9 +208,27 @@ fn fetch(spec: &Spec, base: &Path, dest: &Path) -> Result<(), String> {
                 return Err(format!("git clone {url} failed"));
             }
             let _ = fs::remove_dir_all(dest.join(".git"));
-            Ok(())
+            Ok(None)
         }
     }
+}
+
+fn dependencies_of(dir: &Path) -> Result<IndexMap<String, String>, String> {
+    if dir.join(MANIFEST).is_file() {
+        return Ok(read_manifest(dir)?.dependencies);
+    }
+    let mut out = IndexMap::new();
+    for (name, raw) in npm::package_dependencies(dir) {
+        let spec = if let Some(alias) = raw.strip_prefix("npm:") {
+            format!("npm:{alias}")
+        } else if Range::parse(&raw).is_some() {
+            format!("npm:{name}@{raw}")
+        } else {
+            continue;
+        };
+        out.insert(name, spec);
+    }
+    Ok(out)
 }
 
 pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Report, String> {
@@ -165,53 +238,89 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
         fs::remove_dir_all(&nude).map_err(|e| format!("cannot wipe {DEPS_DIR}: {e}"))?;
     }
     fs::create_dir_all(&nude).map_err(|e| format!("cannot create {DEPS_DIR}: {e}"))?;
-    let mut queue: VecDeque<(String, String, PathBuf)> = manifest
+    let mut queue: VecDeque<(String, String, PathBuf, PathBuf)> = manifest
         .dependencies
         .iter()
-        .map(|(n, s)| (n.clone(), s.clone(), root.to_path_buf()))
+        .map(|(n, s)| (n.clone(), s.clone(), root.to_path_buf(), root.to_path_buf()))
         .collect();
-    let mut seen = Vec::new();
+    let mut seen: Vec<PathBuf> = Vec::new();
     let mut report = Report::default();
-    while let Some((name, raw, base)) = queue.pop_front() {
-        if seen.contains(&name) {
+    while let Some((name, raw, base, holder)) = queue.pop_front() {
+        let spec = Spec::parse_for(Some(&name), &raw)?;
+        let top = nude.join(&name);
+        let (dest, satisfied) = match &spec {
+            Spec::Npm { range, .. } if top.exists() => match npm::installed_version(&top) {
+                Some(v) if range.matches(&v) => (top.clone(), true),
+                _ => {
+                    let nested = holder.join(DEPS_DIR).join(&name);
+                    let ok = nested.exists();
+                    (nested, ok)
+                }
+            },
+            _ => {
+                let exists = top.exists();
+                (top.clone(), exists)
+            }
+        };
+        if seen.contains(&dest) {
             continue;
         }
-        seen.push(name.clone());
-        let dest = nude.join(&name);
-        let spec = Spec::parse(&raw)?;
+        seen.push(dest.clone());
         let origin = match &spec {
             Spec::File(p) if p.is_absolute() => p.clone(),
             Spec::File(p) => base.join(p),
-            Spec::Git { .. } => dest.clone(),
+            _ => dest.clone(),
         };
-        if dest.exists() {
+        if satisfied {
             report.skipped.push(name.clone());
         } else {
             log(&format!("injecting {name} ({raw})"));
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
-            if let Err(e) = fetch(&spec, &base, &dest) {
-                let _ = fs::remove_dir_all(&dest);
-                return Err(format!("{name}: {e}"));
+            match fetch(&spec, &base, &dest) {
+                Ok(Some(version)) => {
+                    let nested = dest != top;
+                    report.injected.push(if nested {
+                        format!("{name}@{version} (nested)")
+                    } else {
+                        format!("{name}@{version}")
+                    });
+                }
+                Ok(None) => report.injected.push(name.clone()),
+                Err(e) => {
+                    let _ = fs::remove_dir_all(&dest);
+                    return Err(format!("{name}: {e}"));
+                }
             }
-            report.injected.push(name.clone());
         }
-        if dest.join(MANIFEST).is_file() {
-            let sub = read_manifest(&dest)?;
-            for (n, s) in sub.dependencies {
-                queue.push_back((n, s, origin.clone()));
-            }
+        for (n, s) in dependencies_of(&dest)? {
+            queue.push_back((n, s, origin.clone(), dest.clone()));
         }
     }
     Ok(report)
 }
 
-pub fn add(root: &Path, name: &str, spec: &str) -> Result<(), String> {
-    Spec::parse(spec)?;
+pub fn add(root: &Path, name: &str, spec: Option<&str>) -> Result<(String, String), String> {
+    let raw = spec.unwrap_or(name);
+    let parsed = Spec::parse_for(Some(name), raw)?;
+    let (dep_name, stored) = match &parsed {
+        Spec::Npm { name: pkg, range } => {
+            let text = range.text();
+            let stored = if text.is_empty() || text == "*" || text == "latest" {
+                let latest = npm::latest_version(pkg)?;
+                format!("npm:{pkg}@^{latest}")
+            } else {
+                format!("npm:{pkg}@{text}")
+            };
+            (pkg.clone(), stored)
+        }
+        _ => (name.to_string(), raw.to_string()),
+    };
     let mut m = read_manifest(root)?;
-    m.dependencies.insert(name.to_string(), spec.to_string());
-    write_manifest(root, &m)
+    m.dependencies.insert(dep_name.clone(), stored.clone());
+    write_manifest(root, &m)?;
+    Ok((dep_name, stored))
 }
 
 pub fn remove(root: &Path, name: &str) -> Result<bool, String> {

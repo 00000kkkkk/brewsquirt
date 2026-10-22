@@ -97,7 +97,7 @@ fn rejects_unknown_spec() {
     let base = temp_dir("spec");
     let out = vrotdaem(&base, &["init"]);
     assert!(out.status.success());
-    let out = vrotdaem(&base, &["add", "thing", "npm:thing"]);
+    let out = vrotdaem(&base, &["add", "thing", "nope://thing"]);
     assert!(!out.status.success());
     assert!(text(&out.stderr).contains("unsupported dependency spec"));
     let _ = std::fs::remove_dir_all(&base);
