@@ -237,6 +237,7 @@ pub struct EvalCtx {
     pub in_function: bool,
     pub field_init: bool,
     pub strict: bool,
+    pub in_params: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -250,6 +251,7 @@ pub struct FuncDef {
     pub is_generator: bool,
     pub uses_arguments: bool,
     pub strict: bool,
+    pub has_eval: bool,
     pub line: u32,
     pub span: (u32, u32),
 }

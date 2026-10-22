@@ -270,6 +270,10 @@ fn from(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         Value::Object(_) => vm.get_prop(&src, crate::object::ITER_KEY)?.is_nullish(),
         _ => false,
     };
+    let f = arg(args, 1);
+    if !f.is_undefined() && !array_like && src.is_object() {
+        return generic(vm, "from", this, args);
+    }
     let list = match &src {
         Value::Object(_) if array_like => {
             let n = vm.get_prop(&src, "length")?;
@@ -285,14 +289,14 @@ fn from(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         }
         _ => vm.iterate(&src)?,
     };
-    let f = arg(args, 1);
     if f.is_undefined() {
         return Ok(vm.new_array(list));
     }
     expect_fn(vm, &f)?;
+    let this_arg = arg(args, 2);
     let mut out = Vec::with_capacity(list.len());
     for (i, v) in list.into_iter().enumerate() {
-        out.push(vm.call_value(&f, Value::Undefined, &[v, Value::Number(i as f64)])?);
+        out.push(vm.call_value(&f, this_arg.clone(), &[v, Value::Number(i as f64)])?);
     }
     Ok(vm.new_array(out))
 }

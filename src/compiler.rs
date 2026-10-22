@@ -57,6 +57,7 @@ struct Local {
     is_const: bool,
     tdz: bool,
     sticky: bool,
+    lexical: bool,
 }
 
 struct LoopCtx {
@@ -106,7 +107,7 @@ struct FnState {
     evals: Vec<Rc<EvalScope>>,
     strict: bool,
     self_slot: Option<u32>,
-    annexb: Vec<Rc<str>>,
+    annexb: Vec<*const FuncDef>,
 }
 
 impl FnState {
@@ -162,73 +163,141 @@ pub struct Compiler {
     export_names: Vec<(Rc<str>, Rc<str>)>,
     completion: Option<(usize, u32)>,
     script_eval: u8,
+    in_eval: bool,
+    eval_leak_vars: bool,
+    defining_fn: bool,
     link_imports: Vec<(Rc<str>, Vec<Rc<str>>)>,
     reexport_sources: Vec<(Rc<str>, Rc<str>)>,
     ns_imports: Vec<(Rc<str>, Rc<str>)>,
 }
 
-fn collect_annexb(s: &Stmt, out: &mut Vec<Rc<str>>, nested: bool) {
-    match &s.kind {
-        StmtKind::Function(f) => {
+type AnnexB = Vec<(Rc<str>, *const FuncDef)>;
+
+fn annexb_list(list: &[&Stmt], enclosing: &mut Vec<Rc<str>>, nested: bool, out: &mut AnnexB) {
+    let mut lex = Vec::new();
+    let mut fns = Vec::new();
+    for s in list {
+        match &s.kind {
+            StmtKind::Decl(k, decls) if *k != DeclKind::Var => {
+                for (p, _) in decls {
+                    p.bound_names(&mut lex);
+                }
+            }
+            StmtKind::Class(c) => {
+                if let Some(n) = &c.name {
+                    lex.push(n.clone());
+                }
+            }
+            StmtKind::Function(f) if nested => {
+                if let Some(n) = &f.name {
+                    fns.push(n.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    let mark = enclosing.len();
+    for s in list {
+        if let StmtKind::Function(f) = &s.kind {
             if nested && !f.is_async && !f.is_generator {
                 if let Some(n) = &f.name {
-                    if !out.contains(n) {
-                        out.push(n.clone());
+                    let conflict = enclosing[..mark].contains(n)
+                        || lex.contains(n)
+                        || fns.iter().filter(|m| *m == n).count() > 1;
+                    if !conflict {
+                        out.push((n.clone(), Rc::as_ptr(f)));
                     }
                 }
             }
         }
-        StmtKind::Block(list) => {
-            for x in list {
-                collect_annexb(x, out, true);
-            }
-        }
+    }
+    enclosing.extend(lex);
+    enclosing.extend(fns);
+    for s in list {
+        annexb_stmt(s, enclosing, out);
+    }
+    enclosing.truncate(mark);
+}
+
+fn annexb_block(list: &[Stmt], enclosing: &mut Vec<Rc<str>>, out: &mut AnnexB) {
+    let refs: Vec<&Stmt> = list.iter().collect();
+    annexb_list(&refs, enclosing, true, out);
+}
+
+fn annexb_stmt(s: &Stmt, enclosing: &mut Vec<Rc<str>>, out: &mut AnnexB) {
+    match &s.kind {
+        StmtKind::Block(list) => annexb_block(list, enclosing, out),
         StmtKind::If(_, a, b) => {
-            collect_annexb(a, out, true);
+            annexb_stmt(a, enclosing, out);
             if let Some(b) = b {
-                collect_annexb(b, out, true);
+                annexb_stmt(b, enclosing, out);
             }
         }
-        StmtKind::While(_, b) | StmtKind::DoWhile(b, _) | StmtKind::With(_, b) => {
-            collect_annexb(b, out, true);
+        StmtKind::While(_, b)
+        | StmtKind::DoWhile(b, _)
+        | StmtKind::With(_, b)
+        | StmtKind::Labeled(_, b) => annexb_stmt(b, enclosing, out),
+        StmtKind::For { init, body, .. } => {
+            let mark = enclosing.len();
+            if let Some(i) = init {
+                if let StmtKind::Decl(k, decls) = &i.kind {
+                    if *k != DeclKind::Var {
+                        for (p, _) in decls {
+                            p.bound_names(enclosing);
+                        }
+                    }
+                }
+            }
+            annexb_stmt(body, enclosing, out);
+            enclosing.truncate(mark);
         }
-        StmtKind::Labeled(_, b) => collect_annexb(b, out, nested),
-        StmtKind::For { body, .. }
-        | StmtKind::ForOf { body, .. }
-        | StmtKind::ForIn { body, .. } => {
-            collect_annexb(body, out, true);
+        StmtKind::ForOf {
+            decl,
+            pattern,
+            body,
+            ..
+        }
+        | StmtKind::ForIn {
+            decl,
+            pattern,
+            body,
+            ..
+        } => {
+            let mark = enclosing.len();
+            if decl.is_some_and(|k| k != DeclKind::Var) {
+                pattern.bound_names(enclosing);
+            }
+            annexb_stmt(body, enclosing, out);
+            enclosing.truncate(mark);
         }
         StmtKind::Try {
             block,
+            param,
             handler,
             finalizer,
-            ..
         } => {
-            for x in block {
-                collect_annexb(x, out, true);
-            }
+            annexb_block(block, enclosing, out);
             if let Some(h) = handler {
-                for x in h {
-                    collect_annexb(x, out, true);
+                let mark = enclosing.len();
+                if let Some(p) = param {
+                    if !matches!(p, Pattern::Ident(_)) {
+                        p.bound_names(enclosing);
+                    }
                 }
+                annexb_block(h, enclosing, out);
+                enclosing.truncate(mark);
             }
             if let Some(f) = finalizer {
-                for x in f {
-                    collect_annexb(x, out, true);
-                }
+                annexb_block(f, enclosing, out);
             }
         }
         StmtKind::Switch(_, cases) => {
-            for c in cases {
-                for x in &c.body {
-                    collect_annexb(x, out, true);
-                }
-            }
+            let refs: Vec<&Stmt> = cases.iter().flat_map(|c| c.body.iter()).collect();
+            annexb_list(&refs, enclosing, true, out);
         }
         _ => {}
     }
 }
-
 fn collect_var_names(s: &Stmt, out: &mut Vec<Rc<str>>) {
     let push = |p: &Pattern, out: &mut Vec<Rc<str>>| {
         let mut v = Vec::new();
@@ -329,6 +398,9 @@ fn new_compiler(module: Rc<ModuleInfo>, mode: Mode) -> Compiler {
         export_names: Vec::new(),
         completion: None,
         script_eval: 0,
+        in_eval: false,
+        eval_leak_vars: false,
+        defining_fn: false,
         link_imports: Vec::new(),
         reexport_sources: Vec::new(),
         ns_imports: Vec::new(),
@@ -345,7 +417,7 @@ pub fn compile_eval(
     let mut outer = FnState::new("<scope>".into(), scope.kind, 1, scope.is_static);
     outer.strict = strict;
     outer.depth = 1;
-    for (name, is_const) in &scope.locals {
+    for (name, is_const, lexical) in &scope.locals {
         outer.locals.push(Local {
             name: name.clone(),
             depth: 1,
@@ -353,6 +425,7 @@ pub fn compile_eval(
             is_const: *is_const,
             tdz: true,
             sticky: true,
+            lexical: *lexical,
         });
     }
     outer.eval_upvals = Some(scope.upvals.clone());
@@ -365,7 +438,84 @@ pub fn compile_eval(
     c.emit(Op::Undefined);
     let slot = c.add_local("%completion".into(), false);
     c.completion = Some((1, slot));
-    c.declare_vars(stmts);
+    c.in_eval = true;
+    let in_function = !strict
+        && (scope.locals.iter().any(|(n, _, _)| &**n == "%evalvars")
+            || scope.upvals.iter().any(|(n, _, _)| &**n == "%evalvars"));
+    let at_global = !strict && !in_function && scope.kind == ProtoKind::Module;
+    if in_function || at_global {
+        let mut vars = Vec::new();
+        for s in stmts {
+            collect_var_names(s, &mut vars);
+        }
+        let refs: Vec<&Stmt> = stmts.iter().collect();
+        let mut enclosing = Vec::new();
+        let mut cands = Vec::new();
+        annexb_list(&refs, &mut enclosing, false, &mut cands);
+        for (n, ptr) in cands {
+            c.st().annexb.push(ptr);
+            if !vars.contains(&n) {
+                vars.push(n);
+            }
+        }
+        for s in stmts {
+            if let StmtKind::Function(f) = &s.kind {
+                if let Some(n) = &f.name {
+                    if !vars.contains(n) {
+                        vars.push(n.clone());
+                    }
+                }
+            }
+        }
+        if scope.ctx.in_params && !scope.in_arrow && vars.iter().any(|n| &**n == "arguments") {
+            return Err(SyntaxError::new(
+                "Identifier 'arguments' cannot be declared by eval in parameter expressions",
+                1,
+                1,
+            ));
+        }
+        for n in &vars {
+            if scope
+                .locals
+                .iter()
+                .any(|(m, _, lexical)| m == n && *lexical)
+            {
+                return Err(SyntaxError::new(
+                    format!("Identifier '{n}' has already been declared"),
+                    1,
+                    1,
+                ));
+            }
+        }
+        c.eval_leak_vars = true;
+        if at_global {
+            for s in stmts {
+                if let StmtKind::Function(f) = &s.kind {
+                    if let Some(n) = &f.name {
+                        let k = c.str_const(n);
+                        c.emit(Op::CanDeclareGlobalFn(k));
+                    }
+                }
+            }
+        }
+        for n in &vars {
+            let k = c.str_const(n);
+            if in_function {
+                if scope.locals.iter().any(|(m, _, _)| m == n) {
+                    continue;
+                }
+                c.load_var_static(&"%evalvars".into());
+                c.emit(Op::EvalVar(k));
+            } else {
+                c.emit(Op::Undefined);
+                let flags = c.define_flags(false, true);
+                c.emit(Op::DefineGlobal(k, flags));
+                c.emit(Op::Pop);
+            }
+        }
+    } else {
+        c.declare_vars(stmts);
+    }
     c.var_scope_next = true;
     c.hoist(stmts)?;
     for s in stmts {
@@ -691,6 +841,7 @@ impl Compiler {
             is_const,
             tdz: false,
             sticky: false,
+            lexical: false,
         });
         (st.locals.len() - 1) as u32
     }
@@ -698,6 +849,7 @@ impl Compiler {
     fn add_lexical(&mut self, name: Rc<str>, is_const: bool) -> u32 {
         let slot = self.add_local(name, is_const);
         self.st().locals[slot as usize].tdz = true;
+        self.st().locals[slot as usize].lexical = true;
         slot
     }
 
@@ -765,7 +917,8 @@ impl Compiler {
                     .flat_map(|u| u.iter().map(|(n, _, _)| n.clone())),
             );
             for n in names {
-                if !n.is_empty() && !n.starts_with('%') && !outer.contains(&n) {
+                let hidden = n.starts_with('%') && !n.starts_with("%with") && &*n != "%evalvars";
+                if !n.is_empty() && !hidden && !outer.contains(&n) {
                     outer.push(n);
                 }
             }
@@ -795,13 +948,15 @@ impl Compiler {
         let locals = st
             .locals
             .iter()
-            .map(|l| (l.name.clone(), l.is_const))
+            .map(|l| (l.name.clone(), l.is_const, l.lexical))
             .collect();
+        let in_arrow = st.kind == ProtoKind::Arrow;
         st.evals.push(Rc::new(EvalScope {
             locals,
             upvals: Rc::new(upvals),
             kind,
             is_static,
+            in_arrow,
             ctx,
         }));
         (st.evals.len() - 1) as u32
@@ -903,11 +1058,29 @@ impl Compiler {
             let bound = st.locals.iter().rposition(|l| &*l.name == name);
             let from = bound.map_or(0, |i| i + 1);
             for l in st.locals[from..].iter().rev() {
-                if l.name.starts_with("%with") {
+                if l.name.starts_with("%with") || &*l.name == "%evalvars" {
                     out.push(l.name.clone());
                 }
             }
-            if bound.is_some() || si == 0 {
+            if bound.is_some() {
+                break;
+            }
+            if let Some(ups) = &st.eval_upvals {
+                let mut stop = false;
+                for (n, _, _) in ups.iter() {
+                    if &**n == name {
+                        stop = true;
+                        break;
+                    }
+                    if n.starts_with("%with") || &**n == "%evalvars" {
+                        out.push(n.clone());
+                    }
+                }
+                if stop {
+                    break;
+                }
+            }
+            if si == 0 {
                 break;
             }
             si -= 1;
@@ -932,7 +1105,7 @@ impl Compiler {
             self.emit(Op::WithHas(k));
             let j = self.emit(Op::JumpIfFalse(0));
             self.load_var_static(w);
-            self.emit(Op::GetProp(k));
+            self.emit(Op::WithGet(k));
             ends.push(self.emit(Op::Jump(0)));
             self.patch(j);
         }
@@ -1002,8 +1175,7 @@ impl Compiler {
             self.emit(Op::WithHas(k));
             let j = self.emit(Op::JumpIfFalse(0));
             self.load_var_static(w);
-            self.emit(Op::Swap);
-            self.emit(Op::SetProp(k));
+            self.emit(Op::WithSet(k));
             ends.push(self.emit(Op::Jump(0)));
             self.patch(j);
         }
@@ -1030,6 +1202,17 @@ impl Compiler {
                 }
             }
             Var::Upval(i, c) => {
+                let silent = c
+                    && !init
+                    && self.states.iter().rev().skip(1).any(|st| {
+                        !st.strict
+                            && st
+                                .self_slot
+                                .is_some_and(|s| *st.locals[s as usize].name == **name)
+                    });
+                if silent {
+                    return;
+                }
                 if c && !init {
                     let k = self.str_const(name);
                     self.emit(Op::ThrowConstAssign(k));
@@ -1074,7 +1257,7 @@ impl Compiler {
                 let k = self.str_const(name);
                 if init && self.is_repl_top() {
                     let c = self.repl_consts.contains(name);
-                    self.emit(Op::DefineGlobal(k, c));
+                    self.emit(Op::DefineGlobal(k, self.define_flags(c, false)));
                 } else {
                     self.emit(Op::SetGlobal(k));
                 }
@@ -1087,7 +1270,7 @@ impl Compiler {
         s: &'a Stmt,
         top: bool,
         names: &mut Vec<(Rc<str>, bool)>,
-        fn_idx: &mut Vec<usize>,
+        fn_idx: &mut Vec<(usize, bool)>,
         funcs: &mut Vec<&'a Rc<FuncDef>>,
         imports: &mut Vec<&'a ImportDecl>,
     ) -> R<()> {
@@ -1104,7 +1287,7 @@ impl Compiler {
             }
             StmtKind::Function(f) => {
                 if let Some(n) = &f.name {
-                    fn_idx.push(names.len());
+                    fn_idx.push((names.len(), !f.is_async && !f.is_generator));
                     names.push((n.clone(), false));
                 }
                 funcs.push(f);
@@ -1185,40 +1368,39 @@ impl Compiler {
         Ok(())
     }
 
+    fn define_flags(&self, is_const: bool, keep: bool) -> u8 {
+        let mut flags = 0;
+        if is_const {
+            flags |= crate::bytecode::DG_CONST;
+        }
+        if keep {
+            flags |= crate::bytecode::DG_KEEP;
+        }
+        if self.script_eval != 0 || self.in_eval {
+            flags |= crate::bytecode::DG_CONFIGURABLE;
+        }
+        if self.defining_fn {
+            flags |= crate::bytecode::DG_FUNCTION;
+        }
+        flags
+    }
+
     fn declare_vars(&mut self, stmts: &[Stmt]) {
         let mut names = Vec::new();
         for s in stmts {
             collect_var_names(s, &mut names);
         }
         if !self.st_ref().strict {
+            let refs: Vec<&Stmt> = stmts.iter().collect();
+            let mut enclosing = Vec::new();
             let mut cands = Vec::new();
-            for s in stmts {
-                collect_annexb(s, &mut cands, false);
-            }
-            let mut lexical = Vec::new();
-            for s in stmts {
-                match &s.kind {
-                    StmtKind::Decl(k, decls) if *k != DeclKind::Var => {
-                        for (p, _) in decls {
-                            p.bound_names(&mut lexical);
-                        }
-                    }
-                    StmtKind::Class(c) => {
-                        if let Some(n) = &c.name {
-                            lexical.push(n.clone());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            for n in cands {
+            annexb_list(&refs, &mut enclosing, false, &mut cands);
+            for (n, ptr) in cands {
                 let bound = self.st_ref().locals.iter().any(|l| l.name == n);
-                if lexical.contains(&n) || bound {
+                if bound {
                     continue;
                 }
-                if !self.st_ref().annexb.contains(&n) {
-                    self.st().annexb.push(n.clone());
-                }
+                self.st().annexb.push(ptr);
                 if !names.contains(&n) {
                     names.push(n);
                 }
@@ -1241,7 +1423,7 @@ impl Compiler {
             if repl {
                 self.emit(Op::Undefined);
                 let k = self.str_const(&n);
-                self.emit(Op::DefineGlobal(k, false));
+                self.emit(Op::DefineGlobal(k, self.define_flags(false, true)));
                 self.emit(Op::Pop);
             } else {
                 self.emit(Op::Undefined);
@@ -1295,10 +1477,15 @@ impl Compiler {
                 .filter(|(_, (m, _))| m == n)
                 .map(|(j, _)| j)
                 .collect();
-            let redeclared_fn = var_scope
+            let me_fn = fn_idx.iter().find(|(j, _)| *j == i).map(|(_, p)| *p);
+            let earlier_fns = earlier.iter().all(|j| fn_idx.iter().any(|(k, _)| k == j));
+            let earlier_plain = earlier
+                .iter()
+                .all(|j| fn_idx.iter().any(|(k, p)| k == j && *p));
+            let redeclared_fn = me_fn.is_some()
+                && earlier_fns
                 && !(top && self.mode == Mode::Module)
-                && fn_idx.contains(&i)
-                && earlier.iter().all(|j| fn_idx.contains(j));
+                && (var_scope || (!self.st_ref().strict && me_fn == Some(true) && earlier_plain));
             let dup_new = !earlier.is_empty() && !redeclared_fn;
             let var_clash = self.st_ref().vars.contains(n)
                 && self
@@ -1309,19 +1496,30 @@ impl Compiler {
             if var_clash && is_fn {
                 continue;
             }
-            let dup_old = &**n != "arguments"
-                && self
-                    .st_ref()
-                    .locals
-                    .iter()
-                    .any(|l| l.depth == depth && &l.name == n);
+            let self_slot = self.st_ref().self_slot;
+            let dup_old =
+                &**n != "arguments"
+                    && self.st_ref().locals.iter().enumerate().any(|(i, l)| {
+                        l.depth == depth && &l.name == n && Some(i as u32) != self_slot
+                    });
             if dup_new || dup_old {
                 return Err(self.err(format!("Identifier '{n}' has already been declared")));
+            }
+            if self.eval_leak_vars && var_scope && is_fn {
+                continue;
             }
             fresh.push((n.clone(), *c));
         }
         let names = fresh;
         let repl = self.is_repl_top() && self.script_eval != 2;
+        if repl {
+            for f in &funcs {
+                if let Some(n) = &f.name {
+                    let k = self.str_const(n);
+                    self.emit(Op::CanDeclareGlobalFn(k));
+                }
+            }
+        }
         let import_names: Vec<Rc<str>> =
             imports.iter().filter_map(|i| i.namespace.clone()).collect();
         for (n, c) in &names {
@@ -1354,7 +1552,7 @@ impl Compiler {
                     self.repl_consts.retain(|m| m != n);
                 }
                 let k = self.str_const(n);
-                self.emit(Op::DefineGlobal(k, *c));
+                self.emit(Op::DefineGlobal(k, self.define_flags(*c, false)));
                 self.emit(Op::Pop);
             } else {
                 self.add_local(n.clone(), *c);
@@ -1440,8 +1638,10 @@ impl Compiler {
                 let idx = self.function(f, None, None)?;
                 self.emit(Op::Closure(idx));
                 if let Some(n) = &f.name {
+                    self.defining_fn = true;
                     self.store_var(n, true);
-                    if !var_scope && self.st_ref().annexb.contains(n) {
+                    self.defining_fn = false;
+                    if !var_scope && self.st_ref().annexb.contains(&Rc::as_ptr(f)) {
                         self.annexb_copy(n);
                     }
                 }
@@ -1449,6 +1649,18 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    fn delete_ident_static(&mut self, n: &Rc<str>) {
+        match self.resolve(n) {
+            Var::Global if self.alias(n).is_none() => {
+                let k = self.str_const(n);
+                self.emit(Op::DeleteGlobal(k));
+            }
+            _ => {
+                self.emit(Op::False);
+            }
+        }
     }
 
     fn annexb_copy(&mut self, n: &Rc<str>) {
@@ -1467,7 +1679,14 @@ impl Compiler {
             }
             None => {
                 let k = self.str_const(n);
-                self.emit(Op::SetGlobal(k));
+                let ev: Rc<str> = "%evalvars".into();
+                if matches!(self.resolve(&ev), Var::Global) {
+                    self.emit(Op::SetGlobal(k));
+                } else {
+                    self.load_var_static(&ev);
+                    self.emit(Op::Swap);
+                    self.emit(Op::SetProp(k));
+                }
             }
         }
     }
@@ -2542,6 +2761,10 @@ impl Compiler {
             self.add_local("arguments".into(), false);
             self.st().uses_arguments = true;
         }
+        if f.has_eval && !self.st_ref().strict {
+            self.emit(Op::NewObject);
+            self.add_local("%evalvars".into(), true);
+        }
     }
 
     fn simple_params(&mut self, f: &FuncDef) -> R<()> {
@@ -2792,6 +3015,7 @@ impl Compiler {
                     is_generator: false,
                     uses_arguments: false,
                     strict: true,
+                    has_eval: false,
                     line: c.line,
                     span: c.span,
                 })
@@ -3001,6 +3225,7 @@ impl Compiler {
             is_generator: false,
             uses_arguments: false,
             strict: true,
+            has_eval: false,
             line,
             span: (0, 0),
         };
@@ -3139,7 +3364,8 @@ impl Compiler {
                     self.emit(Op::WithHas(k));
                     let j = self.emit(Op::JumpIfFalse(0));
                     self.load_var_static(w);
-                    self.emit(Op::GetMethod(k));
+                    self.emit(Op::WithGet(k));
+                    self.load_var_static(w);
                     ends.push(self.emit(Op::Jump(0)));
                     self.patch(j);
                 }
@@ -3283,7 +3509,7 @@ impl Compiler {
                 target: AssignTarget::Simple(t),
                 value,
             } => match (&t.kind, op) {
-                (ExprKind::Ident(n), None) => {
+                (ExprKind::Ident(n), None) if !self.has_dynamic(n) => {
                     self.expr_named(value, Some(n))?;
                     self.store_discard(n);
                 }
@@ -3298,7 +3524,7 @@ impl Compiler {
                     self.expr(value)?;
                     self.emit(Op::AppendLocal(slot));
                 }
-                (ExprKind::Ident(n), Some(AssignOp::Bin(b))) => {
+                (ExprKind::Ident(n), Some(AssignOp::Bin(b))) if !self.has_dynamic(n) => {
                     self.load_var(n);
                     self.expr(value)?;
                     self.emit(bin_op(*b));
@@ -3554,6 +3780,7 @@ impl Compiler {
                         is_generator: false,
                         uses_arguments: false,
                         strict: true,
+                        has_eval: false,
                         line: c.line,
                         span: (0, 0),
                     };
@@ -3585,7 +3812,7 @@ impl Compiler {
                             self.emit(Op::WithHas(k));
                             let j = self.emit(Op::JumpIfFalse(0));
                             self.load_var_static(w);
-                            self.emit(Op::GetProp(k));
+                            self.emit(Op::WithGet(k));
                             self.emit(Op::Typeof);
                             ends.push(self.emit(Op::Jump(0)));
                             self.patch(j);
@@ -3618,11 +3845,12 @@ impl Compiler {
                             ends.push(self.emit(Op::Jump(0)));
                             self.patch(j);
                         }
-                        self.emit(Op::True);
+                        self.delete_ident_static(n);
                         for e in ends {
                             self.patch(e);
                         }
                     }
+                    ExprKind::Ident(n) => self.delete_ident_static(n),
                     ExprKind::Member { obj, name, .. } => {
                         self.expr(obj)?;
                         let k = self.str_const(name);
@@ -3679,16 +3907,18 @@ impl Compiler {
                                 let j = self.emit(Op::JumpIfFalse(0));
                                 self.load_var_static(w);
                                 self.emit(Op::Dup);
-                                self.emit(Op::GetProp(k));
+                                self.emit(Op::WithGet(k));
                                 if *prefix {
                                     self.emit(step);
-                                    self.emit(Op::SetProp(k));
+                                    self.emit(Op::Swap);
+                                    self.emit(Op::WithSet(k));
                                 } else {
                                     self.emit(Op::ToNumeric);
                                     self.emit(Op::Dup);
                                     self.emit(Op::Rot3);
                                     self.emit(step);
-                                    self.emit(Op::SetProp(k));
+                                    self.emit(Op::Swap);
+                                    self.emit(Op::WithSet(k));
                                     self.emit(Op::Pop);
                                 }
                                 ends.push(self.emit(Op::Jump(0)));
@@ -3853,8 +4083,13 @@ impl Compiler {
                 self.load_var(&"eval".into());
                 self.emit(Op::Undefined);
                 let idx = self.eval_scope(ctx.clone());
-                let argc = self.plain_args(args)?;
-                self.emit(Op::DirectEval(argc, idx));
+                if Self::has_spread(args) {
+                    self.args_array(args)?;
+                    self.emit(Op::DirectEval(u32::MAX, idx));
+                } else {
+                    let argc = self.plain_args(args)?;
+                    self.emit(Op::DirectEval(argc, idx));
+                }
             }
             ExprKind::New { callee, args } => {
                 let name = self.name_const(callee);
@@ -3982,24 +4217,25 @@ impl Compiler {
                                 None => {
                                     self.expr_named(value, Some(n))?;
                                     self.load_var_static(w);
-                                    self.emit(Op::Swap);
-                                    self.emit(Op::SetProp(k));
+                                    self.emit(Op::WithSet(k));
                                 }
                                 Some(AssignOp::Bin(b)) => {
                                     self.load_var_static(w);
                                     self.emit(Op::Dup);
-                                    self.emit(Op::GetProp(k));
+                                    self.emit(Op::WithGet(k));
                                     self.expr(value)?;
                                     self.emit(bin_op(b));
-                                    self.emit(Op::SetProp(k));
+                                    self.emit(Op::Swap);
+                                    self.emit(Op::WithSet(k));
                                 }
                                 Some(AssignOp::Logical(l)) => {
                                     self.load_var_static(w);
                                     self.emit(Op::Dup);
-                                    self.emit(Op::GetProp(k));
+                                    self.emit(Op::WithGet(k));
                                     let j2 = self.emit(logical_jump(l));
                                     self.expr_named(value, Some(n))?;
-                                    self.emit(Op::SetProp(k));
+                                    self.emit(Op::Swap);
+                                    self.emit(Op::WithSet(k));
                                     let e2 = self.emit(Op::Jump(0));
                                     self.patch(j2);
                                     self.emit(Op::Swap);

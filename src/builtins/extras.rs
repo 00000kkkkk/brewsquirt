@@ -10,6 +10,10 @@ const defineAll = (obj, methods) => {
 }
 const named = (name, fn) => Object.defineProperty(fn, "name", { value: name, configurable: true })
 const isCallable = (f) => typeof f === "function"
+const toStringStrict = (v) => {
+  if (typeof v === "symbol") throw new TypeError("Cannot convert a Symbol value to a string")
+  return String(v)
+}
 const needFn = (f, what) => {
   if (!isCallable(f)) throw new TypeError(`${typeof f === "string" ? `"${f}"` : String(f)} is not a function`)
 }
@@ -796,7 +800,7 @@ const hex4 = (n) => n.toString(16).toUpperCase().padStart(4, "0")
 const ESCAPE_KEEP = /[A-Za-z0-9@*_+\-./]/
 define(globalThis, "escape", {
   escape(string) {
-    const S = String(string)
+    const S = toStringStrict(string)
     let R = ""
     for (let i = 0; i < S.length; i++) {
       const c = S[i]
@@ -811,7 +815,7 @@ define(globalThis, "escape", {
 }.escape)
 define(globalThis, "unescape", {
   unescape(string) {
-    const S = String(string)
+    const S = toStringStrict(string)
     const isHex = (s) => /^[0-9A-Fa-f]+$/.test(s)
     let R = ""
     let k = 0

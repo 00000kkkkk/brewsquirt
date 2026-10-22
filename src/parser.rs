@@ -83,6 +83,7 @@ fn parse_goal(src: &str, script: bool) -> R<Vec<Stmt>> {
     let toks = crate::lexer::tokenize_goal(src, script)?;
     let mut parser = Parser {
         script,
+        src: src.into(),
         toks,
         pos: 0,
         no_in: false,
@@ -97,6 +98,9 @@ fn parse_goal(src: &str, script: bool) -> R<Vec<Stmt>> {
         strict: !script,
         static_block: false,
         in_params: false,
+        single: false,
+        labeled_fn: false,
+        saw_eval: false,
         last_paren: (usize::MAX, usize::MAX),
         at_top: false,
     };
@@ -111,6 +115,7 @@ pub fn parse_eval(src: &str, ctx: &EvalCtx) -> R<Vec<Stmt>> {
     let toks = crate::lexer::tokenize_goal(src, true)?;
     let mut parser = Parser {
         script: true,
+        src: src.into(),
         toks,
         pos: 0,
         no_in: false,
@@ -125,6 +130,9 @@ pub fn parse_eval(src: &str, ctx: &EvalCtx) -> R<Vec<Stmt>> {
         strict: ctx.strict,
         static_block: false,
         in_params: false,
+        single: false,
+        labeled_fn: false,
+        saw_eval: false,
         last_paren: (usize::MAX, usize::MAX),
         at_top: false,
     };
@@ -166,6 +174,10 @@ struct Parser {
     strict: bool,
     static_block: bool,
     in_params: bool,
+    single: bool,
+    labeled_fn: bool,
+    saw_eval: bool,
+    src: Rc<str>,
     last_paren: (usize, usize),
     at_top: bool,
     args_used: Vec<bool>,
@@ -181,9 +193,39 @@ impl Parser {
         }
     }
 
+    fn relex(&mut self, as_regex: bool) -> R<()> {
+        let t = &self.toks[self.pos];
+        let (start, line, col, nl) = (t.start, t.line, t.col, t.nl_before);
+        let mut new =
+            crate::lexer::tokenize_from(&self.src, self.script, start, line, col, as_regex)?;
+        if let Some(first) = new.first_mut() {
+            first.nl_before = nl;
+        }
+        self.toks.truncate(self.pos);
+        self.toks.append(&mut new);
+        Ok(())
+    }
+
+    fn sub_statement(&mut self) -> R<Stmt> {
+        let saved = std::mem::replace(&mut self.single, true);
+        let r = self.statement();
+        self.single = saved;
+        r
+    }
+
     fn if_body(&mut self) -> R<Stmt> {
-        let s = self.statement()?;
-        if !self.strict && matches!(s.kind, StmtKind::Function(_)) {
+        let before = self.labeled_fn;
+        self.labeled_fn = false;
+        let s = self.sub_statement()?;
+        let labeled = std::mem::replace(&mut self.labeled_fn, before);
+        if let StmtKind::Function(f) = &s.kind {
+            if self.strict || f.is_generator || f.is_async || labeled {
+                return Err(SyntaxError::new(
+                    "Function declarations are not allowed in this position",
+                    s.line,
+                    1,
+                ));
+            }
             let line = s.line;
             return Ok(Stmt {
                 kind: StmtKind::Block(vec![s]),
@@ -465,6 +507,7 @@ impl Parser {
 
     fn statement_kind(&mut self) -> R<StmtKind> {
         let top = std::mem::take(&mut self.at_top);
+        let single = std::mem::take(&mut self.single);
         if self.is(P::LBrace) {
             return Ok(StmtKind::Block(self.block()?));
         }
@@ -481,7 +524,10 @@ impl Parser {
                 if matches!(
                     self.peek_at(1).tok,
                     Tok::Ident(_) | Tok::Punct(P::LBracket) | Tok::Punct(P::LBrace)
-                ) =>
+                ) && !(single
+                    && self.is_kw("let")
+                    && !self.is_at(1, P::LBracket)
+                    && self.peek_at(1).nl_before) =>
             {
                 let s = self.var_decl()?;
                 self.semicolon()?;
@@ -527,12 +573,12 @@ impl Parser {
                 self.expect(P::LParen)?;
                 let test = self.expression()?;
                 self.expect(P::RParen)?;
-                let body = self.statement()?;
+                let body = self.sub_statement()?;
                 Ok(StmtKind::While(test, Box::new(body)))
             }
             Some("do") => {
                 self.advance();
-                let body = self.statement()?;
+                let body = self.sub_statement()?;
                 self.expect_kw("while")?;
                 self.expect(P::LParen)?;
                 let test = self.expression()?;
@@ -678,15 +724,21 @@ impl Parser {
                 self.no_in = saved;
                 let obj = obj?;
                 self.expect(P::RParen)?;
-                let body = self.statement()?;
+                let body = self.sub_statement()?;
                 Ok(StmtKind::With(obj, Box::new(body)))
             }
             Some(w) if !self.reserved(w) && self.is_at(1, P::Colon) => {
                 let label: Rc<str> = w.into();
                 self.advance();
                 self.advance();
-                let body = self.statement()?;
-                if !self.strict && matches!(body.kind, StmtKind::Function(_)) {
+                let body = self.sub_statement()?;
+                if let StmtKind::Function(f) = &body.kind {
+                    if self.strict || f.is_generator || f.is_async {
+                        return Err(
+                            self.error("Labelled function declarations are not allowed here")
+                        );
+                    }
+                    self.labeled_fn = true;
                     return Ok(body.kind);
                 }
                 Ok(StmtKind::Labeled(label, Box::new(body)))
@@ -762,7 +814,7 @@ impl Parser {
             if self.eat_kw("of") {
                 let iter = self.assignment()?;
                 self.expect(P::RParen)?;
-                let body = self.statement()?;
+                let body = self.sub_statement()?;
                 return Ok(StmtKind::ForOf {
                     decl: Some(kind),
                     pattern,
@@ -774,7 +826,7 @@ impl Parser {
             if self.eat_kw("in") {
                 let obj = self.expression()?;
                 self.expect(P::RParen)?;
-                let body = self.statement()?;
+                let body = self.sub_statement()?;
                 return Ok(StmtKind::ForIn {
                     decl: Some(kind),
                     pattern,
@@ -874,7 +926,7 @@ impl Parser {
             Some(self.expression()?)
         };
         self.expect(P::RParen)?;
-        let body = self.statement()?;
+        let body = self.sub_statement()?;
         Ok(StmtKind::For {
             init,
             test,
@@ -1112,6 +1164,7 @@ impl Parser {
     ) -> R<Rc<FuncDef>> {
         let start = self.span_start.take().unwrap_or_else(|| self.peek().start);
         let saved = (self.in_async, self.in_generator);
+        let saved_eval = std::mem::take(&mut self.saw_eval);
         self.in_async = is_async;
         self.in_generator = is_generator;
         self.args_used.push(false);
@@ -1125,11 +1178,23 @@ impl Parser {
         self.static_block = saved_sb;
         self.field_init = saved_field;
         let uses_arguments = self.args_used.pop().unwrap_or(false);
+        let has_eval = std::mem::replace(&mut self.saw_eval, saved_eval);
         let end = self.prev_end();
         (self.in_async, self.in_generator) = saved;
         let (params, rest, body) = parsed?;
-        check_strict_params(&params, &rest, &body, line, self.strict)?;
+        let unique = !matches!(kind, FuncKind::Normal);
+        check_strict_params(&params, &rest, &body, line, self.strict, unique)?;
         let strict = self.strict || body_use_strict(&body);
+        if strict
+            && kind == FuncKind::Normal
+            && matches!(name.as_deref(), Some("eval" | "arguments"))
+        {
+            return Err(SyntaxError::new(
+                "Unexpected eval or arguments in strict mode",
+                line,
+                1,
+            ));
+        }
         Ok(Rc::new(FuncDef {
             name,
             params,
@@ -1140,6 +1205,7 @@ impl Parser {
             is_generator,
             uses_arguments,
             strict,
+            has_eval,
             span: (start, end),
             line,
         }))
@@ -1241,7 +1307,11 @@ impl Parser {
             return Ok(None);
         }
         let saved_sb = std::mem::take(&mut self.static_block);
+        let saved = (self.in_async, self.in_generator);
+        self.in_async = false;
+        self.in_generator = false;
         let name = self.binding_ident();
+        (self.in_async, self.in_generator) = saved;
         self.static_block = saved_sb;
         Ok(Some(name?))
     }
@@ -1533,6 +1603,7 @@ impl Parser {
                         is_generator: false,
                         uses_arguments: false,
                         strict: true,
+                        has_eval: false,
                         line: mline,
                         span: (0, 0),
                     })));
@@ -1703,14 +1774,17 @@ impl Parser {
             self.peek().start
         };
         let saved = (self.in_async, self.in_generator);
+        let saved_eval = std::mem::take(&mut self.saw_eval);
         self.in_async = is_async;
-        self.in_generator = false;
         let parsed = self.arrow_parts();
         (self.in_async, self.in_generator) = saved;
+        let has_eval = std::mem::replace(&mut self.saw_eval, saved_eval);
         let (params, rest, body) = parsed?;
-        if let FuncBody::Block(stmts) = &body {
-            check_strict_params(&params, &rest, stmts, line, self.strict)?;
-        }
+        let stmts: &[Stmt] = match &body {
+            FuncBody::Block(stmts) => stmts,
+            FuncBody::Expr(_) => &[],
+        };
+        check_strict_params(&params, &rest, stmts, line, self.strict, true)?;
         let strict = self.strict || matches!(&body, FuncBody::Block(b) if body_use_strict(b));
         Ok(Expr {
             kind: ExprKind::Function(Rc::new(FuncDef {
@@ -1723,6 +1797,7 @@ impl Parser {
                 is_generator: false,
                 uses_arguments: false,
                 strict,
+                has_eval,
                 line,
                 span: (start, self.prev_end()),
             })),
@@ -1745,6 +1820,7 @@ impl Parser {
         };
         self.expect(P::Arrow)?;
         let saved_sb = std::mem::take(&mut self.static_block);
+        let saved_gen = std::mem::take(&mut self.in_generator);
         let body = if self.is(P::LBrace) {
             FuncBody::Block(self.function_body()?)
         } else {
@@ -1756,6 +1832,7 @@ impl Parser {
             FuncBody::Expr(Box::new(e?))
         };
         self.static_block = saved_sb;
+        self.in_generator = saved_gen;
         Ok((params, rest, body))
     }
 
@@ -1837,6 +1914,9 @@ impl Parser {
         let line = self.line();
         let lhs_start = self.pos;
         let lhs = self.conditional()?;
+        if matches!(self.peek().tok, Tok::Regex(..)) {
+            self.relex(false)?;
+        }
         if let Some(op) = self.assign_op() {
             let parenthesized = self.last_paren == (lhs_start, self.pos);
             if let ExprKind::Ident(n) = &lhs.kind {
@@ -2076,7 +2156,13 @@ impl Parser {
         }
         let mut left = self.unary()?;
         let mut built: Option<LogicalOp> = None;
-        while let Some((prec, op)) = self.binop_info() {
+        loop {
+            if matches!(self.peek().tok, Tok::Regex(..)) {
+                self.relex(false)?;
+            }
+            let Some((prec, op)) = self.binop_info() else {
+                break;
+            };
             if prec < min {
                 break;
             }
@@ -2326,19 +2412,20 @@ impl Parser {
                 };
             } else if self.is(P::LParen) {
                 let args = self.arguments()?;
-                let direct = matches!(&e.kind, ExprKind::Ident(n) if &**n == "eval")
-                    && !args.iter().any(|a| matches!(a, Arg::Spread(_)));
+                let direct = matches!(&e.kind, ExprKind::Ident(n) if &**n == "eval");
                 e = if direct {
                     if self.field_init == 0 {
                         if let Some(top) = self.args_used.last_mut() {
                             *top = true;
                         }
                     }
+                    self.saw_eval = true;
                     let ctx = Rc::new(EvalCtx {
                         privates: self.class_ids.clone(),
                         in_function: self.nt_ok,
                         field_init: self.field_init > 0,
                         strict: self.strict,
+                        in_params: self.in_params,
                     });
                     Expr {
                         kind: ExprKind::DirectEval(args, ctx),
@@ -2480,6 +2567,7 @@ impl Parser {
                 TemplatePart::Str(s, raw) => quasis.push((s, raw)),
                 TemplatePart::Expr(toks) => {
                     let mut sub = Parser {
+                        src: self.src.clone(),
                         toks,
                         pos: 0,
                         no_in: false,
@@ -2493,6 +2581,9 @@ impl Parser {
                         strict: self.strict,
                         static_block: self.static_block,
                         in_params: self.in_params,
+                        single: false,
+                        labeled_fn: false,
+                        saw_eval: false,
                         last_paren: (usize::MAX, usize::MAX),
                         at_top: false,
                         args_used: vec![false],
@@ -2519,6 +2610,12 @@ impl Parser {
 
     fn primary(&mut self) -> R<Expr> {
         let line = self.line();
+        if matches!(
+            self.peek().tok,
+            Tok::Punct(P::Slash) | Tok::Punct(P::SlashEq)
+        ) {
+            self.relex(true)?;
+        }
         let kind = match &self.peek().tok {
             Tok::BigInt(b) => {
                 let b = b.clone();
@@ -2948,6 +3045,7 @@ fn check_strict_params(
     body: &[Stmt],
     line: u32,
     strict: bool,
+    unique: bool,
 ) -> R<()> {
     let simple = rest.is_none()
         && params
@@ -2961,7 +3059,8 @@ fn check_strict_params(
             1,
         ));
     }
-    if !(strict || directive) {
+    let dup_error = !simple || strict || directive || unique;
+    if !(strict || directive || dup_error) {
         return Ok(());
     }
     let mut names = Vec::new();
@@ -2972,14 +3071,14 @@ fn check_strict_params(
         r.bound_names(&mut names);
     }
     for (i, n) in names.iter().enumerate() {
-        if matches!(&**n, "eval" | "arguments") {
+        if (strict || directive) && matches!(&**n, "eval" | "arguments") {
             return Err(SyntaxError::new(
                 "Unexpected eval or arguments in strict mode",
                 line,
                 1,
             ));
         }
-        if simple && names[..i].contains(n) {
+        if dup_error && names[..i].contains(n) {
             return Err(SyntaxError::new(
                 format!("Duplicate parameter name '{n}'"),
                 line,

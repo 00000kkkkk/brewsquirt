@@ -30,7 +30,12 @@ pub enum Op {
     SetUpvalChecked(u32, u32),
     GetGlobal(u32),
     SetGlobal(u32),
-    DefineGlobal(u32, bool),
+    DefineGlobal(u32, u8),
+    DeleteGlobal(u32),
+    EvalVar(u32),
+    CanDeclareGlobalFn(u32),
+    WithGet(u32),
+    WithSet(u32),
     TypeofGlobal(u32),
     GetProp(u32),
     SetProp(u32),
@@ -203,6 +208,11 @@ pub struct UpvalDesc {
     pub index: u32,
 }
 
+pub const DG_KEEP: u8 = 1;
+pub const DG_CONFIGURABLE: u8 = 2;
+pub const DG_CONST: u8 = 4;
+pub const DG_FUNCTION: u8 = 8;
+
 #[derive(Debug)]
 pub struct ModuleInfo {
     pub name: Rc<str>,
@@ -249,10 +259,11 @@ pub type EvalUpvals = Rc<Vec<(Rc<str>, u32, bool)>>;
 
 #[derive(Debug)]
 pub struct EvalScope {
-    pub locals: Vec<(Rc<str>, bool)>,
+    pub locals: Vec<(Rc<str>, bool, bool)>,
     pub upvals: EvalUpvals,
     pub kind: ProtoKind,
     pub is_static: bool,
+    pub in_arrow: bool,
     pub ctx: Rc<crate::ast::EvalCtx>,
 }
 
@@ -324,6 +335,11 @@ impl FunctionProto {
                 | Op::GetGlobal(c)
                 | Op::SetGlobal(c)
                 | Op::DefineGlobal(c, _)
+                | Op::DeleteGlobal(c)
+                | Op::EvalVar(c)
+                | Op::CanDeclareGlobalFn(c)
+                | Op::WithGet(c)
+                | Op::WithSet(c)
                 | Op::TypeofGlobal(c)
                 | Op::GetProp(c)
                 | Op::SetProp(c)

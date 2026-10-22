@@ -202,7 +202,14 @@ fn regexp_prop<const I: usize>(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     )))
 }
 
-fn throw_type_error(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+fn throw_type_error(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    if plain_sloppy_function(&this) {
+        return Ok(if args.is_empty() {
+            Value::Null
+        } else {
+            Value::Undefined
+        });
+    }
     Err(vm.type_error(
         "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them",
     ))
@@ -240,6 +247,14 @@ fn proto_get(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     }
 }
 
+pub fn plain_sloppy_function(v: &Value) -> bool {
+    matches!(v, Value::Object(o) if matches!(&o.kind, ObjKind::Function(c)
+        if c.proto.sloppy
+            && c.proto.kind == crate::bytecode::ProtoKind::Normal
+            && !c.proto.is_generator
+            && !c.proto.is_async))
+}
+
 fn proto_set(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     if this.is_nullish() {
         return Err(vm.type_error("Object.prototype.__proto__ called on null or undefined"));
@@ -252,6 +267,19 @@ fn proto_set(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let Value::Object(o) = &this else {
         return Ok(Value::Undefined);
     };
+    if Rc::ptr_eq(o, &vm.realm.object_proto) {
+        let same = match (&proto, &*o.proto.borrow()) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        };
+        if !same {
+            return Err(vm.type_error(
+                "Immutable prototype object '#<Object>' cannot have their prototype set",
+            ));
+        }
+        return Ok(Value::Undefined);
+    }
     if !vm.op_set_prototype_of(o, proto)? {
         return Err(super::object::proto_set_error(vm, o));
     }

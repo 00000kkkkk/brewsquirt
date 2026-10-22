@@ -115,6 +115,10 @@ impl Vm {
         if matches!(o.kind, ObjKind::Namespace) {
             return Ok(proto.is_none());
         }
+        if Rc::ptr_eq(o, &self.realm.object_proto) {
+            let cur = o.proto.borrow().clone();
+            return Ok(same_proto(&proto, &cur));
+        }
         let current = o.proto.borrow().clone();
         let same = match (&current, &proto) {
             (Some(a), Some(b)) => Rc::ptr_eq(a, b),

@@ -5,6 +5,43 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, SyntaxError> {
     tokenize_goal(src, false)
 }
 
+pub fn tokenize_from(
+    src: &str,
+    html: bool,
+    byte_start: u32,
+    line: u32,
+    col: u32,
+    regex_first: bool,
+) -> Result<Vec<Token>, SyntaxError> {
+    let chars: Vec<char> = src.chars().collect();
+    let mut offsets = Vec::with_capacity(chars.len() + 1);
+    let mut b = 0u32;
+    for c in &chars {
+        offsets.push(b);
+        b += c.len_utf8() as u32;
+    }
+    offsets.push(b);
+    let pos = offsets
+        .iter()
+        .position(|&o| o == byte_start)
+        .unwrap_or(chars.len());
+    let mut lexer = Lexer {
+        html,
+        chars,
+        offsets,
+        pos,
+        line,
+        col,
+        legacy_escape: false,
+        in_template: false,
+        sep_seen: false,
+        force_regex: Some(regex_first),
+    };
+    let mut out = Vec::new();
+    lexer.lex_into(&mut out, false)?;
+    Ok(out)
+}
+
 pub fn tokenize_goal(src: &str, html: bool) -> Result<Vec<Token>, SyntaxError> {
     let chars: Vec<char> = src.chars().collect();
     let mut offsets = Vec::with_capacity(chars.len() + 1);
@@ -23,6 +60,8 @@ pub fn tokenize_goal(src: &str, html: bool) -> Result<Vec<Token>, SyntaxError> {
         col: 1,
         legacy_escape: false,
         in_template: false,
+        sep_seen: false,
+        force_regex: None,
     };
     if lexer.chars.first() == Some(&'#') && lexer.chars.get(1) == Some(&'!') {
         while let Some(c) = lexer.peek() {
@@ -111,6 +150,8 @@ struct Lexer {
     col: u32,
     legacy_escape: bool,
     in_template: bool,
+    sep_seen: bool,
+    force_regex: Option<bool>,
 }
 
 impl Lexer {
@@ -181,9 +222,19 @@ impl Lexer {
                 }
             }
             let begin = self.pos;
-            let regex_ok = regex_allowed(out.last().map(|t| &t.tok));
+            let regex_ok = match self.force_regex.take() {
+                Some(f) => f,
+                None => regex_allowed(out.last().map(|t| &t.tok)),
+            };
             let tok = if c == '/' && regex_ok {
-                self.regex()?
+                let save = (self.pos, self.line, self.col);
+                match self.regex() {
+                    Ok(t) => t,
+                    Err(_) => {
+                        (self.pos, self.line, self.col) = save;
+                        self.next_token(c)?
+                    }
+                }
             } else {
                 self.next_token(c)?
             };
@@ -370,8 +421,12 @@ impl Lexer {
         }
         let mut s = String::new();
         let leading_zero = self.peek() == Some('0');
+        self.sep_seen = false;
         self.digits(&mut s);
         if leading_zero && s.len() > 1 {
+            if self.sep_seen {
+                return Err(self.err("Numeric separators are not allowed in legacy octal literals"));
+            }
             self.legacy_escape = true;
             if s.bytes().all(|b| (b'0'..=b'7').contains(&b)) {
                 if self.peek() == Some('n') {
@@ -429,6 +484,7 @@ impl Lexer {
                 self.bump();
                 any = true;
             } else if c == '_' && any && self.peek_at(1).is_some_and(|d| d.is_ascii_digit()) {
+                self.sep_seen = true;
                 self.bump();
             } else {
                 break;

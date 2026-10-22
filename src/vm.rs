@@ -2385,6 +2385,20 @@ impl Vm {
                 }
                 let mut props = o.props.borrow_mut();
                 if props.contains_key(&key) {
+                    let accessor = props
+                        .get(&key)
+                        .and_then(|raw| crate::props::accessor_parts(raw).map(|(_, s)| s));
+                    if let Some(setter) = accessor {
+                        drop(props);
+                        if setter.is_callable() {
+                            self.call_value(&setter, target.clone(), &[val])?;
+                            return Ok(());
+                        }
+                        return Err(self.assign_error(format!(
+                            "Cannot set property {key} of {} which has only a getter",
+                            inspect_plain(target)
+                        )));
+                    }
                     if props.attrs(&key) & crate::object::READ_ONLY != 0 {
                         drop(props);
                         return Err(self.read_only_error(o, &key));
@@ -3888,17 +3902,70 @@ impl Vm {
                         )),
                     }
                 }
-                Op::DefineGlobal(k, is_const) => {
+                Op::DefineGlobal(k, flags) => {
                     let n = name!(k);
                     let v = peek!();
-                    if is_const {
+                    if flags & crate::bytecode::DG_CONST != 0 {
                         if !self.const_globals.contains(&n) {
                             self.const_globals.push(n.clone());
                         }
                     } else {
                         self.const_globals.retain(|m| *m != n);
                     }
-                    self.globals.insert(n, v);
+                    if flags & crate::bytecode::DG_KEEP != 0
+                        && (self.globals.slot(&n).is_some() || tri!(self.load_lazy_global(&n)))
+                    {
+                        continue;
+                    }
+                    let old = self.globals.attrs_of(&n);
+                    let exists = self.globals.slot(&n).is_some();
+                    let base = if flags & crate::bytecode::DG_FUNCTION != 0 {
+                        old & !(crate::object::NON_ENUM | crate::object::READ_ONLY)
+                    } else {
+                        old
+                    };
+                    let attrs = if exists && old & crate::object::NON_CONFIG != 0 {
+                        old
+                    } else if flags & crate::bytecode::DG_CONFIGURABLE != 0 {
+                        base & !crate::object::NON_CONFIG
+                    } else {
+                        base | crate::object::NON_CONFIG
+                    };
+                    self.globals.insert(n.clone(), v);
+                    self.globals.attrs.insert(n, attrs);
+                }
+                Op::CanDeclareGlobalFn(k) => {
+                    let n = name!(k);
+                    if self.globals.slot(&n).is_some() {
+                        let a = self.globals.attrs_of(&n);
+                        if a & crate::object::NON_CONFIG != 0
+                            && a & (crate::object::READ_ONLY | crate::object::NON_ENUM) != 0
+                        {
+                            throw!(self.type_error(format!(
+                                "Cannot redefine non-configurable global property '{n}'"
+                            )));
+                        }
+                    }
+                }
+                Op::EvalVar(k) => {
+                    let obj = pop!();
+                    let n = name!(k);
+                    if let Value::Object(o) = &obj {
+                        if !o.has_own(&n) {
+                            o.set_own(n, Value::Undefined);
+                        }
+                    }
+                }
+                Op::DeleteGlobal(k) => {
+                    let n = name!(k);
+                    let r = match self.globals.slot(&n) {
+                        None => true,
+                        Some(_) if self.globals.attrs_of(&n) & crate::object::NON_CONFIG != 0 => {
+                            false
+                        }
+                        Some(_) => self.globals.remove(&n),
+                    };
+                    self.stack.push(Value::Bool(r));
                 }
                 Op::TypeofGlobal(k) => {
                     let n = name!(k);
@@ -4886,7 +4953,12 @@ impl Vm {
                     self.stack.push(v);
                 }
                 Op::DirectEval(argc, idx) => {
-                    let args = self.stack.split_off(self.stack.len() - argc as usize);
+                    let args = if argc == u32::MAX {
+                        let arr = pop!();
+                        tri!(self.iterate(&arr))
+                    } else {
+                        self.stack.split_off(self.stack.len() - argc as usize)
+                    };
                     pop!();
                     let callee = pop!();
                     let intrinsic = matches!((&callee, &self.eval_fn), (Value::Object(a), Some(b)) if Rc::ptr_eq(a, b));
@@ -5000,6 +5072,48 @@ impl Vm {
                         }
                     }
                     self.stack.push(Value::Bool(has));
+                }
+                Op::WithGet(k) => {
+                    let obj = pop!();
+                    let n = name!(k);
+                    let has = match &obj {
+                        Value::Object(o) => tri!(self.op_has_property(o, &n)),
+                        _ => false,
+                    };
+                    if !has {
+                        if proto.sloppy {
+                            self.stack.push(Value::Undefined);
+                            continue;
+                        }
+                        throw!(
+                            self.make_error(
+                                ErrorKind::ReferenceError,
+                                format!("{n} is not defined")
+                            )
+                        );
+                    }
+                    let v = tri!(self.get_prop(&obj, &n));
+                    self.stack.push(v);
+                }
+                Op::WithSet(k) => {
+                    let obj = pop!();
+                    let v = peek!();
+                    let n = name!(k);
+                    if let Value::Object(o) = &obj {
+                        let has = tri!(self.op_has_property(o, &n));
+                        if !has && !proto.sloppy {
+                            throw!(self.make_error(
+                                ErrorKind::ReferenceError,
+                                format!("{n} is not defined")
+                            ));
+                        }
+                        self.silent_fail = false;
+                        if let Err(e) = self.set_prop(&obj, n, v) {
+                            if !(proto.sloppy && self.silent_fail) {
+                                throw!(e);
+                            }
+                        }
+                    }
                 }
                 Op::ToObject => {
                     let v = pop!();
