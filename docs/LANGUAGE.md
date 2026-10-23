@@ -1598,7 +1598,14 @@ functions and type predicates. Constructor parameter properties become field ass
 `enum`, `const enum` and `namespace` compile to objects like `tsc` emits them. `import type`,
 `export type` and `type` specifiers are removed, and so are imported names that are only used as
 types; a re-export that names a type is ignored instead of failing to link. `import x =
-require("y")` and `export = value` work in CommonJS files. Decorators are not supported.
+require("y")` and `export = value` work in CommonJS files.
+
+With `"experimentalDecorators": true` in the nearest `tsconfig.json`, decorators on classes,
+methods, accessors, properties and parameters follow TypeScript's legacy semantics, and
+`"emitDecoratorMetadata": true` adds the `design:type`, `design:paramtypes` and
+`design:returntype` metadata that `reflect-metadata` reads, so dependency injection in NestJS,
+TypeORM entities and class-validator rules work from the TypeScript sources. The standard
+decorators that TypeScript uses without that option are not implemented yet.
 
 ```ts
 interface User {
@@ -2315,6 +2322,7 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
 - Private names are shared by all evaluations of a class body, so instances of two classes made
   by the same factory can access each other's private members
 - Several realms in one thread (`vm` contexts share one realm)
-- `Temporal`, `ShadowRealm` and decorators
+- `Temporal`, `ShadowRealm`, and standard (TC39) decorators; TypeScript's
+  `experimentalDecorators` work
 - Tracing garbage collection
 - JIT compilation

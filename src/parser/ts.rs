@@ -563,7 +563,7 @@ impl Parser {
             }
             "abstract" if self.is_kw_at(1, "class") && !next_nl => {
                 self.advance();
-                Ok(Some(StmtKind::Class(self.class(true)?)))
+                Ok(Some(self.class_statement()?))
             }
             "enum" if next_ident => Ok(Some(self.ts_enum()?)),
             "const" if self.is_kw_at(1, "enum") && !next_nl => {

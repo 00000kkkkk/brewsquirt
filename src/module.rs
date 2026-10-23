@@ -75,6 +75,39 @@ fn typescript_sibling(p: &Path) -> Option<PathBuf> {
         .find(|q| q.is_file())
 }
 
+pub fn ts_options(dir: &Path) -> crate::parser::TsOptions {
+    let mut opts = crate::parser::TsOptions::default();
+    let mut cur = Some(dir.to_path_buf());
+    while let Some(d) = cur {
+        if d.file_name()
+            .is_some_and(|n| n == DEPS_DIR || n == NODE_DEPS_DIR)
+        {
+            break;
+        }
+        let file = ["tsconfig.json", "jsconfig.json"]
+            .iter()
+            .map(|n| d.join(n))
+            .find(|f| f.is_file());
+        if let Some(f) = file {
+            let mut chain = Vec::new();
+            read_config_chain(&f, 0, &mut chain);
+            let get = |key: &str| {
+                chain.iter().find_map(|(_, v)| {
+                    v.get("compilerOptions")
+                        .and_then(|o| o.get(key))
+                        .and_then(|x| x.as_bool())
+                })
+            };
+            opts.legacy_decorators = get("experimentalDecorators").unwrap_or(false);
+            opts.emit_metadata =
+                opts.legacy_decorators && get("emitDecoratorMetadata").unwrap_or(false);
+            break;
+        }
+        cur = d.parent().map(Path::to_path_buf);
+    }
+    opts
+}
+
 pub fn jsx_options(dir: &Path) -> crate::parser::JsxOptions {
     let mut opts = crate::parser::JsxOptions::default();
     let mut cur = Some(dir.to_path_buf());

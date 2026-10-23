@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `jsxImportSource` in `tsconfig.json`/`jsconfig.json` or by `@jsx` comment pragmas; React server
   rendering gives the same HTML as Node with esbuild, and the TSX of shadcn/ui and Excalidraw
   parses.
+- TypeScript legacy decorators: with `experimentalDecorators` in `tsconfig.json`, class, method,
+  accessor, property and parameter decorators compile like `tsc` emits them, and
+  `emitDecoratorMetadata` records `design:type`, `design:paramtypes` and `design:returntype` for
+  `reflect-metadata`. A NestJS application with dependency injection, controllers and route
+  parameters runs from its TypeScript sources.
 - `./x.js` imports find `x.ts` when only the TypeScript file exists, extensionless imports try the
   TypeScript extensions, and `tsconfig.json`/`jsconfig.json` `paths` and `baseUrl` (with
   `extends`, comments and trailing commas) resolve path aliases such as `@/lib/x`.

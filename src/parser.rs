@@ -7,9 +7,11 @@ use std::rc::Rc;
 
 type R<T> = Result<T, SyntaxError>;
 
+mod decorators;
 mod jsx;
 mod ts;
 
+pub use decorators::TsOptions;
 pub use jsx::JsxOptions;
 
 const RESERVED: &[&str] = &[
@@ -90,10 +92,30 @@ pub fn parse_ts(src: &str, script: bool) -> R<Vec<Stmt>> {
 }
 
 pub fn parse_full(src: &str, script: bool, ts: bool, jsx: Option<JsxOptions>) -> R<Vec<Stmt>> {
-    parse_goal(src, script, ts, jsx)
+    parse_goal_with(src, script, ts, TsOptions::default(), jsx)
+}
+
+pub fn parse_with_options(
+    src: &str,
+    script: bool,
+    ts: bool,
+    ts_opts: TsOptions,
+    jsx: Option<JsxOptions>,
+) -> R<Vec<Stmt>> {
+    parse_goal_with(src, script, ts, ts_opts, jsx)
 }
 
 fn parse_goal(src: &str, script: bool, ts: bool, jsx: Option<JsxOptions>) -> R<Vec<Stmt>> {
+    parse_goal_with(src, script, ts, TsOptions::default(), jsx)
+}
+
+fn parse_goal_with(
+    src: &str,
+    script: bool,
+    ts: bool,
+    ts_opts: TsOptions,
+    jsx: Option<JsxOptions>,
+) -> R<Vec<Stmt>> {
     let jsx = jsx.map(|mut o| {
         o.apply_pragmas(src);
         o
@@ -134,10 +156,20 @@ fn parse_goal(src: &str, script: bool, ts: bool, jsx: Option<JsxOptions>) -> R<V
         ts_ambient: 0,
         ts_in_extends: false,
         ts_arrow_ret: false,
+        ts_opts: TsOptions::default(),
+        ts_pending_decorators: Vec::new(),
+        ts_param_decs: Vec::new(),
+        ts_param_types: Vec::new(),
+        ts_last_param_decs: Vec::new(),
+        ts_last_param_types: Vec::new(),
+        ts_last_return: None,
+        ts_class_stack: Vec::new(),
+        ts_class_iife: None,
         jsx: None,
         jsx_used: false,
     };
     parser.ts = ts;
+    parser.ts_opts = ts_opts;
     parser.jsx = jsx;
     parser.strict = !script || parser.has_use_strict_from(0);
     if script && parser.strict {
@@ -183,6 +215,15 @@ pub fn parse_eval(src: &str, ctx: &EvalCtx) -> R<Vec<Stmt>> {
         ts_ambient: 0,
         ts_in_extends: false,
         ts_arrow_ret: false,
+        ts_opts: TsOptions::default(),
+        ts_pending_decorators: Vec::new(),
+        ts_param_decs: Vec::new(),
+        ts_param_types: Vec::new(),
+        ts_last_param_decs: Vec::new(),
+        ts_last_param_types: Vec::new(),
+        ts_last_return: None,
+        ts_class_stack: Vec::new(),
+        ts_class_iife: None,
         jsx: None,
         jsx_used: false,
     };
@@ -262,6 +303,15 @@ struct Parser {
     ts_ambient: u32,
     ts_in_extends: bool,
     ts_arrow_ret: bool,
+    ts_opts: TsOptions,
+    ts_pending_decorators: Vec<Expr>,
+    ts_param_decs: Vec<(usize, Expr)>,
+    ts_param_types: Vec<Expr>,
+    ts_last_param_decs: Vec<(usize, Expr)>,
+    ts_last_param_types: Vec<Expr>,
+    ts_last_return: Option<Expr>,
+    ts_class_stack: Vec<decorators::ClassDecorations>,
+    ts_class_iife: Option<Expr>,
     jsx: Option<JsxOptions>,
     jsx_used: bool,
 }
@@ -874,6 +924,10 @@ impl Parser {
     }
 
     fn statement_kind(&mut self) -> R<StmtKind> {
+        if self.ts && self.is(P::At) {
+            let decs = self.ts_decorators()?;
+            self.ts_pending_decorators.extend(decs);
+        }
         let top = std::mem::take(&mut self.at_top);
         let single = std::mem::take(&mut self.single);
         if self.is(P::LBrace) {
@@ -964,7 +1018,7 @@ impl Parser {
                 }
                 Ok(StmtKind::Function(f))
             }
-            Some("class") => Ok(StmtKind::Class(self.class(true)?)),
+            Some("class") => self.class_statement(),
             Some("if") => {
                 self.advance();
                 self.expect(P::LParen)?;
@@ -1724,15 +1778,26 @@ impl Parser {
                     line,
                 }))));
             }
+            if self.ts && self.is(P::At) {
+                let decs = self.ts_decorators()?;
+                self.ts_pending_decorators.extend(decs);
+            }
             if self.is_kw("class") {
                 if matches!(&self.peek_at(1).tok, Tok::Ident(n) if &**n != "extends") {
                     let c = self.class(true)?;
+                    if let Some(e) = self.ts_class_iife.take() {
+                        self.semicolon().ok();
+                        return Ok(StmtKind::Export(ExportDecl::Default(e)));
+                    }
                     return Ok(StmtKind::Export(ExportDecl::DefaultDecl(Box::new(Stmt {
                         kind: StmtKind::Class(c),
                         line,
                     }))));
                 }
                 let c = self.class(false)?;
+                if let Some(e) = self.ts_class_iife.take() {
+                    return Ok(StmtKind::Export(ExportDecl::Default(e)));
+                }
                 return Ok(StmtKind::Export(ExportDecl::Default(Expr {
                     kind: ExprKind::Class(c),
                     line,
@@ -1823,7 +1888,12 @@ impl Parser {
         let saved_sb = std::mem::take(&mut self.static_block);
         let nt = std::mem::replace(&mut self.nt_ok, true);
         let saved_props = std::mem::take(&mut self.ts_props);
+        let saved_decs = std::mem::take(&mut self.ts_param_decs);
+        let saved_types = std::mem::take(&mut self.ts_param_types);
         let mut own_props = Vec::new();
+        let mut own_decs = Vec::new();
+        let mut own_types = Vec::new();
+        let mut own_ret = None;
         let mut bodyless = false;
         let parsed = (|| {
             if self.ts && self.is(P::Lt) {
@@ -1831,8 +1901,16 @@ impl Parser {
             }
             let (params, rest) = self.params()?;
             own_props = std::mem::take(&mut self.ts_props);
+            own_decs = std::mem::take(&mut self.ts_param_decs);
+            own_types = std::mem::take(&mut self.ts_param_types);
             if self.ts {
-                self.ts_annotation()?;
+                if self.eat(P::Colon) {
+                    if self.ts_opts.emit_metadata {
+                        own_ret = Some(self.ts_type_serialized()?);
+                    } else {
+                        self.ts_type()?;
+                    }
+                }
                 if !self.is(P::LBrace) {
                     self.semicolon()?;
                     bodyless = true;
@@ -1842,7 +1920,12 @@ impl Parser {
             Ok((params, rest, self.function_body()?))
         })();
         self.ts_props = saved_props;
+        self.ts_param_decs = saved_decs;
+        self.ts_param_types = saved_types;
         self.ts_last_props = own_props;
+        self.ts_last_param_decs = own_decs;
+        self.ts_last_param_types = own_types;
+        self.ts_last_return = own_ret;
         self.ts_bodyless = bodyless;
         self.nt_ok = nt;
         self.static_block = saved_sb;
@@ -2028,7 +2111,9 @@ impl Parser {
         let mut rest = None;
         while !self.is(P::RParen) {
             let mut is_prop = false;
+            let mut param_decs = Vec::new();
             if self.ts {
+                param_decs = self.ts_decorators()?;
                 if self.is_kw("this")
                     && (self.is_at(1, P::Colon)
                         || self.is_at(1, P::Comma)
@@ -2046,7 +2131,7 @@ impl Parser {
             if self.eat(P::Ellipsis) {
                 rest = Some(self.binding_pattern()?);
                 if self.ts {
-                    self.ts_annotation()?;
+                    self.ts_param_type()?;
                 }
                 break;
             }
@@ -2060,11 +2145,14 @@ impl Parser {
                 {
                     self.advance();
                 }
-                self.ts_annotation()?;
+                self.ts_param_type()?;
                 if is_prop {
                     if let Pattern::Ident(n) = &pattern {
                         self.ts_props.push(n.clone());
                     }
+                }
+                for d in param_decs {
+                    self.ts_param_decs.push((params.len(), d));
                 }
             }
             let default = if self.eat(P::Eq) {
@@ -2216,6 +2304,18 @@ impl Parser {
         }
     }
 
+    fn class_statement(&mut self) -> R<StmtKind> {
+        let c = self.class(true)?;
+        if let Some(e) = self.ts_class_iife.take() {
+            let name = c.name.clone().unwrap_or_else(|| "%decclass%".into());
+            return Ok(StmtKind::Decl(
+                DeclKind::Let,
+                vec![(Pattern::Ident(name), Some(e))],
+            ));
+        }
+        Ok(StmtKind::Class(c))
+    }
+
     fn class(&mut self, require_name: bool) -> R<Rc<ClassDef>> {
         let saved = std::mem::replace(&mut self.strict, true);
         let r = self.class_inner(require_name);
@@ -2224,6 +2324,7 @@ impl Parser {
     }
 
     fn class_inner(&mut self, require_name: bool) -> R<Rc<ClassDef>> {
+        let class_decorators = std::mem::take(&mut self.ts_pending_decorators);
         let line = self.line();
         let start = self.peek().start;
         self.expect_kw("class")?;
@@ -2255,18 +2356,34 @@ impl Parser {
         let id = fresh_class_id();
         let declared = self.prescan_private();
         self.class_ids.push((id, Rc::new(declared)));
+        if self.ts {
+            self.ts_class_stack
+                .push(decorators::ClassDecorations::default());
+        }
         let parsed = self.class_body(superclass.is_some());
+        let decorations = if self.ts {
+            self.ts_class_stack.pop()
+        } else {
+            None
+        };
         self.class_ids.pop();
         let (constructor, members) = parsed?;
         check_class_members(&members, line)?;
-        Ok(Rc::new(ClassDef {
+        let def = Rc::new(ClassDef {
             name,
             superclass,
             constructor,
             members,
             line,
             span: (start, self.prev_end()),
-        }))
+        });
+        if let Some(d) = decorations {
+            if !class_decorators.is_empty() || !d.members.is_empty() || !d.ctor_params.is_empty() {
+                self.ts_class_iife =
+                    Some(self.ts_decorated_class(def.clone(), class_decorators, d));
+            }
+        }
+        Ok(def)
     }
 
     fn class_body(&mut self, has_super: bool) -> R<(Option<Rc<FuncDef>>, Vec<ClassMember>)> {
@@ -2280,6 +2397,11 @@ impl Parser {
             if self.eat(P::Semi) {
                 continue;
             }
+            let member_decs = if self.ts {
+                self.ts_decorators()?
+            } else {
+                Vec::new()
+            };
             let mline = self.line();
             let mut mstart = self.peek().start;
             let ends_name = |p: &Parser, n: usize| {
@@ -2368,6 +2490,21 @@ impl Parser {
                 self.advance();
             }
             let (key, _) = self.prop_key()?;
+            let (key, key_expr) = if self.ts && !member_decs.is_empty() {
+                let mut st = self.ts_class_stack.pop().unwrap_or_default();
+                let (k, e) = self.ts_member_key(key, &mut st);
+                self.ts_class_stack.push(st);
+                (k, Some(e))
+            } else {
+                let e = match &key {
+                    PropKey::Named(n) => Some(Expr {
+                        kind: ExprKind::Str(n.clone()),
+                        line: mline,
+                    }),
+                    PropKey::Computed(_) => None,
+                };
+                (key, e)
+            };
             if self.ts && (self.is(P::Question) || self.is(P::Bang)) && !self.peek().nl_before {
                 self.advance();
             }
@@ -2385,6 +2522,15 @@ impl Parser {
                 let f = self.function_rest(fname, kind, mline)?;
                 if std::mem::take(&mut self.ts_bodyless) {
                     continue;
+                }
+                if self.ts {
+                    self.ts_member_decorations(
+                        key_expr,
+                        is_static,
+                        if setter { 2 } else { 1 },
+                        member_decs,
+                        None,
+                    );
                 }
                 check_accessor_params(&f, setter, mline)?;
                 members.push(ClassMember::Accessor {
@@ -2430,6 +2576,14 @@ impl Parser {
                     if !props.is_empty() {
                         f = self.ts_inject_props(f, props, has_super);
                     }
+                    let pdecs = std::mem::take(&mut self.ts_last_param_decs);
+                    let types = std::mem::take(&mut self.ts_last_param_types);
+                    if let Some(st) = self.ts_class_stack.last_mut() {
+                        st.ctor_params = pdecs;
+                        st.ctor_types = types;
+                    }
+                } else if self.ts {
+                    self.ts_member_decorations(key_expr, is_static, 0, member_decs, None);
                 }
                 if is_ctor {
                     if constructor.is_some() {
@@ -2451,8 +2605,13 @@ impl Parser {
                 if is_async || is_generator {
                     return Err(self.unexpected());
                 }
-                if self.ts {
-                    self.ts_annotation()?;
+                let mut field_type = None;
+                if self.ts && self.eat(P::Colon) {
+                    if self.ts_opts.emit_metadata && !member_decs.is_empty() {
+                        field_type = Some(self.ts_type_serialized()?);
+                    } else {
+                        self.ts_type()?;
+                    }
                 }
                 let value = if self.eat(P::Eq) {
                     self.fn_depth += 1;
@@ -2467,6 +2626,9 @@ impl Parser {
                     None
                 };
                 self.semicolon()?;
+                if self.ts && !member_decs.is_empty() {
+                    self.ts_member_decorations(key_expr, is_static, 3, member_decs, field_type);
+                }
                 if ts_declare || ts_abstract {
                     continue;
                 }
@@ -2581,8 +2743,12 @@ impl Parser {
         }
         let (params, rest) = if self.is(P::LParen) {
             let saved_props = std::mem::take(&mut self.ts_props);
+            let saved_decs = std::mem::take(&mut self.ts_param_decs);
+            let saved_types = std::mem::take(&mut self.ts_param_types);
             let r = self.params();
             self.ts_props = saved_props;
+            self.ts_param_decs = saved_decs;
+            self.ts_param_types = saved_types;
             let r = r?;
             if self.ts && self.eat(P::Colon) {
                 self.ts_arrow_return_type()?;
@@ -3454,6 +3620,15 @@ impl Parser {
                         ts_ambient: self.ts_ambient,
                         ts_in_extends: false,
                         ts_arrow_ret: false,
+                        ts_opts: self.ts_opts,
+                        ts_pending_decorators: Vec::new(),
+                        ts_param_decs: Vec::new(),
+                        ts_param_types: Vec::new(),
+                        ts_last_param_decs: Vec::new(),
+                        ts_last_param_types: Vec::new(),
+                        ts_last_return: None,
+                        ts_class_stack: Vec::new(),
+                        ts_class_iife: None,
                         jsx: self.jsx.clone(),
                         jsx_used: false,
                     };
@@ -3482,6 +3657,11 @@ impl Parser {
     fn primary(&mut self) -> R<Expr> {
         if self.is(P::JsxOpen) {
             return self.jsx_element();
+        }
+        if self.ts && self.is(P::At) {
+            let decs = self.ts_decorators()?;
+            self.ts_pending_decorators.extend(decs);
+            return self.primary();
         }
         let line = self.line();
         if matches!(
@@ -3624,7 +3804,13 @@ impl Parser {
                             is_generator,
                         )?)
                     }
-                    "class" => ExprKind::Class(self.class(false)?),
+                    "class" => {
+                        let c = self.class(false)?;
+                        if let Some(e) = self.ts_class_iife.take() {
+                            return Ok(e);
+                        }
+                        ExprKind::Class(c)
+                    }
                     "super" => {
                         self.advance();
                         if self.is(P::LParen) {

@@ -1349,6 +1349,28 @@ const runDisposeSteps = async (stack) => {
     }
   }
 }
+define(globalThis, "%decorate%", function (decorators, target, key, desc) {
+  const c = arguments.length
+  let r = c < 3 ? target : desc === null ? (desc = Object.getOwnPropertyDescriptor(target, key)) : desc
+  if (typeof Reflect === "object" && typeof Reflect.decorate === "function") {
+    r = Reflect.decorate(decorators, target, key, desc)
+  } else {
+    for (let i = decorators.length - 1; i >= 0; i--) {
+      const d = decorators[i]
+      if (d) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r
+    }
+  }
+  if (c > 3 && r) Object.defineProperty(target, key, r)
+  return r
+})
+define(globalThis, "%metadata%", function (k, v) {
+  if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v)
+})
+define(globalThis, "%param%", function (index, decorator) {
+  return function (target, key) {
+    decorator(target, key, index)
+  }
+})
 define(globalThis, "%usingStack%", newDisposeStack)
 define(globalThis, "%using%", addDisposable)
 define(globalThis, "%usingError%", (stack, e) => {

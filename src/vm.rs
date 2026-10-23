@@ -566,11 +566,15 @@ impl Vm {
         mode: Mode,
         sloppy: bool,
     ) -> Result<Rc<FunctionProto>, SyntaxError> {
-        let ast = if module::is_jsx(name) {
-            let opts = module::jsx_options(&dir);
-            parser::parse_full(src, false, module::is_typescript(name), Some(opts))?
-        } else if module::is_typescript(name) {
-            parser::parse_ts(src, false)?
+        let ast = if module::is_jsx(name) || module::is_typescript(name) {
+            let jsx = module::is_jsx(name).then(|| module::jsx_options(&dir));
+            let ts = module::is_typescript(name);
+            let opts = if ts {
+                module::ts_options(&dir)
+            } else {
+                parser::TsOptions::default()
+            };
+            parser::parse_with_options(src, false, ts, opts, jsx)?
         } else {
             parser::parse(src)?
         };
@@ -593,11 +597,15 @@ impl Vm {
         dir: PathBuf,
         sloppy: bool,
     ) -> Result<Rc<FunctionProto>, SyntaxError> {
-        let ast = if module::is_jsx(name) {
-            let opts = module::jsx_options(&dir);
-            parser::parse_full(src, true, module::is_typescript(name), Some(opts))?
-        } else if module::is_typescript(name) {
-            parser::parse_ts(src, true)?
+        let ast = if module::is_jsx(name) || module::is_typescript(name) {
+            let jsx = module::is_jsx(name).then(|| module::jsx_options(&dir));
+            let ts = module::is_typescript(name);
+            let opts = if ts {
+                module::ts_options(&dir)
+            } else {
+                parser::TsOptions::default()
+            };
+            parser::parse_with_options(src, true, ts, opts, jsx)?
         } else {
             parser::parse_script(src)?
         };

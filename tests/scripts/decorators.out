@@ -1,0 +1,11 @@
+ann 1
+rename needs every argument
+column id: Number
+column name: String
+column address: Address
+column roles: Array
+column active: Boolean
+param rename#0 value
+param constructor#0 db
+entity User -> users
+String,Number | String,String | User
