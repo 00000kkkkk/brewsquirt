@@ -4048,6 +4048,12 @@ const NODE_SRC: &str = r##"
     Duplex.call(this, options)
     if (typeof options.transform === "function") this._transform = options.transform
     if (typeof options.flush === "function") this._flush = options.flush
+    if (typeof options.final === "function") {
+      const userFinal = options.final
+      this._final = function (cb) {
+        userFinal.call(this, (err) => (err ? cb(err) : Transform.prototype._final.call(this, cb)))
+      }
+    }
   }
   Object.setPrototypeOf(Transform.prototype, Duplex.prototype)
   Object.setPrototypeOf(Transform, Duplex)
@@ -4145,36 +4151,86 @@ const NODE_SRC: &str = r##"
     return cleanup
   }
 
-  function pipeline(...args) {
-    const cb = typeof args[args.length - 1] === "function" ? args.pop() : null
-    const streams = args.flat()
-    if (streams.length < 2) throw streamError("ERR_MISSING_ARGS", "The streams argument must contain at least two streams")
+  const isStage = (s) =>
+    typeof s === "function" ||
+    (s !== null &&
+      typeof s === "object" &&
+      (typeof s.pipe === "function" || typeof s.write === "function" || typeof s.on === "function" || typeof s[Symbol.asyncIterator] === "function" || typeof s[Symbol.iterator] === "function"))
+  const asReadable = (s) => (s !== null && typeof s === "object" && typeof s.pipe === "function" ? s : Readable.from(s))
+  function runPipeline(stages, options, cb) {
+    if (stages.length < 2) throw streamError("ERR_MISSING_ARGS", "The streams argument must contain at least two streams")
+    const end = options?.end !== false
+    const streams = []
     let settled = false
+    let result
     const settle = (err) => {
       if (settled) return
       settled = true
       if (err) for (const s of streams) if (typeof s.destroy === "function" && !s.destroyed) s.destroy(err)
-      if (cb) cb(err ?? undefined, streams[streams.length - 1][kRead] ? undefined : undefined)
+      cb(err ?? undefined, result)
     }
-    for (let i = 0; i < streams.length; i++) {
-      const s = streams[i]
-      if (typeof s.on === "function") s.on("error", settle)
-      if (i < streams.length - 1) {
-        const next = streams[i + 1]
-        if (typeof s.pipe === "function") s.pipe(next)
-        else if (s && typeof s[Symbol.asyncIterator] === "function") Readable.from(s).pipe(next)
-        else throw streamError("ERR_INVALID_ARG_TYPE", "pipeline expects streams")
+    const signal = options?.signal
+    if (signal) {
+      if (signal.aborted) {
+        queueMicrotask(() => settle(new DOMException("The operation was aborted", "AbortError")))
+        return
       }
+      signal.addEventListener("abort", () => settle(new DOMException("The operation was aborted", "AbortError")), { once: true })
     }
-    const last = streams[streams.length - 1]
-    finished(last, last[kWrite] !== undefined ? { readable: false } : {}, (err) => settle(err))
-    return last
+    let current = typeof stages[0] === "function" ? stages[0]({ signal }) : stages[0]
+    if (current !== null && typeof current === "object" && typeof current.on === "function") {
+      streams.push(current)
+      current.on("error", settle)
+    }
+    for (let i = 1; i < stages.length; i++) {
+      const stage = stages[i]
+      const last = i === stages.length - 1
+      if (typeof stage === "function") {
+        const out = stage(current, { signal })
+        if (last) {
+          Promise.resolve(out).then(
+            (value) => {
+              result = value
+              settle()
+            },
+            settle,
+          )
+          return
+        }
+        current = out
+        continue
+      }
+      if (!isStage(stage)) throw streamError("ERR_INVALID_ARG_TYPE", "pipeline expects streams")
+      const source = asReadable(current)
+      if (source !== current) {
+        streams.push(source)
+        source.on("error", settle)
+      }
+      streams.push(stage)
+      if (typeof stage.on === "function") stage.on("error", settle)
+      source.pipe(stage, { end: last ? end : true })
+      current = stage
+    }
+    const lastStream = stages[stages.length - 1]
+    if (!end) {
+      const source = streams[streams.length - 2]
+      if (source && typeof source.once === "function") source.once("end", () => settle())
+      return lastStream
+    }
+    finished(lastStream, lastStream[kWrite] !== undefined ? { readable: false } : {}, (err) => settle(err))
+    return lastStream
+  }
+  function pipeline(...args) {
+    const cb = typeof args[args.length - 1] === "function" ? args.pop() : () => {}
+    return runPipeline(args.flat(), {}, cb)
   }
 
   const streamPromises = {
-    pipeline: (...streams) =>
+    pipeline: (...args) =>
       new Promise((resolve, reject) => {
-        pipeline(...streams, (err) => (err ? reject(err) : resolve()))
+        const last = args[args.length - 1]
+        const options = args.length > 2 && last !== null && typeof last === "object" && !isStage(last) ? args.pop() : {}
+        runPipeline(args.flat(), options, (err, value) => (err ? reject(err) : resolve(value)))
       }),
     finished: (stream, options) =>
       new Promise((resolve, reject) => {
@@ -5489,6 +5545,13 @@ const NODE_SRC: &str = r##"
 
   const utilExtras = {
     inspectCustom: Symbol.for("nodejs.util.inspect.custom"),
+    _extend(target, source) {
+      if (source === null || typeof source !== "object") return target
+      const keys = Object.keys(source)
+      let i = keys.length
+      while (i--) target[keys[i]] = source[keys[i]]
+      return target
+    },
     formatWithOptions: (options, ...args) => native.format(...args),
     stripVTControlCharacters: (s) => String(s).replace(/[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d\/#&.:=?%@~_]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g, ""),
     debuglog(section) {
@@ -7545,6 +7608,9 @@ const NODE_SRC: &str = r##"
     this.loaded = true
   }
   Module.runMain = () => {}
+  Module._preloadModules = (requests) => {
+    for (const request of requests ?? []) Module._load(request, null, false)
+  }
   Module.register = () => {}
   Module.syncBuiltinESMExports = () => {}
   Module.findSourceMap = () => undefined
@@ -8445,6 +8511,9 @@ fn module_create_require(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         if let Some(main) = global.get_own("main") {
             require.set_own("main", main);
         }
+        if let Some(extensions) = global.get_own("extensions") {
+            require.set_hidden("extensions", extensions);
+        }
     }
     Ok(Value::Object(require))
 }
@@ -8474,6 +8543,10 @@ fn module_is_builtin(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 fn native_set_module_class(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let class = arg(args, 0);
     vm.module_class = Some(class.clone());
+    let extensions = vm.get_prop(&class, "_extensions")?;
+    if let Some(Value::Object(global)) = vm.globals.get("require").cloned() {
+        global.set_hidden("extensions", extensions);
+    }
     if let Value::Object(proto) = vm.get_prop(&class, "prototype")? {
         let cache = vm.require_cache_object_public();
         for (_, m) in vm.own_entries(&Value::Object(cache)) {

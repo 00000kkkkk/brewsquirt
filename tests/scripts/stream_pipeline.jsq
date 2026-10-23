@@ -1,0 +1,68 @@
+import { Readable, Writable, Transform, PassThrough, pipeline as pipelineCb } from "node:stream"
+import { pipeline } from "node:stream/promises"
+import { createRequire } from "node:module"
+import util from "node:util"
+
+const sink = (out) =>
+  new Writable({
+    write(chunk, encoding, cb) {
+      out.push(String(chunk))
+      cb()
+    },
+  })
+
+const a = []
+await pipeline(Readable.from(["a", "b"]), sink(a), { end: true })
+console.log("options object", a)
+
+const b = []
+const result = await pipeline(
+  Readable.from(["x", "y"]),
+  async function* (source) {
+    for await (const chunk of source) yield String(chunk).toUpperCase()
+  },
+  async function (source) {
+    for await (const chunk of source) b.push(chunk)
+    return "done"
+  },
+)
+console.log("generator stages", b, result)
+
+const c = []
+await pipeline(Readable.from(["p", "q"]), new PassThrough(), sink(c))
+console.log("passthrough", c)
+
+const events = []
+const withFinal = new Transform({
+  transform(chunk, encoding, cb) {
+    cb(null, String(chunk) + "!")
+  },
+  final(cb) {
+    events.push("final")
+    cb()
+  },
+})
+const d = []
+withFinal.on("data", (chunk) => d.push(String(chunk)))
+withFinal.on("end", () => events.push("end"))
+withFinal.write("one")
+withFinal.end("two")
+await new Promise((resolve) => withFinal.on("end", resolve))
+console.log("transform final", d, events)
+
+const controller = new AbortController()
+const slow = new Readable({ read() {} })
+const aborted = pipeline(slow, sink([]), { signal: controller.signal }).catch((e) => e.name)
+controller.abort()
+console.log("abort", await aborted)
+
+await new Promise((resolve) =>
+  pipelineCb(Readable.from(["cb"]), sink([]), (err) => {
+    console.log("callback", err ?? null)
+    resolve()
+  }),
+)
+
+console.log("util._extend", util._extend({ a: 1 }, { b: 2, a: 3 }))
+const require = createRequire(import.meta.url)
+console.log("require.extensions", typeof require.extensions[".js"], Object.keys(require.extensions).sort().join(","))

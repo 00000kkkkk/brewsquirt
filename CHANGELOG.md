@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `stream.pipeline` and `stream/promises` `pipeline` accept generator functions and async
+  functions as stages, and the promise version takes a trailing options object with `end` and
+  `signal`; `graphql-yoga` and `@whatwg-node/server` call it that way.
+- A `Transform` created with a `final` option ends its readable side after the final callback, as
+  in Node, instead of leaving readers waiting.
+- `util._extend`, `require.extensions` and `Module._preloadModules` exist, so `http-proxy` and
+  `ts-node/register` load.
+
 ## [1.7.0] - 2026-10-23
 
 ### Added
