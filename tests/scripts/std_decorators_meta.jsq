@@ -1,0 +1,55 @@
+Symbol.metadata ??= Symbol("Symbol.metadata")
+
+function prop(options) {
+  return function (value, context) {
+    context.metadata.props ??= []
+    context.metadata.props.push([String(context.name), options.type])
+  }
+}
+function element(name) {
+  return function (cls, context) {
+    context.metadata.tag = name
+    return cls
+  }
+}
+
+@element("x-base")
+class Base {
+  @prop({ type: "String" }) title = "t"
+}
+
+@element("x-child")
+class Child extends Base {
+  @prop({ type: "Number" }) count = 1
+  @prop({ type: "Boolean" }) accessor open = false
+}
+
+const base = Base[Symbol.metadata]
+const child = Child[Symbol.metadata]
+console.log(base.tag, JSON.stringify(base.props), child.tag, JSON.stringify(child.props), Object.getPrototypeOf(child) === base, child.props === base.props)
+
+const Expr = @element("x-expr") class {
+  @prop({ type: "Any" }) v
+}
+console.log(Expr[Symbol.metadata].tag, Expr.name === "" || Expr.name === "Expr")
+
+class Priv {
+  accessor #count = 1
+  static accessor #total = 10
+  inc() {
+    this.#count++
+    Priv.#total += this.#count
+    return [this.#count, Priv.#total]
+  }
+}
+console.log(new Priv().inc(), new Priv().inc())
+
+class Plain {
+  accessor a = 1
+  static accessor b = 2
+  accessor
+  c = 3
+}
+const p = new Plain()
+p.a = 5
+console.log(p.a, Plain.b, p.c, p.accessor, Object.getOwnPropertyNames(Plain.prototype).sort(), Object.keys(p).sort())

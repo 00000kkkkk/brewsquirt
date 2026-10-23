@@ -1,0 +1,2 @@
+import D, { A, B, C } from "./fixtures/stddec/lib.mjs"
+console.log(D.tagName, A.tagName, B.tagName, C.tagName, D.name, A.name)

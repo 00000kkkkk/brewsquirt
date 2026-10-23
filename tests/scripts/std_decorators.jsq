@@ -1,0 +1,105 @@
+const log = []
+const ctx = (c) => [c.kind, String(c.name), c.static, c.private, typeof c.addInitializer, Object.keys(c.access ?? {}).sort().join("")].join(":")
+
+function logged(value, context) {
+  log.push("decorate " + ctx(context))
+  if (context.kind === "method") {
+    return function (...args) {
+      log.push(`call ${String(context.name)}(${args.join(",")})`)
+      return value.call(this, ...args)
+    }
+  }
+  if (context.kind === "field") {
+    return function (initial) {
+      log.push(`init ${String(context.name)}=${initial}`)
+      return initial === undefined ? "default" : initial * 10
+    }
+  }
+  if (context.kind === "getter") {
+    return function () {
+      return "got:" + value.call(this)
+    }
+  }
+  if (context.kind === "setter") {
+    return function (v) {
+      log.push("set " + v)
+      value.call(this, v + 1)
+    }
+  }
+  if (context.kind === "accessor") {
+    return {
+      get() {
+        return "acc:" + value.get.call(this)
+      },
+      set(v) {
+        value.set.call(this, v * 2)
+      },
+      init(v) {
+        log.push("accessor init " + v)
+        return v + 1
+      },
+    }
+  }
+}
+
+function withInit(value, context) {
+  context.addInitializer(function () {
+    log.push(`initializer for ${String(context.name)} on ${typeof this === "function" ? "class " + this.name : "instance"}`)
+  })
+}
+
+function tag(label) {
+  return function (cls, context) {
+    log.push(`class ${context.kind} ${context.name}`)
+    context.addInitializer(function () {
+      log.push("class initializer " + this.name)
+    })
+    return class extends cls {
+      tagged = label
+    }
+  }
+}
+
+const sym = Symbol("s")
+
+@tag("T")
+class Box {
+  @logged x = 4
+  @logged y
+  @withInit @logged static count = 2
+  #secret = 7
+  @logged #hidden = 3
+  @logged accessor size = 5
+  @logged @withInit
+  greet(name) {
+    return `hi ${name} ${this.#secret} ${this.#hidden}`
+  }
+  @logged get label() {
+    return "L"
+  }
+  @logged set label(v) {
+    this._label = v
+  }
+  @withInit static make() {
+    return new Box()
+  }
+  @logged [sym]() {
+    return "symbol method"
+  }
+  static self = Box.name
+}
+
+log.push("defined")
+const b = new Box()
+console.log(b.x, b.y, Box.count, b.greet("bob"), b.label, b.size, b.tagged, b[sym](), Box.self)
+b.label = 1
+b.size = 10
+console.log(b._label, b.size, Box.make() instanceof Box, Object.keys(b).sort())
+console.log(log.join("\n"))
+
+const Anon = [class {
+  @logged m() {
+    return 1
+  }
+}][0]
+console.log(new Anon().m())

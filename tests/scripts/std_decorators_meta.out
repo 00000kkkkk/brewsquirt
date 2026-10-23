@@ -1,0 +1,4 @@
+x-base [["title","String"],["open","Boolean"],["count","Number"]] x-child [["title","String"],["open","Boolean"],["count","Number"]] true true
+x-expr true
+[ 2, 12 ] [ 2, 14 ]
+5 2 3 undefined [ 'a', 'constructor' ] [ 'accessor', 'c' ]

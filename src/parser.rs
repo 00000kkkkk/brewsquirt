@@ -9,6 +9,7 @@ type R<T> = Result<T, SyntaxError>;
 
 mod decorators;
 mod jsx;
+mod std_decorators;
 mod ts;
 
 pub use decorators::TsOptions;
@@ -164,6 +165,8 @@ fn parse_goal_with(
         ts_last_param_types: Vec::new(),
         ts_last_return: None,
         ts_class_stack: Vec::new(),
+        std_stack: Vec::new(),
+        std_default_name: false,
         ts_class_iife: None,
         jsx: None,
         jsx_used: false,
@@ -223,6 +226,8 @@ pub fn parse_eval(src: &str, ctx: &EvalCtx) -> R<Vec<Stmt>> {
         ts_last_param_types: Vec::new(),
         ts_last_return: None,
         ts_class_stack: Vec::new(),
+        std_stack: Vec::new(),
+        std_default_name: false,
         ts_class_iife: None,
         jsx: None,
         jsx_used: false,
@@ -311,6 +316,8 @@ struct Parser {
     ts_last_param_types: Vec<Expr>,
     ts_last_return: Option<Expr>,
     ts_class_stack: Vec<decorators::ClassDecorations>,
+    std_stack: Vec<std_decorators::StdClass>,
+    std_default_name: bool,
     ts_class_iife: Option<Expr>,
     jsx: Option<JsxOptions>,
     jsx_used: bool,
@@ -537,8 +544,9 @@ impl Parser {
                                     | Tok::Punct(P::Star)
                             )
                             || matches!(&prev.tok, Tok::Ident(w) if !prev.escaped
-                                && (matches!(&**w, "static" | "get" | "set" | "async")
-                                    || (self.ts && matches!(&**w, "readonly" | "declare" | "abstract" | "override" | "accessor"))));
+                                && (matches!(&**w, "static" | "get" | "set" | "async" | "accessor")
+                                    || (self.ts && matches!(&**w, "readonly" | "declare" | "abstract" | "override"))))
+                            || self.decorated_member_at(i);
                         if decl && !out.contains(n) {
                             out.push(n.clone());
                         }
@@ -549,6 +557,36 @@ impl Parser {
             i += 1;
         }
         out
+    }
+
+    fn decorated_member_at(&self, hash: usize) -> bool {
+        let mut depth = 0i32;
+        let mut j = hash;
+        let mut steps = 0;
+        while j > 0 && steps < 256 {
+            j -= 1;
+            steps += 1;
+            match &self.toks[j].tok {
+                Tok::Punct(P::RParen) | Tok::Punct(P::RBracket) => depth += 1,
+                Tok::Punct(P::LParen) | Tok::Punct(P::LBracket) => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                }
+                Tok::Punct(P::At) if depth == 0 => return true,
+                Tok::Punct(P::Semi)
+                | Tok::Punct(P::LBrace)
+                | Tok::Punct(P::RBrace)
+                | Tok::Punct(P::Eq)
+                    if depth == 0 =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn ident_name(&mut self) -> R<JsStr> {
@@ -924,7 +962,7 @@ impl Parser {
     }
 
     fn statement_kind(&mut self) -> R<StmtKind> {
-        if self.ts && self.is(P::At) {
+        if self.is(P::At) {
             let decs = self.ts_decorators()?;
             self.ts_pending_decorators.extend(decs);
         }
@@ -1778,7 +1816,7 @@ impl Parser {
                     line,
                 }))));
             }
-            if self.ts && self.is(P::At) {
+            if self.is(P::At) {
                 let decs = self.ts_decorators()?;
                 self.ts_pending_decorators.extend(decs);
             }
@@ -1794,7 +1832,10 @@ impl Parser {
                         line,
                     }))));
                 }
-                let c = self.class(false)?;
+                self.std_default_name = true;
+                let c = self.class(false);
+                self.std_default_name = false;
+                let c = c?;
                 if let Some(e) = self.ts_class_iife.take() {
                     return Ok(StmtKind::Export(ExportDecl::Default(e)));
                 }
@@ -2360,12 +2401,18 @@ impl Parser {
             self.ts_class_stack
                 .push(decorators::ClassDecorations::default());
         }
+        let standard = self.std_decorators_active();
+        if standard {
+            self.std_class_start();
+        }
         let parsed = self.class_body(superclass.is_some());
         let decorations = if self.ts {
             self.ts_class_stack.pop()
         } else {
             None
         };
+        let std_class = if standard { self.std_stack.pop() } else { None };
+        let default_name = std::mem::take(&mut self.std_default_name);
         self.class_ids.pop();
         let (constructor, members) = parsed?;
         check_class_members(&members, line)?;
@@ -2377,7 +2424,12 @@ impl Parser {
             line,
             span: (start, self.prev_end()),
         });
-        if let Some(d) = decorations {
+        if let Some(st) = std_class {
+            if !class_decorators.is_empty() || st.wrap {
+                self.ts_class_iife =
+                    Some(self.std_decorated_class(def.clone(), class_decorators, st, default_name));
+            }
+        } else if let Some(d) = decorations {
             if !class_decorators.is_empty() || !d.members.is_empty() || !d.ctor_params.is_empty() {
                 self.ts_class_iife =
                     Some(self.ts_decorated_class(def.clone(), class_decorators, d));
@@ -2397,11 +2449,12 @@ impl Parser {
             if self.eat(P::Semi) {
                 continue;
             }
-            let member_decs = if self.ts {
+            let member_decs = if self.is(P::At) {
                 self.ts_decorators()?
             } else {
                 Vec::new()
             };
+            let legacy = self.ts && self.ts_opts.legacy_decorators;
             let mline = self.line();
             let mut mstart = self.peek().start;
             let ends_name = |p: &Parser, n: usize| {
@@ -2471,6 +2524,46 @@ impl Parser {
                     continue;
                 }
             }
+            if self.is_kw("accessor")
+                && !ends_name(self, 1)
+                && !self.is_at(1, P::Star)
+                && !matches!(&self.peek_at(1).tok, Tok::Ident(w) if matches!(&**w, "get" | "set" | "async") && !ends_name(self, 2))
+            {
+                self.advance();
+                let (key, _) = self.prop_key()?;
+                if self.ts && (self.is(P::Question) || self.is(P::Bang)) && !self.peek().nl_before {
+                    self.advance();
+                }
+                if self.ts && self.eat(P::Colon) {
+                    self.ts_type()?;
+                }
+                let value = if self.eat(P::Eq) {
+                    self.fn_depth += 1;
+                    self.field_init += 1;
+                    let nt = std::mem::replace(&mut self.nt_ok, true);
+                    let v = self.assignment();
+                    self.nt_ok = nt;
+                    self.field_init -= 1;
+                    self.fn_depth -= 1;
+                    Some(v?)
+                } else {
+                    None
+                };
+                self.semicolon()?;
+                if ts_declare || ts_abstract {
+                    continue;
+                }
+                if legacy && !member_decs.is_empty() {
+                    return Err(SyntaxError::new(
+                        "Legacy decorators cannot decorate auto-accessors",
+                        mline,
+                        1,
+                    ));
+                }
+                let expanded = self.std_auto_accessor(key, value, is_static, member_decs, mline)?;
+                members.extend(expanded);
+                continue;
+            }
             let mut is_async = false;
             let mut is_generator = false;
             let mut accessor = None;
@@ -2490,10 +2583,13 @@ impl Parser {
                 self.advance();
             }
             let (key, _) = self.prop_key()?;
-            let (key, key_expr) = if self.ts && !member_decs.is_empty() {
+            let (key, key_expr) = if legacy && !member_decs.is_empty() {
                 let mut st = self.ts_class_stack.pop().unwrap_or_default();
                 let (k, e) = self.ts_member_key(key, &mut st);
                 self.ts_class_stack.push(st);
+                (k, Some(e))
+            } else if !legacy && !member_decs.is_empty() {
+                let (k, e) = self.std_member_key(key, mline);
                 (k, Some(e))
             } else {
                 let e = match &key {
@@ -2523,12 +2619,30 @@ impl Parser {
                 if std::mem::take(&mut self.ts_bodyless) {
                     continue;
                 }
-                if self.ts {
+                if legacy {
                     self.ts_member_decorations(
                         key_expr,
                         is_static,
                         if setter { 2 } else { 1 },
                         member_decs,
+                        None,
+                    );
+                } else if !member_decs.is_empty() {
+                    let k = key_expr.unwrap_or_else(|| syn_ident("undefined", mline));
+                    self.std_record(
+                        if setter { "setter" } else { "getter" },
+                        &key,
+                        k,
+                        is_static,
+                        member_decs,
+                        mline,
+                    )?;
+                } else if self.ts {
+                    self.ts_member_decorations(
+                        key_expr,
+                        is_static,
+                        if setter { 2 } else { 1 },
+                        Vec::new(),
                         None,
                     );
                 }
@@ -2582,8 +2696,20 @@ impl Parser {
                         st.ctor_params = pdecs;
                         st.ctor_types = types;
                     }
-                } else if self.ts {
+                } else if legacy {
                     self.ts_member_decorations(key_expr, is_static, 0, member_decs, None);
+                } else if !member_decs.is_empty() {
+                    if is_ctor {
+                        return Err(SyntaxError::new(
+                            "Decorators are not valid on class constructors",
+                            mline,
+                            1,
+                        ));
+                    }
+                    let k = key_expr.unwrap_or_else(|| syn_ident("undefined", mline));
+                    self.std_record("method", &key, k, is_static, member_decs, mline)?;
+                } else if self.ts {
+                    self.ts_member_decorations(key_expr, is_static, 0, Vec::new(), None);
                 }
                 if is_ctor {
                     if constructor.is_some() {
@@ -2626,10 +2752,35 @@ impl Parser {
                     None
                 };
                 self.semicolon()?;
-                if self.ts && !member_decs.is_empty() {
+                if legacy && !member_decs.is_empty() {
                     self.ts_member_decorations(key_expr, is_static, 3, member_decs, field_type);
+                    if !(ts_declare || ts_abstract) {
+                        members.push(ClassMember::Field {
+                            key,
+                            value,
+                            is_static,
+                        });
+                    }
+                    continue;
                 }
                 if ts_declare || ts_abstract {
+                    continue;
+                }
+                if !member_decs.is_empty() {
+                    let k = key_expr.unwrap_or_else(|| syn_ident("undefined", mline));
+                    let inits = self.std_record("field", &key, k, is_static, member_decs, mline)?;
+                    let value = match inits {
+                        Some(i) => Some(self.std_wrap_init(&i, value, is_static, mline)),
+                        None => value,
+                    };
+                    members.push(ClassMember::Field {
+                        key,
+                        value,
+                        is_static,
+                    });
+                    if let Some(extra) = self.std_field_extras(is_static, mline) {
+                        members.push(extra);
+                    }
                     continue;
                 }
                 members.push(ClassMember::Field {
@@ -3628,6 +3779,8 @@ impl Parser {
                         ts_last_param_types: Vec::new(),
                         ts_last_return: None,
                         ts_class_stack: Vec::new(),
+                        std_stack: Vec::new(),
+                        std_default_name: false,
                         ts_class_iife: None,
                         jsx: self.jsx.clone(),
                         jsx_used: false,
@@ -3658,9 +3811,12 @@ impl Parser {
         if self.is(P::JsxOpen) {
             return self.jsx_element();
         }
-        if self.ts && self.is(P::At) {
+        if self.is(P::At) {
             let decs = self.ts_decorators()?;
             self.ts_pending_decorators.extend(decs);
+            if !self.is_kw("class") {
+                return Err(self.error("Decorators are only valid on classes and class members"));
+            }
             return self.primary();
         }
         let line = self.line();

@@ -276,11 +276,6 @@ impl Parser {
     pub(super) fn ts_decorators(&mut self) -> R<Vec<Expr>> {
         let mut out = Vec::new();
         while self.is(P::At) {
-            if !self.ts_opts.legacy_decorators {
-                return Err(
-                    self.error("Decorators need \"experimentalDecorators\": true in tsconfig.json")
-                );
-            }
             out.push(self.ts_decorator()?);
         }
         Ok(out)

@@ -454,7 +454,6 @@ impl Parser {
                         | "override"
                         | "declare"
                         | "abstract"
-                        | "accessor"
                 )
             {
                 break;

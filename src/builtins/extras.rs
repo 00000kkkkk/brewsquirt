@@ -1370,6 +1370,66 @@ define(globalThis, "%decorate%", function (decorators, target, key, desc) {
   if (c > 3 && r) Object.defineProperty(target, key, r)
   return r
 })
+const acceptDecorated = (f) => {
+  if (f !== undefined && typeof f !== "function") throw new TypeError("Function expected")
+  return f
+}
+const esDecorate = (ctor, descriptorIn, decorators, contextIn, initializers, extraInitializers) => {
+  const kind = contextIn.kind
+  const key = kind === "getter" ? "get" : kind === "setter" ? "set" : "value"
+  const target = !descriptorIn && ctor ? (contextIn.static ? ctor : ctor.prototype) : null
+  const descriptor = descriptorIn || (target ? Object.getOwnPropertyDescriptor(target, contextIn.name) : {})
+  let done = false
+  for (let i = decorators.length - 1; i >= 0; i--) {
+    const context = {}
+    for (const p in contextIn) context[p] = p === "access" ? {} : contextIn[p]
+    for (const p in contextIn.access) context.access[p] = contextIn.access[p]
+    context.addInitializer = (f) => {
+      if (done) throw new TypeError("Cannot add initializers after decoration has completed")
+      extraInitializers.push(acceptDecorated(f || null))
+    }
+    const result = (0, decorators[i])(kind === "accessor" ? { get: descriptor.get, set: descriptor.set } : descriptor[key], context)
+    if (kind === "accessor") {
+      if (result === undefined) continue
+      if (result === null || typeof result !== "object") throw new TypeError("Object expected")
+      let f
+      if ((f = acceptDecorated(result.get))) descriptor.get = f
+      if ((f = acceptDecorated(result.set))) descriptor.set = f
+      if ((f = acceptDecorated(result.init))) initializers.unshift(f)
+    } else {
+      const f = acceptDecorated(result)
+      if (f) {
+        if (kind === "field") initializers.unshift(f)
+        else descriptor[key] = f
+      }
+    }
+  }
+  if (target) Object.defineProperty(target, contextIn.name, descriptor)
+  done = true
+}
+define(globalThis, "%runInitializers%", function (thisArg, initializers, value) {
+  const useValue = arguments.length > 2
+  for (let i = 0; i < initializers.length; i++) {
+    value = useValue ? initializers[i].call(thisArg, value) : initializers[i].call(thisArg)
+  }
+  return useValue ? value : undefined
+})
+define(globalThis, "%applyDecorators%", function (cls, specs, classDecorators, classExtras) {
+  const metadataKey = typeof Symbol === "function" ? Symbol.metadata : undefined
+  const metadata = metadataKey ? Object.create(Object.getPrototypeOf(cls)?.[metadataKey] ?? null) : undefined
+  for (const s of specs) {
+    const context = { kind: s.kind, name: s.name, static: s.static, private: s.private, access: s.access, metadata }
+    esDecorate(s.kind === "field" ? null : cls, null, s.decorators, context, s.initializers, s.extras)
+  }
+  let result = cls
+  if (classDecorators.length) {
+    const descriptor = { value: cls }
+    esDecorate(null, descriptor, classDecorators, { kind: "class", name: cls.name, metadata }, null, classExtras)
+    result = descriptor.value
+  }
+  if (metadata) Object.defineProperty(result, metadataKey, { enumerable: true, configurable: true, writable: true, value: metadata })
+  return result
+})
 define(globalThis, "%metadata%", function (k, v) {
   if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v)
 })

@@ -1,0 +1,31 @@
+40 default 20 hi bob 7 30 got:L acc:6 T symbol method 
+2 acc:20 true [ '_label', 'tagged', 'x', 'y' ]
+decorate accessor:size:false:false:function:gethasset
+decorate method:greet:false:false:function:gethas
+decorate getter:label:false:false:function:gethas
+decorate setter:label:false:false:function:hasset
+decorate method:Symbol(s):false:false:function:gethas
+decorate field:count:true:false:function:gethasset
+decorate field:x:false:false:function:gethasset
+decorate field:y:false:false:function:gethasset
+decorate field:#hidden:false:true:function:gethasset
+class class Box
+initializer for make on class 
+init count=2
+initializer for count on class 
+class initializer 
+defined
+initializer for greet on instance
+init x=4
+init y=undefined
+init #hidden=3
+accessor init 5
+call greet(bob)
+call Symbol(s)()
+set 1
+initializer for greet on instance
+init x=4
+init y=undefined
+init #hidden=3
+accessor init 5
+1

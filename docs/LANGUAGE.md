@@ -877,6 +877,53 @@ Rules:
 - Methods live on the prototype and are shared by all instances.
 - `instanceof` checks whether the constructor's prototype is on the object's prototype chain.
 
+### Decorators and auto-accessors
+
+Classes and their methods, getters, setters, fields and auto-accessors take standard decorators
+in JavaScript and in TypeScript files without `experimentalDecorators`. A decorator receives the
+value and a context with `kind`, `name`, `static`, `private`, `access`, `addInitializer` and
+`metadata`; method, getter and setter decorators may return a replacement, field decorators an
+initializer, accessor decorators `{ get, set, init }`, and class decorators a new class.
+`accessor x = 1` declares a getter and setter pair over private storage. When `Symbol.metadata` is
+defined, as libraries such as Lit do with `Symbol.metadata ??= Symbol("metadata")`, decorators
+share a metadata object that classes inherit and that is stored under `Class[Symbol.metadata]`.
+The semantics match what TypeScript emits for these decorators. Decorating private methods and
+private accessors is not supported; private fields and private auto-accessors work.
+
+```js
+function logged(method, context) {
+  return function (...args) {
+    console.log(`${String(context.name)}(${args.join(", ")})`)
+    return method.call(this, ...args)
+  }
+}
+
+function bound(_method, context) {
+  context.addInitializer(function () {
+    this[context.name] = this[context.name].bind(this)
+  })
+}
+
+class Counter {
+  accessor count = 0
+
+  @logged @bound
+  add(n) {
+    this.count += n
+    return this.count
+  }
+}
+
+const { add } = new Counter()
+console.log(add(2), add(3))
+```
+
+```text
+add(2)
+add(3)
+2 5
+```
+
 ## Private members
 
 Names starting with `#` are private to the class body that declares them: fields, methods,
@@ -1604,8 +1651,9 @@ With `"experimentalDecorators": true` in the nearest `tsconfig.json`, decorators
 methods, accessors, properties and parameters follow TypeScript's legacy semantics, and
 `"emitDecoratorMetadata": true` adds the `design:type`, `design:paramtypes` and
 `design:returntype` metadata that `reflect-metadata` reads, so dependency injection in NestJS,
-TypeORM entities and class-validator rules work from the TypeScript sources. The standard
-decorators that TypeScript uses without that option are not implemented yet.
+TypeORM entities and class-validator rules work from the TypeScript sources. Without that option,
+decorators follow the standard semantics described under
+[Decorators and auto-accessors](#decorators-and-auto-accessors).
 
 ```ts
 interface User {
@@ -2374,7 +2422,6 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
 - Private names are shared by all evaluations of a class body, so instances of two classes made
   by the same factory can access each other's private members
 - Several realms in one thread (`vm` contexts share one realm)
-- `Temporal`, `ShadowRealm`, and standard (TC39) decorators; TypeScript's
-  `experimentalDecorators` work
+- `Temporal`, `ShadowRealm`, and decorators on private methods and private accessors
 - Tracing garbage collection
 - JIT compilation

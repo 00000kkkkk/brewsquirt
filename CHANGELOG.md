@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `preinstall`, `install` and `postinstall` scripts of packages listed in `trustedDependencies`
   in `squirt.json`, with `node` resolving to `jsq`. `vrotdaem trust <name>` adds a package to the
   list and runs its scripts, and `gluboko` names the packages whose scripts it skipped.
+- Standard decorators on classes, methods, getters, setters, fields and auto-accessors, in
+  JavaScript and in TypeScript without `experimentalDecorators`, with `addInitializer`, `access`,
+  class replacement and `Symbol.metadata`, matching what TypeScript emits; `accessor` fields
+  declare getter and setter pairs, public or private. Lit-style and logging decorators behave as
+  under Node with TypeScript, and the 27 decorator tests of test262 pass.
 - `TextDecoder` decodes every encoding of the WHATWG Encoding Standard, including
   `windows-1251`, `koi8-r`, the ISO 8859 family, `gbk`, `gb18030`, `big5`, `shift_jis`, `euc-jp`
   and `euc-kr`, with Node's encoding names and `ERR_ENCODING_INVALID_ENCODED_DATA` in fatal mode.

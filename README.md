@@ -203,7 +203,7 @@ JavaSquirt 1.5.0 implements modern JavaScript as specified, passing 98% of test2
 - **TypeScript and JSX**: `.ts`, `.mts`, `.cts`, `.tsx` and `.jsx` files run directly with types stripped, plus `enum`, `namespace`, parameter properties, `tsconfig` path aliases and JSX for React, Preact and custom runtimes
 - **Native addons**: `.node` files built on Node-API load with `require`, so `@swc/core`, `lightningcss`, `rollup`, `sharp` and other napi-rs and node-addon-api packages run
 - **Resource management**: `using` and `await using` declarations, `DisposableStack`, `AsyncDisposableStack` and `SuppressedError`
-- **Classes**: constructors, methods, static methods, instance and static fields, `extends`, `super()`, `super.method()`, `new`, `instanceof`, private `#members`
+- **Classes**: constructors, methods, static methods, instance and static fields, `extends`, `super()`, `super.method()`, `new`, `instanceof`, private `#members`, `accessor` fields and standard decorators
 - **Operators**: arithmetic, `**`, bitwise and shifts including `>>>`, loose and strict equality, `&&`, `||`, `??`, optional chaining `?.`, ternary, `typeof`, `void`, `delete`, `in`, compound assignment including `&&=`, `||=`, `??=`, `++` and `--`
 - **Syntax**: template literals and tagged templates with `String.raw`, optional semicolons with JS-style ASI, `//` and `/* */` comments
 - **Properties**: full property attributes, `Object.defineProperty`, `freeze`, `seal`, `preventExtensions`, `for...in` over inherited properties, array holes
