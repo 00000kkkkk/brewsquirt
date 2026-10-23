@@ -115,6 +115,7 @@ impl Parser {
                 Expr {
                     kind: ExprKind::Str(text.as_str().into()),
                     line,
+                    col: 0,
                 },
                 text,
             ));
@@ -124,6 +125,7 @@ impl Parser {
             Expr {
                 kind: ExprKind::Str(first.clone()),
                 line,
+                col: 0,
             }
         } else {
             self.ts_refs.insert(first.clone());
@@ -134,6 +136,7 @@ impl Parser {
                     ExprKind::Ident(first.clone())
                 },
                 line,
+                col: 0,
             }
         };
         while self.eat(P::Dot) {
@@ -147,6 +150,7 @@ impl Parser {
                     optional: false,
                 },
                 line,
+                col: 0,
             };
         }
         Ok((e, text))
@@ -189,6 +193,7 @@ impl Parser {
                         Some(Expr {
                             kind: ExprKind::Str(s),
                             line: l,
+                            col: 0,
                         })
                     }
                     Tok::Punct(P::LBrace) => {
@@ -221,6 +226,7 @@ impl Parser {
                         out.push(Arg::Expr(Expr {
                             kind: ExprKind::Str(s.as_str().into()),
                             line,
+                            col: 0,
                         }));
                     }
                 }
@@ -277,6 +283,7 @@ impl Parser {
                     optional: false,
                 },
                 line,
+                col: 0,
             };
         }
         e
@@ -293,6 +300,7 @@ impl Parser {
         let truthy = || Expr {
             kind: ExprKind::Bool(true),
             line,
+            col: 0,
         };
         let runtime = |name: &str| Expr {
             kind: ExprKind::Member {
@@ -301,6 +309,7 @@ impl Parser {
                 optional: false,
             },
             line,
+            col: 0,
         };
         if opts.automatic {
             self.jsx_used = true;
@@ -330,6 +339,7 @@ impl Parser {
                                 .collect(),
                         ),
                         line,
+                        col: 0,
                     }
                 } else {
                     match children.into_iter().next() {
@@ -345,6 +355,7 @@ impl Parser {
                 Expr {
                     kind: ExprKind::Object(props),
                     line,
+                    col: 0,
                 },
             ];
             if let Some(k) = key {
@@ -361,6 +372,7 @@ impl Parser {
             Expr {
                 kind: ExprKind::Null,
                 line,
+                col: 0,
             }
         } else {
             Expr {
@@ -376,6 +388,7 @@ impl Parser {
                         .collect(),
                 ),
                 line,
+                col: 0,
             }
         };
         let mut args = vec![Arg::Expr(ty), Arg::Expr(props)];
@@ -387,6 +400,7 @@ impl Parser {
                 optional: false,
             },
             line,
+            col: 0,
         }
     }
 
@@ -407,6 +421,7 @@ impl Parser {
                             vec![Expr {
                                 kind: ExprKind::Str(source),
                                 line: 1,
+                                col: 0,
                             }],
                             1,
                         )),

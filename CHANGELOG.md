@@ -38,6 +38,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `vrotdaem` installs the required `peerDependencies` of npm packages when nothing else provides
   them, skipping those marked optional in `peerDependenciesMeta`, and links `node_modules` to
   `nude_modules`, so tools that only look in `node_modules` find the installed packages.
+- Stack traces carry columns and read like V8's: `at Type.method [as alias] (file:line:column)`,
+  `at new Name (...)`, `at Object.<anonymous> (...)` for CommonJS module code and a bare
+  `at file:line:column` for anonymous code. Columns follow V8's positions (the property name of a
+  method call, `new`, the operator of an assignment or binary expression), so source maps resolve
+  to the right spot and Jest and Vitest point their code frames at the failing expression.
+  `CallSite` objects report `getColumnNumber`, `getTypeName` and `getMethodName`.
+- `vm.runInThisContext`, `vm.Script` and `vm.compileFunction` honour `lineOffset` and
+  `columnOffset`.
+
+### Fixed
+
+- Errors thrown while assigning a property, deleting one or writing through `super` reported the
+  location of an earlier call instead of the failing statement.
 
 ## [1.6.0] - 2026-10-23
 

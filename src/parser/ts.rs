@@ -35,6 +35,7 @@ fn num(n: f64, line: u32) -> Expr {
     Expr {
         kind: ExprKind::Number(n),
         line,
+        col: 0,
     }
 }
 
@@ -42,6 +43,7 @@ fn string(s: &JsStr, line: u32) -> Expr {
     Expr {
         kind: ExprKind::Str(s.clone()),
         line,
+        col: 0,
     }
 }
 
@@ -53,6 +55,7 @@ fn assign(target: Expr, value: Expr, line: u32) -> Expr {
             value: Box::new(value),
         },
         line,
+        col: 0,
     }
 }
 
@@ -64,6 +67,7 @@ fn index(obj: &JsStr, key: Expr, line: u32) -> Expr {
             optional: false,
         },
         line,
+        col: 0,
     }
 }
 
@@ -75,6 +79,7 @@ fn member(obj: Expr, name: &JsStr, line: u32) -> Expr {
             optional: false,
         },
         line,
+        col: 0,
     }
 }
 
@@ -623,14 +628,17 @@ impl Parser {
                 Box::new(Expr {
                     kind: ExprKind::Object(Vec::new()),
                     line,
+                    col: 0,
                 }),
             ),
             line,
+            col: 0,
         };
         syn_call(
             Expr {
                 kind: ExprKind::Function(Rc::new(f)),
                 line,
+                col: 0,
             },
             vec![arg],
             line,
@@ -687,6 +695,7 @@ impl Parser {
                         Box::new(num(1.0, mline)),
                     ),
                     line: mline,
+                    col: 0,
                 },
             };
             body.push(expr_stmt(assign(syn_ident(&cur, mline), value, mline)));
@@ -818,6 +827,7 @@ impl Parser {
                             Expr {
                                 kind: ExprKind::This,
                                 line,
+                                col: 0,
                             },
                             n,
                             line,

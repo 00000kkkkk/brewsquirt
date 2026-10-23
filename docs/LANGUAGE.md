@@ -757,9 +757,14 @@ true true invalid field: email
 
 ### Stack traces
 
-`err.stack` contains the error name, the message and the chain of active function calls with
-their source locations. An uncaught exception prints the error and its stack trace to stderr
-and makes `jsq` exit with a non-zero status. A rejected top-level `await` in the entry module
+`err.stack` contains the error name, the message and the chain of active function calls in V8's
+format: `at name (file:line:column)` for named functions, `at Type.method (...)` for method calls,
+`at new Name (...)` for constructors, `at Object.<anonymous> (...)` for CommonJS module code and
+`at file:line:column` for anonymous code. Lines and columns start at 1 and point where V8 points:
+the property name of a method call, the `new` keyword, the operator of an assignment or binary
+expression. `Error.captureStackTrace`, `Error.stackTraceLimit` and `Error.prepareStackTrace` with
+`CallSite` objects work as in Node. An uncaught exception prints the error and its stack trace to
+stderr and makes `jsq` exit with a non-zero status. A rejected top-level `await` in the entry module
 counts as an uncaught exception, not an unhandled rejection, as in Node.
 
 ### `using` and disposable resources
@@ -2084,7 +2089,7 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:timers`, `node:timers/promises` | Timer functions returning `Timeout`/`Immediate` objects with `ref`, `unref`, `hasRef`, `refresh` and `close` (unreferenced timers do not keep the process alive); promise versions of `setTimeout`, `setImmediate`, async-iterable `setInterval` and `scheduler.wait`/`scheduler.yield` with abort signals |
 | `node:sys`, `node:domain`, `node:trace_events`, `node:repl`, `node:sea`, `node:wasi` | Aliases and small implementations so that packages importing them load |
 | `node:dns`, `node:dns/promises` | `lookup`, `resolve`, `resolve4`, `resolve6` through the system resolver |
-| `node:vm`                      | `Script`, `runInThisContext` (with `filename` in stack traces), `runInNewContext` and `runInContext` (sandboxes are plain objects scoped with `with`), `createContext`, `compileFunction` with `params` and `parsingContext` |
+| `node:vm`                      | `Script`, `runInThisContext` (with `filename`, `lineOffset` and `columnOffset` in stack traces), `runInNewContext` and `runInContext` (sandboxes are plain objects scoped with `with`), `createContext`, `compileFunction` with `params` and `parsingContext` |
 | `node:v8`                      | `serialize` and `deserialize` with the structured-clone algorithm (`Map`, `Set`, `Date`, `RegExp`, `BigInt`, typed arrays, errors and cycles), `getHeapStatistics` and the other introspection functions; heap snapshots throw `ENOTSUP` |
 | `node:async_hooks`             | `AsyncLocalStorage` whose store is visible to synchronous callees of `run` and `enterWith`, `AsyncResource`, `createHook` as a no-op |
 | `node:punycode`                | `encode`, `decode`, `toASCII`, `toUnicode`, `ucs2`                |

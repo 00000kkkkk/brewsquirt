@@ -1,0 +1,6 @@
+at /v/b.js:12:1
+at /v/b2.js:11:6
+at /v/c.js:1:8
+at /v/d.js:5:10
+SyntaxError
+at /v/a.js:1:8

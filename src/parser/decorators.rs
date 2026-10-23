@@ -243,6 +243,7 @@ impl Parser {
                 ExprKind::Ident(name)
             },
             line,
+            col: 0,
         };
         loop {
             if self.eat(P::Dot) {
@@ -254,6 +255,7 @@ impl Parser {
                         optional: false,
                     },
                     line,
+                    col: 0,
                 };
             } else if self.is(P::LParen) && !self.peek().nl_before {
                 let args = self.arguments()?;
@@ -264,6 +266,7 @@ impl Parser {
                         optional: false,
                     },
                     line,
+                    col: 0,
                 };
             } else if self.is(P::Lt) && self.ts_try_type_args() {
                 continue;
@@ -306,9 +309,11 @@ impl Parser {
                     Box::new(Expr {
                         kind: ExprKind::Number(0.0),
                         line,
+                        col: 0,
                     }),
                 ),
                 line,
+                col: 0,
             },
             Ser::Global(g) => syn_ident(g, line),
             Ser::Object => syn_ident("Object", line),
@@ -324,6 +329,7 @@ impl Parser {
                             optional: false,
                         },
                         line,
+                        col: 0,
                     };
                 }
                 let test = Expr {
@@ -335,13 +341,16 @@ impl Parser {
                                 Box::new(syn_ident(&root, line)),
                             ),
                             line,
+                            col: 0,
                         }),
                         Box::new(Expr {
                             kind: ExprKind::Str("undefined".into()),
                             line,
+                            col: 0,
                         }),
                     ),
                     line,
+                    col: 0,
                 };
                 Expr {
                     kind: ExprKind::Cond(
@@ -350,6 +359,7 @@ impl Parser {
                         Box::new(value),
                     ),
                     line,
+                    col: 0,
                 }
             }
         }
@@ -362,6 +372,7 @@ impl Parser {
                 Expr {
                     kind: ExprKind::Str(key.into()),
                     line,
+                    col: 0,
                 },
                 value,
             ],
@@ -373,6 +384,7 @@ impl Parser {
         Expr {
             kind: ExprKind::Array(items.into_iter().map(ArrayElem::Expr).collect()),
             line,
+            col: 0,
         }
     }
 
@@ -387,6 +399,7 @@ impl Parser {
                 let k = Expr {
                     kind: ExprKind::Str(n.clone()),
                     line,
+                    col: 0,
                 };
                 (PropKey::Named(n), k)
             }
@@ -402,6 +415,7 @@ impl Parser {
                         value: Box::new(e),
                     },
                     line,
+                    col: 0,
                 };
                 (PropKey::Computed(assign), syn_ident(&hidden, line))
             }
@@ -430,6 +444,7 @@ impl Parser {
                     Expr {
                         kind: ExprKind::Number(i as f64),
                         line,
+                        col: 0,
                     },
                     d,
                 ],
@@ -511,6 +526,7 @@ impl Parser {
         let class_expr = Expr {
             kind: ExprKind::Class(def.clone()),
             line,
+            col: 0,
         };
         let init = if def.name.is_some() {
             class_expr
@@ -520,10 +536,12 @@ impl Parser {
                     Expr {
                         kind: ExprKind::Number(0.0),
                         line,
+                        col: 0,
                     },
                     class_expr,
                 ]),
                 line,
+                col: 0,
             }
         };
         body.push(syn_stmt(
@@ -544,6 +562,7 @@ impl Parser {
                         optional: false,
                     },
                     line,
+                    col: 0,
                 }
             };
             let desc = if m.field {
@@ -553,14 +572,17 @@ impl Parser {
                         Box::new(Expr {
                             kind: ExprKind::Number(0.0),
                             line,
+                            col: 0,
                         }),
                     ),
                     line,
+                    col: 0,
                 }
             } else {
                 Expr {
                     kind: ExprKind::Null,
                     line,
+                    col: 0,
                 }
             };
             body.push(syn_stmt(
@@ -580,6 +602,7 @@ impl Parser {
                     Expr {
                         kind: ExprKind::Number(i as f64),
                         line,
+                        col: 0,
                     },
                     d,
                 ],
@@ -604,6 +627,7 @@ impl Parser {
                         value: Box::new(call),
                     },
                     line,
+                    col: 0,
                 }),
                 line,
             ));
@@ -630,6 +654,7 @@ impl Parser {
             Expr {
                 kind: ExprKind::Function(Rc::new(f)),
                 line,
+                col: 0,
             },
             Vec::new(),
             line,

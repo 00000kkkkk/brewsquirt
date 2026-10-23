@@ -1,0 +1,25 @@
+at Object.<anonymous> (stack_columns.js:1:15)
+at Object.<anonymous> (stack_columns.js:7:13)
+at Object.<anonymous> (stack_columns.js:8:15)
+at Object.<anonymous> (stack_columns.js:9:17)
+at Object.<anonymous> (stack_columns.js:10:21)
+at Object.<anonymous> (stack_columns.js:11:21)
+at Object.<anonymous> (stack_columns.js:12:16)
+at Object.<anonymous> (stack_columns.js:14:4)
+at new Cap (stack_columns.js:4:27)
+at Object.<anonymous> (stack_columns.js:16:16)
+TypeError at stack_columns.js:27:29
+TypeError at stack_columns.js:28:26
+TypeError at stack_columns.js:29:30
+TypeError at stack_columns.js:30:33
+TypeError at stack_columns.js:31:26
+ReferenceError at stack_columns.js:32:26
+TypeError at stack_columns.js:33:27
+TypeError at stack_columns.js:34:24
+TypeError at stack_columns.js:35:42
+TypeError at stack_columns.js:36:28
+TypeError at stack_columns.js:37:25
+TypeError at stack_columns.js:38:24
+RangeError at stack_columns.js:39:32
+42:15
+5:21

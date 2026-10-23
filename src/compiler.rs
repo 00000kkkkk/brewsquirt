@@ -87,6 +87,7 @@ struct FnState {
     line: u32,
     code: Vec<Op>,
     lines: Vec<u32>,
+    cols: Vec<u32>,
     target: std::cell::Cell<usize>,
     consts: Vec<Value>,
     const_strs: FxHashMap<JsStr, u32>,
@@ -127,6 +128,7 @@ impl FnState {
             line,
             code: Vec::new(),
             lines: Vec::new(),
+            cols: Vec::new(),
             target: std::cell::Cell::new(usize::MAX),
             consts: Vec::new(),
             const_strs: FxHashMap::default(),
@@ -165,6 +167,7 @@ pub struct Compiler {
     module: Rc<ModuleInfo>,
     mode: Mode,
     line: u32,
+    col: u32,
     chain: Vec<usize>,
     exports: Vec<ExportEntry>,
     hidden: u32,
@@ -398,6 +401,7 @@ fn new_compiler(module: Rc<ModuleInfo>, mode: Mode) -> Compiler {
         module,
         mode,
         line: 1,
+        col: 0,
         chain: Vec::new(),
         exports: Vec::new(),
         hidden: 0,
@@ -792,6 +796,7 @@ impl Compiler {
             sloppy_this: !st.strict && st.reads_this,
             code: st.code,
             lines: st.lines,
+            cols: st.cols,
             consts: st.consts,
             functions: st.functions,
             upvalues: st.upvalues,
@@ -845,7 +850,7 @@ impl Compiler {
     }
 
     fn emit_raw(&mut self, op: Op) -> usize {
-        let line = self.line;
+        let (line, col) = (self.line, self.col);
         let st = self.st();
         let at = st.code.len();
         if at > 0 && st.target.get() != at {
@@ -863,6 +868,7 @@ impl Compiler {
         }
         st.code.push(op);
         st.lines.push(line);
+        st.cols.push(col);
         st.code.len() - 1
     }
 
@@ -1977,6 +1983,7 @@ impl Compiler {
 
     fn stmt(&mut self, s: &Stmt) -> R<()> {
         self.line = s.line;
+        self.col = 0;
         let hidden_try = matches!(&s.kind, StmtKind::Try { param: Some(Pattern::Ident(p)), .. } if p.starts_with("%using"));
         if let Some(slot) = self.completion_slot().filter(|_| !hidden_try) {
             if matches!(
@@ -2017,6 +2024,7 @@ impl Compiler {
                                 let target = AssignTarget::Simple(Box::new(Expr {
                                     kind: ExprKind::Ident(n.clone()),
                                     line: s.line,
+                                    col: 0,
                                 }));
                                 self.assign(None, &target, e)?;
                                 self.emit(Op::Pop);
@@ -2395,7 +2403,7 @@ impl Compiler {
         let tdz_base = self.locals_len() - head_names.len();
         self.expr(source)?;
         self.pending_labels = labels;
-        self.emit(if keys { Op::ForInIter } else { Op::GetIter });
+        self.emit_at(source, if keys { Op::ForInIter } else { Op::GetIter });
         if !head_names.is_empty() {
             let first = tdz_base as u32;
             self.emit(Op::CloseUpvalues(first));
@@ -2504,7 +2512,7 @@ impl Compiler {
         self.begin_scope();
         self.expr(source)?;
         self.pending_labels = labels;
-        self.emit(Op::GetAsyncIter);
+        self.emit_at(source, Op::GetAsyncIter);
         let iter_name = self.hidden_name("aiter");
         let iter_slot = self.add_local(iter_name, true);
         let start = self.here();
@@ -3038,8 +3046,8 @@ impl Compiler {
             name
         };
         let self_name = self.self_bind.take();
-        let saved_line = self.line;
-        self.line = f.line;
+        let saved = (self.line, self.col);
+        (self.line, self.col) = (f.line, 0);
         let mut st = FnState::new(name, kind, f.line, f.kind == FuncKind::StaticMethod);
         st.span = f.span;
         st.fields = fields;
@@ -3051,7 +3059,7 @@ impl Compiler {
         let r = self.function_body(f, kind, self_name);
         self.pending_labels = saved_labels;
         let st = self.states.pop().expect("function state");
-        self.line = saved_line;
+        (self.line, self.col) = saved;
         r?;
         let proto = Rc::new(self.finish(st));
         let parent = self.st();
@@ -3361,8 +3369,10 @@ impl Compiler {
                             kind: ExprKind::SuperCall(vec![Arg::Spread(Expr {
                                 kind: ExprKind::Ident("%args".into()),
                                 line: c.line,
+                                col: 0,
                             })]),
                             line: c.line,
+                            col: 0,
                         }),
                         line: c.line,
                     }]
@@ -3623,7 +3633,7 @@ impl Compiler {
                 }
                 Arg::Spread(e) => {
                     self.expr(e)?;
-                    self.emit(Op::ArraySpread);
+                    self.emit_at(e, Op::ArraySpread);
                 }
             }
         }
@@ -3713,7 +3723,7 @@ impl Compiler {
                     self.chain.push(j);
                 }
                 self.expr(index)?;
-                self.emit(Op::GetIndexMethod);
+                self.emit_at(callee, Op::GetIndexMethod);
             }
             ExprKind::SuperMember(m) => {
                 let is_static = self.super_info(false)?;
@@ -3770,11 +3780,28 @@ impl Compiler {
         self.expr_named(e, None)
     }
 
+    fn enter_expr(&mut self, e: &Expr) -> (u32, u32) {
+        let saved = (self.line, self.col);
+        if e.col != 0 {
+            self.col = e.col;
+        } else if e.line != self.line {
+            self.col = 0;
+        }
+        self.line = e.line;
+        saved
+    }
+
+    fn emit_at(&mut self, e: &Expr, op: Op) -> usize {
+        let saved = self.enter_expr(e);
+        let at = self.emit(op);
+        (self.line, self.col) = saved;
+        at
+    }
+
     fn jump_if_false(&mut self, test: &Expr) -> R<usize> {
-        let saved_line = self.line;
-        self.line = test.line;
+        let saved = self.enter_expr(test);
         let r = self.jump_if_false_inner(test);
-        self.line = saved_line;
+        (self.line, self.col) = saved;
         r
     }
 
@@ -3841,10 +3868,9 @@ impl Compiler {
     }
 
     fn expr_discard(&mut self, e: &Expr) -> R<()> {
-        let saved_line = self.line;
-        self.line = e.line;
+        let saved = self.enter_expr(e);
         let r = self.expr_discard_inner(e);
-        self.line = saved_line;
+        (self.line, self.col) = saved;
         r
     }
 
@@ -3872,6 +3898,7 @@ impl Compiler {
                         target: target.clone(),
                     },
                     line: e.line,
+                    col: 0,
                 };
                 self.expr(&as_prefix)?;
                 self.emit(Op::Pop);
@@ -3927,10 +3954,9 @@ impl Compiler {
     }
 
     fn expr_named(&mut self, e: &Expr, name: Option<&JsStr>) -> R<()> {
-        let saved_line = self.line;
-        self.line = e.line;
+        let saved = self.enter_expr(e);
         let r = self.expr_inner(e, name);
-        self.line = saved_line;
+        (self.line, self.col) = saved;
         r
     }
 
@@ -4035,7 +4061,7 @@ impl Compiler {
                             }
                             ArrayElem::Spread(x) => {
                                 self.expr(x)?;
-                                self.emit(Op::ArraySpread);
+                                self.emit_at(x, Op::ArraySpread);
                             }
                             ArrayElem::Hole => {
                                 self.emit(Op::ArrayHole);
@@ -4143,6 +4169,7 @@ impl Compiler {
                                 kind: StmtKind::Return(Some(Expr {
                                     kind: ExprKind::Ident(n.clone()),
                                     line: c.line,
+                                    col: 0,
                                 })),
                                 line: c.line,
                             },

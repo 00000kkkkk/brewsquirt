@@ -487,6 +487,11 @@ impl Parser {
         self.peek().line
     }
 
+    fn pos(&self) -> (u32, u32) {
+        let t = self.peek();
+        (t.line, t.col)
+    }
+
     fn word(&self) -> Option<JsStr> {
         match &self.peek().tok {
             Tok::Ident(s) => Some(s.clone()),
@@ -828,6 +833,7 @@ impl Parser {
                 Expr {
                     kind: ExprKind::Bool(is_async),
                     line,
+                    col: 0,
                 },
             ],
             line,
@@ -1285,6 +1291,7 @@ impl Parser {
                         return Ok(StmtKind::Expr(Expr {
                             kind: ExprKind::Seq(vec![e]),
                             line,
+                            col: 0,
                         }));
                     }
                 }
@@ -1740,6 +1747,7 @@ impl Parser {
                         optional: false,
                     },
                     line,
+                    col: 0,
                 };
                 return Ok(StmtKind::Expr(Expr {
                     kind: ExprKind::Assign {
@@ -1748,6 +1756,7 @@ impl Parser {
                         value: Box::new(value),
                     },
                     line,
+                    col: 0,
                 }));
             }
             if self.is_kw("as") && self.is_kw_at(1, "namespace") {
@@ -1780,6 +1789,7 @@ impl Parser {
                 return Ok(StmtKind::Export(ExportDecl::Default(Expr {
                     kind: ExprKind::Class(c),
                     line,
+                    col: 0,
                 })));
             }
         }
@@ -1842,6 +1852,7 @@ impl Parser {
                 return Ok(StmtKind::Export(ExportDecl::Default(Expr {
                     kind: ExprKind::Class(c),
                     line,
+                    col: 0,
                 })));
             }
             let e = self.assignment()?;
@@ -2596,6 +2607,7 @@ impl Parser {
                     PropKey::Named(n) => Some(Expr {
                         kind: ExprKind::Str(n.clone()),
                         line: mline,
+                        col: 0,
                     }),
                     PropKey::Computed(_) => None,
                 };
@@ -2804,6 +2816,7 @@ impl Parser {
             return Ok(Expr {
                 kind: ExprKind::Seq(items),
                 line,
+                col: 0,
             });
         }
         Ok(first)
@@ -2885,6 +2898,7 @@ impl Parser {
                 span: (start, self.prev_end()),
             })),
             line,
+            col: 0,
         })
     }
 
@@ -2957,6 +2971,7 @@ impl Parser {
         Ok(Expr {
             kind: ExprKind::Yield { arg, delegate },
             line,
+            col: 0,
         })
     }
 
@@ -3011,13 +3026,14 @@ impl Parser {
                 return Err(self.error("yield is only valid in generator functions"));
             }
         }
-        let line = self.line();
+        let start = self.pos();
         let lhs_start = self.pos;
         let lhs = self.conditional()?;
         if matches!(self.peek().tok, Tok::Regex(..)) {
             self.relex(false)?;
         }
         if let Some(op) = self.assign_op() {
+            let (line, col) = if op.is_some() { start } else { self.pos() };
             let parenthesized = self.last_paren == (lhs_start, self.pos);
             if let ExprKind::Ident(n) = &lhs.kind {
                 if self.strict && matches!(&**n, "eval" | "arguments") {
@@ -3061,6 +3077,7 @@ impl Parser {
                 Expr {
                     line: value.line,
                     kind: ExprKind::Seq(vec![value]),
+                    col: 0,
                 }
             } else {
                 value
@@ -3072,6 +3089,7 @@ impl Parser {
                     value: Box::new(value),
                 },
                 line,
+                col,
             });
         }
         Ok(lhs)
@@ -3143,6 +3161,7 @@ impl Parser {
                             value: self.expr_to_pattern(Expr {
                                 kind: ExprKind::Ident(n),
                                 line,
+                                col: 0,
                             })?,
                             default: None,
                         }),
@@ -3151,6 +3170,7 @@ impl Parser {
                             value: self.expr_to_pattern(Expr {
                                 kind: ExprKind::Ident(n),
                                 line,
+                                col: 0,
                             })?,
                             default: Some(d),
                         }),
@@ -3210,6 +3230,7 @@ impl Parser {
             return Ok(Expr {
                 kind: ExprKind::Cond(Box::new(test), Box::new(cons), Box::new(alt)),
                 line,
+                col: 0,
             });
         }
         Ok(test)
@@ -3291,7 +3312,7 @@ impl Parser {
                 ));
             }
             unary_left = false;
-            let line = self.line();
+            let (line, col) = self.pos();
             if let BinKind::Logical(l) = op {
                 if built.is_some_and(|b| mixes_nullish(b, l)) {
                     return Err(self.error("Cannot mix '??' with '||' or '&&' without parentheses"));
@@ -3321,7 +3342,7 @@ impl Parser {
                 BinKind::Bin(b) => ExprKind::Binary(b, Box::new(left), Box::new(right)),
                 BinKind::Logical(l) => ExprKind::Logical(l, Box::new(left), Box::new(right)),
             };
-            left = Expr { kind, line };
+            left = Expr { kind, line, col };
         }
         Ok(left)
     }
@@ -3354,7 +3375,7 @@ impl Parser {
             self.ts_type_args()?;
             return self.unary();
         }
-        let line = self.line();
+        let (line, col) = self.pos();
         let op = match &self.peek().tok {
             Tok::Punct(P::Bang) => UnaryOp::Not,
             Tok::Punct(P::Minus) => UnaryOp::Neg,
@@ -3397,6 +3418,7 @@ impl Parser {
                 return Ok(Expr {
                     kind: ExprKind::Await(Box::new(operand)),
                     line,
+                    col,
                 });
             }
             Tok::Punct(P::PlusPlus) | Tok::Punct(P::MinusMinus) => {
@@ -3411,6 +3433,7 @@ impl Parser {
                         target: Box::new(target),
                     },
                     line,
+                    col,
                 });
             }
             _ => return self.postfix(),
@@ -3431,21 +3454,23 @@ impl Parser {
                 return Ok(Expr {
                     kind: ExprKind::Number(-n),
                     line,
+                    col,
                 });
             }
         }
         Ok(Expr {
             kind: ExprKind::Unary(op, Box::new(operand)),
             line,
+            col,
         })
     }
 
     fn postfix(&mut self) -> R<Expr> {
+        let (line, col) = self.pos();
         let e = self.call_member()?;
         if (self.is(P::PlusPlus) || self.is(P::MinusMinus)) && !self.peek().nl_before {
             self.check_update_target(&e)?;
             let inc = self.is(P::PlusPlus);
-            let line = self.line();
             self.advance();
             return Ok(Expr {
                 kind: ExprKind::Update {
@@ -3454,6 +3479,7 @@ impl Parser {
                     target: Box::new(e),
                 },
                 line,
+                col,
             });
         }
         Ok(e)
@@ -3497,7 +3523,7 @@ impl Parser {
         };
         let mut chain = false;
         loop {
-            let line = self.line();
+            let (line, col) = self.pos();
             if self.ts && self.is(P::Bang) && !self.peek().nl_before {
                 self.advance();
                 continue;
@@ -3506,6 +3532,7 @@ impl Parser {
                 continue;
             }
             if self.eat(P::Dot) {
+                let (line, col) = self.pos();
                 let name = self.ident_name()?;
                 e = Expr {
                     kind: ExprKind::Member {
@@ -3514,10 +3541,12 @@ impl Parser {
                         optional: false,
                     },
                     line,
+                    col,
                 };
             } else if self.eat(P::QuestionDot) {
                 chain = true;
                 if self.is(P::LParen) {
+                    let (line, col) = call_pos(&e, self.pos());
                     let args = self.arguments()?;
                     e = Expr {
                         kind: ExprKind::Call {
@@ -3526,6 +3555,7 @@ impl Parser {
                             optional: true,
                         },
                         line,
+                        col,
                     };
                 } else if self.eat(P::LBracket) {
                     let index = self.index_expr()?;
@@ -3536,8 +3566,10 @@ impl Parser {
                             optional: true,
                         },
                         line,
+                        col,
                     };
                 } else {
+                    let (line, col) = self.pos();
                     let name = self.ident_name()?;
                     e = Expr {
                         kind: ExprKind::Member {
@@ -3546,6 +3578,7 @@ impl Parser {
                             optional: true,
                         },
                         line,
+                        col,
                     };
                 }
             } else if self.eat(P::LBracket) {
@@ -3557,8 +3590,10 @@ impl Parser {
                         optional: false,
                     },
                     line,
+                    col,
                 };
             } else if self.is(P::LParen) {
+                let (line, col) = call_pos(&e, (line, col));
                 let args = self.arguments()?;
                 let direct = matches!(&e.kind, ExprKind::Ident(n) if &**n == "eval");
                 e = if direct {
@@ -3578,6 +3613,7 @@ impl Parser {
                     Expr {
                         kind: ExprKind::DirectEval(args, ctx),
                         line,
+                        col,
                     }
                 } else {
                     Expr {
@@ -3587,6 +3623,7 @@ impl Parser {
                             optional: false,
                         },
                         line,
+                        col,
                     }
                 };
             } else if matches!(self.peek().tok, Tok::Template(_)) {
@@ -3601,6 +3638,7 @@ impl Parser {
                 let mut args = vec![Arg::Expr(Expr {
                     kind: ExprKind::TemplateStrings(cooked, raw),
                     line,
+                    col,
                 })];
                 args.extend(exprs.into_iter().map(Arg::Expr));
                 e = Expr {
@@ -3610,23 +3648,25 @@ impl Parser {
                         optional: false,
                     },
                     line,
+                    col,
                 };
             } else {
                 break;
             }
         }
         if chain {
-            let line = e.line;
+            let (line, col) = (e.line, e.col);
             e = Expr {
                 kind: ExprKind::OptChain(Box::new(e)),
                 line,
+                col,
             };
         }
         Ok(e)
     }
 
     fn new_expr(&mut self) -> R<Expr> {
-        let line = self.line();
+        let (line, col) = self.pos();
         self.advance();
         if self.is_kw("import") && !self.is_at(1, P::Dot) {
             return Err(self.error("Cannot use new with import"));
@@ -3641,6 +3681,7 @@ impl Parser {
                     return Ok(Expr {
                         kind: ExprKind::NewTarget,
                         line,
+                        col,
                     });
                 }
                 _ => return Err(self.error("Unexpected identifier after 'new.'")),
@@ -3652,8 +3693,9 @@ impl Parser {
             self.primary()?
         };
         loop {
-            let mline = self.line();
+            let (mline, mcol) = self.pos();
             if self.eat(P::Dot) {
+                let (line, col) = self.pos();
                 let name = self.ident_name()?;
                 callee = Expr {
                     kind: ExprKind::Member {
@@ -3661,7 +3703,8 @@ impl Parser {
                         name,
                         optional: false,
                     },
-                    line: mline,
+                    line,
+                    col,
                 };
             } else if self.eat(P::LBracket) {
                 let index = self.index_expr()?;
@@ -3672,6 +3715,7 @@ impl Parser {
                         optional: false,
                     },
                     line: mline,
+                    col: mcol,
                 };
             } else if matches!(self.peek().tok, Tok::Template(_)) {
                 let Tok::Template(parts) = self.advance_token().tok else {
@@ -3682,6 +3726,7 @@ impl Parser {
                 let mut args = vec![Arg::Expr(Expr {
                     kind: ExprKind::TemplateStrings(cooked, raw),
                     line: mline,
+                    col: mcol,
                 })];
                 args.extend(exprs.into_iter().map(Arg::Expr));
                 callee = Expr {
@@ -3691,6 +3736,7 @@ impl Parser {
                         optional: false,
                     },
                     line: mline,
+                    col: mcol,
                 };
             } else {
                 break;
@@ -3710,10 +3756,11 @@ impl Parser {
                 args,
             },
             line,
+            col,
         })
     }
 
-    fn template(&mut self, parts: Vec<TemplatePart>, line: u32) -> R<Expr> {
+    fn template(&mut self, parts: Vec<TemplatePart>, line: u32, col: u32) -> R<Expr> {
         let (quasis, exprs) = self.template_parts(parts)?;
         let quasis = quasis
             .into_iter()
@@ -3722,6 +3769,7 @@ impl Parser {
         Ok(Expr {
             kind: ExprKind::Template(quasis, exprs),
             line,
+            col,
         })
     }
 
@@ -3819,7 +3867,7 @@ impl Parser {
             }
             return self.primary();
         }
-        let line = self.line();
+        let (line, col) = self.pos();
         if matches!(
             self.peek().tok,
             Tok::Punct(P::Slash) | Tok::Punct(P::SlashEq)
@@ -3859,7 +3907,7 @@ impl Parser {
                 let Tok::Template(parts) = self.advance_token().tok else {
                     unreachable!()
                 };
-                return self.template(parts, line);
+                return self.template(parts, line, col);
             }
             Tok::Punct(P::LParen) => {
                 let start = self.pos;
@@ -4051,7 +4099,7 @@ impl Parser {
             }
             _ => return Err(self.unexpected()),
         };
-        Ok(Expr { kind, line })
+        Ok(Expr { kind, line, col })
     }
 
     fn object_props(&mut self) -> R<Vec<PropDef>> {
@@ -4249,6 +4297,15 @@ fn check_accessor_params(f: &FuncDef, setter: bool, line: u32) -> R<()> {
     ))
 }
 
+fn call_pos(callee: &Expr, paren: (u32, u32)) -> (u32, u32) {
+    match callee.kind {
+        ExprKind::Ident(_) | ExprKind::Member { .. } if callee.col != 0 => {
+            (callee.line, callee.col)
+        }
+        _ => paren,
+    }
+}
+
 fn syn_stmt(kind: StmtKind, line: u32) -> Stmt {
     Stmt { kind, line }
 }
@@ -4257,6 +4314,7 @@ fn syn_ident(name: &str, line: u32) -> Expr {
     Expr {
         kind: ExprKind::Ident(name.into()),
         line,
+        col: 0,
     }
 }
 
@@ -4268,6 +4326,7 @@ fn syn_call(callee: Expr, args: Vec<Expr>, line: u32) -> Expr {
             optional: false,
         },
         line,
+        col: 0,
     }
 }
 
@@ -4279,6 +4338,7 @@ fn syn_member(obj: Expr, name: &str, line: u32) -> Expr {
             optional: false,
         },
         line,
+        col: 0,
     }
 }
 
@@ -4290,6 +4350,7 @@ fn syn_assign(name: &str, value: Expr, line: u32) -> Expr {
             value: Box::new(value),
         },
         line,
+        col: 0,
     }
 }
 
@@ -4306,6 +4367,7 @@ fn using_async_finalizer(res: &str, id: u32, line: u32) -> Vec<Stmt> {
     let awaited = Expr {
         kind: ExprKind::Await(Box::new(syn_member(syn_ident(&st, line), "value", line))),
         line,
+        col: 0,
     };
     let step = syn_stmt(
         StmtKind::Try {
@@ -4336,6 +4398,7 @@ fn using_async_finalizer(res: &str, id: u32, line: u32) -> Vec<Stmt> {
             Box::new(syn_member(syn_ident(&st, line), "done", line)),
         ),
         line,
+        col: 0,
     };
     vec![
         syn_stmt(

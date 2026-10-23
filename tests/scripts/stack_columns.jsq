@@ -1,0 +1,6 @@
+import { createRequire } from "node:module"
+
+const require = createRequire(import.meta.url)
+require("./fixtures/stack_columns.js")
+const where = () => new Error("esm").stack.split("\n")[1].trim()
+console.log(where().match(/:(\d+:\d+)\)?$/)[1])

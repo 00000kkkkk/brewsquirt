@@ -1623,13 +1623,13 @@ define(
 
 {
   const siteData = new WeakMap()
-  const data = (site) => siteData.get(site) ?? { file: undefined, line: null, name: null, top: true, construct: false, isEval: false }
+  const data = (site) => siteData.get(site) ?? { file: undefined, line: null, col: null, name: null, top: true, construct: false, isEval: false, typeName: null, method: null, label: "" }
   class CallSite {
     getThis() {
       return undefined
     }
     getTypeName() {
-      return data(this).top ? null : "Object"
+      return data(this).typeName
     }
     getFunction() {
       return undefined
@@ -1638,7 +1638,7 @@ define(
       return data(this).name || null
     }
     getMethodName() {
-      return null
+      return data(this).method
     }
     getFileName() {
       return data(this).file
@@ -1647,13 +1647,13 @@ define(
       return data(this).line
     }
     getColumnNumber() {
-      return 1
+      return data(this).col
     }
     getEnclosingLineNumber() {
       return data(this).line
     }
     getEnclosingColumnNumber() {
-      return 1
+      return data(this).col
     }
     getEvalOrigin() {
       return undefined
@@ -1690,12 +1690,13 @@ define(
     }
     toString() {
       const d = data(this)
-      return d.name ? `${d.name} (${d.file}:${d.line}:1)` : `${d.file}:${d.line}:1`
+      const where = `${d.file}:${d.line}:${d.col}`
+      return d.label ? `${d.label} (${where})` : where
     }
   }
-  define(globalThis, "%makeCallSite%", function makeCallSite(file, line, name, top, construct, isEval) {
+  define(globalThis, "%makeCallSite%", function makeCallSite(file, line, name, top, construct, isEval, col, typeName, method, label) {
     const site = new CallSite()
-    siteData.set(site, { file, line, name, top, construct, isEval })
+    siteData.set(site, { file, line, col, name: name === "<main>" ? "" : name, top, construct, isEval, typeName, method, label })
     return site
   })
 }

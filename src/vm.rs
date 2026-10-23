@@ -396,6 +396,176 @@ pub struct Vm {
     pub(crate) stdin_stopped: bool,
 }
 
+const CJS_PREFIX: &str = "(function (exports, require, module, __filename, __dirname) {";
+
+fn unshift_cjs_error(mut e: crate::token::SyntaxError) -> crate::token::SyntaxError {
+    let by = CJS_PREFIX.len() as u32;
+    if e.line == 1 && e.col > by {
+        e.col -= by;
+    }
+    e
+}
+
+fn finish_cjs_wrapper(mut proto: Rc<FunctionProto>) -> Rc<FunctionProto> {
+    offset_positions(&mut proto, 0, -(CJS_PREFIX.len() as i64));
+    proto
+}
+
+pub(crate) fn offset_positions(proto: &mut Rc<FunctionProto>, lines: i64, cols: i64) {
+    let Some(p) = Rc::get_mut(proto) else {
+        return;
+    };
+    for (line, col) in p.lines.iter_mut().zip(p.cols.iter_mut()) {
+        if *line == 1 && *col != 0 && cols != 0 {
+            *col = (*col as i64 + cols).max(1) as u32;
+        }
+        if lines != 0 && *line != 0 {
+            *line = (*line as i64 + lines).max(1) as u32;
+        }
+    }
+    if lines != 0 {
+        p.line = (p.line as i64 + lines).max(1) as u32;
+    }
+    for f in &mut p.functions {
+        offset_positions(f, lines, cols);
+    }
+}
+
+pub(crate) struct FrameSite {
+    pub(crate) file: JsStr,
+    pub(crate) line: u32,
+    pub(crate) col: u32,
+    pub(crate) name: JsStr,
+    pub(crate) type_name: Option<JsStr>,
+    pub(crate) method: Option<JsStr>,
+    pub(crate) top: bool,
+    pub(crate) construct: bool,
+    pub(crate) eval: bool,
+}
+
+impl FrameSite {
+    pub(crate) fn label(&self) -> String {
+        let name: &str = if &*self.name == "<main>" {
+            ""
+        } else {
+            &self.name
+        };
+        if self.construct {
+            return format!("new {}", if name.is_empty() { "<anonymous>" } else { name });
+        }
+        if self.top || name.starts_with("get ") || name.starts_with("set ") {
+            return name.to_string();
+        }
+        let ty = self.type_name.as_deref().unwrap_or("");
+        let mut s = String::new();
+        if !ty.is_empty() && !name.starts_with(ty) {
+            s.push_str(ty);
+            s.push('.');
+        }
+        if name.is_empty() {
+            s.push_str(self.method.as_deref().unwrap_or("<anonymous>"));
+        } else {
+            s.push_str(name);
+            if let Some(m) = self
+                .method
+                .as_deref()
+                .filter(|m| name != *m && !name.ends_with(&format!(".{m}")))
+            {
+                s.push_str(&format!(" [as {m}]"));
+            }
+        }
+        s
+    }
+
+    pub(crate) fn render(&self) -> String {
+        let (file, line, col) = (&self.file, self.line, self.col);
+        match self.label() {
+            l if l.is_empty() => format!("\n    at {file}:{line}:{col}"),
+            l => format!("\n    at {l} ({file}:{line}:{col})"),
+        }
+    }
+}
+
+fn function_debug_name(o: &Obj) -> Option<JsStr> {
+    match &o.kind {
+        ObjKind::Function(c) => Some(c.proto.name.clone()),
+        ObjKind::Native(n) => Some(n.name.clone()),
+        ObjKind::Bound(_) => match o.get_own("name") {
+            Some(Value::Str(s)) => Some(s),
+            _ => None,
+        },
+        _ => None,
+    }
+    .filter(|n| !n.is_empty())
+}
+
+fn receiver_type_name(v: &Value) -> Option<JsStr> {
+    let o = match v {
+        Value::Number(_) => return Some("Number".into()),
+        Value::Str(_) => return Some("String".into()),
+        Value::Bool(_) => return Some("Boolean".into()),
+        Value::Symbol(_) => return Some("Symbol".into()),
+        Value::BigInt(_) => return Some("BigInt".into()),
+        Value::Object(o) => o,
+        _ => return None,
+    };
+    if matches!(
+        o.kind,
+        ObjKind::Function(_) | ObjKind::Native(_) | ObjKind::Bound(_)
+    ) {
+        return function_debug_name(o).or_else(|| Some("Function".into()));
+    }
+    let mut cur = Some(o.clone());
+    for _ in 0..64 {
+        let Some(obj) = cur else {
+            break;
+        };
+        if let Some(Value::Object(c)) = obj.get_own("constructor") {
+            if let Some(n) = function_debug_name(&c) {
+                return Some(n);
+            }
+        }
+        cur = obj.proto.borrow().clone();
+    }
+    Some("Object".into())
+}
+
+fn receiver_method_name(v: &Value, closure: &Rc<Closure>) -> Option<JsStr> {
+    let Value::Object(o) = v else {
+        return None;
+    };
+    let is_it = |val: &Value| matches!(val, Value::Object(f) if matches!(&f.kind, ObjKind::Function(c) if Rc::ptr_eq(c, closure)));
+    let mut chain = Vec::new();
+    let mut cur = Some(o.clone());
+    while let Some(obj) = cur {
+        if chain.len() >= 64 {
+            break;
+        }
+        cur = obj.proto.borrow().clone();
+        chain.push(obj);
+    }
+    let name = &closure.proto.name;
+    if !name.is_empty() {
+        for obj in &chain {
+            if obj.get_own(name).is_some_and(|val| is_it(&val)) {
+                return Some(name.clone());
+            }
+        }
+    }
+    for obj in chain.iter().take(3) {
+        let props = obj.props.borrow();
+        if props.len() > 128 {
+            continue;
+        }
+        for (k, val) in props.iter() {
+            if !k.starts_with('\u{0}') && is_it(val) {
+                return Some(k.clone());
+            }
+        }
+    }
+    None
+}
+
 impl Vm {
     pub fn new(argv: Vec<String>) -> Vm {
         Self::with_output(
@@ -836,16 +1006,33 @@ impl Vm {
     }
 
     pub fn run_script(&mut self, src: &str, name: &str) -> Result<Value, Value> {
+        self.run_script_at(src, name, 0, 0)
+    }
+
+    pub fn run_script_at(
+        &mut self,
+        src: &str,
+        name: &str,
+        line_offset: i64,
+        col_offset: i64,
+    ) -> Result<Value, Value> {
         let cwd = std::env::current_dir().unwrap_or_default();
         let dir = Path::new(name)
             .parent()
             .filter(|p| !p.as_os_str().is_empty() && p.is_dir())
             .map(|p| cwd.join(p))
             .unwrap_or(cwd);
-        let proto = match self.compile_script(src, name, dir, false) {
+        let mut proto = match self.compile_script(src, name, dir, false) {
             Ok(p) => p,
-            Err(e) => return Err(self.syntax_error_value(&e, name)),
+            Err(mut e) => {
+                if e.line == 1 {
+                    e.col = (e.col as i64 + col_offset).max(1) as u32;
+                }
+                e.line = (e.line as i64 + line_offset).max(1) as u32;
+                return Err(self.syntax_error_value(&e, name));
+            }
         };
+        offset_positions(&mut proto, line_offset, col_offset);
         self.run_script_proto(proto)
     }
 
@@ -1678,10 +1865,12 @@ impl Vm {
         } else {
             content
         };
-        let wrapped =
-            format!("(function (exports, require, module, __filename, __dirname) {{{body}\n}})");
-        let proto = match self.compile_script(&wrapped, &key, dir.clone(), true) {
-            Ok(p) => p,
+        let wrapped = format!("{CJS_PREFIX}{body}\n}})");
+        let proto = match self
+            .compile_script(&wrapped, &key, dir.clone(), true)
+            .map_err(unshift_cjs_error)
+        {
+            Ok(p) => finish_cjs_wrapper(p),
             Err(e) => return Err(self.syntax_error_value(&e, &key)),
         };
         let wrapper = self.run_script_proto(proto)?;
@@ -1780,10 +1969,12 @@ impl Vm {
         } else {
             &src
         };
-        let wrapped =
-            format!("(function (exports, require, module, __filename, __dirname) {{{body}\n}})");
-        let proto = match self.compile_script(&wrapped, &key, dir.clone(), true) {
-            Ok(p) => p,
+        let wrapped = format!("{CJS_PREFIX}{body}\n}})");
+        let proto = match self
+            .compile_script(&wrapped, &key, dir.clone(), true)
+            .map_err(unshift_cjs_error)
+        {
+            Ok(p) => finish_cjs_wrapper(p),
             Err(e) => {
                 let detect = module::esm_only_error(&e.message)
                     || (module::redeclares_wrapper(&e.message) && !module::explicit_commonjs(&dir));
@@ -1841,20 +2032,43 @@ impl Vm {
             })
             .take(12)
         {
-            let p = &f.closure.proto;
-            let name = if p.name.is_empty() {
-                "<anonymous>"
-            } else {
-                &p.name
-            };
-            s.push_str(&format!(
-                "\n    at {} ({}:{})",
-                name,
-                p.module.name,
-                p.line_at(f.ip)
-            ));
+            s.push_str(&self.frame_site(f).render());
         }
         s
+    }
+
+    pub(crate) fn frame_site(&self, f: &Frame) -> FrameSite {
+        let p = &f.closure.proto;
+        let receiver = match p.kind {
+            ProtoKind::Module => Value::Undefined,
+            _ if f.construct => Value::Undefined,
+            _ => self.stack.get(f.base).cloned().unwrap_or_default(),
+        };
+        let top = match &receiver {
+            Value::Undefined | Value::Null | Value::Uninit => true,
+            Value::Object(o) => matches!(self.global_this(), Value::Object(g) if Rc::ptr_eq(&g, o)),
+            _ => false,
+        };
+        let (type_name, method) = if top || f.construct {
+            (None, None)
+        } else {
+            (
+                receiver_type_name(&receiver),
+                receiver_method_name(&receiver, &f.closure),
+            )
+        };
+        let file = p.module.name.clone();
+        FrameSite {
+            eval: file.starts_with("<eval"),
+            file,
+            line: p.line_at(f.ip),
+            col: p.col_at(f.ip),
+            name: p.name.clone(),
+            type_name,
+            method,
+            top,
+            construct: f.construct,
+        }
     }
 
     pub fn make_error(&mut self, kind: ErrorKind, msg: impl Into<String>) -> Value {
@@ -4267,8 +4481,8 @@ impl Vm {
         }
         macro_rules! throw {
             ($e:expr) => {{
-                let e = $e;
                 self.frames[fi].ip = ip;
+                let e = $e;
                 match self.unwind(e, stop) {
                     Ok(()) => {
                         reload!();
@@ -4621,6 +4835,7 @@ impl Vm {
                         }
                         let obj = self.stack[abs].clone();
                         self.silent_fail = false;
+                        self.frames[fi].ip = ip;
                         if let Err(e) = self.set_prop(&obj, name!(k), val) {
                             if !(proto.sloppy && self.silent_fail) {
                                 throw!(e);
@@ -4730,6 +4945,7 @@ impl Vm {
                             }
                             if self.global_accessors || self.globals.readonly {
                                 self.silent_fail = false;
+                                self.frames[fi].ip = ip;
                                 if let Err(e) = self.set_global_prop(n.clone(), v) {
                                     if !(proto.sloppy && self.silent_fail) {
                                         throw!(e);
@@ -4854,6 +5070,7 @@ impl Vm {
                     };
                     if !done {
                         self.silent_fail = false;
+                        self.frames[fi].ip = ip;
                         if let Err(e) = self.set_prop(&obj, name!(k), val.clone()) {
                             if !(proto.sloppy && self.silent_fail) {
                                 throw!(e);
@@ -4910,6 +5127,7 @@ impl Vm {
                     let key = pop!();
                     let obj = pop!();
                     self.silent_fail = false;
+                    self.frames[fi].ip = ip;
                     if let Err(e) = self.set_index(&obj, &key, val.clone()) {
                         if !(proto.sloppy && self.silent_fail) {
                             throw!(e);
@@ -4921,6 +5139,7 @@ impl Vm {
                     let obj = pop!();
                     let n = name!(k);
                     self.silent_fail = false;
+                    self.frames[fi].ip = ip;
                     let r = match self.delete_prop(&obj, &n) {
                         Ok(r) => r,
                         Err(_) if proto.sloppy && self.silent_fail => false,
@@ -4933,6 +5152,7 @@ impl Vm {
                     let obj = pop!();
                     let n = tri!(self.to_property_key(&key));
                     self.silent_fail = false;
+                    self.frames[fi].ip = ip;
                     let r = match self.delete_prop(&obj, &n) {
                         Ok(r) => r,
                         Err(_) if proto.sloppy && self.silent_fail => false,
@@ -5204,6 +5424,7 @@ impl Vm {
                     let this = pop!();
                     let n = name!(k);
                     self.silent_fail = false;
+                    self.frames[fi].ip = ip;
                     if let Err(e) = self.super_store(&cl, n, is_static, &this, val.clone()) {
                         if !(proto.sloppy && self.silent_fail) {
                             throw!(e);
@@ -5218,6 +5439,7 @@ impl Vm {
                     let base = tri!(self.super_base(&cl, is_static));
                     let n = tri!(self.to_property_key(&key));
                     self.silent_fail = false;
+                    self.frames[fi].ip = ip;
                     if let Err(e) = self.super_set_to(base, n, &this, val.clone()) {
                         if !(proto.sloppy && self.silent_fail) {
                             throw!(e);
@@ -6251,6 +6473,7 @@ impl Vm {
                     };
                     if !done {
                         self.silent_fail = false;
+                        self.frames[fi].ip = ip;
                         if let Err(e) = self.set_prop(&obj, name!(k), val) {
                             if !(proto.sloppy && self.silent_fail) {
                                 throw!(e);

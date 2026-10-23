@@ -87,8 +87,8 @@ fn uncaught_error_reports_and_fails() {
     assert!(!out.status.success());
     let err = normalize(&out.stderr);
     assert!(err.starts_with("Uncaught TypeError: nope"), "{err}");
-    assert!(err.contains("at boom (<eval>:1)"), "{err}");
-    assert!(err.contains("at <main> (<eval>:2)"), "{err}");
+    assert!(err.contains("at boom (<eval>:1:25)"), "{err}");
+    assert!(err.contains("at <eval>:2:1"), "{err}");
 }
 
 #[test]

@@ -1832,7 +1832,7 @@ const NODE_SRC: &str = r##"
   function callSiteText(names) {
     const stack = String(new Error().stack ?? "").split("\n").slice(1)
     for (const line of stack) {
-      const m = /\((.+):(\d+)\)\s*$/.exec(line) ?? /at (.+):(\d+)\s*$/.exec(line)
+      const m = /\((.+?):(\d+):\d+\)\s*$/.exec(line) ?? /at (.+?):(\d+):\d+\s*$/.exec(line)
       if (!m || m[1].startsWith("<") || m[1].startsWith("node:")) continue
       const source = readSource(m[1])
       if (source === null) return null
@@ -6612,14 +6612,18 @@ const NODE_SRC: &str = r##"
   }
 
   const indirectEval = eval
+  const vmFilename = (options) => (typeof options === "string" ? options : options?.filename ?? "evalmachine.<anonymous>")
+  const vmOffsets = (options) => (typeof options === "object" && options !== null ? [Number(options.lineOffset ?? 0), Number(options.columnOffset ?? 0)] : [0, 0])
   class VmScript {
     #code
+    #offsets
     constructor(code, options) {
       this.#code = String(code)
-      this.filename = typeof options === "string" ? options : options?.filename ?? "evalmachine.<anonymous>"
+      this.filename = vmFilename(options)
+      this.#offsets = vmOffsets(options)
     }
     runInThisContext() {
-      return native.vmRunScript(this.#code, this.filename)
+      return native.vmRunScript(this.#code, this.filename, ...this.#offsets)
     }
     runInContext(context) {
       return vmRun(this.#code, context)
@@ -6657,18 +6661,21 @@ const NODE_SRC: &str = r##"
       return sandbox
     },
     isContext: (o) => contexts.has(o),
-    runInThisContext: (code, options) => native.vmRunScript(String(code), typeof options === "string" ? options : options?.filename ?? "evalmachine.<anonymous>"),
+    runInThisContext: (code, options) => native.vmRunScript(String(code), vmFilename(options), ...vmOffsets(options)),
     runInContext: (code, context) => vmRun(code, context),
     runInNewContext: (code, context = {}) => vmRun(code, context),
     compileFunction: (code, params = [], options = {}) => {
       const filename = options?.filename ?? "evalmachine.<anonymous>"
       const sandbox = options?.parsingContext
       const list = params.join(", ")
+      const [lineOffset, columnOffset] = vmOffsets(options)
       if (sandbox === undefined || sandbox === null || !contexts.has(sandbox)) {
-        return native.vmRunScript(`(function (${list}) {${String(code)}\n})`, filename)
+        const head = `(function (${list}) {`
+        return native.vmRunScript(`${head}${String(code)}\n})`, filename, lineOffset, columnOffset - head.length)
       }
       const scope = "globalThis" in sandbox ? {} : { globalThis: contextGlobal(sandbox), global: contextGlobal(sandbox) }
-      const maker = native.vmRunScript(`(function (__sandbox__, __scope__) { with (__sandbox__) { with (__scope__) { return function (${list}) {${String(code)}\n} } } })`, filename)
+      const head = `(function (__sandbox__, __scope__) { with (__sandbox__) { with (__scope__) { return function (${list}) {`
+      const maker = native.vmRunScript(`${head}${String(code)}\n} } } })`, filename, lineOffset, columnOffset - head.length)
       return maker.call(sandbox, sandbox, scope)
     },
     measureMemory: async () => ({ total: { jsMemoryEstimate: process.memoryUsage().heapUsed, jsMemoryRange: [0, 0] } }),
@@ -7681,7 +7688,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         ("zlib", 3, zlib_op),
         ("crc32", 2, zlib_crc32),
         ("format", 0, native_format),
-        ("vmRunScript", 2, vm_run_script),
+        ("vmRunScript", 4, vm_run_script),
         ("setModuleClass", 1, native_set_module_class),
         ("cjsCompile", 3, native_cjs_compile),
         ("dnsLookup", 1, dns_lookup),
@@ -8500,7 +8507,11 @@ fn vm_run_script(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         Value::Str(s) => s.to_string(),
         _ => "evalmachine.<anonymous>".to_string(),
     };
-    vm.run_script(&code, &name)
+    let offset = |v: Value| match v {
+        Value::Number(n) if n.is_finite() => n as i64,
+        _ => 0,
+    };
+    vm.run_script_at(&code, &name, offset(arg(args, 2)), offset(arg(args, 3)))
 }
 
 fn native_format(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

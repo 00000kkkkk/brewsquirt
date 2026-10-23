@@ -248,6 +248,7 @@ pub struct FunctionProto {
     pub sloppy_this: bool,
     pub code: Vec<Op>,
     pub lines: Vec<u32>,
+    pub cols: Vec<u32>,
     pub consts: Vec<Value>,
     pub functions: Vec<Rc<FunctionProto>>,
     pub upvalues: Vec<UpvalDesc>,
@@ -307,6 +308,14 @@ impl FunctionProto {
             .get(ip.saturating_sub(1))
             .copied()
             .unwrap_or(self.line)
+    }
+
+    pub fn col_at(&self, ip: usize) -> u32 {
+        self.cols
+            .get(ip.saturating_sub(1))
+            .copied()
+            .filter(|c| *c != 0)
+            .unwrap_or(1)
     }
 
     pub fn disassemble(&self) -> String {

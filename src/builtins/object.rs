@@ -941,8 +941,6 @@ fn stack_limit(vm: &Vm) -> usize {
         .unwrap_or(10)
 }
 
-type FrameInfo = (JsStr, f64, JsStr, bool, bool, bool);
-
 fn error_stack(
     vm: &mut Vm,
     target: &Rc<Obj>,
@@ -956,7 +954,7 @@ fn error_stack(
         .and_then(|e| e.as_object().and_then(|o| o.get_own("prepareStackTrace")))
         .filter(|p| p.is_callable());
     let make = vm.globals.get("%makeCallSite%").cloned();
-    let mut frames: Vec<FrameInfo> = Vec::new();
+    let mut frames: Vec<crate::vm::FrameSite> = Vec::new();
     let mut skipping = skip_until.is_some();
     for f in vm.frames.iter().rev() {
         let p = &f.closure.proto;
@@ -980,31 +978,28 @@ fn error_stack(
         if frames.len() >= limit {
             break;
         }
-        frames.push((
-            m.clone(),
-            p.line_at(f.ip) as f64,
-            p.name.clone(),
-            p.kind == crate::bytecode::ProtoKind::Module,
-            f.construct,
-            m.starts_with("<eval"),
-        ));
+        frames.push(vm.frame_site(f));
     }
     if let (Some(prepare), Some(make)) = (prepare, make) {
         if !PREPARING.with(|p| p.get()) {
             PREPARING.with(|p| p.set(true));
             let mut sites = Vec::new();
             let mut failed = None;
-            for (file, line, name, top, construct, eval) in &frames {
+            for f in &frames {
                 let r = vm.call_value(
                     &make,
                     Value::Undefined,
                     &[
-                        Value::Str(file.clone()),
-                        Value::Number(*line),
-                        Value::Str(name.clone()),
-                        Value::Bool(*top),
-                        Value::Bool(*construct),
-                        Value::Bool(*eval),
+                        Value::Str(f.file.clone()),
+                        Value::Number(f.line as f64),
+                        Value::Str(f.name.clone()),
+                        Value::Bool(f.top),
+                        Value::Bool(f.construct),
+                        Value::Bool(f.eval),
+                        Value::Number(f.col as f64),
+                        f.type_name.clone().map(Value::Str).unwrap_or(Value::Null),
+                        f.method.clone().map(Value::Str).unwrap_or(Value::Null),
+                        Value::Str(f.label().into()),
                     ],
                 );
                 match r {
@@ -1028,9 +1023,8 @@ fn error_stack(
         }
     }
     let mut s = String::from(header);
-    for (file, line, name, _, _, _) in &frames {
-        let name = if name.is_empty() { "<anonymous>" } else { name };
-        s.push_str(&format!("\n    at {name} ({file}:{line})"));
+    for f in &frames {
+        s.push_str(&f.render());
     }
     Ok(Value::Str(s.into()))
 }

@@ -27,6 +27,7 @@ fn num(n: f64, line: u32) -> Expr {
     Expr {
         kind: ExprKind::Number(n),
         line,
+        col: 0,
     }
 }
 
@@ -34,6 +35,7 @@ fn void0(line: u32) -> Expr {
     Expr {
         kind: ExprKind::Unary(UnaryOp::Void, Box::new(num(0.0, line))),
         line,
+        col: 0,
     }
 }
 
@@ -41,6 +43,7 @@ fn string(s: &str, line: u32) -> Expr {
     Expr {
         kind: ExprKind::Str(s.into()),
         line,
+        col: 0,
     }
 }
 
@@ -67,6 +70,7 @@ fn arrow(params: &[&str], body: FuncBody, line: u32) -> Expr {
             span: (0, 0),
         })),
         line,
+        col: 0,
     }
 }
 
@@ -93,11 +97,13 @@ fn accessor_fn(storage: &JsStr, setter: bool, is_static: bool, line: u32) -> Rc<
             obj: Box::new(Expr {
                 kind: ExprKind::This,
                 line,
+                col: 0,
             }),
             name: storage.clone(),
             optional: false,
         },
         line,
+        col: 0,
     };
     let (params, body) = if setter {
         (
@@ -113,6 +119,7 @@ fn accessor_fn(storage: &JsStr, setter: bool, is_static: bool, line: u32) -> Rc<
                         value: Box::new(syn_ident("value", line)),
                     },
                     line,
+                    col: 0,
                 }),
                 line,
             )],
@@ -162,6 +169,7 @@ impl Parser {
             _ => Expr {
                 kind: ExprKind::This,
                 line,
+                col: 0,
             },
         }
     }
@@ -383,6 +391,7 @@ impl Parser {
                     optional: false,
                 },
                 line,
+                col: 0,
             },
             None => Expr {
                 kind: ExprKind::Index {
@@ -391,6 +400,7 @@ impl Parser {
                     optional: false,
                 },
                 line,
+                col: 0,
             },
         };
         let has_key = match &m.private_key {
@@ -408,6 +418,7 @@ impl Parser {
                         Box::new(syn_ident("o", line)),
                     ),
                     line,
+                    col: 0,
                 })),
                 line,
             ),
@@ -430,6 +441,7 @@ impl Parser {
                     value: Box::new(syn_ident("v", line)),
                 },
                 line,
+                col: 0,
             };
             props.push(PropDef::KeyValue(
                 PropKey::Named("set".into()),
@@ -443,6 +455,7 @@ impl Parser {
         Expr {
             kind: ExprKind::Object(props),
             line,
+            col: 0,
         }
     }
 
@@ -457,6 +470,7 @@ impl Parser {
                     Expr {
                         kind: ExprKind::Bool(m.is_static),
                         line,
+                        col: 0,
                     },
                 ),
                 kv(
@@ -464,6 +478,7 @@ impl Parser {
                     Expr {
                         kind: ExprKind::Bool(m.private_key.is_some()),
                         line,
+                        col: 0,
                     },
                 ),
                 kv("access", Self::std_access(m, line)),
@@ -475,12 +490,14 @@ impl Parser {
                         None => Expr {
                             kind: ExprKind::Null,
                             line,
+                            col: 0,
                         },
                     },
                 ),
                 kv("extras", syn_ident(&m.extras, line)),
             ]),
             line,
+            col: 0,
         }
     }
 
@@ -512,6 +529,7 @@ impl Parser {
             Expr {
                 kind: ExprKind::Array(class_decorators.into_iter().map(ArrayElem::Expr).collect()),
                 line,
+                col: 0,
             },
             &mut body,
         );
@@ -521,6 +539,7 @@ impl Parser {
                 Expr {
                     kind: ExprKind::Array(exprs.iter().cloned().map(ArrayElem::Expr).collect()),
                     line,
+                    col: 0,
                 },
                 &mut body,
             );
@@ -531,6 +550,7 @@ impl Parser {
                 Expr {
                     kind: ExprKind::Array(Vec::new()),
                     line,
+                    col: 0,
                 },
                 &mut body,
             );
@@ -562,6 +582,7 @@ impl Parser {
                     .collect(),
             ),
             line,
+            col: 0,
         };
         let mut first = vec![syn_stmt(
             StmtKind::Expr(syn_assign(
@@ -572,6 +593,7 @@ impl Parser {
                         Expr {
                             kind: ExprKind::This,
                             line,
+                            col: 0,
                         },
                         specs,
                         syn_ident(&class_decs, line),
@@ -608,6 +630,7 @@ impl Parser {
                         Expr {
                             kind: ExprKind::This,
                             line,
+                            col: 0,
                         },
                         syn_ident(ix, line),
                     ],
@@ -639,6 +662,7 @@ impl Parser {
         let class_expr = Expr {
             kind: ExprKind::Class(class),
             line,
+            col: 0,
         };
         let init = if def.name.is_some() || default_name {
             class_expr
@@ -646,6 +670,7 @@ impl Parser {
             Expr {
                 kind: ExprKind::Seq(vec![num(0.0, line), class_expr]),
                 line,
+                col: 0,
             }
         };
         body.push(syn_stmt(
@@ -681,6 +706,7 @@ impl Parser {
             Expr {
                 kind: ExprKind::Function(Rc::new(f)),
                 line,
+                col: 0,
             },
             Vec::new(),
             line,

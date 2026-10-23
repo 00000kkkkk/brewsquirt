@@ -5,6 +5,7 @@ use std::rc::Rc;
 pub struct Expr {
     pub kind: ExprKind,
     pub line: u32,
+    pub col: u32,
 }
 
 #[derive(Clone, Debug)]
