@@ -1,0 +1,36 @@
+import crypto from "node:crypto"
+import { readFileSync } from "node:fs"
+
+const dir = import.meta.dirname
+const rsa = crypto.createPrivateKey(readFileSync(`${dir}/fixtures/rsa_key.pem`, "utf8"))
+const ed = crypto.createPrivateKey(readFileSync(`${dir}/fixtures/ed25519_key.pem`, "utf8"))
+const rsaPub = crypto.createPublicKey(rsa)
+const edPub = crypto.createPublicKey(ed)
+const data = Buffer.from("javasquirt")
+
+console.log(rsa.type, rsa.asymmetricKeyType, rsa.asymmetricKeyDetails.modulusLength, rsaPub.type)
+const rsaSig = crypto.sign("sha256", data, rsa)
+console.log("rsa sig", rsaSig.toString("base64").slice(0, 40), crypto.verify("sha256", data, rsaPub, rsaSig))
+const edSig = crypto.sign(null, data, ed)
+console.log("ed sig", edSig.toString("hex").slice(0, 40), crypto.verify(null, data, edPub, edSig))
+console.log("spki", rsaPub.export({ type: "spki", format: "pem" }).split("\n").length > 3, edPub.export({ format: "jwk" }).crv)
+console.log("roundtrip", crypto.createPrivateKey(rsa.export({ type: "pkcs1", format: "pem" })).equals(rsa))
+
+const key = Buffer.alloc(32, 1)
+const iv = Buffer.alloc(16, 2)
+const cbc = crypto.createCipheriv("aes-256-cbc", key, iv)
+const enc = Buffer.concat([cbc.update("streaming ciphers"), cbc.final()])
+console.log("cbc", enc.toString("hex"))
+const dec = crypto.createDecipheriv("aes-256-cbc", key, iv)
+console.log("cbc back", dec.update(enc, undefined, "utf8") + dec.final("utf8"))
+const gcm = crypto.createCipheriv("aes-256-gcm", key, iv.subarray(0, 12))
+const sealed = Buffer.concat([gcm.update("authenticated"), gcm.final()])
+console.log("gcm", sealed.toString("hex"), gcm.getAuthTag().toString("hex"))
+const oaep = crypto.publicEncrypt(rsaPub, Buffer.from("oaep"))
+console.log("oaep", oaep.length, crypto.privateDecrypt(rsa, oaep).toString())
+console.log("scrypt", crypto.scryptSync("pw", "salt", 16, { N: 256 }).toString("hex"))
+
+const subtle = crypto.webcrypto.subtle
+const cryptoKey = rsa.toCryptoKey({ name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"])
+const webSig = new Uint8Array(await subtle.sign("RSASSA-PKCS1-v1_5", cryptoKey, data))
+console.log("webcrypto", Buffer.from(webSig).equals(rsaSig), cryptoKey.algorithm.modulusLength)

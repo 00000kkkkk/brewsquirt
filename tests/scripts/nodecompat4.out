@@ -17,7 +17,7 @@ true 201 2, 3 content-type,x-a hello true true 1
 GET / function 0 {}
 HTTP/1.1 201 Created true
 true number sync inflate works
-3 r 16384 number function undefined
+3 r 16384 number function function
 finish once true
 wrapped:value
 true [object CryptoKey] secret false HMAC SHA-256 48 sign,verify
@@ -30,6 +30,6 @@ true
 1024 128
 ba7816bf8f01cfea
 DOMException InvalidAccessError
-DOMException NotSupportedError
-DOMException NotSupportedError
+TypeError TypeError
+TypeError TypeError
 DOMException InvalidAccessError

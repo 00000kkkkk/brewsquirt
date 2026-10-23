@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `receiveMessageOnPort`, `environmentData` and cross-thread `BroadcastChannel` work. `piscina`
   and `tinypool` run unchanged.
 - `structuredClone` accepts `{ transfer }` and shares the memory of `SharedArrayBuffer`s.
+- `node:crypto` handles asymmetric keys and ciphers: `KeyObject`s for RSA, RSA-PSS, P-256,
+  P-384, Ed25519 and X25519 imported from and exported to PEM, DER and JWK (PKCS#8, SPKI,
+  PKCS#1, SEC1, encrypted PKCS#8, certificates), `generateKeyPair`, `sign`/`verify` and
+  `createSign`/`createVerify`, AES CBC/CTR/ECB/GCM and ChaCha20-Poly1305 ciphers, RSA
+  `publicEncrypt`/`privateDecrypt`, ECDH, X25519, `diffieHellman` and `scrypt`. `crypto.subtle`
+  gained ECDSA, Ed25519, RSASSA-PKCS1-v1_5, RSA-PSS, RSA-OAEP, AES-GCM/CBC/CTR, ECDH and X25519
+  with `spki`, `pkcs8` and `jwk` formats and key wrapping. `jsonwebtoken` RS256/PS256/ES256 and
+  `jose` JWS and JWE work.
 - Regular expressions with the `v` flag accept nested classes, `&&` intersections and `\q{...}`
   string alternatives.
 - `Atomics.waitAsync` returns a promise that settles when another thread notifies the location

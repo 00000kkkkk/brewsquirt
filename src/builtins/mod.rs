@@ -1,6 +1,7 @@
 pub mod array;
 pub mod binary;
 mod collections;
+pub mod cryptokeys;
 mod date;
 mod extras;
 pub mod intl;

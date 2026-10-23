@@ -1,0 +1,11 @@
+private rsa 1024 public
+rsa sig CuNfteQ41+7mERdGQHx1hZGMdTT2f3T+gJcMTjiD true
+ed sig 489286cd2e0891b41a8868bd26145fb3d795880f true
+spki true Ed25519
+roundtrip true
+cbc fb2fb926a98eb0800f5497f2b234e8cb83b26c04afab143f2170c301e107697f
+cbc back streaming ciphers
+gcm 66a3bd212f39b594b0adc8ad38 0b054a549907a546ea399dedbe7916f6
+oaep 128 oaep
+scrypt 4c367f271c389fd3613349feffb95eff
+webcrypto true 1024

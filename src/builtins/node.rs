@@ -2620,35 +2620,335 @@ const NODE_SRC: &str = r##"
     return key
   }
   const kKeyBytes = Symbol("keyBytes")
-  const unsupportedKeys = () => {
-    const e = new Error("Asymmetric keys are not supported in this runtime")
-    e.code = "ERR_FEATURE_UNAVAILABLE_ON_PLATFORM"
+  const kKeyInfo = Symbol("keyInfo")
+  const cryptoErr = (code, message, Type = Error) => {
+    const e = new Type(message)
+    e.code = code
     return e
   }
+  const curveNames = { "P-256": "prime256v1", "P-384": "secp384r1" }
+  const curveAlias = (name) => ({ prime256v1: "P-256", secp256r1: "P-256", "P-256": "P-256", secp384r1: "P-384", "P-384": "P-384" })[name]
   class KeyObject {
+    #type
     #bytes
-    constructor(type, bytes) {
-      if (type !== "secret") throw unsupportedKeys()
-      this.type = type
+    #info
+    constructor(type, bytes, info) {
+      if (type !== "secret" && type !== "public" && type !== "private") {
+        throw cryptoErr("ERR_INVALID_ARG_VALUE", `The argument 'type' is invalid. Received '${type}'`, TypeError)
+      }
+      this.#type = type
       this.#bytes = bytes
-      this.symmetricKeySize = bytes.length
+      this.#info = info ?? null
+    }
+    get type() {
+      return this.#type
+    }
+    get asymmetricKeyType() {
+      return this.#info?.alg
+    }
+    get asymmetricKeyDetails() {
+      const info = this.#info
+      if (!info) return undefined
+      if (info.alg === "rsa" || info.alg === "rsa-pss") return { modulusLength: info.modulusLength, publicExponent: info.publicExponent }
+      if (info.alg === "ec") return { namedCurve: curveNames[info.curve] }
+      return {}
+    }
+    get symmetricKeySize() {
+      return this.#type === "secret" ? this.#bytes.length : undefined
     }
     get [kKeyBytes]() {
       return this.#bytes
     }
+    get [kKeyInfo]() {
+      return this.#info
+    }
     export(options) {
-      if (options?.format === "jwk") return { kty: "oct", k: Buffer.from(this.#bytes).toString("base64url") }
-      return Buffer.from(this.#bytes)
+      if (this.#type === "secret") {
+        if (options?.format === "jwk") return { kty: "oct", k: Buffer.from(this.#bytes).toString("base64url") }
+        return Buffer.from(this.#bytes)
+      }
+      const format = options?.format ?? "pem"
+      if (format === "jwk") {
+        if (this.#info?.alg === "rsa-pss") throw cryptoErr("ERR_CRYPTO_JWK_UNSUPPORTED_KEY_TYPE", "Unsupported JWK Key Type.")
+        return native.keyExportJwk(this.#bytes, this.#type)
+      }
+      if (format !== "pem" && format !== "der") throw cryptoErr("ERR_INVALID_ARG_VALUE", `The property 'options.format' must be one of: 'pem', 'der', 'jwk'. Received '${format}'`, TypeError)
+      const type = options?.type ?? (this.#type === "private" ? "pkcs8" : "spki")
+      const passphrase = options?.passphrase === undefined ? undefined : cryptoBytes(options.passphrase, undefined, "passphrase")
+      const out = native.keyExport(this.#bytes, this.#type, format, type, options?.cipher ? passphrase : undefined)
+      return typeof out === "string" ? out : Buffer.from(out.buffer, out.byteOffset, out.byteLength)
     }
     equals(other) {
-      return other instanceof KeyObject && other.type === this.type && Buffer.from(this.#bytes).equals(other.export())
+      if (!(other instanceof KeyObject) || other.type !== this.#type) return false
+      return Buffer.from(this.#bytes).equals(Buffer.from(other[kKeyBytes]))
     }
-    toCryptoKey() {
-      throw unsupportedKeys()
+    toCryptoKey(algorithm, extractable, usages) {
+      return keyObjectToCryptoKey(this, algorithm, extractable, usages)
     }
-    static from() {
-      throw unsupportedKeys()
+    static from(key) {
+      if (!(key instanceof CryptoKey)) throw cryptoErr("ERR_INVALID_ARG_TYPE", 'The "key" argument must be an instance of CryptoKey.', TypeError)
+      return key[kKeyObject]
     }
+  }
+  Object.defineProperty(KeyObject.prototype, Symbol.toStringTag, { value: "KeyObject", configurable: true })
+  const keyFromInfo = (info) => new KeyObject(info.kind, info.der, info)
+  function keyInput(input, encoding) {
+    if (input && typeof input === "object" && !ArrayBuffer.isView(input) && !(input instanceof ArrayBuffer) && !(input instanceof KeyObject) && !(input instanceof CryptoKey)) {
+      return { data: input.key, format: input.format, type: input.type, passphrase: input.passphrase, encoding: input.encoding ?? encoding }
+    }
+    return { data: input, encoding }
+  }
+  function importAsymmetric(input, want) {
+    const opts = keyInput(input)
+    let data = opts.data
+    if (data instanceof CryptoKey) data = data[kKeyObject]
+    if (data instanceof KeyObject) {
+      if (data.type === "secret") throw cryptoErr("ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE", `Invalid key object type secret, expected ${want}.`, TypeError)
+      if (want === "private" && data.type !== "private") throw cryptoErr("ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE", `Invalid key object type ${data.type}, expected private.`, TypeError)
+      if (want === "public" && data.type === "private") return keyFromInfo(native.keyImport(data[kKeyBytes], "der", "pkcs8", "public"))
+      return data
+    }
+    if (opts.format === "jwk") {
+      if (!data || typeof data !== "object") throw cryptoErr("ERR_INVALID_ARG_TYPE", 'The "key.key" property must be of type object.', TypeError)
+      const info = native.keyImportJwk(data, want === "private")
+      return keyFromInfo(want === "public" && info.kind === "private" ? native.keyImport(info.der, "der", "pkcs8", "public") : info)
+    }
+    if (typeof data !== "string" && !ArrayBuffer.isView(data) && !(data instanceof ArrayBuffer)) {
+      throw cryptoErr("ERR_INVALID_ARG_TYPE", `The "key" argument must be of type string or an instance of ArrayBuffer, Buffer, TypedArray, DataView, KeyObject, or CryptoKey.`, TypeError)
+    }
+    const format = opts.format ?? "pem"
+    const bytes = typeof data === "string" ? (format === "pem" ? data : Buffer.from(data, opts.encoding)) : cryptoBytes(data)
+    const pass = opts.passphrase === undefined ? undefined : cryptoBytes(opts.passphrase, undefined, "passphrase")
+    return keyFromInfo(native.keyImport(format === "pem" && typeof bytes !== "string" ? Buffer.from(bytes).toString("latin1") : bytes, format, opts.type ?? "", want, pass))
+  }
+  function createPrivateKey(key) {
+    return importAsymmetric(key, "private")
+  }
+  function createPublicKey(key) {
+    return importAsymmetric(key, "public")
+  }
+  function signingKey(key, want) {
+    const opts = key && typeof key === "object" && !(key instanceof KeyObject) && !(key instanceof CryptoKey) && !ArrayBuffer.isView(key) ? key : {}
+    let k
+    try {
+      k = importAsymmetric(key, want)
+    } catch (e) {
+      if (want === "public") k = importAsymmetric(key, "private")
+      else throw e
+      k = keyFromInfo(native.keyImport(k[kKeyBytes], "der", "pkcs8", "public"))
+    }
+    return { key: k, padding: opts.padding, saltLength: opts.saltLength, dsaEncoding: opts.dsaEncoding, oaepHash: opts.oaepHash, oaepLabel: opts.oaepLabel }
+  }
+  const pssSalt = (n) => (n === undefined || n === null || n < 0 ? undefined : n)
+  function signWith(algorithm, data, key) {
+    const k = signingKey(key, "private")
+    const out = native.sign(algorithm ?? "", data, k.key[kKeyBytes], k.padding ?? 1, pssSalt(k.saltLength), k.dsaEncoding ?? "der")
+    return Buffer.from(out.buffer, out.byteOffset, out.byteLength)
+  }
+  function verifyWith(algorithm, data, key, signature) {
+    const k = signingKey(key, "public")
+    return native.verify(algorithm ?? "", data, k.key[kKeyBytes], signature, k.padding ?? 1, pssSalt(k.saltLength), k.dsaEncoding ?? "der")
+  }
+  class Sign extends Writable {
+    #alg
+    #parts = []
+    constructor(algorithm, options) {
+      super(options)
+      this.#alg = String(algorithm)
+    }
+    update(data, encoding) {
+      this.#parts.push(cryptoBytes(data, encoding))
+      return this
+    }
+    _write(chunk, encoding, cb) {
+      this.update(chunk, encoding)
+      cb()
+    }
+    sign(privateKey, outputEncoding) {
+      const sig = signWith(this.#alg, concatBytes(this.#parts), privateKey)
+      return outputEncoding && outputEncoding !== "buffer" ? sig.toString(outputEncoding) : sig
+    }
+  }
+  class Verify extends Writable {
+    #alg
+    #parts = []
+    constructor(algorithm, options) {
+      super(options)
+      this.#alg = String(algorithm)
+    }
+    update(data, encoding) {
+      this.#parts.push(cryptoBytes(data, encoding))
+      return this
+    }
+    _write(chunk, encoding, cb) {
+      this.update(chunk, encoding)
+      cb()
+    }
+    verify(publicKey, signature, signatureEncoding) {
+      return verifyWith(this.#alg, concatBytes(this.#parts), publicKey, cryptoBytes(signature, signatureEncoding, "signature"))
+    }
+  }
+  class CipherBase extends Transform {
+    #id
+    #decoder = null
+    #encrypt
+    #done = false
+    constructor(name, key, iv, options, encrypt) {
+      super(options)
+      this.#encrypt = encrypt
+      const keyBytes = key instanceof KeyObject ? key[kKeyBytes] : cryptoBytes(key, undefined, "key")
+      const ivBytes = iv === null || iv === undefined ? new Uint8Array(0) : cryptoBytes(iv, undefined, "iv")
+      this.#id = native.cipherNew(String(name), keyBytes, ivBytes, encrypt, options?.authTagLength)
+    }
+    #text(bytes, encoding, end) {
+      const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+      if (encoding === undefined || encoding === "buffer") return buf
+      this.#decoder ??= new StringDecoder(encoding)
+      return end ? this.#decoder.write(buf) + this.#decoder.end() : this.#decoder.write(buf)
+    }
+    update(data, inputEncoding, outputEncoding) {
+      if (this.#done) throw cryptoErr("ERR_CRYPTO_INVALID_STATE", "Invalid state for operation update")
+      return this.#text(native.cipherUpdate(this.#id, cryptoBytes(data, inputEncoding)), outputEncoding, false)
+    }
+    final(outputEncoding) {
+      if (this.#done) throw cryptoErr("ERR_CRYPTO_INVALID_STATE", "Invalid state for operation final")
+      this.#done = true
+      return this.#text(native.cipherFinal(this.#id), outputEncoding, true)
+    }
+    setAutoPadding(on = true) {
+      native.cipherCtl(this.#id, "padding", !!on)
+      return this
+    }
+    setAAD(buffer) {
+      native.cipherCtl(this.#id, "aad", cryptoBytes(buffer, undefined, "buffer"))
+      return this
+    }
+    getAuthTag() {
+      if (!this.#encrypt || !this.#done) throw cryptoErr("ERR_CRYPTO_INVALID_STATE", "Invalid state for operation getAuthTag")
+      const tag = native.cipherCtl(this.#id, "getTag")
+      return Buffer.from(tag.buffer, tag.byteOffset, tag.byteLength)
+    }
+    setAuthTag(tag) {
+      if (this.#encrypt || this.#done) throw cryptoErr("ERR_CRYPTO_INVALID_STATE", "Invalid state for operation setAuthTag")
+      native.cipherCtl(this.#id, "setTag", cryptoBytes(tag, undefined, "buffer"))
+      return this
+    }
+    _transform(chunk, encoding, cb) {
+      try {
+        this.push(this.update(chunk, encoding))
+        cb()
+      } catch (e) {
+        cb(e)
+      }
+    }
+    _flush(cb) {
+      try {
+        this.push(this.final())
+        cb()
+      } catch (e) {
+        cb(e)
+      }
+    }
+  }
+  class Cipheriv extends CipherBase {
+    constructor(algorithm, key, iv, options) {
+      super(algorithm, key, iv, options, true)
+    }
+  }
+  class Decipheriv extends CipherBase {
+    constructor(algorithm, key, iv, options) {
+      super(algorithm, key, iv, options, false)
+    }
+  }
+  const CIPHER_LIST = ["aes-128-cbc", "aes-128-ctr", "aes-128-ecb", "aes-128-gcm", "aes-192-cbc", "aes-192-ctr", "aes-192-ecb", "aes-192-gcm", "aes-256-cbc", "aes-256-ctr", "aes-256-ecb", "aes-256-gcm", "chacha20-poly1305", "id-aes128-gcm", "id-aes192-gcm", "id-aes256-gcm"]
+  function getCipherInfo(name) {
+    const n = String(name).toLowerCase()
+    if (!CIPHER_LIST.includes(n)) return undefined
+    const keyLength = n.startsWith("chacha") ? 32 : Number(n.match(/(\d{3})/)[1]) / 8
+    const mode = n.split("-").pop() === "poly1305" ? "stream" : n.split("-").pop()
+    const info = { mode, name: n, nid: 0, blockSize: mode === "cbc" || mode === "ecb" ? 16 : 1, keyLength }
+    if (mode === "cbc" || mode === "ctr") info.ivLength = 16
+    if (mode === "gcm" || n.startsWith("chacha")) info.ivLength = 12
+    return info
+  }
+  function rsaOp(op, key, buffer) {
+    const k = signingKey(key, op === "publicEncrypt" || op === "publicDecrypt" ? "public" : "private")
+    const defaultPadding = op === "publicEncrypt" || op === "privateDecrypt" ? 4 : 1
+    const label = k.oaepLabel === undefined ? undefined : cryptoBytes(k.oaepLabel, undefined, "oaepLabel")
+    const out = native.rsa(op, k.key[kKeyBytes], cryptoBytes(buffer, undefined, "buffer"), k.padding ?? defaultPadding, k.oaepHash ?? "sha1", label)
+    return Buffer.from(out.buffer, out.byteOffset, out.byteLength)
+  }
+  function generateKeyPairSync(type, options = {}) {
+    const t = String(type)
+    if (!["rsa", "rsa-pss", "ec", "ed25519", "x25519"].includes(t)) {
+      throw cryptoErr("ERR_INVALID_ARG_VALUE", `The argument 'type' must be a supported key type. Received '${t}'`, TypeError)
+    }
+    if ((t === "rsa" || t === "rsa-pss") && typeof options?.modulusLength !== "number") {
+      throw cryptoErr("ERR_INVALID_ARG_TYPE", `The "options.modulusLength" property must be of type number. Received ${describeReceived(options?.modulusLength)}`, TypeError)
+    }
+    if (t === "ec" && typeof options?.namedCurve !== "string") {
+      throw cryptoErr("ERR_INVALID_ARG_TYPE", `The "options.namedCurve" property must be of type string. Received ${describeReceived(options?.namedCurve)}`, TypeError)
+    }
+    const pair = native.keyGenerate(t, options?.modulusLength, options?.publicExponent, options?.namedCurve)
+    let publicKey = keyFromInfo(pair.publicKey)
+    let privateKey = keyFromInfo(pair.privateKey)
+    if (options?.publicKeyEncoding) publicKey = publicKey.export(options.publicKeyEncoding)
+    if (options?.privateKeyEncoding) privateKey = privateKey.export(options.privateKeyEncoding)
+    return { publicKey, privateKey }
+  }
+  class ECDH {
+    #curve
+    #private = null
+    #public = null
+    constructor(curve) {
+      this.#curve = curve
+    }
+    static convertKey(key, curve, inputEncoding, outputEncoding, format) {
+      const c = curveAlias(curve)
+      if (!c) throw cryptoErr("ERR_CRYPTO_INVALID_CURVE", "Invalid EC curve name", TypeError)
+      const out = Buffer.from(native.ecdh("convert", c, new Uint8Array(0), cryptoBytes(key, inputEncoding, "key"), format === "compressed"))
+      return outputEncoding && outputEncoding !== "buffer" ? out.toString(outputEncoding) : out
+    }
+    #out(bytes, encoding) {
+      const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+      return encoding && encoding !== "buffer" ? buf.toString(encoding) : buf
+    }
+    generateKeys(encoding, format) {
+      this.#private = native.ecdh("generate", this.#curve, new Uint8Array(0), new Uint8Array(0), false)
+      this.#public = native.ecdh("public", this.#curve, this.#private, new Uint8Array(0), false)
+      return this.getPublicKey(encoding, format)
+    }
+    computeSecret(otherPublicKey, inputEncoding, outputEncoding) {
+      if (!this.#private) throw cryptoErr("ERR_CRYPTO_INVALID_STATE", "Invalid state for operation computeSecret")
+      return this.#out(native.ecdh("compute", this.#curve, this.#private, cryptoBytes(otherPublicKey, inputEncoding, "otherPublicKey"), false), outputEncoding)
+    }
+    getPublicKey(encoding, format) {
+      if (!this.#private) throw cryptoErr("ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY", "Failed to get ECDH public key")
+      return this.#out(native.ecdh("public", this.#curve, this.#private, new Uint8Array(0), format === "compressed"), encoding)
+    }
+    getPrivateKey(encoding) {
+      if (!this.#private) throw cryptoErr("ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY", "Failed to get ECDH private key")
+      return this.#out(this.#private, encoding)
+    }
+    setPrivateKey(key, encoding) {
+      const bytes = cryptoBytes(key, encoding, "key")
+      this.#public = native.ecdh("public", this.#curve, bytes, new Uint8Array(0), false)
+      this.#private = bytes
+      return this
+    }
+    setPublicKey(key, encoding) {
+      this.#public = cryptoBytes(key, encoding, "key")
+      return this
+    }
+  }
+  function createECDH(curve) {
+    const c = curveAlias(String(curve))
+    if (!c) throw cryptoErr("ERR_CRYPTO_INVALID_CURVE", "Invalid EC curve name", TypeError)
+    return new ECDH(c)
+  }
+  function scryptOptions(options) {
+    const o = options ?? {}
+    return { N: o.N ?? o.cost ?? 16384, r: o.r ?? o.blockSize ?? 8, p: o.p ?? o.parallelization ?? 1 }
   }
   function cryptoBytes(data, encoding, what = "data") {
     if (data instanceof KeyObject) return data[kKeyBytes]
@@ -2768,13 +3068,9 @@ const NODE_SRC: &str = r##"
     Hash,
     Hmac,
     KeyObject,
-    createSecretKey: (key, encoding) => new KeyObject("secret", cryptoBytes(key, encoding, "key")),
-    createPrivateKey: () => {
-      throw unsupportedKeys()
-    },
-    createPublicKey: () => {
-      throw unsupportedKeys()
-    },
+    createSecretKey: (key, encoding) => new KeyObject("secret", new Uint8Array(cryptoBytes(key, encoding, "key"))),
+    createPrivateKey,
+    createPublicKey,
     generateKeySync: (type, options) => new KeyObject("secret", native.randomBytes(Math.ceil((options?.length ?? 256) / 8))),
     generateKey(type, options, cb) {
       let key
@@ -2786,30 +3082,68 @@ const NODE_SRC: &str = r##"
       }
       queueMicrotask(() => cb(err, key))
     },
-    createSign: () => {
-      throw unsupportedKeys()
+    Sign,
+    Verify,
+    Cipheriv,
+    Decipheriv,
+    ECDH,
+    createSign: (algorithm, options) => new Sign(algorithm, options),
+    createVerify: (algorithm, options) => new Verify(algorithm, options),
+    sign(algorithm, data, key, cb) {
+      if (typeof cb === "function") {
+        let out
+        let err = null
+        try {
+          out = signWith(algorithm, cryptoBytes(data), key)
+        } catch (e) {
+          err = e
+        }
+        queueMicrotask(() => cb(err, out))
+        return
+      }
+      return signWith(algorithm, cryptoBytes(data), key)
     },
-    createVerify: () => {
-      throw unsupportedKeys()
+    verify(algorithm, data, key, signature, cb) {
+      if (typeof cb === "function") {
+        let out
+        let err = null
+        try {
+          out = verifyWith(algorithm, cryptoBytes(data), key, cryptoBytes(signature, undefined, "signature"))
+        } catch (e) {
+          err = e
+        }
+        queueMicrotask(() => cb(err, out))
+        return
+      }
+      return verifyWith(algorithm, cryptoBytes(data), key, cryptoBytes(signature, undefined, "signature"))
     },
-    sign: () => {
-      throw unsupportedKeys()
+    createCipheriv: (algorithm, key, iv, options) => new Cipheriv(algorithm, key, iv, options),
+    createDecipheriv: (algorithm, key, iv, options) => new Decipheriv(algorithm, key, iv, options),
+    getCiphers: () => [...CIPHER_LIST].sort(),
+    getCipherInfo,
+    getCurves: () => ["prime256v1", "secp256r1", "secp384r1"],
+    publicEncrypt: (key, buffer) => rsaOp("publicEncrypt", key, buffer),
+    privateDecrypt: (key, buffer) => rsaOp("privateDecrypt", key, buffer),
+    privateEncrypt: (key, buffer) => rsaOp("privateEncrypt", key, buffer),
+    publicDecrypt: (key, buffer) => rsaOp("publicDecrypt", key, buffer),
+    generateKeyPairSync,
+    generateKeyPair(type, options, cb) {
+      if (typeof options === "function") [options, cb] = [undefined, options]
+      let out
+      let err = null
+      try {
+        out = generateKeyPairSync(type, options)
+      } catch (e) {
+        err = e
+      }
+      queueMicrotask(() => (err ? cb(err) : cb(null, out.publicKey, out.privateKey)))
     },
-    verify: () => {
-      throw unsupportedKeys()
+    createECDH,
+    diffieHellman({ privateKey, publicKey } = {}) {
+      if (!(privateKey instanceof KeyObject) || !(publicKey instanceof KeyObject)) throw cryptoErr("ERR_INVALID_ARG_TYPE", 'The "options.privateKey" property must be of type KeyObject.', TypeError)
+      const out = native.deriveShared(privateKey[kKeyBytes], publicKey.type === "private" ? createPublicKey(publicKey)[kKeyBytes] : publicKey[kKeyBytes])
+      return Buffer.from(out.buffer, out.byteOffset, out.byteLength)
     },
-    createCipheriv: () => {
-      const e = new Error("Ciphers are not supported in this runtime")
-      e.code = "ERR_CRYPTO_UNKNOWN_CIPHER"
-      throw e
-    },
-    createDecipheriv: () => {
-      const e = new Error("Ciphers are not supported in this runtime")
-      e.code = "ERR_CRYPTO_UNKNOWN_CIPHER"
-      throw e
-    },
-    getCiphers: () => [],
-    getCurves: () => [],
     pbkdf2Sync(password, salt, iterations, keylen, digest) {
       const out = native.pbkdf2(hashName(digest), cryptoBytes(password, undefined, "password"), cryptoBytes(salt, undefined, "salt"), iterations, keylen)
       return Buffer.from(out.buffer, out.byteOffset, out.byteLength)
@@ -2838,20 +3172,37 @@ const NODE_SRC: &str = r##"
       }
       queueMicrotask(() => cb(err, out))
     },
-    scryptSync: () => {
-      const e = new Error("scrypt is not supported in this runtime")
-      e.code = "ERR_CRYPTO_SCRYPT_NOT_SUPPORTED"
-      throw e
+    scryptSync(password, salt, keylen, options) {
+      const o = scryptOptions(options)
+      const out = native.scrypt(cryptoBytes(password, undefined, "password"), cryptoBytes(salt, undefined, "salt"), o.N, o.r, o.p, keylen)
+      return Buffer.from(out.buffer, out.byteOffset, out.byteLength)
     },
-    scrypt: (password, salt, keylen, options, cb) => {
-      const done = typeof options === "function" ? options : cb
-      const e = new Error("scrypt is not supported in this runtime")
-      e.code = "ERR_CRYPTO_SCRYPT_NOT_SUPPORTED"
-      queueMicrotask(() => done(e))
+    scrypt(password, salt, keylen, options, cb) {
+      if (typeof options === "function") [options, cb] = [undefined, options]
+      let out
+      let err = null
+      try {
+        out = crypto.scryptSync(password, salt, keylen, options)
+      } catch (e) {
+        err = e
+      }
+      queueMicrotask(() => cb(err, out))
     },
     webcrypto: globalThis.crypto,
     subtle: globalThis.crypto.subtle,
-    constants: {},
+    constants: {
+      RSA_PKCS1_PADDING: 1,
+      RSA_NO_PADDING: 3,
+      RSA_PKCS1_OAEP_PADDING: 4,
+      RSA_X931_PADDING: 5,
+      RSA_PKCS1_PSS_PADDING: 6,
+      RSA_PSS_SALTLEN_DIGEST: -1,
+      RSA_PSS_SALTLEN_MAX_SIGN: -2,
+      RSA_PSS_SALTLEN_AUTO: -2,
+      POINT_CONVERSION_COMPRESSED: 2,
+      POINT_CONVERSION_UNCOMPRESSED: 4,
+      POINT_CONVERSION_HYBRID: 6,
+    },
   }
   const utf8Incomplete = (bytes) => {
     const n = bytes.length
@@ -4407,6 +4758,7 @@ const NODE_SRC: &str = r##"
   const toArrayBuffer = (bytes) => bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
   const base64urlDecode = (text) => Buffer.from(String(text).replace(/-/g, "+").replace(/_/g, "/"), "base64")
   const base64urlEncode = (bytes) => Buffer.from(bytes).toString("base64url")
+  const kKeyObject = Symbol("keyObject")
   class CryptoKey {
     #material
     constructor(material, algorithm, extractable, usages, type = "secret") {
@@ -4417,25 +4769,119 @@ const NODE_SRC: &str = r##"
       Object.defineProperty(this, "usages", { value: Object.freeze([...usages]), enumerable: true })
     }
     get [kKeyMaterial]() {
-      return this.#material
+      return this.#material instanceof KeyObject ? this.#material[kKeyBytes] : this.#material
+    }
+    get [kKeyObject]() {
+      return this.#material instanceof KeyObject ? this.#material : new KeyObject("secret", this.#material)
     }
     get [Symbol.toStringTag]() {
       return "CryptoKey"
     }
   }
   const normalizeAlgorithm = (alg) => (typeof alg === "string" ? { name: alg } : { ...alg })
-  const algName = (alg) => String(normalizeAlgorithm(alg).name).toUpperCase().replace(/^SHA(\d)/, "SHA-$1")
+  const ALGORITHM_NAMES = ["AES-CBC", "AES-CTR", "AES-GCM", "AES-KW", "ECDH", "ECDSA", "Ed25519", "HKDF", "HMAC", "PBKDF2", "RSA-OAEP", "RSA-PSS", "RSASSA-PKCS1-v1_5", "SHA-1", "SHA-256", "SHA-384", "SHA-512", "X25519"]
+  const algName = (alg) => {
+    const raw = String(normalizeAlgorithm(alg).name)
+    const found = ALGORITHM_NAMES.find((n) => n.toUpperCase() === raw.toUpperCase().replace(/^SHA(\d)/, "SHA-$1"))
+    return found ?? raw.toUpperCase().replace(/^SHA(\d)/, "SHA-$1")
+  }
   const requireKey = (key, what = "key") => {
     if (!(key instanceof CryptoKey)) throw new TypeError(`${what} is not a CryptoKey`)
   }
   const requireUsage = (key, usage) => {
-    if (!key.usages.includes(usage)) throw new DOMException(`The key does not support the '${usage}' operation`, "InvalidAccessError")
+    if (!key.usages.includes(usage)) throw new DOMException(`Unable to use this key to ${usage}`, "InvalidAccessError")
   }
   const hashBlockBits = { sha1: 512, sha256: 512, sha384: 1024, sha512: 1024 }
+  const PARAMS = {
+    encrypt: { "AES-GCM": ["AeadParams", "iv"], "AES-CBC": ["AesCbcParams", "iv"], "AES-CTR": ["AesCtrParams", "counter", "length"] },
+    sign: { ECDSA: ["EcdsaParams", "hash"], "RSA-PSS": ["RsaPssParams", "saltLength"] },
+    importKey: {
+      HMAC: ["HmacImportParams", "hash"],
+      "RSASSA-PKCS1-v1_5": ["RsaHashedImportParams", "hash"],
+      "RSA-PSS": ["RsaHashedImportParams", "hash"],
+      "RSA-OAEP": ["RsaHashedImportParams", "hash"],
+      ECDSA: ["EcKeyImportParams", "namedCurve"],
+      ECDH: ["EcKeyImportParams", "namedCurve"],
+    },
+    generateKey: {
+      HMAC: ["HmacKeyGenParams", "hash"],
+      "AES-GCM": ["AesKeyGenParams", "length"],
+      "AES-CBC": ["AesKeyGenParams", "length"],
+      "AES-CTR": ["AesKeyGenParams", "length"],
+      "RSASSA-PKCS1-v1_5": ["RsaHashedKeyGenParams", "modulusLength", "publicExponent", "hash"],
+      "RSA-PSS": ["RsaHashedKeyGenParams", "modulusLength", "publicExponent", "hash"],
+      "RSA-OAEP": ["RsaHashedKeyGenParams", "modulusLength", "publicExponent", "hash"],
+      ECDSA: ["EcKeyGenParams", "namedCurve"],
+      ECDH: ["EcKeyGenParams", "namedCurve"],
+    },
+    deriveBits: { ECDH: ["EcdhKeyDeriveParams", "public"], X25519: ["EcdhKeyDeriveParams", "public"], PBKDF2: ["Pbkdf2Params", "salt", "iterations", "hash"], HKDF: ["HkdfParams", "hash", "salt", "info"] },
+  }
+  const checkParams = (op, alg) => {
+    const spec = PARAMS[op]?.[algName(alg)]
+    if (!spec) return
+    const [dict, ...required] = spec
+    for (const field of required) {
+      if (alg[field] === undefined) {
+        throw new TypeError(`Failed to normalize algorithm: passed algorithm cannot be converted to '${dict}' because '${field}' is required in '${dict}'.`)
+      }
+    }
+  }
+  const asymmetricUsages = {
+    ECDSA: [["verify"], ["sign"]],
+    Ed25519: [["verify"], ["sign"]],
+    "RSASSA-PKCS1-v1_5": [["verify"], ["sign"]],
+    "RSA-PSS": [["verify"], ["sign"]],
+    "RSA-OAEP": [["encrypt", "wrapKey"], ["decrypt", "unwrapKey"]],
+    ECDH: [[], ["deriveKey", "deriveBits"]],
+    X25519: [[], ["deriveKey", "deriveBits"]],
+  }
+  const asymmetricAlgorithm = (name, keyObject, alg) => {
+    if (name === "ECDSA" || name === "ECDH") return { name, namedCurve: keyObject[kKeyInfo].curve }
+    if (name.startsWith("RSA")) {
+      const info = keyObject[kKeyInfo]
+      const e = info.publicExponent
+      const bytes = []
+      let v = e
+      while (v > 0n) {
+        bytes.unshift(Number(v & 255n))
+        v >>= 8n
+      }
+      return { name, modulusLength: info.modulusLength, publicExponent: new Uint8Array(bytes), hash: { name: algName(normalizeAlgorithm(alg.hash ?? "SHA-256")) } }
+    }
+    return { name }
+  }
+  const keyObjectAlg = (name) => ({ ECDSA: "ec", ECDH: "ec", Ed25519: "ed25519", X25519: "x25519", "RSASSA-PKCS1-v1_5": "rsa", "RSA-PSS": "rsa", "RSA-OAEP": "rsa" })[name]
+  function keyObjectToCryptoKey(keyObject, algorithm, extractable, usages) {
+    const alg = normalizeAlgorithm(algorithm)
+    const name = algName(alg)
+    if (keyObject.type === "secret") {
+      const bytes = keyObject[kKeyBytes]
+      if (name === "HMAC") return new CryptoKey(bytes, { name, hash: { name: algName(normalizeAlgorithm(alg.hash)) }, length: alg.length ?? bytes.length * 8 }, extractable, usages)
+      if (name.startsWith("AES-")) return new CryptoKey(bytes, { name, length: bytes.length * 8 }, extractable, usages)
+      return new CryptoKey(bytes, { name }, false, usages)
+    }
+    const expected = keyObjectAlg(name)
+    if (!expected || (keyObject.asymmetricKeyType !== expected && !(expected === "rsa" && keyObject.asymmetricKeyType === "rsa-pss"))) {
+      throw new DOMException("Invalid key type for the algorithm", "DataError")
+    }
+    if ((name === "ECDSA" || name === "ECDH") && alg.namedCurve && alg.namedCurve !== keyObject[kKeyInfo].curve) {
+      throw new DOMException("Named curve mismatch", "DataError")
+    }
+    return new CryptoKey(keyObject, asymmetricAlgorithm(name, keyObject, alg), keyObject.type === "public" ? true : extractable, usages, keyObject.type)
+  }
   const deriveRaw = (algorithm, baseKey, bits) => {
     const alg = normalizeAlgorithm(algorithm)
     const name = algName(alg)
     const material = baseKey[kKeyMaterial]
+    if (name === "ECDH" || name === "X25519") {
+      requireKey(alg.public, "algorithm.public")
+      const shared = native.deriveShared(baseKey[kKeyObject][kKeyBytes], alg.public[kKeyObject][kKeyBytes])
+      if (bits === null || bits === undefined) return shared
+      if (bits > shared.length * 8) throw new DOMException("length is too large", "OperationError")
+      const out = shared.slice(0, Math.ceil(bits / 8))
+      if (bits % 8) out[out.length - 1] &= 0xff << (8 - (bits % 8))
+      return out
+    }
     if (bits === null || bits === undefined) throw new DOMException("length is required", "OperationError")
     const bytes = Math.ceil(bits / 8)
     if (name === "PBKDF2") {
@@ -4446,10 +4892,73 @@ const NODE_SRC: &str = r##"
     }
     throw new DOMException(`Unsupported derivation algorithm: ${name}`, "NotSupportedError")
   }
+  const aesRun = (alg, key, data, encrypt) => {
+    const name = algName(alg)
+    const bits = key.algorithm.length
+    const material = key[kKeyMaterial]
+    if (name === "AES-GCM") {
+      const tagBytes = (alg.tagLength ?? 128) / 8
+      const iv = subtleBytes(alg.iv, "iv")
+      const id = native.cipherNew(`aes-${bits}-gcm`, material, iv, encrypt, tagBytes)
+      try {
+        if (alg.additionalData !== undefined) native.cipherCtl(id, "aad", subtleBytes(alg.additionalData, "additionalData"))
+        if (encrypt) {
+          native.cipherUpdate(id, data)
+          const out = native.cipherFinal(id)
+          const tag = native.cipherCtl(id, "getTag")
+          return concatBytes([out, tag])
+        }
+        if (data.length < tagBytes) throw new DOMException("The provided data is too small.", "OperationError")
+        native.cipherCtl(id, "setTag", data.slice(data.length - tagBytes))
+        native.cipherUpdate(id, data.slice(0, data.length - tagBytes))
+        try {
+          return native.cipherFinal(id)
+        } catch {
+          throw new DOMException("The operation failed for an operation-specific reason", "OperationError")
+        }
+      } finally {
+        native.cipherCtl(id, "free")
+      }
+    }
+    if (name === "AES-CBC" || name === "AES-CTR") {
+      const iv = subtleBytes(name === "AES-CTR" ? alg.counter : alg.iv, name === "AES-CTR" ? "counter" : "iv")
+      const id = native.cipherNew(`aes-${bits}-${name === "AES-CBC" ? "cbc" : "ctr"}`, material, iv, encrypt)
+      try {
+        const head = native.cipherUpdate(id, data)
+        let tail
+        try {
+          tail = native.cipherFinal(id)
+        } catch {
+          throw new DOMException("The operation failed for an operation-specific reason", "OperationError")
+        }
+        return concatBytes([head, tail])
+      } finally {
+        native.cipherCtl(id, "free")
+      }
+    }
+    throw new DOMException(`Unrecognized algorithm name: ${name}`, "NotSupportedError")
+  }
   const subtleCrypto = {
     async importKey(format, keyData, algorithm, extractable, usages) {
       const alg = normalizeAlgorithm(algorithm)
       const name = algName(alg)
+      checkParams("importKey", alg)
+      if (keyObjectAlg(name)) {
+        let keyObject
+        try {
+          if (format === "spki") keyObject = createPublicKey({ key: Buffer.from(subtleBytes(keyData, "keyData")), format: "der", type: "spki" })
+          else if (format === "pkcs8") keyObject = createPrivateKey({ key: Buffer.from(subtleBytes(keyData, "keyData")), format: "der", type: "pkcs8" })
+          else if (format === "jwk") keyObject = keyData?.d !== undefined ? createPrivateKey({ key: keyData, format: "jwk" }) : createPublicKey({ key: keyData, format: "jwk" })
+          else if (format === "raw") {
+            const curve = name === "ECDSA" || name === "ECDH" ? alg.namedCurve : name
+            keyObject = keyFromInfo(native.keyRaw("import", curve, subtleBytes(keyData, "keyData")))
+          } else throw new DOMException(`Unsupported key format: ${format}`, "NotSupportedError")
+        } catch (e) {
+          if (e instanceof DOMException) throw e
+          throw new DOMException(e.message, "DataError")
+        }
+        return keyObjectToCryptoKey(keyObject, alg, extractable, usages)
+      }
       let material
       if (format === "raw") material = subtleBytes(keyData, "keyData")
       else if (format === "jwk") {
@@ -4463,12 +4972,33 @@ const NODE_SRC: &str = r##"
         return new CryptoKey(material, { name: "HMAC", hash: { name: algName(hash) }, length }, extractable, usages)
       }
       if (name === "PBKDF2" || name === "HKDF") return new CryptoKey(material, { name }, false, usages)
-      if (name.startsWith("AES-")) return new CryptoKey(material, { name, length: material.length * 8 }, extractable, usages)
+      if (name.startsWith("AES-")) {
+        if (![16, 24, 32].includes(material.length)) throw new DOMException("Invalid key length", "DataError")
+        return new CryptoKey(material, { name, length: material.length * 8 }, extractable, usages)
+      }
       throw new DOMException(`Unrecognized algorithm name: ${name}`, "NotSupportedError")
     },
     async exportKey(format, key) {
       requireKey(key)
       if (!key.extractable) throw new DOMException("key is not extractable", "InvalidAccessError")
+      if (key.type !== "secret") {
+        const keyObject = key[kKeyObject]
+        if (format === "spki" && key.type === "public") return toArrayBuffer(keyObject.export({ format: "der", type: "spki" }))
+        if (format === "pkcs8" && key.type === "private") return toArrayBuffer(keyObject.export({ format: "der", type: "pkcs8" }))
+        if (format === "jwk") {
+          const jwk = keyObject.export({ format: "jwk" })
+          jwk.ext = true
+          jwk.key_ops = [...key.usages]
+          const hashAlg = key.algorithm.hash?.name?.replace("SHA-", "")
+          if (key.algorithm.name === "RSASSA-PKCS1-v1_5") jwk.alg = `RS${hashAlg}`
+          if (key.algorithm.name === "RSA-PSS") jwk.alg = `PS${hashAlg}`
+          if (key.algorithm.name === "RSA-OAEP") jwk.alg = hashAlg === "1" ? "RSA-OAEP" : `RSA-OAEP-${hashAlg}`
+          if (key.algorithm.name === "Ed25519") jwk.alg = "Ed25519"
+          return jwk
+        }
+        if (format === "raw" && key.type === "public") return toArrayBuffer(native.keyRaw("export", "", keyObject[kKeyBytes]))
+        throw new DOMException(`Unsupported key format: ${format}`, "InvalidAccessError")
+      }
       const material = key[kKeyMaterial]
       if (format === "raw") return toArrayBuffer(material)
       if (format === "jwk") {
@@ -4482,6 +5012,7 @@ const NODE_SRC: &str = r##"
     async generateKey(algorithm, extractable, usages) {
       const alg = normalizeAlgorithm(algorithm)
       const name = algName(alg)
+      checkParams("generateKey", alg)
       if (name === "HMAC") {
         const hash = normalizeAlgorithm(alg.hash)
         const bits = alg.length ?? hashBlockBits[subtleHashName(hash)]
@@ -4490,29 +5021,65 @@ const NODE_SRC: &str = r##"
       }
       if (name.startsWith("AES-")) {
         const bits = alg.length ?? 256
+        if (![128, 192, 256].includes(bits)) throw new DOMException("AES key length must be 128, 192 or 256 bits", "OperationError")
         return new CryptoKey(native.randomBytes(bits / 8), { name, length: bits }, extractable, usages)
+      }
+      const type = keyObjectAlg(name)
+      if (type) {
+        let exponent
+        if (alg.publicExponent) {
+          exponent = 0
+          for (const b of alg.publicExponent) exponent = exponent * 256 + b
+        }
+        const pair = native.keyGenerate(type, alg.modulusLength, exponent, alg.namedCurve)
+        const [publicUses, privateUses] = asymmetricUsages[name]
+        const publicKey = keyObjectToCryptoKey(keyFromInfo(pair.publicKey), alg, true, usages.filter((u) => publicUses.includes(u)))
+        const privateKey = keyObjectToCryptoKey(keyFromInfo(pair.privateKey), alg, extractable, usages.filter((u) => privateUses.includes(u)))
+        return { publicKey, privateKey }
       }
       throw new DOMException(`Unsupported algorithm for key generation: ${name}`, "NotSupportedError")
     },
     async sign(algorithm, key, data) {
+      const alg = normalizeAlgorithm(algorithm)
+      checkParams("sign", alg)
       requireKey(key)
       requireUsage(key, "sign")
-      if (algName(algorithm) !== "HMAC" || key.algorithm.name !== "HMAC") throw new DOMException("Only HMAC signatures are supported", "NotSupportedError")
-      const out = native.hmac(subtleHashName(key.algorithm.hash), key[kKeyMaterial], subtleBytes(data))
-      return toArrayBuffer(out)
+      const name = algName(alg)
+      const bytes = subtleBytes(data)
+      if (name === "HMAC" && key.algorithm.name === "HMAC") return toArrayBuffer(native.hmac(subtleHashName(key.algorithm.hash), key[kKeyMaterial], bytes))
+      if (name !== key.algorithm.name) throw new DOMException("Key algorithm mismatch", "InvalidAccessError")
+      const der = key[kKeyObject][kKeyBytes]
+      if (name === "ECDSA") return toArrayBuffer(native.sign(subtleHashName(alg.hash), bytes, der, 1, undefined, "ieee-p1363"))
+      if (name === "Ed25519") return toArrayBuffer(native.sign("", bytes, der, 1, undefined, "der"))
+      if (name === "RSASSA-PKCS1-v1_5") return toArrayBuffer(native.sign(subtleHashName(key.algorithm.hash), bytes, der, 1, undefined, "der"))
+      if (name === "RSA-PSS") return toArrayBuffer(native.sign(subtleHashName(key.algorithm.hash), bytes, der, 6, alg.saltLength, "der"))
+      throw new DOMException(`Unrecognized algorithm name: ${name}`, "NotSupportedError")
     },
     async verify(algorithm, key, signature, data) {
+      const alg = normalizeAlgorithm(algorithm)
+      checkParams("sign", alg)
       requireKey(key)
       requireUsage(key, "verify")
-      if (algName(algorithm) !== "HMAC" || key.algorithm.name !== "HMAC") throw new DOMException("Only HMAC signatures are supported", "NotSupportedError")
-      const expected = native.hmac(subtleHashName(key.algorithm.hash), key[kKeyMaterial], subtleBytes(data))
+      const name = algName(alg)
+      const bytes = subtleBytes(data)
       const given = subtleBytes(signature, "signature")
-      if (expected.length !== given.length) return false
-      let diff = 0
-      for (let i = 0; i < expected.length; i++) diff |= expected[i] ^ given[i]
-      return diff === 0
+      if (name === "HMAC" && key.algorithm.name === "HMAC") {
+        const expected = native.hmac(subtleHashName(key.algorithm.hash), key[kKeyMaterial], bytes)
+        if (expected.length !== given.length) return false
+        let diff = 0
+        for (let i = 0; i < expected.length; i++) diff |= expected[i] ^ given[i]
+        return diff === 0
+      }
+      if (name !== key.algorithm.name) throw new DOMException("Key algorithm mismatch", "InvalidAccessError")
+      const der = key[kKeyObject][kKeyBytes]
+      if (name === "ECDSA") return native.verify(subtleHashName(alg.hash), bytes, der, given, 1, undefined, "ieee-p1363")
+      if (name === "Ed25519") return native.verify("", bytes, der, given, 1, undefined, "der")
+      if (name === "RSASSA-PKCS1-v1_5") return native.verify(subtleHashName(key.algorithm.hash), bytes, der, given, 1, undefined, "der")
+      if (name === "RSA-PSS") return native.verify(subtleHashName(key.algorithm.hash), bytes, der, given, 6, alg.saltLength, "der")
+      throw new DOMException(`Unrecognized algorithm name: ${name}`, "NotSupportedError")
     },
     async deriveBits(algorithm, baseKey, length) {
+      checkParams("deriveBits", normalizeAlgorithm(algorithm))
       requireKey(baseKey, "baseKey")
       requireUsage(baseKey, "deriveBits")
       return toArrayBuffer(deriveRaw(algorithm, baseKey, length))
@@ -4530,17 +5097,62 @@ const NODE_SRC: &str = r##"
     async digest(algorithm, data) {
       return toArrayBuffer(native.digest(subtleHashName(normalizeAlgorithm(algorithm).name), subtleBytes(data)))
     },
-    async encrypt() {
-      throw new DOMException("encrypt is not supported in this runtime", "NotSupportedError")
+    async encrypt(algorithm, key, data) {
+      const alg = normalizeAlgorithm(algorithm)
+      checkParams("encrypt", alg)
+      requireKey(key)
+      requireUsage(key, "encrypt")
+      const name = algName(alg)
+      if (name !== key.algorithm.name) throw new DOMException("Key algorithm mismatch", "InvalidAccessError")
+      const bytes = subtleBytes(data)
+      if (name === "RSA-OAEP") {
+        const label = alg.label === undefined ? undefined : subtleBytes(alg.label, "label")
+        return toArrayBuffer(native.rsa("publicEncrypt", key[kKeyObject][kKeyBytes], bytes, 4, subtleHashName(key.algorithm.hash), label))
+      }
+      return toArrayBuffer(aesRun(alg, key, bytes, true))
     },
-    async decrypt() {
-      throw new DOMException("decrypt is not supported in this runtime", "NotSupportedError")
+    async decrypt(algorithm, key, data) {
+      const alg = normalizeAlgorithm(algorithm)
+      checkParams("encrypt", alg)
+      requireKey(key)
+      requireUsage(key, "decrypt")
+      const name = algName(alg)
+      if (name !== key.algorithm.name) throw new DOMException("Key algorithm mismatch", "InvalidAccessError")
+      const bytes = subtleBytes(data)
+      if (name === "RSA-OAEP") {
+        const label = alg.label === undefined ? undefined : subtleBytes(alg.label, "label")
+        try {
+          return toArrayBuffer(native.rsa("privateDecrypt", key[kKeyObject][kKeyBytes], bytes, 4, subtleHashName(key.algorithm.hash), label))
+        } catch {
+          throw new DOMException("The operation failed for an operation-specific reason", "OperationError")
+        }
+      }
+      return toArrayBuffer(aesRun(alg, key, bytes, false))
     },
-    async wrapKey() {
-      throw new DOMException("wrapKey is not supported in this runtime", "NotSupportedError")
+    async wrapKey(format, key, wrappingKey, wrapAlgorithm) {
+      requireKey(wrappingKey, "wrappingKey")
+      requireUsage(wrappingKey, "wrapKey")
+      const exported = await subtleCrypto.exportKey(format, key)
+      const bytes = format === "jwk" ? new TextEncoder().encode(JSON.stringify(exported)) : new Uint8Array(exported)
+      const alg = normalizeAlgorithm(wrapAlgorithm)
+      if (algName(alg) === "RSA-OAEP") {
+        const label = alg.label === undefined ? undefined : subtleBytes(alg.label, "label")
+        return toArrayBuffer(native.rsa("publicEncrypt", wrappingKey[kKeyObject][kKeyBytes], bytes, 4, subtleHashName(wrappingKey.algorithm.hash), label))
+      }
+      return toArrayBuffer(aesRun(alg, wrappingKey, bytes, true))
     },
-    async unwrapKey() {
-      throw new DOMException("unwrapKey is not supported in this runtime", "NotSupportedError")
+    async unwrapKey(format, wrappedKey, unwrappingKey, unwrapAlgorithm, unwrappedKeyAlgorithm, extractable, usages) {
+      requireKey(unwrappingKey, "unwrappingKey")
+      requireUsage(unwrappingKey, "unwrapKey")
+      const alg = normalizeAlgorithm(unwrapAlgorithm)
+      const bytes = subtleBytes(wrappedKey, "wrappedKey")
+      let plain
+      if (algName(alg) === "RSA-OAEP") {
+        const label = alg.label === undefined ? undefined : subtleBytes(alg.label, "label")
+        plain = native.rsa("privateDecrypt", unwrappingKey[kKeyObject][kKeyBytes], bytes, 4, subtleHashName(unwrappingKey.algorithm.hash), label)
+      } else plain = aesRun(alg, unwrappingKey, bytes, false)
+      const keyData = format === "jwk" ? JSON.parse(new TextDecoder().decode(plain)) : plain
+      return subtleCrypto.importKey(format, keyData, unwrappedKeyAlgorithm, extractable, usages)
     },
   }
   Object.defineProperty(subtleCrypto, Symbol.toStringTag, { value: "SubtleCrypto", configurable: true })
@@ -6832,6 +7444,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         method(vm, &n, name, arity, f);
     }
     super::threads::install_natives(vm, &n);
+    super::cryptokeys::install_natives(vm, &n);
     let exports = vm.call_value(&factory, Value::Undefined, &[Value::Object(n)])?;
     let buffer = vm.get_prop(&exports, "Buffer")?;
     vm.define_global("Buffer", buffer);
