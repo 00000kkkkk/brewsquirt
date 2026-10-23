@@ -1,0 +1,129 @@
+const log = []
+const res = (name) => ({
+  [Symbol.dispose]() {
+    log.push(`dispose ${name}`)
+  },
+})
+
+{
+  using a = res("a"), b = res("b")
+  using c = null
+  log.push("block body")
+}
+console.log(log.splice(0).join(", "))
+
+const early = () => {
+  using r = res("early")
+  log.push("before return")
+  return "returned"
+}
+console.log(early(), log.splice(0).join(", "))
+
+try {
+  using x = {
+    [Symbol.dispose]() {
+      throw new Error("from dispose x")
+    },
+  }
+  using y = {
+    [Symbol.dispose]() {
+      throw new Error("from dispose y")
+    },
+  }
+  throw new Error("from body")
+} catch (e) {
+  console.log(e.name, e.message)
+  console.log(e.error.message, "|", e.suppressed.name, e.suppressed.error.message, "|", e.suppressed.suppressed.message)
+}
+
+try {
+  using bad = 42
+} catch (e) {
+  console.log(e.name, e.message)
+}
+
+for (using item of [res("first"), res("second")]) {
+  log.push("iterate")
+}
+console.log(log.splice(0).join(", "))
+
+let rounds = 0
+outer: for (using loop = res("loop"); rounds < 3; rounds++) {
+  for (using inner of [res("inner")]) {
+    if (rounds === 1) break outer
+    continue outer
+  }
+}
+console.log(rounds, log.splice(0).join(", "))
+
+function* gen() {
+  using g = res("generator")
+  yield 1
+  yield 2
+}
+const it = gen()
+it.next()
+it.return()
+console.log(log.splice(0).join(", "))
+
+const stack = new DisposableStack()
+stack.use(res("used"))
+stack.defer(() => log.push("deferred"))
+stack.adopt("value", (v) => log.push(`adopted ${v}`))
+const moved = stack.move()
+console.log(stack.disposed, moved.disposed, String(moved))
+moved.dispose()
+console.log(moved.disposed, log.splice(0).join(", "))
+try {
+  moved.use(res("late"))
+} catch (e) {
+  console.log(e.name)
+}
+
+const order = []
+async function mixed() {
+  await using a = {
+    async [Symbol.asyncDispose]() {
+      await null
+      order.push("async a")
+    },
+  }
+  using b = {
+    [Symbol.dispose]() {
+      order.push("sync b")
+    },
+  }
+  await using c = null
+  order.push("body")
+}
+await mixed()
+console.log(order.join(", "))
+
+const astack = new AsyncDisposableStack()
+astack.use({
+  [Symbol.dispose]() {
+    log.push("sync through async stack")
+  },
+})
+astack.defer(async () => log.push("async deferred"))
+await astack.disposeAsync()
+console.log(astack.disposed, log.splice(0).join(", "))
+
+const values = [1, 2, 3].values()
+const wrapped = {
+  next: () => values.next(),
+  return() {
+    log.push("iterator return")
+    return { done: true }
+  },
+  __proto__: Iterator.prototype,
+}
+{
+  using w = wrapped
+  console.log(w.next().value)
+}
+console.log(log.splice(0).join(", "))
+
+const e = new SuppressedError("err", "sup", "message")
+console.log(e instanceof Error, e.name, e.message, e.error, e.suppressed, SuppressedError.length)
+console.log(typeof Symbol.dispose, typeof Symbol.asyncDispose)

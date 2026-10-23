@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Atomics.waitAsync` returns a promise that settles when another thread notifies the location
   or the timeout passes; every `Atomics` test in test262 now passes, including the multi-agent
   ones.
+- Explicit resource management: `using` and `await using` declarations in blocks, functions,
+  loops, `for...of` heads and modules, `DisposableStack`, `AsyncDisposableStack`,
+  `Symbol.dispose` and `Symbol.asyncDispose` methods on iterators and async iterators, and a
+  `SuppressedError` that can be called without `new`. All test262 tests for the feature pass.
 
 ### Changed
 
@@ -49,6 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `events.once` works with emitters that have `once` but no `removeListener`, as in Node.
 - A `MessagePort` with a `message` listener keeps the program alive until it is closed or
   unreferenced, and removing the last listener releases it, matching Node.
+- CommonJS modules are parsed as sloppy-mode scripts like in Node instead of as strict code, so
+  legacy octal literals, `with`, implicit globals and identifiers named `await`, `yield` or
+  `let` work, and `this` in plain function calls is the global object. Sloppy functions that
+  never read `this` skip the global-object substitution, so calls cost the same as in strict
+  code.
+- A rejected top-level `await` in the entry module is reported as an uncaught exception and
+  exits with status 1 even when an `unhandledRejection` listener is installed, as in Node.
 
 ## [1.4.0] - 2026-10-23
 

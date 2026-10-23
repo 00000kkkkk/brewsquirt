@@ -5,8 +5,8 @@ supported feature, a program should print the same output under `jsq` as under N
 that are not implemented yet are listed in [Not yet supported](#not-yet-supported).
 
 JavaSquirt is checked against [test262](https://github.com/tc39/test262), the official
-ECMAScript conformance suite. JavaSquirt passes 97% of the tests it runs, in both strict and
-sloppy mode (about 42,800 of 44,000). Most remaining failures are edge cases; the larger gaps are
+ECMAScript conformance suite. JavaSquirt passes 98% of the tests it runs, in both strict and
+sloppy mode (about 43,700 of 44,600). Most remaining failures are edge cases; the larger gaps are
 listed in [Not yet supported](#not-yet-supported).
 
 ## Contents
@@ -758,7 +758,62 @@ true true invalid field: email
 
 `err.stack` contains the error name, the message and the chain of active function calls with
 their source locations. An uncaught exception prints the error and its stack trace to stderr
-and makes `jsq` exit with a non-zero status.
+and makes `jsq` exit with a non-zero status. A rejected top-level `await` in the entry module
+counts as an uncaught exception, not an unhandled rejection, as in Node.
+
+### `using` and disposable resources
+
+A `using` declaration binds a constant like `const` and registers its value for cleanup: when
+the enclosing block, function body, loop iteration or module finishes, by completing, returning,
+breaking or throwing, the value's `[Symbol.dispose]()` method runs. Resources are disposed in
+reverse order of declaration, `null` and `undefined` are allowed and skipped, and any other
+value without a callable `[Symbol.dispose]` throws a `TypeError` at the declaration. `await
+using`, allowed in async functions and at the top level of modules, awaits
+`[Symbol.asyncDispose]()` instead and falls back to `[Symbol.dispose]`. `for (using x of
+items)` disposes each item at the end of its iteration.
+
+```js
+function open(name) {
+  console.log(`open ${name}`)
+  return { name, [Symbol.dispose]() { console.log(`close ${name}`) } }
+}
+
+{
+  using a = open("a")
+  using b = open("b")
+  console.log("working")
+}
+```
+
+```text
+open a
+open b
+working
+close b
+close a
+```
+
+When disposal throws while another error is already propagating, the errors are combined into
+a `SuppressedError` whose `error` is the newer error and whose `suppressed` is the older one.
+`DisposableStack` and `AsyncDisposableStack` collect resources by hand with `use`, `adopt`,
+`defer`, `move` and `dispose`/`disposeAsync`, and iterators from generators and builtins have
+`[Symbol.dispose]` (async iterators `[Symbol.asyncDispose]`) that calls their `return` method.
+
+```js
+const stack = new DisposableStack()
+stack.defer(() => console.log("deferred cleanup"))
+const file = stack.adopt({ fd: 3 }, (f) => console.log(`closing fd ${f.fd}`))
+console.log(file.fd, stack.disposed)
+stack.dispose()
+console.log(stack.disposed)
+```
+
+```text
+3 false
+closing fd 3
+deferred cleanup
+true
+```
 
 ## Classes
 
@@ -917,8 +972,8 @@ with `Object.defineProperty` default to `false` for all three, class methods and
 are not enumerable, and `Object.keys`, `for...in`, spread, `JSON.stringify` and `console.log` only
 see enumerable properties. Modules, classes and code under a `"use strict"` directive run in
 strict mode, so writing a read-only property or adding one to a non-extensible object throws a
-`TypeError`; scripts, `Function` bodies and `eval` code without the directive follow sloppy
-mode rules, where such writes are silently ignored.
+`TypeError`; scripts, CommonJS modules, `Function` bodies and `eval` code without the directive
+follow sloppy mode rules, where such writes are silently ignored.
 
 ```js
 const point = Object.freeze({ x: 1, y: 2 })
@@ -1321,7 +1376,10 @@ count, and dynamic `import()` is allowed) unless the nearest `package.json` says
 `"type": "module"`; a `.js` file that uses `module.exports`, `exports` or `require(...)` is
 CommonJS either way. CommonJS modules run in a function that receives `exports`, `require`,
 `module`, `__filename` and `__dirname`, and whatever ends up in `module.exports` becomes the
-module's default export, with its properties also available as named imports. `.json` files
+module's default export, with its properties also available as named imports. Like in Node,
+CommonJS code is sloppy-mode script code unless it says `"use strict"`, so legacy octal
+literals, `with`, assignments to undeclared variables and words such as `await`, `yield` and
+`let` used as identifiers all work. `.json` files
 export the parsed value, and `import data from "./x.json" with { type: "json" }` (or the older
 `assert { type: "json" }`) is accepted on static imports and re-exports.
 
@@ -2179,6 +2237,6 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
 - Private names are shared by all evaluations of a class body, so instances of two classes made
   by the same factory can access each other's private members
 - Several realms in one thread (`vm` contexts share one realm)
-- `Temporal`, `ShadowRealm`, decorators and `using` declarations
+- `Temporal`, `ShadowRealm` and decorators
 - Tracing garbage collection
 - JIT compilation

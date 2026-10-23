@@ -1,0 +1,8 @@
+{
+  implicit: 16,
+  words: [ 1, 2, 3, 4 ],
+  plainThis: true,
+  primitiveThis: 'object',
+  noThis: 'number',
+  seen: 'from with'
+} 16

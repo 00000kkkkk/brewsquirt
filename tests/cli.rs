@@ -154,6 +154,15 @@ f()",
 }
 
 #[test]
+fn rejected_entry_module_is_uncaught() {
+    let out = run_in(&root(), &["tests/scripts/fixtures/main_tla_reject.mjs"]);
+    assert!(!out.status.success());
+    assert_eq!(normalize(&out.stdout), "");
+    let err = normalize(&out.stderr);
+    assert!(err.starts_with("Uncaught TypeError: entry failed"), "{err}");
+}
+
+#[test]
 fn top_level_await_in_eval() {
     let out = run_in(
         &root(),

@@ -1226,15 +1226,311 @@ Object.defineProperty(RegExpProto, "flags", {
   configurable: true,
 })
 
-class SuppressedError extends Error {
-  constructor(error, suppressed, message) {
-    super(message)
-    Object.defineProperty(this, "error", { value: error, writable: true, configurable: true })
-    Object.defineProperty(this, "suppressed", { value: suppressed, writable: true, configurable: true })
+const $Promise = Promise
+const $promiseResolveFn = Promise.resolve
+const $promiseRejectFn = Promise.reject
+const $promiseThen = Promise.prototype.then
+const promiseResolve = (v) => Reflect.apply($promiseResolveFn, $Promise, [v])
+const promiseReject = (e) => Reflect.apply($promiseRejectFn, $Promise, [e])
+const $SuppressedError = SuppressedError
+const disposeSym = Symbol.dispose
+const asyncDisposeSym = Symbol.asyncDispose
+const isObject = (v) => v !== null && (typeof v === "object" || typeof v === "function")
+const pushEntry = (list, v) =>
+  Object.defineProperty(list, list.length, { value: v, writable: true, enumerable: true, configurable: true })
+const disposeMethod = (V, key) => {
+  const f = V[key]
+  if (f === undefined || f === null) return undefined
+  if (typeof f !== "function") throw new TypeError(`${String(key)} is not a function`)
+  return f
+}
+const asyncFromSync = (method) =>
+  function () {
+    try {
+      Reflect.apply(method, this, [])
+    } catch (e) {
+      return promiseReject(e)
+    }
+    return promiseResolve(undefined)
+  }
+const disposableEntry = (V, isAsync) => {
+  if (!isObject(V)) throw new TypeError("An object is expected with `using` declarations")
+  let method
+  if (isAsync) {
+    method = disposeMethod(V, asyncDisposeSym)
+    if (method === undefined) {
+      const sync = disposeMethod(V, disposeSym)
+      if (sync !== undefined) method = asyncFromSync(sync)
+    }
+  } else {
+    method = disposeMethod(V, disposeSym)
+  }
+  if (method === undefined) {
+    throw new TypeError(`${String(isAsync ? asyncDisposeSym : disposeSym)} is not a function`)
+  }
+  return [V, isAsync, method]
+}
+const newDisposeStack = () => ({ list: [], threw: false, error: undefined })
+const addDisposable = (stack, V, isAsync) => {
+  if (V === null || V === undefined) {
+    if (isAsync) pushEntry(stack.list, [undefined, true, undefined])
+    return
+  }
+  pushEntry(stack.list, disposableEntry(V, isAsync))
+}
+const recordDisposeError = (stack, e) => {
+  if (stack.threw) {
+    stack.error = new $SuppressedError(e, stack.error, "An error was suppressed during disposal")
+  } else {
+    stack.threw = true
+    stack.error = e
   }
 }
-define(SuppressedError.prototype, "name", "SuppressedError")
-define(globalThis, "SuppressedError", SuppressedError)
+const disposeSync = (stack) => {
+  const list = stack.list
+  stack.list = []
+  for (let i = list.length - 1; i >= 0; i--) {
+    const entry = list[i]
+    if (entry[2] === undefined) continue
+    try {
+      Reflect.apply(entry[2], entry[0], [])
+    } catch (e) {
+      recordDisposeError(stack, e)
+    }
+  }
+  if (stack.threw) {
+    const error = stack.error
+    stack.threw = false
+    stack.error = undefined
+    throw error
+  }
+}
+const disposeSteps = function* (stack) {
+  const list = stack.list
+  stack.list = []
+  let needsAwait = false
+  let hasAwaited = false
+  for (let i = list.length - 1; i >= 0; i--) {
+    const entry = list[i]
+    if (!entry[1] && needsAwait && !hasAwaited) {
+      yield undefined
+      needsAwait = false
+    }
+    if (entry[2] !== undefined) {
+      try {
+        const result = Reflect.apply(entry[2], entry[0], [])
+        if (entry[1]) {
+          hasAwaited = true
+          yield result
+        }
+      } catch (e) {
+        recordDisposeError(stack, e)
+      }
+    } else {
+      needsAwait = true
+    }
+  }
+  if (needsAwait && !hasAwaited) yield undefined
+  if (stack.threw) {
+    const error = stack.error
+    stack.threw = false
+    stack.error = undefined
+    throw error
+  }
+}
+const runDisposeSteps = async (stack) => {
+  const steps = disposeSteps(stack)
+  let step = steps.next()
+  while (!step.done) {
+    try {
+      step = steps.next(await step.value)
+    } catch (e) {
+      step = steps.throw(e)
+    }
+  }
+}
+define(globalThis, "%usingStack%", newDisposeStack)
+define(globalThis, "%using%", addDisposable)
+define(globalThis, "%usingError%", (stack, e) => {
+  stack.threw = true
+  stack.error = e
+})
+define(globalThis, "%usingDispose%", disposeSync)
+define(globalThis, "%usingDisposeAsync%", disposeSteps)
+const receiverName = (v) => {
+  if (v === null) return "null"
+  if (typeof v === "object" || typeof v === "function") return "#<Object>"
+  if (typeof v === "symbol") return "Symbol()"
+  return String(v)
+}
+const callableName = (v) => (typeof v === "symbol" ? "Symbol()" : isObject(v) ? "#<Object>" : String(v))
+let checkDisposableStack
+class DisposableStack {
+  #disposed = false
+  #stack = newDisposeStack()
+  static {
+    checkDisposableStack = (o, name) => {
+      if (!isObject(o) || !(#disposed in o)) {
+        throw new TypeError(`Method DisposableStack.prototype.${name} called on incompatible receiver ${receiverName(o)}`)
+      }
+    }
+  }
+  use(value) {
+    checkDisposableStack(this, "use")
+    if (this.#disposed) {
+      throw new ReferenceError("Cannot call DisposableStack.prototype.use on an already-disposed DisposableStack")
+    }
+    addDisposable(this.#stack, value, false)
+    return value
+  }
+  dispose() {
+    checkDisposableStack(this, "dispose")
+    if (this.#disposed) return undefined
+    this.#disposed = true
+    disposeSync(this.#stack)
+    return undefined
+  }
+  adopt(value, onDispose) {
+    checkDisposableStack(this, "adopt")
+    if (this.#disposed) {
+      throw new ReferenceError("Cannot call DisposableStack.prototype.adopt on an already-disposed DisposableStack")
+    }
+    if (typeof onDispose !== "function") throw new TypeError(`${callableName(onDispose)} is not a function`)
+    pushEntry(this.#stack.list, [undefined, false, () => Reflect.apply(onDispose, undefined, [value])])
+    return value
+  }
+  defer(onDispose) {
+    checkDisposableStack(this, "defer")
+    if (this.#disposed) {
+      throw new ReferenceError("Cannot call DisposableStack.prototype.defer on an already-disposed DisposableStack")
+    }
+    if (typeof onDispose !== "function") throw new TypeError(`${callableName(onDispose)} is not a function`)
+    pushEntry(this.#stack.list, [undefined, false, onDispose])
+    return undefined
+  }
+  move() {
+    checkDisposableStack(this, "move")
+    if (this.#disposed) {
+      throw new ReferenceError("Cannot call DisposableStack.prototype.move on an already-disposed DisposableStack")
+    }
+    const next = new DisposableStack()
+    next.#stack = this.#stack
+    this.#stack = newDisposeStack()
+    this.#disposed = true
+    return next
+  }
+  get disposed() {
+    checkDisposableStack(this, "disposed")
+    return this.#disposed
+  }
+}
+define(DisposableStack.prototype, disposeSym, DisposableStack.prototype.dispose)
+Object.defineProperty(DisposableStack.prototype, Symbol.toStringTag, { value: "DisposableStack", configurable: true })
+define(globalThis, "DisposableStack", DisposableStack)
+let checkAsyncDisposableStack
+class AsyncDisposableStack {
+  #disposed = false
+  #stack = newDisposeStack()
+  static {
+    checkAsyncDisposableStack = (o, name, soft) => {
+      if (!isObject(o) || !(#disposed in o)) {
+        const error = new TypeError(
+          `Method AsyncDisposableStack.prototype.${name} called on incompatible receiver ${receiverName(o)}`,
+        )
+        if (soft) return error
+        throw error
+      }
+      return undefined
+    }
+  }
+  use(value) {
+    checkAsyncDisposableStack(this, "use")
+    if (this.#disposed) {
+      throw new ReferenceError("Cannot call AsyncDisposableStack.prototype.use on an already-disposed AsyncDisposableStack")
+    }
+    addDisposable(this.#stack, value, true)
+    return value
+  }
+  disposeAsync() {
+    const error = checkAsyncDisposableStack(this, "disposeAsync", true)
+    if (error) return promiseReject(error)
+    if (this.#disposed) return promiseResolve(undefined)
+    this.#disposed = true
+    return runDisposeSteps(this.#stack)
+  }
+  adopt(value, onDisposeAsync) {
+    checkAsyncDisposableStack(this, "adopt")
+    if (this.#disposed) {
+      throw new ReferenceError("Cannot call AsyncDisposableStack.prototype.adopt on an already-disposed AsyncDisposableStack")
+    }
+    if (typeof onDisposeAsync !== "function") throw new TypeError(`${callableName(onDisposeAsync)} is not a function`)
+    pushEntry(this.#stack.list, [undefined, true, () => Reflect.apply(onDisposeAsync, undefined, [value])])
+    return value
+  }
+  defer(onDisposeAsync) {
+    checkAsyncDisposableStack(this, "defer")
+    if (this.#disposed) {
+      throw new ReferenceError("Cannot call AsyncDisposableStack.prototype.defer on an already-disposed AsyncDisposableStack")
+    }
+    if (typeof onDisposeAsync !== "function") throw new TypeError(`${callableName(onDisposeAsync)} is not a function`)
+    pushEntry(this.#stack.list, [undefined, true, onDisposeAsync])
+    return undefined
+  }
+  move() {
+    checkAsyncDisposableStack(this, "move")
+    if (this.#disposed) {
+      throw new ReferenceError("Cannot call AsyncDisposableStack.prototype.move on an already-disposed AsyncDisposableStack")
+    }
+    const next = new AsyncDisposableStack()
+    next.#stack = this.#stack
+    this.#stack = newDisposeStack()
+    this.#disposed = true
+    return next
+  }
+  get disposed() {
+    checkAsyncDisposableStack(this, "disposed")
+    return this.#disposed
+  }
+}
+define(AsyncDisposableStack.prototype, asyncDisposeSym, AsyncDisposableStack.prototype.disposeAsync)
+Object.defineProperty(AsyncDisposableStack.prototype, Symbol.toStringTag, {
+  value: "AsyncDisposableStack",
+  configurable: true,
+})
+define(globalThis, "AsyncDisposableStack", AsyncDisposableStack)
+define(
+  IteratorPrototype,
+  disposeSym,
+  {
+    [Symbol.dispose]() {
+      const ret = disposeMethod(this, "return")
+      if (ret !== undefined) Reflect.apply(ret, this, [])
+    },
+  }[Symbol.dispose],
+)
+const AsyncIteratorPrototype = Object.getPrototypeOf(Object.getPrototypeOf((async function* () {}).prototype))
+define(
+  AsyncIteratorPrototype,
+  asyncDisposeSym,
+  {
+    [Symbol.asyncDispose]() {
+      let ret
+      try {
+        ret = disposeMethod(this, "return")
+      } catch (e) {
+        return promiseReject(e)
+      }
+      if (ret === undefined) return promiseResolve(undefined)
+      let wrapper
+      try {
+        wrapper = promiseResolve(Reflect.apply(ret, this, []))
+      } catch (e) {
+        return promiseReject(e)
+      }
+      return Reflect.apply($promiseThen, wrapper, [() => undefined])
+    },
+  }[Symbol.asyncDispose],
+)
 
 define(globalThis, "%makeCallSite%", function makeCallSite(file, line, name, top, construct, isEval) {
   const site = {

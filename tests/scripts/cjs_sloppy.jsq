@@ -1,0 +1,4 @@
+import { createRequire } from "node:module"
+const require = createRequire(import.meta.url)
+const result = require("./fixtures/cjs_sloppy.js")
+console.log(result, globalThis.implicitGlobal)

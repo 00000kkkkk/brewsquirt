@@ -1,0 +1,17 @@
+block body, dispose b, dispose a
+returned before return, dispose early
+SuppressedError An error was suppressed during disposal
+from dispose x | SuppressedError from dispose y | from body
+TypeError An object is expected with `using` declarations
+iterate, dispose first, iterate, dispose second
+1 dispose inner, dispose inner, dispose loop
+dispose generator
+true false [object DisposableStack]
+true adopted value, deferred, dispose used
+ReferenceError
+body, sync b, async a
+true async deferred, sync through async stack
+1
+iterator return
+true SuppressedError message err sup 3
+symbol symbol

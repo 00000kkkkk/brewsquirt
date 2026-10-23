@@ -627,6 +627,14 @@ impl Vm {
                     _ => continue,
                 }
             };
+            if self
+                .main_promise
+                .as_ref()
+                .is_some_and(|m| Rc::ptr_eq(m, &p))
+            {
+                self.main_promise = None;
+                return Err(reason);
+            }
             if self.process_listener_count("unhandledRejection")? > 0 {
                 self.emit_process("unhandledRejection", &[reason, Value::Object(p.clone())])?;
                 continue;

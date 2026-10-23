@@ -342,6 +342,8 @@ pub struct Vm {
     pub(crate) timer_seq: u64,
     pub(crate) unref_timers: rustc_hash::FxHashSet<u64>,
     pub(crate) pending_rejections: Vec<Rc<Obj>>,
+    pub(crate) main_promise: Option<Rc<Obj>>,
+    pub(crate) global_obj: Option<Rc<Obj>>,
     pub(crate) co_signal: Option<Signal>,
     pub accessors_used: bool,
     pub(crate) readonly_used: bool,
@@ -463,6 +465,8 @@ impl Vm {
             timer_seq: 0,
             unref_timers: rustc_hash::FxHashSet::default(),
             pending_rejections: Vec::new(),
+            main_promise: None,
+            global_obj: None,
             co_signal: None,
             accessors_used: false,
             readonly_used: false,
@@ -783,7 +787,10 @@ impl Vm {
     }
 
     pub fn global_this(&self) -> Value {
-        self.globals.get("globalThis").cloned().unwrap_or_default()
+        match &self.global_obj {
+            Some(g) => Value::Object(g.clone()),
+            None => self.globals.get("globalThis").cloned().unwrap_or_default(),
+        }
     }
 
     pub fn run_script_proto(&mut self, proto: Rc<FunctionProto>) -> Result<Value, Value> {
@@ -961,7 +968,12 @@ impl Vm {
         let r = self.run_proto(proto);
         self.loading.pop();
         match r {
-            Ok(v) if Vm::is_promise(&v) => Ok(v),
+            Ok(v) if Vm::is_promise(&v) => {
+                if let Value::Object(p) = &v {
+                    self.main_promise.get_or_insert_with(|| p.clone());
+                }
+                Ok(v)
+            }
             Ok(_) => Ok(ns),
             Err(e) => {
                 self.modules.remove(&abs);
@@ -1612,7 +1624,7 @@ impl Vm {
         };
         let wrapped =
             format!("(function (exports, require, module, __filename, __dirname) {{{body}\n}})");
-        let proto = match self.compile_unit(&wrapped, &key, dir.clone(), Mode::Repl, true) {
+        let proto = match self.compile_script(&wrapped, &key, dir.clone(), true) {
             Ok(p) => p,
             Err(e) => {
                 let detect = module::esm_only_error(&e.message)
@@ -1906,7 +1918,7 @@ impl Vm {
         let p = &c.proto;
         let np = p.num_params as usize;
         let ci = self.stack.len() - argc - 2;
-        if p.sloppy && p.kind != ProtoKind::Arrow && !construct {
+        if p.sloppy_this && p.kind != ProtoKind::Arrow && !construct {
             match &self.stack[ci + 1] {
                 Value::Undefined | Value::Null => self.stack[ci + 1] = self.global_this(),
                 Value::Object(_) => {}

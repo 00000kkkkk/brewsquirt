@@ -114,6 +114,7 @@ struct FnState {
     strict: bool,
     self_slot: Option<u32>,
     annexb: Vec<*const FuncDef>,
+    reads_this: bool,
 }
 
 impl FnState {
@@ -152,6 +153,7 @@ impl FnState {
             strict: true,
             self_slot: None,
             annexb: Vec::new(),
+            reads_this: false,
         }
     }
 }
@@ -785,6 +787,7 @@ impl Compiler {
             is_async: st.is_async,
             is_generator: st.is_generator,
             sloppy: !st.strict,
+            sloppy_this: !st.strict && st.reads_this,
             code: st.code,
             lines: st.lines,
             consts: st.consts,
@@ -1124,6 +1127,9 @@ impl Compiler {
         }
         if let Some((slot, c)) = self.resolve_local(si - 1, name) {
             self.states[si - 1].locals[slot as usize].captured = true;
+            if name == "this" {
+                self.states[si - 1].reads_this = true;
+            }
             return Some((self.add_upvalue(si, true, slot), c));
         }
         if let Some(ups) = self.states[si - 1].eval_upvals.clone() {
@@ -1139,6 +1145,9 @@ impl Compiler {
     fn resolve(&mut self, name: &str) -> Var {
         let si = self.states.len() - 1;
         if let Some((s, c)) = self.resolve_local(si, name) {
+            if name == "this" {
+                self.states[si].reads_this = true;
+            }
             if self.local_tdz(si, s) {
                 return Var::LocalTdz(s, c);
             }
@@ -1950,7 +1959,8 @@ impl Compiler {
 
     fn stmt(&mut self, s: &Stmt) -> R<()> {
         self.line = s.line;
-        if let Some(slot) = self.completion_slot() {
+        let hidden_try = matches!(&s.kind, StmtKind::Try { param: Some(Pattern::Ident(p)), .. } if p.starts_with("%using"));
+        if let Some(slot) = self.completion_slot().filter(|_| !hidden_try) {
             if matches!(
                 s.kind,
                 StmtKind::If(..)
@@ -3069,6 +3079,11 @@ impl Compiler {
         if f.uses_arguments && f.kind != FuncKind::Arrow && !shadowed {
             self.add_local("arguments".into(), false);
             self.st().uses_arguments = true;
+        }
+        if f.has_eval {
+            for st in &mut self.states {
+                st.reads_this = true;
+            }
         }
         if f.has_eval && !self.st_ref().strict {
             self.emit(Op::NewObject);

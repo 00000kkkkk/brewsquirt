@@ -243,6 +243,7 @@ pub struct FunctionProto {
     pub is_async: bool,
     pub is_generator: bool,
     pub sloppy: bool,
+    pub sloppy_this: bool,
     pub code: Vec<Op>,
     pub lines: Vec<u32>,
     pub consts: Vec<Value>,

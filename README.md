@@ -199,6 +199,7 @@ JavaSquirt 1.4.0 implements modern JavaScript as specified, passing 98% of test2
 - **Spread and destructuring**: spread in calls, arrays and objects; object and array destructuring with defaults and rest in `let`, `const` and parameters
 - **Control flow**: `if`/`else`, `while`, `do`/`while`, `for`, `for...of`, `for...in`, `switch`, `break`, `continue`
 - **Errors**: `try`/`catch`/`finally`, `throw`, `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, `URIError`, `EvalError`, with stack traces
+- **Resource management**: `using` and `await using` declarations, `DisposableStack`, `AsyncDisposableStack` and `SuppressedError`
 - **Classes**: constructors, methods, static methods, instance and static fields, `extends`, `super()`, `super.method()`, `new`, `instanceof`, private `#members`
 - **Operators**: arithmetic, `**`, bitwise and shifts including `>>>`, loose and strict equality, `&&`, `||`, `??`, optional chaining `?.`, ternary, `typeof`, `void`, `delete`, `in`, compound assignment including `&&=`, `||=`, `??=`, `++` and `--`
 - **Syntax**: template literals and tagged templates with `String.raw`, optional semicolons with JS-style ASI, `//` and `/* */` comments
@@ -332,6 +333,7 @@ typos
 - [x] Node compatibility: streams, crypto, zlib, http client, CommonJS `require`
 - [x] Web streams, Blob, File and FormData
 - [x] WebAssembly
+- [x] Explicit resource management with `using`
 - [ ] 99% of test262
 - [ ] Own regular expression engine with lookbehind back-references and the `v` flag
 - [ ] WebSockets

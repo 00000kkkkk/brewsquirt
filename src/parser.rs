@@ -104,6 +104,9 @@ fn parse_goal(src: &str, script: bool) -> R<Vec<Stmt>> {
         saw_eval: false,
         last_paren: (usize::MAX, usize::MAX),
         at_top: false,
+        using_ok: false,
+        using_scope: None,
+        using_ids: 0,
     };
     parser.strict = !script || parser.has_use_strict_from(0);
     if script && parser.strict {
@@ -136,6 +139,9 @@ pub fn parse_eval(src: &str, ctx: &EvalCtx) -> R<Vec<Stmt>> {
         saw_eval: false,
         last_paren: (usize::MAX, usize::MAX),
         at_top: false,
+        using_ok: false,
+        using_scope: None,
+        using_ids: 0,
     };
     parser.strict = ctx.strict || parser.has_use_strict_from(0);
     if parser.strict {
@@ -183,6 +189,9 @@ struct Parser {
     at_top: bool,
     args_used: Vec<bool>,
     span_start: Option<u32>,
+    using_ok: bool,
+    using_scope: Option<(u32, bool)>,
+    using_ids: u32,
 }
 
 impl Parser {
@@ -518,16 +527,60 @@ impl Parser {
     }
 
     fn program(&mut self) -> R<Vec<Stmt>> {
+        self.using_ok = !self.script;
         let mut out = Vec::new();
         while !self.is_eof() {
             self.at_top = true;
             out.push(self.statement()?);
         }
+        if let Some((id, is_async)) = self.using_scope.take() {
+            let line = self.line();
+            let res = using_res(id);
+            out.insert(
+                0,
+                syn_stmt(
+                    StmtKind::Decl(
+                        DeclKind::Const,
+                        vec![(
+                            Pattern::Ident(res.as_str().into()),
+                            Some(syn_call(syn_ident("%usingStack%", line), Vec::new(), line)),
+                        )],
+                    ),
+                    line,
+                ),
+            );
+            if is_async {
+                out.extend(using_async_finalizer(&res, id, line));
+            } else {
+                out.push(syn_stmt(
+                    StmtKind::Expr(syn_call(
+                        syn_ident("%usingDispose%", line),
+                        vec![syn_ident(&res, line)],
+                        line,
+                    )),
+                    line,
+                ));
+            }
+        }
         Ok(out)
     }
 
     fn block(&mut self) -> R<Vec<Stmt>> {
+        let line = self.line();
         self.expect(P::LBrace)?;
+        let saved_ok = std::mem::replace(&mut self.using_ok, true);
+        let saved_scope = self.using_scope.take();
+        let items = self.block_items();
+        let scope = std::mem::replace(&mut self.using_scope, saved_scope);
+        self.using_ok = saved_ok;
+        let items = items?;
+        Ok(match scope {
+            Some((id, is_async)) => using_wrap(items, id, is_async, line, false),
+            None => items,
+        })
+    }
+
+    fn block_items(&mut self) -> R<Vec<Stmt>> {
         let mut out = Vec::new();
         while !self.eat(P::RBrace) {
             if self.is_eof() {
@@ -536,6 +589,191 @@ impl Parser {
             out.push(self.statement()?);
         }
         Ok(out)
+    }
+
+    fn await_ok(&self) -> bool {
+        self.in_async || (!self.script && self.fn_depth == 0 && !self.static_block)
+    }
+
+    fn using_head(&self, for_head: bool) -> Option<bool> {
+        let (off, is_async) = if self.is_kw("using") {
+            (0, false)
+        } else if self.is_kw("await")
+            && self.await_ok()
+            && self.is_kw_at(1, "using")
+            && !self.peek_at(1).nl_before
+        {
+            (1, true)
+        } else {
+            return None;
+        };
+        let t = self.peek_at(off + 1);
+        let Tok::Ident(name) = &t.tok else {
+            return None;
+        };
+        if t.nl_before || (!t.escaped && matches!(&**name, "in" | "instanceof")) {
+            return None;
+        }
+        if for_head && !is_async && !t.escaped && &**name == "of" && !self.is_at(off + 2, P::Eq) {
+            return None;
+        }
+        Some(is_async)
+    }
+
+    fn using_id(&mut self, is_async: bool) -> u32 {
+        if let Some((id, a)) = &mut self.using_scope {
+            *a |= is_async;
+            return *id;
+        }
+        self.using_ids += 1;
+        let id = self.using_ids;
+        self.using_scope = Some((id, is_async));
+        id
+    }
+
+    fn using_slot(
+        &mut self,
+        decls: &mut Vec<(Pattern, Option<Expr>)>,
+        name: &JsStr,
+        id: u32,
+        is_async: bool,
+        line: u32,
+    ) {
+        self.using_ids += 1;
+        let slot = format!("%usingv{}%", self.using_ids);
+        let reg = syn_call(
+            syn_ident("%using%", line),
+            vec![
+                syn_ident(&using_res(id), line),
+                syn_ident(name, line),
+                Expr {
+                    kind: ExprKind::Bool(is_async),
+                    line,
+                },
+            ],
+            line,
+        );
+        decls.push((Pattern::Ident(slot.as_str().into()), Some(reg)));
+    }
+
+    fn using_name(&mut self) -> R<JsStr> {
+        let name = self.binding_ident()?;
+        if &*name == "let" {
+            return Err(self.error("let is disallowed as a lexically bound name"));
+        }
+        Ok(name)
+    }
+
+    fn using_decl(&mut self, is_async: bool) -> R<StmtKind> {
+        let line = self.line();
+        if is_async {
+            self.advance();
+        }
+        self.advance();
+        let id = self.using_id(is_async);
+        let mut decls = Vec::new();
+        loop {
+            let name = self.using_name()?;
+            if !self.eat(P::Eq) {
+                return Err(self.error("Missing initializer in using declaration"));
+            }
+            let init = self.assignment()?;
+            decls.push((Pattern::Ident(name.clone()), Some(init)));
+            self.using_slot(&mut decls, &name, id, is_async, line);
+            if !self.eat(P::Comma) {
+                break;
+            }
+        }
+        Ok(StmtKind::Decl(DeclKind::Const, decls))
+    }
+
+    fn for_using(&mut self, for_await: bool, is_async: bool, line: u32) -> R<StmtKind> {
+        if is_async {
+            self.advance();
+        }
+        self.advance();
+        self.using_ids += 1;
+        let id = self.using_ids;
+        let mut name = self.using_name()?;
+        if self.eat_kw("of") {
+            let iter = self.assignment()?;
+            self.expect(P::RParen)?;
+            let body = self.sub_statement()?;
+            if matches!(
+                body.kind,
+                StmtKind::Decl(..) | StmtKind::Class(_) | StmtKind::Function(_)
+            ) {
+                return Err(SyntaxError::new(
+                    "Lexical declaration cannot appear in a single-statement context",
+                    body.line,
+                    1,
+                ));
+            }
+            let mut decls = Vec::new();
+            self.using_slot(&mut decls, &name, id, is_async, line);
+            let reg = syn_stmt(StmtKind::Decl(DeclKind::Const, decls), line);
+            let inner = using_wrap(vec![reg, body], id, is_async, line, false);
+            return Ok(StmtKind::ForOf {
+                decl: Some(DeclKind::Const),
+                pattern: Pattern::Ident(name),
+                iter,
+                body: Box::new(syn_stmt(StmtKind::Block(inner), line)),
+                is_await: for_await,
+            });
+        }
+        if self.is_kw("in") {
+            return Err(
+                self.error("The left-hand side of a for-in loop may not be a using declaration")
+            );
+        }
+        let saved = self.no_in;
+        self.no_in = true;
+        let mut decls = Vec::new();
+        loop {
+            if !self.eat(P::Eq) {
+                self.no_in = saved;
+                return Err(self.error("Missing initializer in using declaration"));
+            }
+            let init = self.assignment()?;
+            decls.push((Pattern::Ident(name.clone()), Some(init)));
+            self.using_slot(&mut decls, &name, id, is_async, line);
+            if !self.eat(P::Comma) {
+                break;
+            }
+            name = self.using_name()?;
+        }
+        self.no_in = saved;
+        self.expect(P::Semi)?;
+        let test = if self.is(P::Semi) {
+            None
+        } else {
+            Some(self.expression()?)
+        };
+        self.expect(P::Semi)?;
+        let update = if self.is(P::RParen) {
+            None
+        } else {
+            Some(self.expression()?)
+        };
+        self.expect(P::RParen)?;
+        let body = self.sub_statement()?;
+        let decl = syn_stmt(StmtKind::Decl(DeclKind::Const, decls), line);
+        let lp = syn_stmt(
+            StmtKind::For {
+                init: None,
+                test,
+                update,
+                body: Box::new(body),
+            },
+            line,
+        );
+        Ok(StmtKind::Block(using_wrap(
+            vec![decl, lp],
+            id,
+            is_async,
+            line,
+            true,
+        )))
     }
 
     fn statement(&mut self) -> R<Stmt> {
@@ -571,6 +809,23 @@ impl Parser {
             self.word()
         };
         match word.as_deref() {
+            Some("using") | Some("await") if self.using_head(false).is_some() => {
+                let is_async = self.using_head(false) == Some(true);
+                if single {
+                    return Err(self
+                        .error("Lexical declaration cannot appear in a single-statement context"));
+                }
+                if !self.using_ok {
+                    return Err(self.error(if is_async {
+                        "await using declarations are not allowed in this position"
+                    } else {
+                        "using declarations are not allowed in this position"
+                    }));
+                }
+                let s = self.using_decl(is_async)?;
+                self.semicolon()?;
+                Ok(s)
+            }
             Some("let") | Some("const") | Some("var")
                 if matches!(
                     self.peek_at(1).tok,
@@ -718,6 +973,7 @@ impl Parser {
                 let disc = self.expression()?;
                 self.expect(P::RParen)?;
                 self.expect(P::LBrace)?;
+                let saved_using = std::mem::replace(&mut self.using_ok, false);
                 let mut cases = Vec::new();
                 let mut seen_default = false;
                 while !self.eat(P::RBrace) {
@@ -744,6 +1000,7 @@ impl Parser {
                     }
                     cases.push(SwitchCase { test, body });
                 }
+                self.using_ok = saved_using;
                 Ok(StmtKind::Switch(disc, cases))
             }
             Some("import") if !self.is_at(1, P::LParen) && !self.is_at(1, P::Dot) => {
@@ -789,7 +1046,22 @@ impl Parser {
                 let label: JsStr = w.into();
                 self.advance();
                 self.advance();
-                let body = self.sub_statement()?;
+                let mut body = self.sub_statement()?;
+                if let Some(slot) = using_loop(&mut body) {
+                    let inner = std::mem::replace(
+                        slot,
+                        Stmt {
+                            kind: StmtKind::Empty,
+                            line: 0,
+                        },
+                    );
+                    let l = inner.line;
+                    *slot = Stmt {
+                        kind: StmtKind::Labeled(label, Box::new(inner)),
+                        line: l,
+                    };
+                    return Ok(body.kind);
+                }
                 if let StmtKind::Function(f) = &body.kind {
                     if self.strict || f.is_generator || f.is_async {
                         return Err(
@@ -880,6 +1152,9 @@ impl Parser {
         }
         self.expect(P::LParen)?;
         let init_line = self.line();
+        if let Some(is_async) = self.using_head(true) {
+            return self.for_using(is_await, is_async, init_line);
+        }
         let init = if (self.is_kw("let") || self.is_kw("const") || self.is_kw("var"))
             && matches!(
                 self.peek_at(1).tok,
@@ -2373,6 +2648,23 @@ impl Parser {
             Tok::Ident(s) if &**s == "void" => UnaryOp::Void,
             Tok::Ident(s) if &**s == "delete" => UnaryOp::Delete,
             Tok::Ident(s)
+                if &**s == "await"
+                    && !self.peek().escaped
+                    && self.script
+                    && !self.in_async
+                    && !self.static_block
+                    && self.fn_depth > 0
+                    && !self.peek_at(1).nl_before
+                    && match &self.peek_at(1).tok {
+                        Tok::Ident(n) => !matches!(&**n, "in" | "instanceof" | "of"),
+                        Tok::Num(_) | Tok::Str(_) | Tok::BigInt(_) => true,
+                        _ => false,
+                    } =>
+            {
+                return Err(self
+                    .error("await is only valid in async functions and the top level of modules"));
+            }
+            Tok::Ident(s)
                 if &**s == "await" && !self.peek().escaped && (self.in_async || !self.script) =>
             {
                 if !self.in_async && self.fn_depth > 0 {
@@ -2740,11 +3032,15 @@ impl Parser {
                         at_top: false,
                         args_used: vec![false],
                         span_start: None,
+                        using_ok: false,
+                        using_scope: None,
+                        using_ids: self.using_ids,
                     };
                     if sub.is_eof() {
                         return Err(sub.error("Unexpected token '}'"));
                     }
                     let e = sub.expression()?;
+                    self.using_ids = sub.using_ids;
                     if !sub.is_eof() {
                         return Err(sub.unexpected());
                     }
@@ -3173,6 +3469,205 @@ fn check_accessor_params(f: &FuncDef, setter: bool, line: u32) -> R<()> {
         line,
         1,
     ))
+}
+
+fn syn_stmt(kind: StmtKind, line: u32) -> Stmt {
+    Stmt { kind, line }
+}
+
+fn syn_ident(name: &str, line: u32) -> Expr {
+    Expr {
+        kind: ExprKind::Ident(name.into()),
+        line,
+    }
+}
+
+fn syn_call(callee: Expr, args: Vec<Expr>, line: u32) -> Expr {
+    Expr {
+        kind: ExprKind::Call {
+            callee: Box::new(callee),
+            args: args.into_iter().map(Arg::Expr).collect(),
+            optional: false,
+        },
+        line,
+    }
+}
+
+fn syn_member(obj: Expr, name: &str, line: u32) -> Expr {
+    Expr {
+        kind: ExprKind::Member {
+            obj: Box::new(obj),
+            name: name.into(),
+            optional: false,
+        },
+        line,
+    }
+}
+
+fn syn_assign(name: &str, value: Expr, line: u32) -> Expr {
+    Expr {
+        kind: ExprKind::Assign {
+            op: None,
+            target: AssignTarget::Simple(Box::new(syn_ident(name, line))),
+            value: Box::new(value),
+        },
+        line,
+    }
+}
+
+fn using_res(id: u32) -> String {
+    format!("%usingres{id}%")
+}
+
+fn using_async_finalizer(res: &str, id: u32, line: u32) -> Vec<Stmt> {
+    let g = format!("%usingg{id}%");
+    let st = format!("%usings{id}%");
+    let x = format!("%usingx{id}%");
+    let next =
+        |args: Vec<Expr>| syn_call(syn_member(syn_ident(&g, line), "next", line), args, line);
+    let awaited = Expr {
+        kind: ExprKind::Await(Box::new(syn_member(syn_ident(&st, line), "value", line))),
+        line,
+    };
+    let step = syn_stmt(
+        StmtKind::Try {
+            block: vec![syn_stmt(
+                StmtKind::Expr(syn_assign(&st, next(vec![awaited]), line)),
+                line,
+            )],
+            param: Some(Pattern::Ident(x.as_str().into())),
+            handler: Some(vec![syn_stmt(
+                StmtKind::Expr(syn_assign(
+                    &st,
+                    syn_call(
+                        syn_member(syn_ident(&g, line), "throw", line),
+                        vec![syn_ident(&x, line)],
+                        line,
+                    ),
+                    line,
+                )),
+                line,
+            )]),
+            finalizer: None,
+        },
+        line,
+    );
+    let test = Expr {
+        kind: ExprKind::Unary(
+            UnaryOp::Not,
+            Box::new(syn_member(syn_ident(&st, line), "done", line)),
+        ),
+        line,
+    };
+    vec![
+        syn_stmt(
+            StmtKind::Decl(
+                DeclKind::Let,
+                vec![(
+                    Pattern::Ident(g.as_str().into()),
+                    Some(syn_call(
+                        syn_ident("%usingDisposeAsync%", line),
+                        vec![syn_ident(res, line)],
+                        line,
+                    )),
+                )],
+            ),
+            line,
+        ),
+        syn_stmt(
+            StmtKind::Decl(
+                DeclKind::Let,
+                vec![(Pattern::Ident(st.as_str().into()), Some(next(Vec::new())))],
+            ),
+            line,
+        ),
+        syn_stmt(
+            StmtKind::While(test, Box::new(syn_stmt(StmtKind::Block(vec![step]), line))),
+            line,
+        ),
+    ]
+}
+
+fn using_wrap(
+    mut items: Vec<Stmt>,
+    id: u32,
+    is_async: bool,
+    line: u32,
+    for_loop: bool,
+) -> Vec<Stmt> {
+    let n = items
+        .iter()
+        .take_while(|s| matches!(&s.kind, StmtKind::Expr(e) if matches!(e.kind, ExprKind::Str(_))))
+        .count();
+    let body = items.split_off(n);
+    let res = using_res(id);
+    items.push(syn_stmt(
+        StmtKind::Decl(
+            DeclKind::Const,
+            vec![(
+                Pattern::Ident(res.as_str().into()),
+                Some(syn_call(syn_ident("%usingStack%", line), Vec::new(), line)),
+            )],
+        ),
+        line,
+    ));
+    let err = if for_loop {
+        format!("%usingfor{id}%")
+    } else {
+        format!("%usingerr{id}%")
+    };
+    let handler = vec![syn_stmt(
+        StmtKind::Expr(syn_call(
+            syn_ident("%usingError%", line),
+            vec![syn_ident(&res, line), syn_ident(&err, line)],
+            line,
+        )),
+        line,
+    )];
+    let finalizer = if is_async {
+        using_async_finalizer(&res, id, line)
+    } else {
+        vec![syn_stmt(
+            StmtKind::Expr(syn_call(
+                syn_ident("%usingDispose%", line),
+                vec![syn_ident(&res, line)],
+                line,
+            )),
+            line,
+        )]
+    };
+    items.push(syn_stmt(
+        StmtKind::Try {
+            block: body,
+            param: Some(Pattern::Ident(err.as_str().into())),
+            handler: Some(handler),
+            finalizer: Some(finalizer),
+        },
+        line,
+    ));
+    items
+}
+
+fn using_loop(s: &mut Stmt) -> Option<&mut Stmt> {
+    let StmtKind::Block(items) = &mut s.kind else {
+        return None;
+    };
+    let Some(Stmt {
+        kind:
+            StmtKind::Try {
+                block,
+                param: Some(Pattern::Ident(p)),
+                ..
+            },
+        ..
+    }) = items.last_mut()
+    else {
+        return None;
+    };
+    if !p.starts_with("%usingfor") {
+        return None;
+    }
+    block.last_mut()
 }
 
 pub fn body_use_strict(body: &[Stmt]) -> bool {

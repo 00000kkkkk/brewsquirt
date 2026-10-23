@@ -152,6 +152,21 @@ pub fn install(vm: &mut Vm) {
         *agg.proto.borrow_mut() = Some(Rc::clone(base));
     }
     vm.define_global("AggregateError", Value::Object(agg));
+    let sup_proto = Obj::new(ObjKind::Ordinary, Some(vm.realm.error_protos[0].clone()));
+    sup_proto.set_hidden("name", "SuppressedError".into());
+    sup_proto.set_hidden("message", "".into());
+    let sup = make_ctor(
+        vm,
+        "SuppressedError",
+        3,
+        suppressed_error_ctor,
+        Some(|| ObjKind::Error),
+        &sup_proto,
+    );
+    if let Some(base) = &base_ctor {
+        *sup.proto.borrow_mut() = Some(Rc::clone(base));
+    }
+    vm.define_global("SuppressedError", Value::Object(sup));
 
     let bp = vm.realm.boolean_proto.clone();
     method(vm, &bp, "toString", 0, bool_to_string);
@@ -1049,6 +1064,35 @@ fn aggregate_error_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let errors = vm.iterate(&arg(args, 0))?;
     let list = vm.new_array(errors);
     target.set_hidden("errors", list);
+    let header = error_header(&target);
+    let stack = error_stack(vm, &target, &header, None)?;
+    target.set_hidden("stack", stack);
+    Ok(Value::Object(target))
+}
+
+fn suppressed_error_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let target = match &this {
+        Value::Object(o) if matches!(o.kind, ObjKind::Error) && o.props.borrow().is_empty() => {
+            o.clone()
+        }
+        _ => {
+            let proto = vm
+                .globals
+                .get("SuppressedError")
+                .cloned()
+                .and_then(|c| c.as_object().and_then(|c| c.get_own("prototype")))
+                .and_then(|p| p.as_object().cloned());
+            Obj::new(ObjKind::Error, proto)
+        }
+    };
+    target.set_hidden("stack", Value::Str("".into()));
+    let msg = arg(args, 2);
+    if !msg.is_undefined() {
+        let m = vm.to_string(&msg)?;
+        target.set_hidden("message", Value::Str(m));
+    }
+    target.set_hidden("error", arg(args, 0));
+    target.set_hidden("suppressed", arg(args, 1));
     let header = error_header(&target);
     let stack = error_stack(vm, &target, &header, None)?;
     target.set_hidden("stack", stack);

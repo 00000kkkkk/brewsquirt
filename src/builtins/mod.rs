@@ -159,6 +159,7 @@ pub fn install(vm: &mut Vm) {
     reflect::install(vm);
     intrinsics::install(vm);
     let global = Obj::new(ObjKind::Global, Some(vm.realm.object_proto.clone()));
+    vm.global_obj = Some(global.clone());
     vm.define_global("globalThis", Value::Object(global));
     for name in ["Math", "JSON", "Atomics"] {
         if let Some(Value::Object(o)) = vm.globals.get(name).cloned() {
