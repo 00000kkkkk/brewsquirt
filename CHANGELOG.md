@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-10-24
+
 ### Added
 
 - `node:http2` is implemented: HPACK with Huffman decoding, flow control, trailers, pings,
@@ -1218,7 +1220,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Continuous integration on Linux, macOS and Windows, MSRV check, cargo-deny, CodeQL, coverage,
   benchmarks, and release archives for five targets.
 
-[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/00000kkkkk/javasquirt/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/00000kkkkk/javasquirt/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/00000kkkkk/javasquirt/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/00000kkkkk/javasquirt/compare/v1.4.0...v1.5.0
