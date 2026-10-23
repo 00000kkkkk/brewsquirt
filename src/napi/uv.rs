@@ -9,16 +9,16 @@ struct Sem {
     cv: Condvar,
 }
 
-static SEMS: Mutex<Vec<Option<Arc<Sem>>>> = Mutex::new(Vec::new());
+static SEMAPHORES: Mutex<Vec<Option<Arc<Sem>>>> = Mutex::new(Vec::new());
 
 fn sem_of(s: *mut c_void) -> Option<Arc<Sem>> {
     let i = unsafe { *(s as *const u32) } as usize;
-    SEMS.lock().ok()?.get(i.checked_sub(1)?)?.clone()
+    SEMAPHORES.lock().ok()?.get(i.checked_sub(1)?)?.clone()
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uv_sem_init(sem: *mut c_void, value: c_uint) -> c_int {
-    let Ok(mut all) = SEMS.lock() else {
+    let Ok(mut all) = SEMAPHORES.lock() else {
         return imp::EINVAL;
     };
     let sem_data = Some(Arc::new(Sem {
@@ -42,7 +42,7 @@ pub unsafe extern "C" fn uv_sem_init(sem: *mut c_void, value: c_uint) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uv_sem_destroy(sem: *mut c_void) {
     let i = unsafe { *(sem as *const u32) } as usize;
-    if let (Ok(mut all), Some(i)) = (SEMS.lock(), i.checked_sub(1)) {
+    if let (Ok(mut all), Some(i)) = (SEMAPHORES.lock(), i.checked_sub(1)) {
         if let Some(slot) = all.get_mut(i) {
             *slot = None;
         }
