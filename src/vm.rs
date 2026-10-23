@@ -432,6 +432,123 @@ pub(crate) fn offset_positions(proto: &mut Rc<FunctionProto>, lines: i64, cols: 
 }
 
 #[inline(always)]
+fn plain_property(v: &Value) -> bool {
+    !matches!(v, Value::Uninit) && !matches!(v, Value::Object(a) if a.is_accessor())
+}
+
+#[inline(always)]
+fn ic_plain(v: &Value, accessors: bool) -> bool {
+    !matches!(v, Value::Uninit) && !(accessors && matches!(v, Value::Object(a) if a.is_accessor()))
+}
+
+#[inline(always)]
+fn ic_read(o: &Obj, key: &str, ic: &crate::bytecode::PropIc) -> Option<Value> {
+    {
+        let props = o.props.borrow();
+        if props.shape_id() == ic.shape.get() {
+            let holder = ic.holder.get();
+            if holder == 0 {
+                if let Some(v) = props.value_at(ic.index.get() as usize) {
+                    if ic_plain(v, props.may_have_accessors()) {
+                        return Some(v.clone());
+                    }
+                }
+            } else if let Some(p) = &*o.proto.borrow() {
+                if Rc::as_ptr(p) as usize == holder {
+                    let pp = p.props.borrow();
+                    if pp.shape_id() == ic.holder_shape.get() {
+                        if let Some(v) = pp.value_at(ic.index.get() as usize) {
+                            if ic_plain(v, pp.may_have_accessors()) {
+                                return Some(v.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ic_fill_read(o, key, ic)
+}
+
+fn ic_fill_read(o: &Obj, key: &str, ic: &crate::bytecode::PropIc) -> Option<Value> {
+    let props = o.props.borrow();
+    if let Some(i) = props.find_index(key) {
+        let v = props.value_at(i)?.clone();
+        if plain_property(&v) {
+            ic.shape.set(props.shape_id());
+            ic.holder.set(0);
+            ic.index.set(i as u32);
+        }
+        return Some(v);
+    }
+    let p = o.proto.borrow().clone();
+    let Some(p) = p else {
+        return Some(Value::Undefined);
+    };
+    if !matches!(p.kind, ObjKind::Ordinary) {
+        return None;
+    }
+    let pp = p.props.borrow();
+    if let Some(i) = pp.find_index(key) {
+        let v = pp.value_at(i)?.clone();
+        if plain_property(&v) {
+            ic.shape.set(props.shape_id());
+            ic.holder.set(Rc::as_ptr(&p) as usize);
+            ic.holder_shape.set(pp.shape_id());
+            ic.index.set(i as u32);
+        }
+        return Some(v);
+    }
+    drop(pp);
+    p.get_chain_plain(key)
+}
+
+#[inline(always)]
+fn ic_write(o: &Obj, key: &Value, ic: &crate::bytecode::PropIc, val: &Value) -> bool {
+    let mut props = o.props.borrow_mut();
+    if props.shape_id() != ic.shape.get() || ic.holder.get() != 0 {
+        return false;
+    }
+    if props.has_attrs() {
+        let Value::Str(key) = key else {
+            return false;
+        };
+        if props.attrs(key) & crate::object::READ_ONLY != 0 {
+            return false;
+        }
+    }
+    let i = ic.index.get() as usize;
+    match props.value_at(i) {
+        Some(old) if ic_plain(old, props.may_have_accessors()) => {}
+        _ => return false,
+    }
+    props.set_value_at(i, val.clone());
+    true
+}
+
+fn ic_fill_write(o: &Obj, key: &Value, ic: &crate::bytecode::PropIc) {
+    let Value::Str(key) = key else {
+        return;
+    };
+    if !matches!(o.kind, ObjKind::Ordinary) || o.flags.get() != 0 {
+        return;
+    }
+    let props = o.props.borrow();
+    let Some(i) = props.find_index(key) else {
+        return;
+    };
+    if props.attrs(key) & crate::object::READ_ONLY != 0 {
+        return;
+    }
+    if !props.value_at(i).is_some_and(plain_property) {
+        return;
+    }
+    ic.shape.set(props.shape_id());
+    ic.holder.set(0);
+    ic.index.set(i as u32);
+}
+
+#[inline(always)]
 fn pop_value(stack: &mut Vec<Value>) -> Value {
     let n = stack.len();
     let v = match stack.last() {
@@ -4783,15 +4900,8 @@ impl Vm {
                             let Value::Str(key) = &proto.consts[k as usize] else {
                                 unreachable!()
                             };
-                            match o.get_chain_plain(key) {
-                                Some(v)
-                                    if !matches!(&v, Value::Object(a) if a.is_accessor())
-                                        && !matches!(v, Value::Uninit) =>
-                                {
-                                    Some(v)
-                                }
-                                _ => None,
-                            }
+                            ic_read(o, key, &proto.ics[proto.ic_index[ip - 1] as usize])
+                                .filter(plain_property)
                         }
                         _ => None,
                     };
@@ -4813,15 +4923,8 @@ impl Vm {
                             let Value::Str(key) = &proto.consts[k as usize] else {
                                 unreachable!()
                             };
-                            match o.get_chain_plain(key) {
-                                Some(v)
-                                    if !matches!(&v, Value::Object(a) if a.is_accessor())
-                                        && !matches!(v, Value::Uninit) =>
-                                {
-                                    Some(v)
-                                }
-                                _ => None,
-                            }
+                            ic_read(o, key, &proto.ics[proto.ic_index[ip - 1] as usize])
+                                .filter(plain_property)
                         }
                         _ => None,
                     };
@@ -4839,17 +4942,18 @@ impl Vm {
                 Op::StoreLocalProp(s, k) => {
                     let val = pop!();
                     let abs = base + s as usize;
+                    let ic = &proto.ics[proto.ic_index[ip - 1] as usize];
                     let done = match &self.stack[abs] {
                         Value::Object(o)
-                            if matches!(o.kind, ObjKind::Ordinary)
-                                && o.flags.get() == 0
-                                && !self.accessors_used =>
+                            if matches!(o.kind, ObjKind::Ordinary) && o.flags.get() == 0 =>
                         {
-                            o.props.borrow_mut().insert_fast(
-                                name!(k),
-                                val.clone(),
-                                !self.readonly_used,
-                            )
+                            ic_write(o, &proto.consts[k as usize], ic, &val)
+                                || (!self.accessors_used
+                                    && o.props.borrow_mut().insert_fast(
+                                        name!(k),
+                                        val.clone(),
+                                        !self.readonly_used,
+                                    ))
                         }
                         _ => false,
                     };
@@ -4864,6 +4968,9 @@ impl Vm {
                             if !(proto.sloppy && self.silent_fail) {
                                 throw!(e);
                             }
+                        }
+                        if let Value::Object(o) = &obj {
+                            ic_fill_write(o, &proto.consts[k as usize], ic);
                         }
                     }
                 }
@@ -5057,7 +5164,7 @@ impl Vm {
                         Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => {
                             let key = &proto.consts[k as usize];
                             let Value::Str(key) = key else { unreachable!() };
-                            match o.get_chain_plain(key) {
+                            match ic_read(o, key, &proto.ics[proto.ic_index[ip - 1] as usize]) {
                                 Some(v)
                                     if matches!(&v, Value::Object(a) if a.is_accessor())
                                         || matches!(v, Value::Uninit) =>
@@ -5078,17 +5185,18 @@ impl Vm {
                 Op::SetProp(k) => {
                     let val = pop!();
                     let obj = pop!();
+                    let ic = &proto.ics[proto.ic_index[ip - 1] as usize];
                     let done = match &obj {
                         Value::Object(o)
-                            if matches!(o.kind, ObjKind::Ordinary)
-                                && o.flags.get() == 0
-                                && !self.accessors_used =>
+                            if matches!(o.kind, ObjKind::Ordinary) && o.flags.get() == 0 =>
                         {
-                            o.props.borrow_mut().insert_fast(
-                                name!(k),
-                                val.clone(),
-                                !self.readonly_used,
-                            )
+                            ic_write(o, &proto.consts[k as usize], ic, &val)
+                                || (!self.accessors_used
+                                    && o.props.borrow_mut().insert_fast(
+                                        name!(k),
+                                        val.clone(),
+                                        !self.readonly_used,
+                                    ))
                         }
                         _ => false,
                     };
@@ -5099,6 +5207,9 @@ impl Vm {
                             if !(proto.sloppy && self.silent_fail) {
                                 throw!(e);
                             }
+                        }
+                        if let Value::Object(o) = &obj {
+                            ic_fill_write(o, &proto.consts[k as usize], ic);
                         }
                     }
                     self.stack.push(val);
@@ -5186,8 +5297,23 @@ impl Vm {
                 }
                 Op::GetMethod(k) => {
                     let obj = pop!();
-                    let n = name!(k);
-                    let f = tri!(self.get_prop(&obj, &n));
+                    let fast = match &obj {
+                        Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => {
+                            let Value::Str(key) = &proto.consts[k as usize] else {
+                                unreachable!()
+                            };
+                            ic_read(o, key, &proto.ics[proto.ic_index[ip - 1] as usize])
+                                .filter(plain_property)
+                        }
+                        _ => None,
+                    };
+                    let f = match fast {
+                        Some(f) => f,
+                        None => {
+                            let n = name!(k);
+                            tri!(self.get_prop(&obj, &n))
+                        }
+                    };
                     self.stack.push(f);
                     self.stack.push(obj);
                 }
@@ -6518,17 +6644,18 @@ impl Vm {
                 Op::StoreProp(k) => {
                     let val = pop!();
                     let obj = pop!();
+                    let ic = &proto.ics[proto.ic_index[ip - 1] as usize];
                     let done = match &obj {
                         Value::Object(o)
-                            if matches!(o.kind, ObjKind::Ordinary)
-                                && o.flags.get() == 0
-                                && !self.accessors_used =>
+                            if matches!(o.kind, ObjKind::Ordinary) && o.flags.get() == 0 =>
                         {
-                            o.props.borrow_mut().insert_fast(
-                                name!(k),
-                                val.clone(),
-                                !self.readonly_used,
-                            )
+                            ic_write(o, &proto.consts[k as usize], ic, &val)
+                                || (!self.accessors_used
+                                    && o.props.borrow_mut().insert_fast(
+                                        name!(k),
+                                        val.clone(),
+                                        !self.readonly_used,
+                                    ))
                         }
                         _ => false,
                     };
@@ -6539,6 +6666,9 @@ impl Vm {
                             if !(proto.sloppy && self.silent_fail) {
                                 throw!(e);
                             }
+                        }
+                        if let Value::Object(o) = &obj {
+                            ic_fill_write(o, &proto.consts[k as usize], ic);
                         }
                     }
                 }

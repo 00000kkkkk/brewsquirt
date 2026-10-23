@@ -782,6 +782,19 @@ impl Compiler {
 
     fn finish(&self, st: FnState) -> FunctionProto {
         let cache_len = st.consts.len();
+        let mut ic_count = 0u32;
+        let ic_index: Box<[u32]> = st
+            .code
+            .iter()
+            .map(|op| {
+                if op.uses_prop_ic() {
+                    ic_count += 1;
+                    ic_count - 1
+                } else {
+                    u32::MAX
+                }
+            })
+            .collect();
         FunctionProto {
             name: st.name,
             kind: st.kind,
@@ -809,6 +822,8 @@ impl Compiler {
             global_cache: (0..cache_len)
                 .map(|_| std::cell::Cell::new(u32::MAX))
                 .collect(),
+            ic_index,
+            ics: (0..ic_count).map(|_| PropIc::default()).collect(),
             evals: st.evals,
             link: None,
         }

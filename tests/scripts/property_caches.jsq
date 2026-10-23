@@ -1,0 +1,87 @@
+const read = (o) => o.x
+const call = (o) => o.m()
+const sloppyWrite = new Function("o", "v", "o.x = v; return o.x")
+const write = (o, v) => sloppyWrite(o, v)
+const strictWrite = (o, v) => {
+  try {
+    o.x = v
+    return o.x
+  } catch (e) {
+    return e.constructor.name
+  }
+}
+
+const a = { x: 1 }
+const b = { x: 2 }
+console.log(read(a), read(b), read(a))
+Object.defineProperty(a, "x", { get: () => "getter" })
+console.log(read(a), read(b))
+
+const c = { x: 1 }
+console.log(write(c, 2), write(c, 3))
+Object.defineProperty(c, "x", { writable: false })
+console.log(write(c, 4), strictWrite(c, 5))
+
+const p1 = { m: () => "p1", x: "from p1" }
+const p2 = { m: () => "p2", x: "from p2" }
+const o1 = Object.create(p1)
+const o2 = Object.create(p1)
+console.log(call(o1), call(o2), read(o1))
+Object.setPrototypeOf(o2, p2)
+console.log(call(o1), call(o2), read(o2))
+p1.m = () => "p1 changed"
+console.log(call(o1))
+o1.m = () => "own"
+console.log(call(o1), call(o2))
+delete o1.m
+console.log(call(o1))
+Object.defineProperty(p1, "m", { get: () => () => "proto getter" })
+console.log(call(o1))
+
+const frozen = { x: 1 }
+console.log(write(frozen, 2))
+Object.freeze(frozen)
+console.log(write(frozen, 3), strictWrite(frozen, 4))
+
+const d = { x: 1, y: 2 }
+console.log(read(d))
+delete d.x
+console.log(read(d), write(d, 9), Object.keys(d).join(","))
+
+class Point {
+  constructor(x) {
+    this.x = x
+  }
+  m() {
+    return "point " + this.x
+  }
+}
+class Point3 extends Point {
+  m() {
+    return "point3 " + this.x
+  }
+}
+const shapes = [new Point(1), new Point3(2), { x: 3, m: () => "literal" }, Object.assign(Object.create(null), { x: 4, m: () => "null proto" })]
+for (let i = 0; i < 3; i++) console.log(shapes.map((s) => `${read(s)}:${call(s)}`).join(" "))
+Point.prototype.m = function () {
+  return "patched " + this.x
+}
+console.log(shapes.map((s) => call(s)).join(" "))
+
+const counter = { n: 0 }
+const bump = (o) => {
+  o.n = o.n + 1
+}
+for (let i = 0; i < 5; i++) bump(counter)
+Object.defineProperty(counter, "n", { set(v) { this.seen = v }, get() { return 100 } })
+bump(counter)
+console.log(counter.n, counter.seen)
+
+const big = {}
+for (let i = 0; i < 50; i++) big["k" + i] = i
+const readK = (o) => o.k40
+console.log(readK(big), readK(big))
+delete big.k3
+console.log(readK(big))
+big.k40 = "changed"
+console.log(readK(big))

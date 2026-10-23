@@ -28,51 +28,190 @@ pub const SLOW_ELEMENTS: u8 = 64;
 
 #[derive(Default)]
 struct PropExtra {
-    index: rustc_hash::FxHashMap<JsStr, u32>,
     attrs: rustc_hash::FxHashMap<JsStr, u8>,
     holes: Vec<u64>,
 }
 
 impl PropExtra {
     fn is_empty(&self) -> bool {
-        self.index.is_empty() && self.attrs.is_empty() && self.holes.is_empty()
+        self.attrs.is_empty() && self.holes.is_empty()
     }
 }
 
-#[derive(Default)]
-pub struct PropMap {
-    entries: Vec<(JsStr, Value)>,
-    extra: Option<Box<PropExtra>>,
+const SHARED_KEYS: usize = 32;
+
+pub struct Shape {
+    id: u64,
+    keys: Vec<JsStr>,
+    index: Option<rustc_hash::FxHashMap<JsStr, u32>>,
+    last: RefCell<Option<(JsStr, std::rc::Weak<Shape>)>>,
+    transitions: RefCell<rustc_hash::FxHashMap<JsStr, std::rc::Weak<Shape>>>,
+    parent: Option<Rc<Shape>>,
+    dictionary: bool,
 }
 
-impl PropMap {
-    fn index(&self) -> Option<&rustc_hash::FxHashMap<JsStr, u32>> {
-        self.extra
-            .as_ref()
-            .map(|x| &x.index)
-            .filter(|ix| !ix.is_empty())
+thread_local! {
+    static NEXT_SHAPE: Cell<u64> = const { Cell::new(1) };
+    static ROOT_SHAPE: Rc<Shape> = Rc::new(Shape::new(Vec::new(), false));
+}
+
+fn next_shape_id() -> u64 {
+    NEXT_SHAPE.with(|n| {
+        let id = n.get();
+        n.set(id + 1);
+        id
+    })
+}
+
+impl Shape {
+    fn new(keys: Vec<JsStr>, dictionary: bool) -> Shape {
+        let mut shape = Shape {
+            id: next_shape_id(),
+            keys,
+            index: None,
+            last: RefCell::new(None),
+            transitions: RefCell::new(rustc_hash::FxHashMap::default()),
+            parent: None,
+            dictionary,
+        };
+        shape.reindex();
+        shape
     }
 
-    fn find(&self, key: &str) -> Option<usize> {
-        if let Some(ix) = self.index() {
-            return ix.get(key).map(|&i| i as usize);
-        }
-        self.entries.iter().position(|(k, _)| **k == *key)
+    fn root() -> Rc<Shape> {
+        ROOT_SHAPE
+            .try_with(Rc::clone)
+            .unwrap_or_else(|_| Rc::new(Shape::new(Vec::new(), false)))
     }
 
     fn reindex(&mut self) {
-        if self.entries.len() > INDEX_AT {
-            let x = self.extra.get_or_insert_with(Box::default);
-            x.index.clear();
-            x.index.reserve(self.entries.len());
-            for (i, (k, _)) in self.entries.iter().enumerate() {
-                x.index.insert(k.clone(), i as u32);
+        if self.keys.len() > INDEX_AT {
+            let mut ix = rustc_hash::FxHashMap::default();
+            ix.reserve(self.keys.len());
+            for (i, k) in self.keys.iter().enumerate() {
+                ix.insert(k.clone(), i as u32);
             }
-        } else if let Some(x) = &mut self.extra {
-            x.index.clear();
-            if x.is_empty() {
-                self.extra = None;
+            self.index = Some(ix);
+        } else {
+            self.index = None;
+        }
+    }
+
+    #[inline]
+    fn find(&self, key: &str) -> Option<usize> {
+        if let Some(ix) = &self.index {
+            return ix.get(key).map(|&i| i as usize);
+        }
+        self.keys.iter().position(|k| **k == *key)
+    }
+
+    fn child(self: &Rc<Self>, key: &JsStr) -> Rc<Shape> {
+        if let Some((k, w)) = &*self.last.borrow() {
+            if JsStr::ptr_eq(k, key) || k == key {
+                if let Some(s) = w.upgrade() {
+                    return s;
+                }
             }
+        }
+        if let Some(s) = self.transitions.borrow().get(key).and_then(|w| w.upgrade()) {
+            *self.last.borrow_mut() = Some((key.clone(), Rc::downgrade(&s)));
+            return s;
+        }
+        let mut keys = Vec::with_capacity(self.keys.len() + 1);
+        keys.extend(self.keys.iter().cloned());
+        keys.push(key.clone());
+        let mut shape = Shape::new(keys, false);
+        shape.parent = Some(self.clone());
+        let child = Rc::new(shape);
+        let mut t = self.transitions.borrow_mut();
+        if t.len() >= 16 && t.len().is_power_of_two() {
+            t.retain(|_, w| w.strong_count() > 0);
+        }
+        t.insert(key.clone(), Rc::downgrade(&child));
+        *self.last.borrow_mut() = Some((key.clone(), Rc::downgrade(&child)));
+        child
+    }
+}
+
+pub struct PropMap {
+    shape: Rc<Shape>,
+    values: Vec<Value>,
+    extra: Option<Box<PropExtra>>,
+    accessors: bool,
+}
+
+impl Default for PropMap {
+    fn default() -> Self {
+        PropMap {
+            shape: Shape::root(),
+            values: Vec::new(),
+            extra: None,
+            accessors: false,
+        }
+    }
+}
+
+impl PropMap {
+    #[inline]
+    fn find(&self, key: &str) -> Option<usize> {
+        self.shape.find(key)
+    }
+
+    #[inline]
+    pub fn shape_id(&self) -> u64 {
+        self.shape.id
+    }
+
+    #[inline]
+    pub fn find_index(&self, key: &str) -> Option<usize> {
+        self.find(key)
+    }
+
+    #[inline]
+    pub fn value_at(&self, i: usize) -> Option<&Value> {
+        self.values.get(i)
+    }
+
+    #[inline]
+    pub fn may_have_accessors(&self) -> bool {
+        self.accessors
+    }
+
+    #[inline]
+    pub fn set_value_at(&mut self, i: usize, v: Value) {
+        if let Some(slot) = self.values.get_mut(i) {
+            *slot = v;
+        }
+    }
+
+    fn own_keys(&mut self) -> &mut Vec<JsStr> {
+        if !self.shape.dictionary || Rc::get_mut(&mut self.shape).is_none() {
+            self.shape = Rc::new(Shape::new(self.shape.keys.clone(), true));
+        }
+        let shape = Rc::get_mut(&mut self.shape).expect("unique dictionary shape");
+        shape.id = next_shape_id();
+        &mut shape.keys
+    }
+
+    fn push_key(&mut self, key: JsStr) {
+        if !self.shape.dictionary && self.shape.keys.len() < SHARED_KEYS {
+            self.shape = self.shape.child(&key);
+            return;
+        }
+        self.own_keys().push(key.clone());
+        let shape = Rc::get_mut(&mut self.shape).expect("unique dictionary shape");
+        let at = shape.keys.len() - 1;
+        match &mut shape.index {
+            Some(ix) => {
+                ix.insert(key, at as u32);
+            }
+            None => shape.reindex(),
+        }
+    }
+
+    fn note_value(&mut self, v: &Value) {
+        if !self.accessors && matches!(v, Value::Object(o) if o.is_accessor()) {
+            self.accessors = true;
         }
     }
 
@@ -98,7 +237,7 @@ impl PropMap {
             return;
         }
         if let Some(i) = self.find(key) {
-            let k = self.entries[i].0.clone();
+            let k = self.shape.keys[i].clone();
             self.extra
                 .get_or_insert_with(Box::default)
                 .attrs
@@ -145,12 +284,14 @@ impl PropMap {
     }
 
     pub fn add_all(&mut self, bits: u8, data_only: bool) {
-        if self.entries.is_empty() {
+        if self.values.is_empty() {
             return;
         }
         let keys: Vec<(JsStr, bool)> = self
-            .entries
+            .shape
+            .keys
             .iter()
+            .zip(self.values.iter())
             .map(|(k, v)| (k.clone(), matches!(v, Value::Object(o) if o.is_accessor())))
             .collect();
         let x = self.extra.get_or_insert_with(Box::default);
@@ -172,8 +313,10 @@ impl PropMap {
     }
 
     pub fn all_have(&self, bits: u8, data_only: bool) -> bool {
-        self.entries
+        self.shape
+            .keys
             .iter()
+            .zip(self.values.iter())
             .filter(|(k, _)| !is_private_key(k))
             .all(|(k, v)| {
                 let need = if data_only && matches!(v, Value::Object(o) if o.is_accessor()) {
@@ -193,30 +336,22 @@ impl PropMap {
             if self.extra.is_some() && self.attrs(&key) & READ_ONLY != 0 {
                 return false;
             }
-            self.entries[i].1 = v;
+            self.note_value(&v);
+            self.values[i] = v;
             return true;
         }
         if !adding_ok {
             return false;
         }
-        let i = self.entries.len() as u32;
-        match self.extra.as_mut().filter(|x| !x.index.is_empty()) {
-            Some(x) => {
-                x.index.insert(key.clone(), i);
-                self.entries.push((key, v));
-            }
-            None => {
-                self.entries.push((key, v));
-                if self.entries.len() > INDEX_AT {
-                    self.reindex();
-                }
-            }
-        }
+        self.note_value(&v);
+        self.push_key(key);
+        self.values.push(v);
         true
     }
 
     fn order(&self) -> Option<Vec<usize>> {
-        let has_index = self.entries.iter().any(|(k, _)| {
+        let keys = &self.shape.keys;
+        let has_index = keys.iter().any(|k| {
             k.as_bytes().first().is_some_and(u8::is_ascii_digit) && array_index(k).is_some()
         });
         if !has_index {
@@ -224,7 +359,7 @@ impl PropMap {
         }
         let mut ints: Vec<(usize, usize)> = Vec::new();
         let mut rest: Vec<usize> = Vec::new();
-        for (i, (k, _)) in self.entries.iter().enumerate() {
+        for (i, k) in keys.iter().enumerate() {
             match array_index(k) {
                 Some(n) => ints.push((n, i)),
                 None => rest.push(i),
@@ -237,11 +372,13 @@ impl PropMap {
     }
 
     pub fn get(&self, key: &str) -> Option<&Value> {
-        self.find(key).map(|i| &self.entries[i].1)
+        self.find(key).map(|i| &self.values[i])
     }
 
     pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
-        self.find(key).map(|i| &mut self.entries[i].1)
+        let i = self.find(key)?;
+        self.accessors = true;
+        Some(&mut self.values[i])
     }
 
     pub fn contains_key(&self, key: &str) -> bool {
@@ -249,32 +386,26 @@ impl PropMap {
     }
 
     pub fn insert(&mut self, key: JsStr, v: Value) -> Option<Value> {
+        self.note_value(&v);
         if let Some(i) = self.find(&key) {
-            return Some(std::mem::replace(&mut self.entries[i].1, v));
+            return Some(std::mem::replace(&mut self.values[i], v));
         }
-        let i = self.entries.len() as u32;
-        match self.extra.as_mut().filter(|x| !x.index.is_empty()) {
-            Some(x) => {
-                x.index.insert(key.clone(), i);
-                self.entries.push((key, v));
-            }
-            None => {
-                self.entries.push((key, v));
-                if self.entries.len() > INDEX_AT {
-                    self.reindex();
-                }
-            }
-        }
+        self.push_key(key);
+        self.values.push(v);
         None
     }
 
     pub fn shift_remove(&mut self, key: &str) -> Option<Value> {
         let i = self.find(key)?;
-        let (_, v) = self.entries.remove(i);
+        let v = self.values.remove(i);
+        self.own_keys().remove(i);
+        Rc::get_mut(&mut self.shape)
+            .expect("unique dictionary shape")
+            .reindex();
         if let Some(x) = &mut self.extra {
             x.attrs.remove(key);
-            if !x.index.is_empty() || x.attrs.is_empty() {
-                self.reindex();
+            if x.is_empty() {
+                self.extra = None;
             }
         }
         Some(v)
@@ -346,10 +477,9 @@ impl PropMap {
 
     pub fn iter(&self) -> impl Iterator<Item = (&JsStr, &Value)> {
         let order = self.order();
-        (0..self.entries.len()).map(move |i| {
+        (0..self.values.len()).map(move |i| {
             let j = order.as_ref().map_or(i, |o| o[i]);
-            let (k, v) = &self.entries[j];
-            (k, v)
+            (&self.shape.keys[j], &self.values[j])
         })
     }
 
@@ -358,24 +488,26 @@ impl PropMap {
     }
 
     pub fn values(&self) -> impl Iterator<Item = &Value> {
-        self.entries.iter().map(|(_, v)| v)
+        self.values.iter()
     }
 
     pub fn into_values(self) -> impl Iterator<Item = Value> {
-        self.entries.into_iter().map(|(_, v)| v)
+        self.values.into_iter()
     }
 
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.values.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.values.is_empty()
     }
 
     pub fn clear(&mut self) {
-        self.entries.clear();
+        self.shape = Shape::root();
+        self.values.clear();
         self.extra = None;
+        self.accessors = false;
     }
 }
 

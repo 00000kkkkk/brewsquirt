@@ -255,10 +255,35 @@ pub struct FunctionProto {
     pub module: Rc<ModuleInfo>,
     pub line: u32,
     pub global_cache: Box<[std::cell::Cell<u32>]>,
+    pub ic_index: Box<[u32]>,
+    pub ics: Box<[PropIc]>,
     pub span: (u32, u32),
     pub templates: Box<[std::cell::RefCell<Option<Value>>]>,
     pub evals: Vec<Rc<EvalScope>>,
     pub link: Option<Rc<ModuleLink>>,
+}
+
+#[derive(Debug, Default)]
+pub struct PropIc {
+    pub shape: std::cell::Cell<u64>,
+    pub holder: std::cell::Cell<usize>,
+    pub holder_shape: std::cell::Cell<u64>,
+    pub index: std::cell::Cell<u32>,
+}
+
+impl Op {
+    pub fn uses_prop_ic(&self) -> bool {
+        matches!(
+            self,
+            Op::GetProp(_)
+                | Op::SetProp(_)
+                | Op::GetMethod(_)
+                | Op::StoreProp(_)
+                | Op::GetLocalProp(..)
+                | Op::StoreLocalProp(..)
+                | Op::GetLocalMethod(..)
+        )
+    }
 }
 
 #[derive(Debug, Default)]
