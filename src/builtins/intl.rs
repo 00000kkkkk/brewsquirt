@@ -1809,6 +1809,21 @@ fn tz_list(vm: &mut Vm, _this: Value, _args: &[Value]) -> Result<Value, Value> {
 
 fn tz_system(_vm: &mut Vm, _this: Value, _args: &[Value]) -> Result<Value, Value> {
     let name = iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".to_string());
+    let utc = [
+        "UTC",
+        "GMT",
+        "UCT",
+        "Zulu",
+        "Universal",
+        "Greenwich",
+        "GMT0",
+        "GMT+0",
+        "GMT-0",
+    ];
+    let bare = name.strip_prefix("Etc/").unwrap_or(&name);
+    if utc.contains(&bare) || tz_lookup(&name).is_none() {
+        return Ok(Value::from("UTC"));
+    }
     Ok(Value::from(name))
 }
 
