@@ -31,6 +31,7 @@ listed in [Not yet supported](#not-yet-supported).
 - [Dates](#dates)
 - [Regular expressions](#regular-expressions)
 - [Modules](#modules)
+- [TypeScript](#typescript)
 - [Binary data](#binary-data)
 - [Web APIs](#web-apis)
 - [Events and cancellation](#events-and-cancellation)
@@ -1357,11 +1358,18 @@ A specifier is resolved in this order:
    and so do the bare names of Node's core modules such as `fs` and `path`.
 2. **Relative paths**: specifiers starting with `./` or `../` are resolved against the directory
    of the importing file. For `./x`, the loader tries:
-   1. `x` as written, if it is a file
-   2. `x.jsq`, `x.js`, `x.mjs`, `x.cjs`, `x.json`
-   3. `x/index.jsq`, `x/index.js`, `x/index.mjs`, `x/index.cjs`
-3. **Bare names**: any other specifier, such as `left-pad` or `lodash/fp`, is a package installed
-   in `nude_modules/<name>/`, searched upwards from the importing file so nested installs win.
+   1. `x` as written, if it is a file, or `x.ts` when `x.js` is written but only the TypeScript
+      file exists (`.mjs` maps to `.mts` and `.cjs` to `.cts`)
+   2. `x.jsq`, `x.js`, `x.mjs`, `x.cjs`, `x.ts`, `x.mts`, `x.cts`, `x.json`
+   3. `x/index.jsq`, `x/index.js`, `x/index.mjs`, `x/index.cjs`, `x/index.ts` and the other
+      TypeScript extensions
+3. **Path aliases**: when the nearest `tsconfig.json` or `jsconfig.json` sets
+   `compilerOptions.paths` or `baseUrl` (directly or through `extends`), bare specifiers are
+   matched against the `paths` patterns first and then looked up under `baseUrl`. The files may
+   contain comments and trailing commas.
+4. **Bare names**: any other specifier, such as `left-pad` or `lodash/fp`, is a package installed
+   in `nude_modules/<name>/` or `node_modules/<name>/`, searched upwards from the importing file so
+   nested installs win; projects installed with npm, pnpm or yarn run as they are.
    The entry file comes from `exports` in `package.json` (string, array, or an object with
    `import`, `require`, `node`, `module-sync` and `default` conditions, subpath keys and `*`
    patterns), then `main`, then `module`, then an `index` file.
@@ -1573,6 +1581,50 @@ console.log(isDeepStrictEqual({ a: [1, 2] }, { a: [1, 2] }))
 "it's" { list: [ 1, { deep: true } ] }
 cart has 3 items
 true
+```
+
+## TypeScript
+
+`.ts`, `.mts` and `.cts` files run directly: the parser reads TypeScript syntax and drops the
+types, so there is no build step and no type checking (run `tsc --noEmit` for that). `.mts` files
+are ES modules, `.cts` files are CommonJS, and `.ts` files follow the same rules as `.js`.
+
+Supported: type annotations everywhere, interfaces, type aliases, generics on functions, classes,
+methods, arrow functions, calls and `new`, `as`, `satisfies`, `as const`, non-null `!`,
+`<T>value` assertions, definite assignment, optional parameters and properties, function
+overloads, `abstract` classes and members, `public`/`private`/`protected`/`readonly`/`override`
+modifiers, `declare` statements and fields, index signatures, `this` parameters, assertion
+functions and type predicates. Constructor parameter properties become field assignments, and
+`enum`, `const enum` and `namespace` compile to objects like `tsc` emits them. `import type`,
+`export type` and `type` specifiers are removed, and so are imported names that are only used as
+types; a re-export that names a type is ignored instead of failing to link. `import x =
+require("y")` and `export = value` work in CommonJS files. Decorators and JSX (`.tsx`) are not
+supported.
+
+```ts
+interface User {
+  name: string
+  roles?: string[]
+}
+
+enum Level {
+  Guest,
+  Admin = 10,
+}
+
+class Account {
+  constructor(public readonly user: User, private level: Level = Level.Guest) {}
+  describe(): string {
+    return `${this.user.name} (${Level[this.level]})`
+  }
+}
+
+const admin = new Account({ name: "ann" }, Level.Admin)
+console.log(admin.describe(), Level.Admin satisfies number)
+```
+
+```text
+ann (Admin) 10
 ```
 
 ## Binary data
@@ -2241,6 +2293,6 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
 - Private names are shared by all evaluations of a class body, so instances of two classes made
   by the same factory can access each other's private members
 - Several realms in one thread (`vm` contexts share one realm)
-- `Temporal`, `ShadowRealm` and decorators
+- `Temporal`, `ShadowRealm`, decorators, and JSX/TSX
 - Tracing garbage collection
 - JIT compilation

@@ -8178,8 +8178,34 @@ pub const BUILTIN_MODULES: [&str; 55] = [
 
 pub const PREFIX_ONLY: [&str; 2] = ["sea", "test"];
 
-fn module_create_require(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
-    Ok(vm.globals.get("require").cloned().unwrap_or_default())
+fn module_create_require(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let base = arg(args, 0);
+    if base.is_undefined() {
+        return Ok(vm.globals.get("require").cloned().unwrap_or_default());
+    }
+    super::system::require_base(vm, &base)?;
+    let bind = |vm: &mut Vm, name: &str, f: crate::object::NativeFn| {
+        let target = native_fn(vm, name, 1, f);
+        crate::object::Obj::new(
+            crate::object::ObjKind::Bound(Box::new(crate::object::Bound {
+                target,
+                this: Value::Undefined,
+                args: vec![base.clone()],
+            })),
+            Some(vm.realm.function_proto.clone()),
+        )
+    };
+    let require = bind(vm, "require", super::system::require_at);
+    let resolve = bind(vm, "resolve", super::system::require_resolve_at);
+    require.set_hidden("resolve", Value::Object(resolve));
+    let cache = vm.require_cache_object_public();
+    require.set_own("cache", Value::Object(cache));
+    if let Some(Value::Object(global)) = vm.globals.get("require").cloned() {
+        if let Some(main) = global.get_own("main") {
+            require.set_own("main", main);
+        }
+    }
+    Ok(Value::Object(require))
 }
 
 fn module_is_builtin(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

@@ -2,6 +2,7 @@ use crate::token::Token;
 use std::path::{Path, PathBuf};
 
 pub const DEPS_DIR: &str = "nude_modules";
+pub const NODE_DEPS_DIR: &str = "node_modules";
 pub const MANIFEST: &str = "squirt.json";
 pub const EXT: &str = "jsq";
 
@@ -43,7 +44,24 @@ pub fn canonical(p: &Path) -> PathBuf {
     c
 }
 
-pub const EXTENSIONS: [&str; 5] = [EXT, "js", "mjs", "cjs", "json"];
+pub const EXTENSIONS: [&str; 8] = [EXT, "js", "mjs", "cjs", "ts", "mts", "cts", "json"];
+
+pub fn is_typescript(name: &str) -> bool {
+    (name.ends_with(".ts") || name.ends_with(".mts") || name.ends_with(".cts"))
+        && !name.ends_with(".d.ts")
+}
+
+fn typescript_sibling(p: &Path) -> Option<PathBuf> {
+    let ext = p.extension()?.to_str()?;
+    let ts = match ext {
+        "js" => "ts",
+        "mjs" => "mts",
+        "cjs" => "cts",
+        _ => return None,
+    };
+    let q = p.with_extension(ts);
+    q.is_file().then_some(q)
+}
 
 fn with_extension(p: &Path, ext: &str) -> PathBuf {
     let mut s = p.as_os_str().to_owned();
@@ -201,6 +219,9 @@ fn resolve_file(p: &Path) -> Option<PathBuf> {
     if p.is_file() {
         return Some(p.to_path_buf());
     }
+    if let Some(q) = typescript_sibling(p) {
+        return Some(q);
+    }
     for ext in EXTENSIONS {
         let q = with_extension(p, ext);
         if q.is_file() {
@@ -323,8 +344,8 @@ pub fn explicit_commonjs(dir: &Path) -> bool {
 pub fn is_commonjs(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
-        "cjs" | "json" => return true,
-        "js" => {}
+        "cjs" | "cts" | "json" => return true,
+        "js" | "ts" => {}
         _ => return false,
     }
     if let Some(v) = CJS_CACHE.with(|c| c.borrow().get(path).copied()) {
@@ -393,13 +414,252 @@ fn resolve_import_alias(spec: &str, from_dir: &Path, cjs: bool) -> Result<PathBu
     Err(format!("Cannot find module '{spec}'"))
 }
 
+struct PathConfig {
+    paths: Vec<(String, Vec<String>)>,
+    paths_base: PathBuf,
+    base_url: Option<PathBuf>,
+}
+
+thread_local! {
+    static PATH_CONFIGS: std::cell::RefCell<std::collections::HashMap<PathBuf, Option<std::rc::Rc<PathConfig>>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+pub fn lenient_json(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let mut in_string = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if c == '\\' && i + 1 < chars.len() {
+                out.push(chars[i + 1]);
+                i += 2;
+                continue;
+            }
+            if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '/' && chars.get(i + 1) == Some(&'/') {
+            while i < chars.len() && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && chars.get(i + 1) == Some(&'*') {
+            i += 2;
+            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i += 2;
+            continue;
+        }
+        if c == ',' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if matches!(chars.get(j), Some('}') | Some(']')) {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+fn read_config_chain(file: &Path, depth: u32, out: &mut Vec<(PathBuf, serde_json::Value)>) {
+    if depth > 8 {
+        return;
+    }
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&lenient_json(&text)) else {
+        return;
+    };
+    let dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
+    let parents: Vec<String> = match v.get("extends") {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
+    };
+    out.push((dir.clone(), v));
+    for parent in parents {
+        let target = if parent.starts_with('.') || Path::new(&parent).is_absolute() {
+            dir.join(&parent)
+        } else {
+            let mut found = None;
+            let mut d = Some(dir.clone());
+            while let Some(cur) = d {
+                for deps in [DEPS_DIR, NODE_DEPS_DIR] {
+                    let c = cur.join(deps).join(&parent);
+                    if c.exists() {
+                        found = Some(c);
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
+                d = cur.parent().map(Path::to_path_buf);
+            }
+            match found {
+                Some(f) => f,
+                None => continue,
+            }
+        };
+        let target = if target.is_dir() {
+            target.join("tsconfig.json")
+        } else if target.extension().is_none() {
+            with_extension(&target, "json")
+        } else {
+            target
+        };
+        read_config_chain(&target, depth + 1, out);
+    }
+}
+
+fn load_path_config(file: &Path) -> Option<PathConfig> {
+    let mut chain = Vec::new();
+    read_config_chain(file, 0, &mut chain);
+    let mut paths = None;
+    let mut paths_base = None;
+    let mut base_url = None;
+    for (dir, v) in &chain {
+        let Some(opts) = v.get("compilerOptions") else {
+            continue;
+        };
+        if base_url.is_none() {
+            if let Some(b) = opts.get("baseUrl").and_then(|b| b.as_str()) {
+                base_url = Some(dir.join(b));
+            }
+        }
+        if paths.is_none() {
+            if let Some(map) = opts.get("paths").and_then(|p| p.as_object()) {
+                let list: Vec<(String, Vec<String>)> = map
+                    .iter()
+                    .map(|(k, v)| {
+                        let targets = v
+                            .as_array()
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|t| t.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        (k.clone(), targets)
+                    })
+                    .collect();
+                paths = Some(list);
+                paths_base = Some(dir.clone());
+            }
+        }
+    }
+    if paths.is_none() && base_url.is_none() {
+        return None;
+    }
+    let paths_base = base_url.clone().or(paths_base).unwrap_or_default();
+    Some(PathConfig {
+        paths: paths.unwrap_or_default(),
+        paths_base,
+        base_url,
+    })
+}
+
+fn path_config_for(dir: &Path) -> Option<std::rc::Rc<PathConfig>> {
+    if let Some(hit) = PATH_CONFIGS.with(|c| c.borrow().get(dir).cloned()) {
+        return hit;
+    }
+    let mut result = None;
+    let mut cur = Some(dir.to_path_buf());
+    while let Some(d) = cur {
+        if d.file_name()
+            .is_some_and(|n| n == DEPS_DIR || n == NODE_DEPS_DIR)
+        {
+            break;
+        }
+        let ts = d.join("tsconfig.json");
+        let js = d.join("jsconfig.json");
+        let file = if ts.is_file() {
+            Some(ts)
+        } else if js.is_file() {
+            Some(js)
+        } else {
+            None
+        };
+        if let Some(f) = file {
+            result = load_path_config(&f).map(std::rc::Rc::new);
+            break;
+        }
+        cur = d.parent().map(Path::to_path_buf);
+    }
+    PATH_CONFIGS.with(|c| c.borrow_mut().insert(dir.to_path_buf(), result.clone()));
+    result
+}
+
+fn config_paths_resolve(spec: &str, from_dir: &Path) -> Option<PathBuf> {
+    let config = path_config_for(from_dir)?;
+    let mut best: Option<(usize, &str, &Vec<String>)> = None;
+    for (pattern, targets) in &config.paths {
+        let captured = match pattern.split_once('*') {
+            Some((prefix, suffix)) => {
+                if spec.len() >= prefix.len() + suffix.len()
+                    && spec.starts_with(prefix)
+                    && spec.ends_with(suffix)
+                {
+                    Some((prefix.len(), &spec[prefix.len()..spec.len() - suffix.len()]))
+                } else {
+                    None
+                }
+            }
+            None => (pattern == spec).then_some((usize::MAX, "")),
+        };
+        if let Some((rank, cap)) = captured {
+            if best.is_none_or(|(r, _, _)| rank > r) {
+                best = Some((rank, cap, targets));
+            }
+        }
+    }
+    if let Some((_, cap, targets)) = best {
+        for t in targets {
+            let target = config.paths_base.join(t.replace('*', cap));
+            if let Some(found) = resolve_file(&target) {
+                return Some(found);
+            }
+        }
+    }
+    let base = config.base_url.as_ref()?;
+    resolve_file(&base.join(spec))
+}
+
 pub fn resolve(spec: &str, from_dir: &Path) -> Result<PathBuf, String> {
     resolve_with(spec, from_dir, false)
 }
 
 pub fn resolve_with(spec: &str, from_dir: &Path, cjs: bool) -> Result<PathBuf, String> {
     if spec.starts_with('#') {
-        return resolve_import_alias(spec, from_dir, cjs);
+        return resolve_import_alias(spec, from_dir, cjs).or_else(|e| {
+            config_paths_resolve(spec, from_dir)
+                .map(|p| canonical(&p))
+                .ok_or(e)
+        });
     }
     let relative = spec.starts_with("./")
         || spec.starts_with("../")
@@ -421,14 +681,19 @@ pub fn resolve_with(spec: &str, from_dir: &Path, cjs: bool) -> Result<PathBuf, S
         }
     }
     let sub = parts.next().unwrap_or("");
+    if let Some(found) = config_paths_resolve(spec, from_dir) {
+        return Ok(canonical(&found));
+    }
     let mut dir = Some(from_dir.to_path_buf());
     while let Some(d) = dir {
-        let candidate = d.join(DEPS_DIR).join(&pkg);
-        if candidate.is_dir() {
-            let found = package_subpath(&candidate, sub, cjs);
-            return found.map(|p| canonical(&p)).ok_or_else(|| {
-                format!("Cannot find module '{spec}': package '{pkg}' has no entry point")
-            });
+        for deps in [DEPS_DIR, NODE_DEPS_DIR] {
+            let candidate = d.join(deps).join(&pkg);
+            if candidate.is_dir() {
+                let found = package_subpath(&candidate, sub, cjs);
+                return found.map(|p| canonical(&p)).ok_or_else(|| {
+                    format!("Cannot find module '{spec}': package '{pkg}' has no entry point")
+                });
+            }
         }
         dir = d.parent().map(Path::to_path_buf);
     }

@@ -566,7 +566,11 @@ impl Vm {
         mode: Mode,
         sloppy: bool,
     ) -> Result<Rc<FunctionProto>, SyntaxError> {
-        let ast = parser::parse(src)?;
+        let ast = if module::is_typescript(name) {
+            parser::parse_ts(src, false)?
+        } else {
+            parser::parse(src)?
+        };
         compile_module(
             &ast,
             Rc::new(ModuleInfo {
@@ -586,7 +590,11 @@ impl Vm {
         dir: PathBuf,
         sloppy: bool,
     ) -> Result<Rc<FunctionProto>, SyntaxError> {
-        let ast = parser::parse_script(src)?;
+        let ast = if module::is_typescript(name) {
+            parser::parse_ts(src, true)?
+        } else {
+            parser::parse_script(src)?
+        };
         compile_module(
             &ast,
             Rc::new(ModuleInfo {
@@ -1411,6 +1419,7 @@ impl Vm {
         let Some(link) = proto.link.clone() else {
             return Ok(());
         };
+        let lenient = module::is_typescript(&path.display().to_string());
         for source in &link.stars {
             if let Some(dep) = self.link_target(path, source)? {
                 if !module::is_commonjs(&dep) {
@@ -1432,6 +1441,9 @@ impl Vm {
             for name in names {
                 let mut seen = Vec::new();
                 let r = self.resolve_export(&dep, name, &mut seen)?;
+                if lenient && r == Resolution::NotFound {
+                    continue;
+                }
                 if let Some(e) = self.link_error(source, name, &r) {
                     return Err(e);
                 }
@@ -1453,6 +1465,9 @@ impl Vm {
             }
             let mut seen = Vec::new();
             let r = self.resolve_export(&dep, imported, &mut seen)?;
+            if lenient && r == Resolution::NotFound {
+                continue;
+            }
             if let Some(e) = self.link_error(source, imported, &r) {
                 return Err(e);
             }

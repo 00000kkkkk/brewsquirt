@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- TypeScript runs without a build step: `.ts`, `.mts` and `.cts` files are parsed with their
+  types stripped, including generics, `as`/`satisfies`/`!`, overloads, abstract classes,
+  access modifiers, `declare`, index signatures and type-only imports, which are removed together
+  with imports that are only used as types. Constructor parameter properties, `enum`, `const
+  enum` and `namespace` are compiled like `tsc` does, and CommonJS files accept `import x =
+  require()` and `export =`. `effect`, `rxjs`, `zod` and `chrono-node` run from their TypeScript
+  sources.
+- `./x.js` imports find `x.ts` when only the TypeScript file exists, extensionless imports try the
+  TypeScript extensions, and `tsconfig.json`/`jsconfig.json` `paths` and `baseUrl` (with
+  `extends`, comments and trailing commas) resolve path aliases such as `@/lib/x`.
+
+### Fixed
+
+- Packages in `node_modules` were not found; bare specifiers now look in `node_modules` as well as
+  `nude_modules`, so projects installed with npm, pnpm or yarn run unchanged.
+- `module.createRequire(filename)` returned the caller's `require`; it now resolves relative to the
+  given path or `file:` URL and has its own `resolve`.
+
 ## [1.5.0] - 2026-10-23
 
 ### Added

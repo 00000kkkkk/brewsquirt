@@ -407,6 +407,91 @@ fn caller_module(vm: &Vm) -> std::rc::Rc<crate::bytecode::ModuleInfo> {
     })
 }
 
+pub fn require_base(vm: &mut Vm, v: &Value) -> Result<std::path::PathBuf, Value> {
+    let text = match v {
+        Value::Object(_) => {
+            let href = vm.get_prop(v, "href")?;
+            vm.to_string(&href)?
+        }
+        other => vm.to_string(other)?,
+    };
+    let text = text.to_string();
+    let path = match text.strip_prefix("file://") {
+        Some(rest) => {
+            let mut bytes = Vec::with_capacity(rest.len());
+            let raw = rest.as_bytes();
+            let mut i = 0;
+            while i < raw.len() {
+                if raw[i] == b'%' && i + 2 < raw.len() {
+                    if let Ok(b) = u8::from_str_radix(&rest[i + 1..i + 3], 16) {
+                        bytes.push(b);
+                        i += 3;
+                        continue;
+                    }
+                }
+                bytes.push(raw[i]);
+                i += 1;
+            }
+            let decoded = String::from_utf8_lossy(&bytes).into_owned();
+            let trimmed = if cfg!(windows) && decoded.len() > 2 && decoded.as_bytes()[2] == b':' {
+                decoded[1..].to_string()
+            } else {
+                decoded
+            };
+            std::path::PathBuf::from(trimmed)
+        }
+        None => std::path::PathBuf::from(text.clone()),
+    };
+    if text.ends_with('/') || text.ends_with('\\') {
+        return Ok(path);
+    }
+    Ok(path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or(path))
+}
+
+fn base_module(vm: &mut Vm, v: &Value) -> Result<std::rc::Rc<crate::bytecode::ModuleInfo>, Value> {
+    let dir = require_base(vm, v)?;
+    Ok(std::rc::Rc::new(crate::bytecode::ModuleInfo {
+        name: "<require>".into(),
+        dir,
+        source: "".into(),
+        sloppy: true,
+    }))
+}
+
+pub fn require_at(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let spec = vm.to_string(&arg(args, 1))?;
+    if spec.is_empty() {
+        return Err(vm.type_error("The argument 'id' must be a non-empty string. Received ''"));
+    }
+    let from = base_module(vm, &arg(args, 0))?;
+    vm.require_module(&spec, &from)
+}
+
+pub fn require_resolve_at(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let spec = vm.to_string(&arg(args, 1))?;
+    let bare = !spec.starts_with('.') && !spec.starts_with('/') && !spec.contains(':');
+    if spec.starts_with("node:") || spec.starts_with("squirt:") {
+        return Ok(Value::Str(spec));
+    }
+    if bare && vm.import_node(&spec)?.is_some() {
+        return Ok(Value::Str(spec));
+    }
+    let from = base_module(vm, &arg(args, 0))?;
+    match crate::module::resolve_with(&spec, &from.dir, true) {
+        Ok(p) => Ok(Value::Str(p.display().to_string().into())),
+        Err(msg) => {
+            let e = vm.make_error(ErrorKind::Error, msg);
+            if let Value::Object(o) = &e {
+                o.set_own("code", "MODULE_NOT_FOUND".into());
+            }
+            Err(e)
+        }
+    }
+}
+
 fn require(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let spec = match arg(args, 0) {
         Value::Str(s) => s,

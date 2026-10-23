@@ -7,6 +7,8 @@ use std::rc::Rc;
 
 type R<T> = Result<T, SyntaxError>;
 
+mod ts;
+
 const RESERVED: &[&str] = &[
     "break",
     "case",
@@ -73,14 +75,18 @@ const STRICT_RESERVED: &[&str] = &[
 type ExportList = Vec<(JsStr, JsStr)>;
 
 pub fn parse(src: &str) -> R<Vec<Stmt>> {
-    parse_goal(src, false)
+    parse_goal(src, false, false)
 }
 
 pub fn parse_script(src: &str) -> R<Vec<Stmt>> {
-    parse_goal(src, true)
+    parse_goal(src, true, false)
 }
 
-fn parse_goal(src: &str, script: bool) -> R<Vec<Stmt>> {
+pub fn parse_ts(src: &str, script: bool) -> R<Vec<Stmt>> {
+    parse_goal(src, script, true)
+}
+
+fn parse_goal(src: &str, script: bool, ts: bool) -> R<Vec<Stmt>> {
     let toks = crate::lexer::tokenize_goal(src, script)?;
     let mut parser = Parser {
         pairs: bracket_pairs(&toks),
@@ -108,7 +114,16 @@ fn parse_goal(src: &str, script: bool) -> R<Vec<Stmt>> {
         using_ok: false,
         using_scope: None,
         using_ids: 0,
+        ts: false,
+        ts_splits: Vec::new(),
+        ts_refs: rustc_hash::FxHashSet::default(),
+        ts_props: Vec::new(),
+        ts_last_props: Vec::new(),
+        ts_bodyless: false,
+        ts_ambient: 0,
+        ts_in_extends: false,
     };
+    parser.ts = ts;
     parser.strict = !script || parser.has_use_strict_from(0);
     if script && parser.strict {
         parser.check_prologue_octal(0)?;
@@ -144,6 +159,14 @@ pub fn parse_eval(src: &str, ctx: &EvalCtx) -> R<Vec<Stmt>> {
         using_ok: false,
         using_scope: None,
         using_ids: 0,
+        ts: false,
+        ts_splits: Vec::new(),
+        ts_refs: rustc_hash::FxHashSet::default(),
+        ts_props: Vec::new(),
+        ts_last_props: Vec::new(),
+        ts_bodyless: false,
+        ts_ambient: 0,
+        ts_in_extends: false,
     };
     parser.strict = ctx.strict || parser.has_use_strict_from(0);
     if parser.strict {
@@ -212,6 +235,14 @@ struct Parser {
     using_ok: bool,
     using_scope: Option<(u32, bool)>,
     using_ids: u32,
+    ts: bool,
+    ts_splits: Vec<(usize, Token)>,
+    ts_refs: rustc_hash::FxHashSet<JsStr>,
+    ts_props: Vec<JsStr>,
+    ts_last_props: Vec<JsStr>,
+    ts_bodyless: bool,
+    ts_ambient: u32,
+    ts_in_extends: bool,
 }
 
 impl Parser {
@@ -428,7 +459,8 @@ impl Parser {
                                     | Tok::Punct(P::Star)
                             )
                             || matches!(&prev.tok, Tok::Ident(w) if !prev.escaped
-                                && matches!(&**w, "static" | "get" | "set" | "async"));
+                                && (matches!(&**w, "static" | "get" | "set" | "async")
+                                    || (self.ts && matches!(&**w, "readonly" | "declare" | "abstract" | "override" | "accessor"))));
                         if decl && !out.contains(n) {
                             out.push(n.clone());
                         }
@@ -557,6 +589,9 @@ impl Parser {
         while !self.is_eof() {
             self.at_top = true;
             out.push(self.statement()?);
+        }
+        if self.ts {
+            self.ts_elide_imports(&mut out);
         }
         if let Some((id, is_async)) = self.using_scope.take() {
             let line = self.line();
@@ -833,6 +868,13 @@ impl Parser {
         } else {
             self.word()
         };
+        if self.ts && !single {
+            if let Some(w) = word.clone() {
+                if let Some(kind) = self.ts_statement(&w)? {
+                    return Ok(kind);
+                }
+            }
+        }
         match word.as_deref() {
             Some("using") | Some("await") if self.using_head(false).is_some() => {
                 let is_async = self.using_head(false) == Some(true);
@@ -872,6 +914,9 @@ impl Parser {
                 let name = self.binding_ident()?;
                 let f =
                     self.function_full(Some(name), FuncKind::Normal, line, false, is_generator)?;
+                if std::mem::take(&mut self.ts_bodyless) {
+                    return Ok(StmtKind::Empty);
+                }
                 Ok(StmtKind::Function(f))
             }
             Some("async") if self.is_kw_at(1, "function") && !self.peek_at(1).nl_before => {
@@ -883,6 +928,9 @@ impl Parser {
                 let name = self.binding_ident()?;
                 let f =
                     self.function_full(Some(name), FuncKind::Normal, line, true, is_generator)?;
+                if std::mem::take(&mut self.ts_bodyless) {
+                    return Ok(StmtKind::Empty);
+                }
                 Ok(StmtKind::Function(f))
             }
             Some("class") => Ok(StmtKind::Class(self.class(true)?)),
@@ -964,6 +1012,9 @@ impl Parser {
                 if self.eat_kw("catch") {
                     if self.eat(P::LParen) {
                         let p = self.binding_pattern()?;
+                        if self.ts {
+                            self.ts_annotation()?;
+                        }
                         let mut names = Vec::new();
                         p.bound_names(&mut names);
                         for (i, n) in names.iter().enumerate() {
@@ -1143,12 +1194,18 @@ impl Parser {
             if kind != DeclKind::Var {
                 self.check_lexical_name(&pattern)?;
             }
+            if self.ts {
+                if self.is(P::Bang) && !self.peek().nl_before {
+                    self.advance();
+                }
+                self.ts_annotation()?;
+            }
             let init = if self.eat(P::Eq) {
                 Some(self.assignment()?)
             } else {
                 None
             };
-            if init.is_none() {
+            if init.is_none() && self.ts_ambient == 0 {
                 if kind == DeclKind::Const {
                     return Err(self.error("Missing initializer in const declaration"));
                 }
@@ -1198,6 +1255,9 @@ impl Parser {
             let pattern = self.binding_pattern()?;
             if kind != DeclKind::Var {
                 self.check_lexical_name(&pattern)?;
+            }
+            if self.ts {
+                self.ts_annotation()?;
             }
             let mut annexb_init = None;
             if kind == DeclKind::Var
@@ -1269,6 +1329,9 @@ impl Parser {
             decls.push((pattern, first));
             while self.eat(P::Comma) {
                 let p = self.binding_pattern()?;
+                if self.ts {
+                    self.ts_annotation()?;
+                }
                 let i = if self.eat(P::Eq) {
                     Some(self.assignment()?)
                 } else {
@@ -1364,6 +1427,26 @@ impl Parser {
 
     fn import(&mut self) -> R<StmtKind> {
         self.advance();
+        if self.ts
+            && self.is_kw("type")
+            && (matches!(self.peek_at(1).tok, Tok::Ident(_)) && !self.is_kw_at(1, "from")
+                || self.is_at(1, P::LBrace)
+                || self.is_at(1, P::Star))
+        {
+            while !self.is_eof() && !self.is(P::Semi) && !matches!(self.peek().tok, Tok::Str(_)) {
+                if self.is(P::LBrace) || self.is(P::LParen) {
+                    self.ts_skip_group()?;
+                } else {
+                    self.advance();
+                }
+            }
+            if matches!(self.peek().tok, Tok::Str(_)) {
+                self.advance();
+                self.import_attributes()?;
+            }
+            self.semicolon()?;
+            return Ok(StmtKind::Empty);
+        }
         if let Tok::Str(s) = &self.peek().tok {
             let source = s.clone();
             self.advance();
@@ -1389,6 +1472,23 @@ impl Parser {
                 namespace = Some(self.binding_ident()?);
             } else if self.eat(P::LBrace) {
                 while !self.eat(P::RBrace) {
+                    if self.ts
+                        && self.is_kw("type")
+                        && matches!(self.peek_at(1).tok, Tok::Ident(_) | Tok::Str(_))
+                        && !(self.is_kw_at(1, "as")
+                            && !matches!(self.peek_at(2).tok, Tok::Ident(_)))
+                    {
+                        self.advance();
+                        self.module_name()?;
+                        if self.eat_kw("as") {
+                            self.binding_ident()?;
+                        }
+                        if !self.eat(P::Comma) {
+                            self.expect(P::RBrace)?;
+                            break;
+                        }
+                        continue;
+                    }
                     let was_string = matches!(self.peek().tok, Tok::Str(_));
                     let imported = self.module_name()?;
                     self.check_export_name(&imported)?;
@@ -1441,10 +1541,29 @@ impl Parser {
         let mut names = Vec::new();
         let mut string_local = false;
         while !self.eat(P::RBrace) {
+            if self.ts
+                && self.is_kw("type")
+                && matches!(self.peek_at(1).tok, Tok::Ident(_) | Tok::Str(_))
+                && !(self.is_kw_at(1, "as") && !matches!(self.peek_at(2).tok, Tok::Ident(_)))
+            {
+                self.advance();
+                self.module_name()?;
+                if self.eat_kw("as") {
+                    self.module_name()?;
+                }
+                if !self.eat(P::Comma) {
+                    self.expect(P::RBrace)?;
+                    break;
+                }
+                continue;
+            }
             if matches!(self.peek().tok, Tok::Str(_)) {
                 string_local = true;
             }
             let local = self.module_name()?;
+            if self.ts {
+                self.ts_refs.insert(local.clone());
+            }
             self.check_export_name(&local)?;
             let exported = if self.eat_kw("as") {
                 self.module_name()?
@@ -1470,6 +1589,77 @@ impl Parser {
 
     fn export(&mut self) -> R<StmtKind> {
         self.advance();
+        if self.ts {
+            if self.is_kw("type") && (self.is_at(1, P::LBrace) || self.is_at(1, P::Star)) {
+                self.advance();
+                if self.eat(P::Star) {
+                    if self.eat_kw("as") {
+                        self.module_name()?;
+                    }
+                } else {
+                    self.ts_skip_group()?;
+                }
+                if self.eat_kw("from") {
+                    self.string_lit()?;
+                    self.import_attributes()?;
+                }
+                self.semicolon()?;
+                return Ok(StmtKind::Empty);
+            }
+            if self.eat(P::Eq) {
+                let line = self.line();
+                let value = self.assignment()?;
+                self.semicolon()?;
+                let target = Expr {
+                    kind: ExprKind::Member {
+                        obj: Box::new(syn_ident("module", line)),
+                        name: "exports".into(),
+                        optional: false,
+                    },
+                    line,
+                };
+                return Ok(StmtKind::Expr(Expr {
+                    kind: ExprKind::Assign {
+                        op: None,
+                        target: AssignTarget::Simple(Box::new(target)),
+                        value: Box::new(value),
+                    },
+                    line,
+                }));
+            }
+            if self.is_kw("as") && self.is_kw_at(1, "namespace") {
+                self.advance();
+                self.advance();
+                self.ident_name()?;
+                self.semicolon()?;
+                return Ok(StmtKind::Empty);
+            }
+            if self.is_kw("default") && self.is_kw_at(1, "interface") {
+                self.advance();
+                let s = self.statement()?;
+                if matches!(s.kind, StmtKind::Empty) {
+                    return Ok(StmtKind::Empty);
+                }
+                return Err(SyntaxError::new("Unexpected export", s.line, 1));
+            }
+            if self.is_kw("default") && self.is_kw_at(1, "abstract") && self.is_kw_at(2, "class") {
+                self.advance();
+                let line = self.line();
+                self.advance();
+                let named = matches!(&self.peek_at(1).tok, Tok::Ident(n) if &**n != "extends" && &**n != "implements");
+                let c = self.class(named)?;
+                if named {
+                    return Ok(StmtKind::Export(ExportDecl::DefaultDecl(Box::new(Stmt {
+                        kind: StmtKind::Class(c),
+                        line,
+                    }))));
+                }
+                return Ok(StmtKind::Export(ExportDecl::Default(Expr {
+                    kind: ExprKind::Class(c),
+                    line,
+                })));
+            }
+        }
         if self.eat_kw("default") {
             let line = self.line();
             let is_async =
@@ -1480,6 +1670,9 @@ impl Parser {
                 let name_at = fn_at + 1 + usize::from(star);
                 if matches!(self.peek_at(name_at).tok, Tok::Ident(_)) {
                     let s = self.statement()?;
+                    if matches!(s.kind, StmtKind::Empty) {
+                        return Ok(StmtKind::Empty);
+                    }
                     return Ok(StmtKind::Export(ExportDecl::DefaultDecl(Box::new(s))));
                 }
                 self.span_start = Some(self.peek().start);
@@ -1562,6 +1755,7 @@ impl Parser {
             StmtKind::Decl(..) | StmtKind::Function(_) | StmtKind::Class(_) => {
                 Ok(StmtKind::Export(ExportDecl::Decl(Box::new(s))))
             }
+            StmtKind::Empty if self.ts => Ok(StmtKind::Empty),
             _ => Err(SyntaxError::new("Unexpected export", s.line, 1)),
         }
     }
@@ -1597,9 +1791,28 @@ impl Parser {
         let saved_field = std::mem::take(&mut self.field_init);
         let saved_sb = std::mem::take(&mut self.static_block);
         let nt = std::mem::replace(&mut self.nt_ok, true);
-        let parsed = self
-            .params()
-            .and_then(|(params, rest)| Ok((params, rest, self.function_body()?)));
+        let saved_props = std::mem::take(&mut self.ts_props);
+        let mut own_props = Vec::new();
+        let mut bodyless = false;
+        let parsed = (|| {
+            if self.ts && self.is(P::Lt) {
+                self.ts_type_params()?;
+            }
+            let (params, rest) = self.params()?;
+            own_props = std::mem::take(&mut self.ts_props);
+            if self.ts {
+                self.ts_annotation()?;
+                if !self.is(P::LBrace) {
+                    self.semicolon()?;
+                    bodyless = true;
+                    return Ok((params, rest, Vec::new()));
+                }
+            }
+            Ok((params, rest, self.function_body()?))
+        })();
+        self.ts_props = saved_props;
+        self.ts_last_props = own_props;
+        self.ts_bodyless = bodyless;
         self.nt_ok = nt;
         self.static_block = saved_sb;
         self.field_init = saved_field;
@@ -1783,11 +1996,46 @@ impl Parser {
         let mut params = Vec::new();
         let mut rest = None;
         while !self.is(P::RParen) {
+            let mut is_prop = false;
+            if self.ts {
+                if self.is_kw("this")
+                    && (self.is_at(1, P::Colon)
+                        || self.is_at(1, P::Comma)
+                        || self.is_at(1, P::RParen))
+                {
+                    self.advance();
+                    self.ts_annotation()?;
+                    if !self.eat(P::Comma) {
+                        break;
+                    }
+                    continue;
+                }
+                is_prop = self.ts_param_modifiers();
+            }
             if self.eat(P::Ellipsis) {
                 rest = Some(self.binding_pattern()?);
+                if self.ts {
+                    self.ts_annotation()?;
+                }
                 break;
             }
             let pattern = self.binding_pattern()?;
+            if self.ts {
+                if self.is(P::Question)
+                    && matches!(
+                        self.peek_at(1).tok,
+                        Tok::Punct(P::Colon | P::Comma | P::RParen | P::Eq)
+                    )
+                {
+                    self.advance();
+                }
+                self.ts_annotation()?;
+                if is_prop {
+                    if let Pattern::Ident(n) = &pattern {
+                        self.ts_props.push(n.clone());
+                    }
+                }
+            }
             let default = if self.eat(P::Eq) {
                 Some(self.assignment()?)
             } else {
@@ -1948,18 +2196,31 @@ impl Parser {
         let line = self.line();
         let start = self.peek().start;
         self.expect_kw("class")?;
-        let name = if matches!(self.peek().tok, Tok::Ident(_)) && !self.is_kw("extends") {
+        let name = if matches!(self.peek().tok, Tok::Ident(_))
+            && !self.is_kw("extends")
+            && !(self.ts && self.is_kw("implements"))
+        {
             Some(self.binding_ident()?)
         } else if require_name {
             return Err(self.error("Class statements require a name"));
         } else {
             None
         };
+        if self.ts && self.is(P::Lt) {
+            self.ts_type_params()?;
+        }
         let superclass = if self.eat_kw("extends") {
-            Some(self.call_member()?)
+            let e = self.call_member()?;
+            if self.ts && self.is(P::Lt) {
+                self.ts_type_args()?;
+            }
+            Some(e)
         } else {
             None
         };
+        if self.ts && self.eat_kw("implements") {
+            self.ts_heritage()?;
+        }
         let id = fresh_class_id();
         let declared = self.prescan_private();
         self.class_ids.push((id, Rc::new(declared)));
@@ -1996,6 +2257,16 @@ impl Parser {
                     || p.is_at(n, P::Semi)
                     || p.is_at(n, P::RBrace)
                     || p.peek_at(n).nl_before
+                    || (p.ts
+                        && (p.is_at(n, P::Colon)
+                            || p.is_at(n, P::Question)
+                            || p.is_at(n, P::Bang)
+                            || p.is_at(n, P::Lt)))
+            };
+            let (mut ts_declare, mut ts_abstract) = if self.ts {
+                self.ts_member_modifiers()
+            } else {
+                (false, false)
             };
             let mut is_static = false;
             if self.is_kw("static") && !ends_name(self, 1) {
@@ -2036,6 +2307,17 @@ impl Parser {
                     continue;
                 }
             }
+            if self.ts {
+                let (d, a) = self.ts_member_modifiers();
+                ts_declare |= d;
+                ts_abstract |= a;
+                if self.ts_index_signature_ahead() {
+                    self.ts_skip_group()?;
+                    self.ts_annotation()?;
+                    self.semicolon()?;
+                    continue;
+                }
+            }
             let mut is_async = false;
             let mut is_generator = false;
             let mut accessor = None;
@@ -2055,6 +2337,9 @@ impl Parser {
                 self.advance();
             }
             let (key, _) = self.prop_key()?;
+            if self.ts && (self.is(P::Question) || self.is(P::Bang)) && !self.peek().nl_before {
+                self.advance();
+            }
             if let Some(setter) = accessor {
                 let fname = match &key {
                     PropKey::Named(n) => Some(display_name(n)),
@@ -2067,6 +2352,9 @@ impl Parser {
                 };
                 self.span_start = Some(mstart);
                 let f = self.function_rest(fname, kind, mline)?;
+                if std::mem::take(&mut self.ts_bodyless) {
+                    continue;
+                }
                 check_accessor_params(&f, setter, mline)?;
                 members.push(ClassMember::Accessor {
                     key,
@@ -2076,7 +2364,7 @@ impl Parser {
                 });
                 continue;
             }
-            if self.is(P::LParen) {
+            if self.is(P::LParen) || (self.ts && self.is(P::Lt)) {
                 let is_ctor =
                     !is_static && matches!(&key, PropKey::Named(n) if &**n == "constructor");
                 let kind = if is_ctor {
@@ -2102,7 +2390,16 @@ impl Parser {
                     ));
                 }
                 self.span_start = Some(mstart);
-                let f = self.function_full(fname, kind, mline, is_async, is_generator)?;
+                let mut f = self.function_full(fname, kind, mline, is_async, is_generator)?;
+                if std::mem::take(&mut self.ts_bodyless) {
+                    continue;
+                }
+                if is_ctor && self.ts {
+                    let props = std::mem::take(&mut self.ts_last_props);
+                    if !props.is_empty() {
+                        f = self.ts_inject_props(f, props, has_super);
+                    }
+                }
                 if is_ctor {
                     if constructor.is_some() {
                         return Err(SyntaxError::new(
@@ -2123,6 +2420,9 @@ impl Parser {
                 if is_async || is_generator {
                     return Err(self.unexpected());
                 }
+                if self.ts {
+                    self.ts_annotation()?;
+                }
                 let value = if self.eat(P::Eq) {
                     self.fn_depth += 1;
                     self.field_init += 1;
@@ -2136,6 +2436,9 @@ impl Parser {
                     None
                 };
                 self.semicolon()?;
+                if ts_declare || ts_abstract {
+                    continue;
+                }
                 members.push(ClassMember::Field {
                     key,
                     value,
@@ -2162,16 +2465,21 @@ impl Parser {
         Ok(first)
     }
 
-    fn is_arrow_ahead(&self) -> bool {
+    fn is_arrow_ahead(&mut self) -> bool {
         match &self.peek().tok {
             Tok::Ident(n) if !self.reserved(n) => {
                 self.is_at(1, P::Arrow) && !self.peek_at(1).nl_before
             }
+            Tok::Punct(P::Lt) if self.ts => self.ts_generic_arrow_ahead(),
             Tok::Punct(P::LParen) => {
                 let paired = self.pairs.get(self.pos).copied().unwrap_or(u32::MAX);
                 if paired != u32::MAX {
                     let t = self.toks.get(paired as usize + 1);
-                    return matches!(t, Some(t) if matches!(t.tok, Tok::Punct(P::Arrow)) && !t.nl_before);
+                    if matches!(t, Some(t) if matches!(t.tok, Tok::Punct(P::Arrow)) && !t.nl_before)
+                    {
+                        return true;
+                    }
+                    return self.ts && self.ts_return_arrow_ahead(paired as usize + 1);
                 }
                 let mut depth = 0i32;
                 let mut i = self.pos;
@@ -2237,8 +2545,18 @@ impl Parser {
     }
 
     fn arrow_parts(&mut self, is_async: bool) -> R<(Vec<Param>, Option<Pattern>, FuncBody)> {
+        if self.ts && self.is(P::Lt) {
+            self.ts_type_params()?;
+        }
         let (params, rest) = if self.is(P::LParen) {
-            self.params()?
+            let saved_props = std::mem::take(&mut self.ts_props);
+            let r = self.params();
+            self.ts_props = saved_props;
+            let r = r?;
+            if self.ts {
+                self.ts_annotation()?;
+            }
+            r
         } else {
             let n = self.binding_ident()?;
             (
@@ -2325,7 +2643,9 @@ impl Parser {
             return self.arrow(false);
         }
         if self.is_kw("async")
-            && (self.is_at(1, P::LParen) || matches!(self.peek_at(1).tok, Tok::Ident(_)))
+            && (self.is_at(1, P::LParen)
+                || matches!(self.peek_at(1).tok, Tok::Ident(_))
+                || (self.ts && self.is_at(1, P::Lt)))
             && !self.peek_at(1).nl_before
         {
             let save = self.pos;
@@ -2597,6 +2917,20 @@ impl Parser {
             if matches!(self.peek().tok, Tok::Regex(..)) {
                 self.relex(false)?;
             }
+            if self.ts
+                && min <= 8
+                && (self.is_kw("as") || self.is_kw("satisfies"))
+                && !self.peek().nl_before
+            {
+                self.advance();
+                if self.is_kw("const") {
+                    self.advance();
+                } else {
+                    self.ts_type()?;
+                }
+                unary_left = false;
+                continue;
+            }
             let Some((prec, op)) = self.binop_info() else {
                 break;
             };
@@ -2668,6 +3002,10 @@ impl Parser {
     }
 
     fn unary(&mut self) -> R<Expr> {
+        if self.ts && self.is(P::Lt) {
+            self.ts_type_args()?;
+            return self.unary();
+        }
         let line = self.line();
         let op = match &self.peek().tok {
             Tok::Punct(P::Bang) => UnaryOp::Not,
@@ -2812,6 +3150,13 @@ impl Parser {
         let mut chain = false;
         loop {
             let line = self.line();
+            if self.ts && self.is(P::Bang) && !self.peek().nl_before {
+                self.advance();
+                continue;
+            }
+            if self.ts && self.is(P::Lt) && self.ts_try_type_args() {
+                continue;
+            }
             if self.eat(P::Dot) {
                 let name = self.ident_name()?;
                 e = Expr {
@@ -3003,6 +3348,9 @@ impl Parser {
                 break;
             }
         }
+        if self.ts && self.is(P::Lt) {
+            self.ts_try_type_args();
+        }
         let args = if self.is(P::LParen) {
             self.arguments()?
         } else {
@@ -3066,12 +3414,21 @@ impl Parser {
                         using_ok: false,
                         using_scope: None,
                         using_ids: self.using_ids,
+                        ts: self.ts,
+                        ts_splits: Vec::new(),
+                        ts_refs: rustc_hash::FxHashSet::default(),
+                        ts_props: Vec::new(),
+                        ts_last_props: Vec::new(),
+                        ts_bodyless: false,
+                        ts_ambient: self.ts_ambient,
+                        ts_in_extends: false,
                     };
                     if sub.is_eof() {
                         return Err(sub.error("Unexpected token '}'"));
                     }
                     let e = sub.expression()?;
                     self.using_ids = sub.using_ids;
+                    self.ts_refs.extend(std::mem::take(&mut sub.ts_refs));
                     if !sub.is_eof() {
                         return Err(sub.unexpected());
                     }
@@ -3191,6 +3548,9 @@ impl Parser {
                 let name = name.clone();
                 self.check_ident_ref(&name)?;
                 self.advance();
+                if self.ts {
+                    self.ts_refs.insert(name.clone());
+                }
                 ExprKind::Ident(name)
             }
             Tok::Ident(name) => {
@@ -3302,6 +3662,9 @@ impl Parser {
                                 *top = true;
                             }
                         }
+                        if self.ts {
+                            self.ts_refs.insert(name.clone());
+                        }
                         ExprKind::Ident(name)
                     }
                 }
@@ -3328,6 +3691,7 @@ impl Parser {
                         || p.is_at(1, P::Comma)
                         || p.is_at(1, P::RBrace)
                         || p.is_at(1, P::Eq)
+                        || (p.ts && p.is_at(1, P::Lt))
                 };
                 let mut is_async = false;
                 let mut is_generator = false;
@@ -3367,7 +3731,7 @@ impl Parser {
                     } else {
                         PropDef::Getter(key, f)
                     });
-                } else if self.is(P::LParen) {
+                } else if self.is(P::LParen) || (self.ts && self.is(P::Lt)) {
                     let f = {
                         self.span_start = Some(kstart);
                         self.function_full(name, FuncKind::Method, line, is_async, is_generator)?
@@ -3391,6 +3755,9 @@ impl Parser {
                             if let Some(top) = self.args_used.last_mut() {
                                 *top = true;
                             }
+                        }
+                        if self.ts {
+                            self.ts_refs.insert(n.clone());
                         }
                         props.push(PropDef::Shorthand(n));
                     }
