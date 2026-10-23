@@ -8495,6 +8495,7 @@ fn fs_read(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 fn fs_write(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    crate::module::filesystem_changed();
     use std::io::Write;
     let p = path_of(vm, args, 0)?;
     let data = arg(args, 1);
@@ -8663,6 +8664,7 @@ fn open_flags(vm: &mut Vm, v: &Value) -> Result<std::fs::OpenOptions, Value> {
 }
 
 fn fs_open(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    crate::module::filesystem_changed();
     let p = path_of(vm, args, 0)?;
     let opts = open_flags(vm, &arg(args, 1))?;
     let file = opts
@@ -8930,6 +8932,7 @@ fn fs_readdir(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 fn fs_mkdir(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    crate::module::filesystem_changed();
     let p = path_of(vm, args, 0)?;
     if arg(args, 1).truthy() {
         let first = Path::new(&p)
@@ -8954,6 +8957,7 @@ fn strip_unc(p: &Path) -> String {
 }
 
 fn fs_mkdtemp(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    crate::module::filesystem_changed();
     let prefix = path_of(vm, args, 0)?;
     const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
     for _ in 0..100 {
@@ -8982,6 +8986,7 @@ fn fs_mkdtemp(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 fn fs_rm(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    crate::module::filesystem_changed();
     let p = path_of(vm, args, 0)?;
     let recursive = arg(args, 1).truthy();
     let force = arg(args, 2).truthy();
@@ -9015,6 +9020,7 @@ fn fs_rm(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 fn fs_rmdir(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    crate::module::filesystem_changed();
     let p = path_of(vm, args, 0)?;
     let r = if arg(args, 1).truthy() {
         std::fs::remove_dir_all(&p)
@@ -9026,6 +9032,7 @@ fn fs_rmdir(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 fn fs_unlink(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    crate::module::filesystem_changed();
     let p = path_of(vm, args, 0)?;
     std::fs::remove_file(&p)
         .map(|_| Value::Undefined)
@@ -9033,6 +9040,7 @@ fn fs_unlink(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 fn fs_rename(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    crate::module::filesystem_changed();
     let a = path_of(vm, args, 0)?;
     let b = path_of(vm, args, 1)?;
     std::fs::rename(&a, &b)
@@ -9041,6 +9049,7 @@ fn fs_rename(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 fn fs_copy(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    crate::module::filesystem_changed();
     let a = path_of(vm, args, 0)?;
     let b = path_of(vm, args, 1)?;
     std::fs::copy(&a, &b)
@@ -9062,6 +9071,7 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 fn fs_cp(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    crate::module::filesystem_changed();
     let a = path_of(vm, args, 0)?;
     let b = path_of(vm, args, 1)?;
     if Path::new(&a).is_dir() && !arg(args, 2).truthy() {
@@ -9087,6 +9097,7 @@ fn fs_realpath(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 fn fs_symlink(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    crate::module::filesystem_changed();
     let target = path_of(vm, args, 0)?;
     let link = path_of(vm, args, 1)?;
     #[cfg(unix)]

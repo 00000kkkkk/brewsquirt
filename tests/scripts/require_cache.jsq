@@ -1,0 +1,24 @@
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { createRequire } from "node:module"
+
+const base = fs.mkdtempSync(path.join(os.tmpdir(), "jsq-req-"))
+const require = createRequire(path.join(base, "main.js"))
+
+try {
+  require("./later")
+} catch (e) {
+  console.log("before", e.code ?? "missing")
+}
+fs.writeFileSync(path.join(base, "later.js"), "module.exports = 'created later'")
+console.log("after", require("./later"))
+
+fs.mkdirSync(path.join(base, "pkg"))
+fs.writeFileSync(path.join(base, "pkg", "index.js"), "module.exports = { from: 'index' }")
+console.log(require("./pkg"), require("./pkg") === require("./pkg/index.js"))
+
+fs.writeFileSync(path.join(base, "esm.js"), "export const kind = 'esm'")
+fs.writeFileSync(path.join(base, "cjs.js"), "exports.kind = 'cjs'")
+console.log(require("./esm.js").kind, require("./cjs.js").kind, require("./sub/../cjs.js") === require("./cjs.js"))
+fs.rmSync(base, { recursive: true })

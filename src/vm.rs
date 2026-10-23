@@ -1601,7 +1601,13 @@ impl Vm {
         }
         let path = match module::resolve_with(spec, &from.dir, true) {
             Ok(p) => p,
-            Err(msg) => return Err(self.make_error(ErrorKind::Error, msg)),
+            Err(msg) => {
+                let e = self.make_error(ErrorKind::Error, msg);
+                if let Value::Object(o) = &e {
+                    o.set_own("code", "MODULE_NOT_FOUND".into());
+                }
+                return Err(e);
+            }
         };
         self.require_path(&path, spec)
     }
@@ -1646,7 +1652,7 @@ impl Vm {
             return Ok(value);
         }
         let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-        if !module::is_commonjs(path) {
+        if !module::is_commonjs_source(path, Some(&src)) {
             let from = Rc::new(ModuleInfo {
                 name: key.clone(),
                 dir: dir.clone(),

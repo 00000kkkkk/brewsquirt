@@ -765,6 +765,7 @@ fn fs_read(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 fn fs_write(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    crate::module::filesystem_changed();
     let p = path_arg(vm, args)?;
     let data = vm.to_string(&arg(args, 1))?;
     std::fs::write(&p, data.as_bytes())
@@ -773,6 +774,7 @@ fn fs_write(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 fn fs_append(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    crate::module::filesystem_changed();
     use std::io::Write;
     let p = path_arg(vm, args)?;
     let data = vm.to_string(&arg(args, 1))?;
@@ -791,6 +793,7 @@ fn fs_exists(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 fn fs_remove(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    crate::module::filesystem_changed();
     let p = path_arg(vm, args)?;
     let path = Path::new(&p);
     let r = if path.is_dir() {
@@ -815,6 +818,7 @@ fn fs_read_dir(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 fn fs_mkdir(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    crate::module::filesystem_changed();
     let p = path_arg(vm, args)?;
     std::fs::create_dir_all(&p)
         .map(|_| Value::Undefined)

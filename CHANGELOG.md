@@ -59,6 +59,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and upvalue reads and writes, constants and numeric array and typed array reads update the
   value stack in place instead of copying values through temporaries, and `ToInt32`/`ToUint32`
   avoid floating-point remainders. `bcryptjs` hashes 2.3 times faster.
+- Loading large CommonJS packages is about a third faster: module resolutions and real paths are
+  cached until the program changes the file system, relative requires no longer open every file
+  to find its real path, and deciding whether a `.js` file is CommonJS reuses the source that was
+  already read, looks up `package.json` once per directory and only tokenizes files that mention
+  `import` or `export`. `require("mathjs")` (1058 modules) went from 1.35 s to 0.88 s on Windows.
 
 ### Fixed
 
@@ -69,6 +74,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `http.Server.listen` lost its callback when it was called with a backlog or an explicit
   `undefined` host, which is how `ws` starts `new WebSocketServer({ port })`; every Node form of
   the call works now.
+- `require` failures carry `code: "MODULE_NOT_FOUND"`, and relative specifiers such as
+  `./missing/../file.js` are normalized before the file system is asked, like Node.
 - `fetch` removed `content-encoding` and `content-length` from compressed responses, and
   `http.request` decompressed bodies that Node hands over raw. `fetch` now asks for
   `gzip, deflate` like Node, decodes gzip, deflate (zlib and raw) and brotli while keeping the

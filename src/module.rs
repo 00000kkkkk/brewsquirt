@@ -32,7 +32,99 @@ pub fn display_path_abs(p: &Path) -> String {
     s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
 }
 
+static FS_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn filesystem_changed() {
+    FS_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn epoch() -> u64 {
+    FS_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+type Cache<K, V> = std::cell::RefCell<(u64, std::collections::HashMap<K, V>)>;
+type ResolveKey = (PathBuf, String, bool);
+
+thread_local! {
+    static CANONICAL: Cache<PathBuf, PathBuf> =
+        std::cell::RefCell::new((0, std::collections::HashMap::new()));
+    static RESOLVED: Cache<ResolveKey, PathBuf> =
+        std::cell::RefCell::new((0, std::collections::HashMap::new()));
+    static PACKAGE_TYPES: Cache<PathBuf, Option<String>> =
+        std::cell::RefCell::new((0, std::collections::HashMap::new()));
+}
+
+fn cached<K: std::hash::Hash + Eq, V: Clone>(
+    cell: &'static std::thread::LocalKey<
+        std::cell::RefCell<(u64, std::collections::HashMap<K, V>)>,
+    >,
+    key: &K,
+) -> Option<V> {
+    cell.with(|c| {
+        let mut c = c.borrow_mut();
+        let now = epoch();
+        if c.0 != now {
+            c.0 = now;
+            c.1.clear();
+            return None;
+        }
+        c.1.get(key).cloned()
+    })
+}
+
+fn remember<K: std::hash::Hash + Eq, V>(
+    cell: &'static std::thread::LocalKey<
+        std::cell::RefCell<(u64, std::collections::HashMap<K, V>)>,
+    >,
+    key: K,
+    value: V,
+) {
+    cell.with(|c| {
+        let mut c = c.borrow_mut();
+        let now = epoch();
+        if c.0 != now {
+            c.0 = now;
+            c.1.clear();
+        }
+        c.1.insert(key, value);
+    })
+}
+
 pub fn canonical(p: &Path) -> PathBuf {
+    let key = p.to_path_buf();
+    if let Some(hit) = cached(&CANONICAL, &key) {
+        return hit;
+    }
+    let out = canonical_uncached(p);
+    remember(&CANONICAL, key, out.clone());
+    out
+}
+
+fn lexical_normalize(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn real_path(p: &Path) -> PathBuf {
+    let normalized = lexical_normalize(p);
+    match std::fs::symlink_metadata(&normalized) {
+        Ok(m) if m.is_file() && normalized.is_absolute() => normalized,
+        _ => canonical(p),
+    }
+}
+
+fn canonical_uncached(p: &Path) -> PathBuf {
     let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let text = c.to_string_lossy();
     if let Some(rest) = text.strip_prefix(r"\\?\") {
@@ -391,19 +483,37 @@ thread_local! {
 }
 
 fn package_type(dir: &Path) -> Option<String> {
-    let mut cur = Some(dir.to_path_buf());
-    while let Some(d) = cur {
-        if let Some(doc) = package_json(&d) {
-            return Some(
-                doc.get("type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("commonjs")
-                    .to_string(),
-            );
-        }
-        cur = d.parent().map(Path::to_path_buf);
+    let key = dir.to_path_buf();
+    if let Some(hit) = cached(&PACKAGE_TYPES, &key) {
+        return hit;
     }
-    None
+    let found = match package_json(dir) {
+        Some(doc) => Some(
+            doc.get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or("commonjs")
+                .to_string(),
+        ),
+        None => dir.parent().and_then(package_type),
+    };
+    remember(&PACKAGE_TYPES, key, found.clone());
+    found
+}
+
+fn mentions_keyword(src: &str, word: &str) -> bool {
+    let bytes = src.as_bytes();
+    let mut start = 0;
+    while let Some(i) = memchr::memmem::find(&bytes[start..], word.as_bytes()) {
+        let at = start + i;
+        let before = at.checked_sub(1).map(|j| bytes[j]);
+        let after = bytes.get(at + word.len()).copied();
+        let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$' || b >= 0x80;
+        if !before.is_some_and(|b| ident(b) || b == b'.') && !after.is_some_and(ident) {
+            return true;
+        }
+        start = at + word.len();
+    }
+    false
 }
 
 pub fn mark_esm(path: &Path) {
@@ -434,6 +544,10 @@ pub fn explicit_commonjs(dir: &Path) -> bool {
 }
 
 pub fn is_commonjs(path: &Path) -> bool {
+    is_commonjs_source(path, None)
+}
+
+pub fn is_commonjs_source(path: &Path, source: Option<&str>) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
         "cjs" | "cts" | "json" | "node" => return true,
@@ -443,11 +557,20 @@ pub fn is_commonjs(path: &Path) -> bool {
     if let Some(v) = CJS_CACHE.with(|c| c.borrow().get(path).copied()) {
         return v;
     }
-    let src = std::fs::read_to_string(path).unwrap_or_default();
+    let owned;
+    let src = match source {
+        Some(s) => s,
+        None => {
+            owned = std::fs::read_to_string(path).unwrap_or_default();
+            &owned
+        }
+    };
     let name = path.display().to_string();
-    let result = if has_module_syntax_in(&src, is_jsx(&name), is_typescript(&name)) {
+    let module_syntax = (mentions_keyword(src, "import") || mentions_keyword(src, "export"))
+        && has_module_syntax_in(src, is_jsx(&name), is_typescript(&name));
+    let result = if module_syntax {
         false
-    } else if looks_like_commonjs(&src) {
+    } else if has_commonjs_markers(src) {
         true
     } else {
         let dir = path.parent().unwrap_or(Path::new("."));
@@ -455,6 +578,10 @@ pub fn is_commonjs(path: &Path) -> bool {
     };
     CJS_CACHE.with(|c| c.borrow_mut().insert(path.to_path_buf(), result));
     result
+}
+
+fn has_commonjs_markers(src: &str) -> bool {
+    src.contains("module.exports") || src.contains("exports.") || src.contains("require(")
 }
 
 pub fn looks_like_commonjs(src: &str) -> bool {
@@ -747,6 +874,16 @@ pub fn resolve(spec: &str, from_dir: &Path) -> Result<PathBuf, String> {
 }
 
 pub fn resolve_with(spec: &str, from_dir: &Path, cjs: bool) -> Result<PathBuf, String> {
+    let key = (from_dir.to_path_buf(), spec.to_string(), cjs);
+    if let Some(hit) = cached(&RESOLVED, &key) {
+        return Ok(hit);
+    }
+    let found = resolve_uncached(spec, from_dir, cjs)?;
+    remember(&RESOLVED, key, found.clone());
+    Ok(found)
+}
+
+fn resolve_uncached(spec: &str, from_dir: &Path, cjs: bool) -> Result<PathBuf, String> {
     if spec.starts_with('#') {
         return resolve_import_alias(spec, from_dir, cjs).or_else(|e| {
             config_paths_resolve(spec, from_dir)
@@ -761,9 +898,9 @@ pub fn resolve_with(spec: &str, from_dir: &Path, cjs: bool) -> Result<PathBuf, S
         || spec == ".."
         || Path::new(spec).is_absolute();
     if relative {
-        let target = from_dir.join(spec);
+        let target = lexical_normalize(&from_dir.join(spec));
         return resolve_file(&target)
-            .map(|p| canonical(&p))
+            .map(|p| real_path(&p))
             .ok_or_else(|| format!("Cannot find module '{spec}'"));
     }
     let mut parts = spec.splitn(if spec.starts_with('@') { 3 } else { 2 }, '/');

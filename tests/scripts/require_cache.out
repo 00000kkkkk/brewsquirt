@@ -1,0 +1,4 @@
+before MODULE_NOT_FOUND
+after created later
+{ from: 'index' } true
+esm cjs true
