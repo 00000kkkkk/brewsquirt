@@ -4,7 +4,9 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2023-0071", reason = "rsa has no constant-time release yet; node:crypto exposes RSA like Node and the timing side channel needs an attacker measuring many local decryptions" },
+]
 
 [licenses]
 version = 2
