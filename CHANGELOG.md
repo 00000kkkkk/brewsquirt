@@ -7,7 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `vrotdaem gluboko` fetches registry metadata and tarballs in parallel, with a per-run metadata
+  cache, and picks the `latest` tag whenever it satisfies the range, as npm does. A project with
+  `fastify`, `@apollo/server`, `alasql`, `esbuild`, `@swc/core` and `sharp` (about 500 packages)
+  installs in 7 seconds.
+
 ### Fixed
+
+- `vrotdaem gluboko` looks for an installed copy in every enclosing `nude_modules` directory, the
+  way Node resolves packages, before nesting a new one. Packages that depend on each other with
+  pinned versions, such as `metro-source-map` and `metro-symbolicate`, used to nest forever.
+- `process.binding` returns `constants`, `tty_wrap`, `uv`, `natives`, `util`, `config`, `buffer`,
+  `os` and `zlib` like Node, so `@electric-sql/pglite` and `readline-sync` (through
+  `ioredis-mock`) load. `util.getSystemErrorName`, `getSystemErrorMap` and
+  `getSystemErrorMessage` use the full libuv error table with each platform's codes, and file
+  system errors carry the same `errno` values as Node.
+- `module.constructor` in a CommonJS file is the `Module` class with `createRequire`, `isBuiltin`
+  and `builtinModules`, even before anything imports `node:module`. `@apollo/server` failed every
+  request without it.
+- The socket of a request on an HTTP server has `end`, `write`, `ref`, `unref`, `pause`, `resume`
+  and the other `net.Socket` methods that return the socket, which the `@apollo/server` drain
+  plugin calls on shutdown.
 
 - `stream.pipeline` and `stream/promises` `pipeline` accept generator functions and async
   functions as stages, and the promise version takes a trailing options object with `end` and

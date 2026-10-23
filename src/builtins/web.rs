@@ -2490,14 +2490,70 @@ const WEB_SRC: &str = r##"
     this.destroyed = false
   }
   defineMethods(NullSocket.prototype, {
-    setTimeout() {},
-    setNoDelay() {},
-    setKeepAlive() {},
-    on() {},
-    once() {},
-    off() {},
-    removeListener() {},
-    destroy() {},
+    setTimeout() {
+      return this
+    },
+    setNoDelay() {
+      return this
+    },
+    setKeepAlive() {
+      return this
+    },
+    setEncoding() {
+      return this
+    },
+    on() {
+      return this
+    },
+    once() {
+      return this
+    },
+    off() {
+      return this
+    },
+    addListener() {
+      return this
+    },
+    removeListener() {
+      return this
+    },
+    removeAllListeners() {
+      return this
+    },
+    emit() {
+      return false
+    },
+    listenerCount() {
+      return 0
+    },
+    ref() {
+      return this
+    },
+    unref() {
+      return this
+    },
+    pause() {
+      return this
+    },
+    resume() {
+      return this
+    },
+    cork() {},
+    uncork() {},
+    write() {
+      return true
+    },
+    end() {
+      this.writable = false
+      return this
+    },
+    destroySoon() {
+      this.writable = false
+    },
+    destroy() {
+      this.destroyed = true
+      return this
+    },
     address: () => ({ address: "127.0.0.1", family: "IPv4", port: 0 }),
   })
   const nullSocket = (remoteAddress) => new NullSocket(remoteAddress)

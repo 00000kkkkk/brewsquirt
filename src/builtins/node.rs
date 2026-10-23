@@ -6009,6 +6009,13 @@ const NODE_SRC: &str = r##"
   Object.assign(zlib, zlibConstants)
   zlib.constants = zlibConstants
 
+  let uvErrors = null
+  const uvErrorMap = () => (uvErrors ??= new Map(native.uvErrors().map(([name, message, code]) => [code, [name, message]])))
+  const systemError = (err) => {
+    if (typeof err !== "number") throw nodeTypeError("ERR_INVALID_ARG_TYPE", `The "err" argument must be of type number. Received ${describeReceived(err)}`)
+    if (err >= 0 || !Number.isSafeInteger(err)) throw Object.assign(new RangeError(`The value of "err" is out of range. It must be a negative integer. Received ${err}`), { code: "ERR_OUT_OF_RANGE" })
+    return uvErrorMap().get(err)
+  }
   const utilExtras = {
     inspectCustom: Symbol.for("nodejs.util.inspect.custom"),
     _extend(target, source) {
@@ -6025,7 +6032,15 @@ const NODE_SRC: &str = r##"
       fn.enabled = false
       return fn
     },
-    getSystemErrorName: (code) => ({ "-2": "ENOENT", "-13": "EACCES", "-17": "EEXIST", "-22": "EINVAL", "-39": "ENOTEMPTY", "-98": "EADDRINUSE", "-111": "ECONNREFUSED", "-3008": "ENOTFOUND" })[String(code)] ?? `Unknown system error ${code}`,
+    getSystemErrorName(err) {
+      const entry = systemError(err)
+      return entry ? entry[0] : `Unknown system error ${err}`
+    },
+    getSystemErrorMessage(err) {
+      const entry = systemError(err)
+      return entry ? entry[1] : `Unknown system error ${err}`
+    },
+    getSystemErrorMap: () => new Map(uvErrorMap()),
     toUSVString: (s) => String(s).toWellFormed(),
     styleText: (format, text) => String(text),
     aborted: (signal, resource) => new Promise((resolve) => signal.aborted ? resolve() : signal.addEventListener("abort", () => resolve(), { once: true })),
@@ -8196,7 +8211,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let n = vm.new_object();
-    let natives: [(&str, u32, crate::object::NativeFn); 59] = [
+    let natives: [(&str, u32, crate::object::NativeFn); 60] = [
         ("isProxy", 1, is_proxy),
         ("watchStart", 4, super::netio::watch_start),
         ("watchClose", 1, super::netio::watch_close),
@@ -8252,6 +8267,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         ("zlib", 3, zlib_op),
         ("crc32", 2, zlib_crc32),
         ("format", 0, native_format),
+        ("uvErrors", 0, native_uv_errors),
         ("vmRunScript", 4, vm_run_script),
         ("setModuleClass", 1, native_set_module_class),
         ("cjsCompile", 3, native_cjs_compile),
@@ -8519,13 +8535,6 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                     return Ok(None);
                 };
                 let require = vm.globals.get("require").cloned().unwrap_or_default();
-                let create = native_fn(vm, "createRequire", 1, module_create_require);
-                o.set_own("createRequire", create);
-                let is_builtin = native_fn(vm, "isBuiltin", 1, module_is_builtin);
-                o.set_own("isBuiltin", is_builtin);
-                let names: Vec<Value> = BUILTIN_MODULES.iter().map(|n| Value::from(*n)).collect();
-                let list = vm.new_array(names);
-                o.set_own("builtinModules", list);
                 o.set_own("require", require);
                 o.set_hidden("default", Value::Object(o.clone()));
                 Value::Object(o)
@@ -9053,6 +9062,15 @@ fn module_is_builtin(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 fn native_set_module_class(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let class = arg(args, 0);
     vm.module_class = Some(class.clone());
+    if let Value::Object(o) = &class {
+        let create = native_fn(vm, "createRequire", 1, module_create_require);
+        o.set_own("createRequire", create);
+        let is_builtin = native_fn(vm, "isBuiltin", 1, module_is_builtin);
+        o.set_own("isBuiltin", is_builtin);
+        let names: Vec<Value> = BUILTIN_MODULES.iter().map(|n| Value::from(*n)).collect();
+        let list = vm.new_array(names);
+        o.set_own("builtinModules", list);
+    }
     let extensions = vm.get_prop(&class, "_extensions")?;
     if let Some(Value::Object(global)) = vm.globals.get("require").cloned() {
         global.set_hidden("extensions", extensions);
@@ -9061,11 +9079,13 @@ fn native_set_module_class(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         let cache = vm.require_cache_object_public();
         for (_, m) in vm.own_entries(&Value::Object(cache)) {
             if let Value::Object(o) = m {
-                let plain = o
-                    .proto
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|p| std::rc::Rc::ptr_eq(p, &vm.realm.object_proto));
+                let plain = o.proto.borrow().as_ref().is_some_and(|p| {
+                    std::rc::Rc::ptr_eq(p, &vm.realm.object_proto)
+                        || vm
+                            .cjs_stub_proto
+                            .as_ref()
+                            .is_some_and(|s| std::rc::Rc::ptr_eq(p, s))
+                });
                 if plain {
                     *o.proto.borrow_mut() = Some(proto.clone());
                 }
@@ -9073,6 +9093,18 @@ fn native_set_module_class(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         }
     }
     Ok(Value::Undefined)
+}
+
+pub(crate) fn module_stub_constructor(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    load(vm)?;
+    Ok(vm.module_class.clone().unwrap_or_default())
+}
+
+pub(crate) fn module_stub_require(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    load(vm)?;
+    let class = vm.module_class.clone().unwrap_or_default();
+    let proto = vm.get_prop(&class, "prototype")?;
+    vm.get_prop(&proto, "require")
 }
 
 fn native_cjs_compile(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
@@ -9188,47 +9220,58 @@ fn is_tty(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 
 fn error_code(e: &std::io::Error) -> (&'static str, &'static str, i32) {
     use std::io::ErrorKind as K;
-    match e.kind() {
-        K::NotFound => ("ENOENT", "no such file or directory", -2),
-        K::PermissionDenied => ("EACCES", "permission denied", -13),
-        K::AlreadyExists => ("EEXIST", "file already exists", -17),
-        K::DirectoryNotEmpty => ("ENOTEMPTY", "directory not empty", -39),
-        K::IsADirectory => ("EISDIR", "illegal operation on a directory", -21),
-        K::NotADirectory => ("ENOTDIR", "not a directory", -20),
-        K::InvalidInput => ("EINVAL", "invalid argument", -22),
-        _ => raw_error_code(e.raw_os_error()),
-    }
+    let name = match e.kind() {
+        K::NotFound => "ENOENT",
+        K::PermissionDenied => "EACCES",
+        K::AlreadyExists => "EEXIST",
+        K::DirectoryNotEmpty => "ENOTEMPTY",
+        K::IsADirectory => "EISDIR",
+        K::NotADirectory => "ENOTDIR",
+        K::InvalidInput => "EINVAL",
+        _ => raw_error_name(e.raw_os_error()),
+    };
+    super::uverr::by_name(name)
 }
 
 #[cfg(windows)]
-fn raw_error_code(code: Option<i32>) -> (&'static str, &'static str, i32) {
+fn raw_error_name(code: Option<i32>) -> &'static str {
     match code {
-        Some(267) => ("ENOTDIR", "not a directory", -20),
-        Some(145) => ("ENOTEMPTY", "directory not empty", -39),
-        Some(123) | Some(161) => ("ENOENT", "no such file or directory", -2),
-        Some(206) => ("ENAMETOOLONG", "name too long", -36),
-        Some(32) | Some(33) => ("EBUSY", "resource busy or locked", -16),
-        Some(17) => ("EXDEV", "cross-device link not permitted", -18),
-        Some(112) => ("ENOSPC", "no space left on device", -28),
-        _ => ("EIO", "i/o error", -5),
+        Some(267) => "ENOTDIR",
+        Some(145) => "ENOTEMPTY",
+        Some(2) | Some(3) | Some(123) | Some(161) => "ENOENT",
+        Some(5) => "EPERM",
+        Some(80) | Some(183) => "EEXIST",
+        Some(206) => "ENAMETOOLONG",
+        Some(32) | Some(33) => "EBUSY",
+        Some(17) => "EXDEV",
+        Some(112) => "ENOSPC",
+        Some(6) => "EBADF",
+        Some(4) => "EMFILE",
+        Some(1921) => "ELOOP",
+        Some(87) => "EINVAL",
+        _ => "EIO",
     }
 }
 
 #[cfg(not(windows))]
-fn raw_error_code(code: Option<i32>) -> (&'static str, &'static str, i32) {
-    let (name_too_long, symlink_loop) = if cfg!(target_os = "macos") {
-        (63, 62)
-    } else {
-        (36, 40)
-    };
-    match code {
-        Some(c) if c == name_too_long => ("ENAMETOOLONG", "name too long", -36),
-        Some(c) if c == symlink_loop => ("ELOOP", "too many symbolic links encountered", -40),
-        Some(16) => ("EBUSY", "resource busy or locked", -16),
-        Some(18) => ("EXDEV", "cross-device link not permitted", -18),
-        Some(28) => ("ENOSPC", "no space left on device", -28),
-        _ => ("EIO", "i/o error", -5),
-    }
+fn raw_error_name(code: Option<i32>) -> &'static str {
+    code.and_then(|c| super::uverr::by_code(-c))
+        .map(|e| e.0)
+        .unwrap_or("EIO")
+}
+
+fn native_uv_errors(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    let rows = super::uverr::UV_ERRORS
+        .iter()
+        .map(|(name, message, code)| {
+            vm.new_array(vec![
+                (*name).into(),
+                (*message).into(),
+                Value::Number(*code as f64),
+            ])
+        })
+        .collect();
+    Ok(vm.new_array(rows))
 }
 
 pub fn fs_error(

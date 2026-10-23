@@ -270,22 +270,32 @@ fn serve_registry(packages: Vec<Package>) -> String {
                 .trim_start_matches('/')
                 .replace("%2F", "/")
                 .replace("%2f", "/");
-            let (status, body): (&str, Vec<u8>) = if let Some(name) = path.strip_suffix(".tgz") {
-                match packages.iter().find(|p| p.name == name) {
+            let version_of = |p: &Package| p.manifest["version"].as_str().unwrap().to_string();
+            let (status, body): (&str, Vec<u8>) = if let Some(file) = path.strip_suffix(".tgz") {
+                match packages
+                    .iter()
+                    .find(|p| format!("{}@{}", p.name, version_of(p)) == file)
+                {
                     Some(p) => ("200 OK", p.tarball.clone()),
                     None => ("404 Not Found", Vec::new()),
                 }
             } else {
-                match packages.iter().find(|p| p.name == path) {
-                    Some(p) => {
-                        let version = p.manifest["version"].as_str().unwrap().to_string();
-                        let mut entry = p.manifest.clone();
-                        entry["dist"] =
-                            serde_json::json!({ "tarball": format!("{root}/{}.tgz", p.name) });
+                let matching: Vec<&Package> = packages.iter().filter(|p| p.name == path).collect();
+                match matching.last() {
+                    Some(last) => {
+                        let mut versions = serde_json::Map::new();
+                        for p in &matching {
+                            let version = version_of(p);
+                            let mut entry = p.manifest.clone();
+                            entry["dist"] = serde_json::json!({
+                                "tarball": format!("{root}/{}@{version}.tgz", p.name)
+                            });
+                            versions.insert(version, entry);
+                        }
                         let doc = serde_json::json!({
-                            "name": p.name,
-                            "dist-tags": { "latest": version },
-                            "versions": { version: entry },
+                            "name": last.name,
+                            "dist-tags": { "latest": version_of(last) },
+                            "versions": versions,
                         });
                         ("200 OK", doc.to_string().into_bytes())
                     }
@@ -372,5 +382,81 @@ fn peer_dependencies_and_node_modules_link() {
     let out = vrotdaem(&app, &["run"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(text(&out.stdout), "peer 2.1.0 via peer\n");
+    let _ = std::fs::remove_dir_all(&app);
+}
+
+#[test]
+fn cyclic_dependencies_resolve_through_ancestors() {
+    let pkg = |name: &'static str, version: &str, deps: serde_json::Value, main: &str| {
+        npm_package(
+            name,
+            serde_json::json!({ "name": name, "version": version, "main": "index.js", "dependencies": deps }),
+            &[("index.js", main)],
+        )
+    };
+    let map = "exports.version = require(\"./package.json\").version\nexports.peer = () => require(PEER)\n";
+    let registry = serve_registry(vec![
+        pkg(
+            "srcmap",
+            "1.0.0",
+            serde_json::json!({ "symbol": "1.0.0" }),
+            &map.replace("PEER", "\"symbol\""),
+        ),
+        pkg(
+            "srcmap",
+            "2.0.0",
+            serde_json::json!({ "symbol": "^2.0.0" }),
+            &map.replace("PEER", "\"symbol\""),
+        ),
+        pkg(
+            "symbol",
+            "1.0.0",
+            serde_json::json!({ "srcmap": "1.0.0" }),
+            &map.replace("PEER", "\"srcmap\""),
+        ),
+        pkg(
+            "symbol",
+            "2.0.0",
+            serde_json::json!({ "srcmap": "^2.0.0" }),
+            &map.replace("PEER", "\"srcmap\""),
+        ),
+        pkg(
+            "bundler",
+            "1.0.0",
+            serde_json::json!({ "srcmap": "1.0.0" }),
+            "const m = require(\"srcmap\")\nmodule.exports = [m.version, m.peer().version, m.peer().peer().version].join(\",\")\n",
+        ),
+    ]);
+    let app = temp_dir("cycles");
+    write(
+        app.join("squirt.json"),
+        r#"{"name":"app","version":"0.1.0","main":"index.jsq","dependencies":{"srcmap":"npm:srcmap@^2.0.0","bundler":"npm:bundler@^1.0.0"}}"#,
+    );
+    write(
+        app.join("index.jsq"),
+        "import srcmap from \"srcmap\"\nimport bundler from \"bundler\"\nconsole.log(srcmap.version, srcmap.peer().version, bundler)\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_vrotdaem"))
+        .current_dir(&app)
+        .env("JSQ_NPM_REGISTRY", &registry)
+        .arg("gluboko")
+        .output()
+        .expect("run vrotdaem");
+    assert!(
+        out.status.success(),
+        "{}{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+    let nested = app.join("nude_modules/bundler/nude_modules/srcmap");
+    assert!(nested.join("nude_modules/symbol/index.js").is_file());
+    assert!(!nested.join("nude_modules/symbol/nude_modules").exists());
+    assert!(
+        !app.join("nude_modules/bundler/nude_modules/symbol")
+            .exists()
+    );
+    let out = vrotdaem(&app, &["run"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "2.0.0 2.0.0 1.0.0,1.0.0,1.0.0\n");
     let _ = std::fs::remove_dir_all(&app);
 }

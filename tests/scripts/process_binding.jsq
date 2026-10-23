@@ -1,0 +1,44 @@
+const ctor = require("./fixtures/module_ctor.js")
+console.log(ctor)
+
+const util = require("node:util")
+const map = util.getSystemErrorMap()
+const code = (name) => [...map].find(([, [n]]) => n === name)[0]
+console.log(map.size, util.getSystemErrorName(code("ENOENT")), util.getSystemErrorMessage(code("ECONNREFUSED")), util.getSystemErrorName(-3008))
+for (const bad of [1, 0.5, "x"]) {
+  try {
+    util.getSystemErrorName(bad)
+  } catch (e) {
+    console.log(e.code)
+  }
+}
+const uv = process.binding("uv")
+console.log(uv.UV_ENOENT === code("ENOENT"), uv.errname(code("EACCES")), uv.UV_EOF, uv.UV_EAI_NONAME)
+try {
+  require("node:fs").readFileSync("definitely-missing-file")
+} catch (e) {
+  console.log(e.code, e.errno === uv.UV_ENOENT)
+}
+const constants = process.binding("constants")
+console.log(Object.keys(constants), constants === process.binding("constants"), constants.fs.O_CREAT === require("node:fs").constants.O_CREAT)
+const tty = process.binding("tty_wrap")
+const size = []
+console.log(typeof tty.TTY, tty.isTTY(1234), new tty.TTY(1, false).getWindowSize(size) < 0, size.length)
+console.log(typeof process.binding("natives").fs, Object.keys(process.binding("util")).length, process.binding("config").hasIntl, typeof process.binding("os").getHostname())
+try {
+  process.binding("nope")
+} catch (e) {
+  console.log(e.message, e.code)
+}
+
+const http = require("node:http")
+const server = http.createServer((req, res) => {
+  const s = req.socket
+  res.once("finish", () => s.end())
+  res.end([typeof s.end, s.setTimeout(10) === s, s.ref() === s, s.unref() === s, typeof s.cork].join(" "))
+})
+server.listen(0, "127.0.0.1", async () => {
+  const r = await fetch(`http://127.0.0.1:${server.address().port}/`)
+  console.log(await r.text())
+  server.close()
+})

@@ -1783,6 +1783,83 @@ define(globalThis, "global", globalThis)
       }))
     }
   }
+  const bindings = new Map()
+  const makeBinding = (name) => {
+    const load = (m) => process.getBuiltinModule(m)
+    switch (name) {
+      case "constants":
+        return { os: load("os").constants, fs: load("fs").constants, crypto: load("crypto").constants ?? {}, zlib: load("zlib").constants, trace: {}, internal: {} }
+      case "tty_wrap": {
+        const tty = load("tty")
+        function TTY(fd, readable) {
+          if (!new.target) throw new TypeError("Class constructor TTY cannot be invoked without 'new'")
+          this.fd = fd
+          this.readable = !!readable
+        }
+        TTY.prototype.getWindowSize = function getWindowSize(out) {
+          if (!tty.isatty(this.fd)) return [...load("util").getSystemErrorMap()].find(([, [n]]) => n === "EBADF")[0]
+          const stream = this.fd === 2 ? process.stderr : process.stdout
+          if (Array.isArray(out)) {
+            out[0] = stream.columns ?? 80
+            out[1] = stream.rows ?? 24
+          }
+          return 0
+        }
+        TTY.prototype.setRawMode = function setRawMode(flag) {
+          if (this.fd === 0 && typeof process.stdin.setRawMode === "function") process.stdin.setRawMode(!!flag)
+          return 0
+        }
+        return { isTTY: (fd) => tty.isatty(fd), TTY }
+      }
+      case "uv": {
+        const map = load("util").getSystemErrorMap()
+        const out = {
+          errname: (code) => map.get(code)?.[0] ?? `Unknown system error ${code}`,
+          getErrorMap: () => new Map(map),
+          getErrorMessage: (code) => map.get(code)?.[1] ?? `Unknown system error ${code}`,
+        }
+        for (const [code, [n]] of map) out[`UV_${n}`] = code
+        return out
+      }
+      case "natives":
+        return Object.fromEntries(load("module").builtinModules.filter((n) => !n.startsWith("node:")).map((n) => [n, ""]))
+      case "util": {
+        const types = load("util").types
+        const out = {}
+        for (const k of ["isArrayBuffer", "isAsyncFunction", "isDate", "isExternal", "isMap", "isMapIterator", "isNativeError", "isPromise", "isRegExp", "isSet", "isSetIterator", "isAnyArrayBuffer", "isArrayBufferView", "isDataView", "isTypedArray", "isUint8Array"]) out[k] = types[k]
+        return out
+      }
+      case "config":
+        return { isDebugBuild: false, openSSLIsBoringSSL: false, hasOpenSSL: true, fipsMode: false, hasIntl: true, hasTracing: false, hasNodeOptions: true, hasInspector: false, noBrowserGlobals: false, bits: 64, getDefaultLocale: () => Intl.DateTimeFormat().resolvedOptions().locale }
+      case "buffer": {
+        const buffer = load("buffer")
+        return { kMaxLength: buffer.kMaxLength, kStringMaxLength: buffer.constants.MAX_STRING_LENGTH, atob, btoa, byteLengthUtf8: (s) => buffer.Buffer.byteLength(String(s), "utf8"), compare: (a, b) => buffer.Buffer.compare(a, b) }
+      }
+      case "os": {
+        const os = load("os")
+        return {
+          getHostname: () => os.hostname(),
+          getLoadAvg(out) {
+            const l = os.loadavg()
+            for (let i = 0; i < 3; i++) out[i] = l[i]
+          },
+          getUptime: () => os.uptime(),
+          getTotalMem: () => os.totalmem(),
+          getFreeMem: () => os.freemem(),
+          getCPUs: () => os.cpus(),
+          getHomeDirectory: () => os.homedir(),
+          getUserInfo: (options) => os.userInfo(options),
+          getAvailableParallelism: () => os.availableParallelism(),
+        }
+      }
+      case "zlib": {
+        const zlib = load("zlib")
+        return { crc32: zlib.crc32, ZLIB_VERSION: process.versions.zlib ?? "1.3.1" }
+      }
+      default:
+        throw new Error(`No such module: ${name}`)
+    }
+  }
   defineAll(process, {
     umask() {
       return 0o22
@@ -1817,9 +1894,11 @@ define(globalThis, "global", globalThis)
       process.exit(134)
     },
     binding(name) {
-      const e = new Error(`No such module: ${name}`)
-      e.code = "ERR_INVALID_MODULE"
-      throw e
+      name = String(name)
+      if (bindings.has(name)) return bindings.get(name)
+      const made = makeBinding(name)
+      bindings.set(name, made)
+      return made
     },
     setSourceMapsEnabled(value) {
       process.sourceMapsEnabled = !!value

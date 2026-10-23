@@ -6,7 +6,7 @@ use crate::module::{DEPS_DIR, MANIFEST, NODE_DEPS_DIR};
 use indexmap::IndexMap;
 use semver::Range;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -188,12 +188,8 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn fetch(spec: &Spec, base: &Path, dest: &Path, optional: bool) -> Result<Option<String>, String> {
+fn fetch_local(spec: &Spec, base: &Path, dest: &Path) -> Result<(), String> {
     match spec {
-        Spec::Npm { name, range } => {
-            let resolved = npm::install_checked(name, range, dest, optional)?;
-            Ok(Some(resolved.version.to_string()))
-        }
         Spec::File(p) => {
             let src = if p.is_absolute() {
                 p.clone()
@@ -203,8 +199,7 @@ fn fetch(spec: &Spec, base: &Path, dest: &Path, optional: bool) -> Result<Option
             if !src.is_dir() {
                 return Err(format!("{} is not a directory", src.display()));
             }
-            copy_dir(&src, dest)?;
-            Ok(None)
+            copy_dir(&src, dest)
         }
         Spec::Git { url, rev } => {
             let mut cmd = Command::new("git");
@@ -218,8 +213,9 @@ fn fetch(spec: &Spec, base: &Path, dest: &Path, optional: bool) -> Result<Option
                 return Err(format!("git clone {url} failed"));
             }
             let _ = fs::remove_dir_all(dest.join(".git"));
-            Ok(None)
+            Ok(())
         }
+        Spec::Npm { .. } => Ok(()),
     }
 }
 
@@ -230,18 +226,11 @@ enum DepKind {
     Peer,
 }
 
-fn dependencies_of(dir: &Path) -> Result<IndexMap<String, (String, DepKind)>, String> {
-    if dir.join(MANIFEST).is_file() {
-        return Ok(read_manifest(dir)?
-            .dependencies
-            .into_iter()
-            .map(|(k, v)| (k, (v, DepKind::Regular)))
-            .collect());
-    }
-    let mut out = IndexMap::new();
-    let optional = npm::package_optional_dependencies(dir);
-    let peers = npm::package_peer_dependencies(dir);
-    let mut all = npm::package_dependencies(dir);
+type DepList = IndexMap<String, (String, DepKind)>;
+
+fn classify(sets: npm::DependencySets) -> DepList {
+    let (regular, optional, peers) = sets;
+    let mut all = regular.clone();
     for (k, v) in &optional {
         all.insert(k.clone(), v.clone());
     }
@@ -250,6 +239,7 @@ fn dependencies_of(dir: &Path) -> Result<IndexMap<String, (String, DepKind)>, St
             all.insert(k.clone(), v.clone());
         }
     }
+    let mut out = IndexMap::new();
     for (name, raw) in all {
         let spec = if let Some(alias) = raw.strip_prefix("npm:") {
             format!("npm:{alias}")
@@ -260,14 +250,82 @@ fn dependencies_of(dir: &Path) -> Result<IndexMap<String, (String, DepKind)>, St
         };
         let kind = if optional.contains_key(&name) {
             DepKind::Optional
-        } else if peers.contains_key(&name) && !npm::package_dependencies(dir).contains_key(&name) {
+        } else if peers.contains_key(&name) && !regular.contains_key(&name) {
             DepKind::Peer
         } else {
             DepKind::Regular
         };
         out.insert(name, (spec, kind));
     }
-    Ok(out)
+    out
+}
+
+fn dependencies_of(dir: &Path) -> Result<DepList, String> {
+    if dir.join(MANIFEST).is_file() {
+        return Ok(read_manifest(dir)?
+            .dependencies
+            .into_iter()
+            .map(|(k, v)| (k, (v, DepKind::Regular)))
+            .collect());
+    }
+    Ok(classify(npm::package_dependency_sets(dir)))
+}
+
+type Placed = HashMap<PathBuf, Option<semver::Version>>;
+
+fn presence(placed: &Placed, path: &Path) -> Option<Option<semver::Version>> {
+    if let Some(v) = placed.get(path) {
+        return Some(v.clone());
+    }
+    if path.is_dir() {
+        return Some(npm::installed_version(path));
+    }
+    None
+}
+
+fn nearest(
+    placed: &Placed,
+    root: &Path,
+    holder: &Path,
+    name: &str,
+) -> Option<(PathBuf, Option<semver::Version>)> {
+    let start = holder.join(DEPS_DIR);
+    for dir in start.ancestors() {
+        if !dir.starts_with(root) {
+            break;
+        }
+        if dir.file_name().is_none_or(|n| n != DEPS_DIR) {
+            continue;
+        }
+        let candidate = dir.join(name);
+        if let Some(v) = presence(placed, &candidate) {
+            return Some((candidate, v));
+        }
+    }
+    None
+}
+
+type QueueItem = (String, String, PathBuf, PathBuf, DepKind);
+
+fn enqueue(
+    registry: &npm::Registry,
+    queue: &mut VecDeque<QueueItem>,
+    peers: &mut VecDeque<QueueItem>,
+    root: &Path,
+    deps: DepList,
+    origin: &Path,
+    holder: &Path,
+) {
+    for (n, (s, k)) in deps {
+        if let Ok(Spec::Npm { name, .. }) = Spec::parse_for(Some(&n), &s) {
+            registry.prefetch(&name);
+        }
+        if k == DepKind::Peer {
+            peers.push_back((n, s, root.to_path_buf(), root.to_path_buf(), k));
+        } else {
+            queue.push_back((n, s, origin.to_path_buf(), holder.to_path_buf(), k));
+        }
+    }
 }
 
 pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Report, String> {
@@ -277,53 +335,46 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
         fs::remove_dir_all(&nude).map_err(|e| format!("cannot wipe {DEPS_DIR}: {e}"))?;
     }
     fs::create_dir_all(&nude).map_err(|e| format!("cannot create {DEPS_DIR}: {e}"))?;
-    let mut queue: VecDeque<(String, String, PathBuf, PathBuf, DepKind)> = manifest
+    let registry = npm::Registry::new();
+    let mut queue: VecDeque<QueueItem> = VecDeque::new();
+    let mut peers: VecDeque<QueueItem> = VecDeque::new();
+    let top_deps: DepList = manifest
         .dependencies
         .iter()
-        .map(|(n, s)| {
-            (
-                n.clone(),
-                s.clone(),
-                root.to_path_buf(),
-                root.to_path_buf(),
-                DepKind::Regular,
-            )
-        })
+        .map(|(n, s)| (n.clone(), (s.clone(), DepKind::Regular)))
         .collect();
-    let mut peers: VecDeque<(String, String, PathBuf, PathBuf, DepKind)> = VecDeque::new();
-    let mut seen: Vec<PathBuf> = Vec::new();
+    enqueue(
+        &registry, &mut queue, &mut peers, root, top_deps, root, root,
+    );
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut placed: Placed = HashMap::new();
     let mut all: Vec<(String, PathBuf)> = Vec::new();
     let mut fresh: Vec<(String, PathBuf, bool)> = Vec::new();
+    let mut pending: Vec<(String, PathBuf, bool)> = Vec::new();
     let mut report = Report::default();
     while let Some((name, raw, base, holder, kind)) =
         queue.pop_front().or_else(|| peers.pop_front())
     {
         let spec = Spec::parse_for(Some(&name), &raw)?;
         let top = nude.join(&name);
-        if kind == DepKind::Peer && top.exists() {
+        if kind == DepKind::Peer && presence(&placed, &top).is_some() {
             continue;
         }
         let optional = kind == DepKind::Optional;
         let (dest, satisfied) = match &spec {
-            Spec::Npm { range, .. } if top.exists() => match npm::installed_version(&top) {
-                Some(v) if range.matches(&v) => (top.clone(), true),
-                _ if holder.as_path() == root => (top.clone(), false),
-                _ => {
-                    let nested = holder.join(DEPS_DIR).join(&name);
-                    let ok = nested.exists()
-                        && npm::installed_version(&nested).is_some_and(|v| range.matches(&v));
-                    (nested, ok)
-                }
+            Spec::Npm { range, .. } => match nearest(&placed, root, &holder, &name) {
+                Some((found, Some(v))) if range.matches(&v) => (found, true),
+                Some(_) if holder.as_path() != root => (holder.join(DEPS_DIR).join(&name), false),
+                _ => (top.clone(), false),
             },
             _ => {
-                let exists = top.exists();
+                let exists = presence(&placed, &top).is_some();
                 (top.clone(), exists)
             }
         };
-        if seen.contains(&dest) {
+        if !seen.insert(dest.clone()) {
             continue;
         }
-        seen.push(dest.clone());
         all.push((name.clone(), dest.clone()));
         let origin = match &spec {
             Spec::File(p) if p.is_absolute() => p.clone(),
@@ -332,53 +383,85 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
         };
         if satisfied {
             report.skipped.push(name.clone());
-        } else {
-            if !optional {
-                log(&format!("injecting {name} ({raw})"));
-            }
-            if dest.exists() {
-                fs::remove_dir_all(&dest)
-                    .map_err(|e| format!("cannot replace {}: {e}", dest.display()))?;
-            }
-            if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-            }
-            match fetch(&spec, &base, &dest, optional) {
-                Ok(Some(version)) => {
-                    if optional {
-                        log(&format!("injecting {name} ({raw})"));
+            let deps = dependencies_of(&dest)?;
+            enqueue(
+                &registry, &mut queue, &mut peers, root, deps, &origin, &dest,
+            );
+            continue;
+        }
+        if !optional {
+            log(&format!("injecting {name} ({raw})"));
+        }
+        if dest.exists() {
+            fs::remove_dir_all(&dest)
+                .map_err(|e| format!("cannot replace {}: {e}", dest.display()))?;
+        }
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let deps = match &spec {
+            Spec::Npm { name: pkg, range } => {
+                let resolved = match registry.resolve(pkg, range) {
+                    Ok(r) if optional && !npm::platform_ok(&r) => continue,
+                    Ok(r) => r,
+                    Err(e) if optional => {
+                        log(&format!("skipping optional {name}: {e}"));
+                        continue;
                     }
-                    fresh.push((name.clone(), dest.clone(), optional));
-                    let nested = dest != top;
-                    report.injected.push(if nested {
-                        format!("{name}@{version} (nested)")
-                    } else {
-                        format!("{name}@{version}")
-                    });
+                    Err(e) => return Err(format!("{name}: {e}")),
+                };
+                if optional {
+                    log(&format!("injecting {name} ({raw})"));
                 }
-                Ok(None) => {
-                    fresh.push((name.clone(), dest.clone(), optional));
-                    report.injected.push(name.clone());
-                }
-                Err(e) => {
+                placed.insert(dest.clone(), Some(resolved.version.clone()));
+                registry.install(pending.len(), pkg, &resolved, dest.clone());
+                pending.push((name.clone(), dest.clone(), optional));
+                fresh.push((name.clone(), dest.clone(), optional));
+                report.injected.push(if dest != top {
+                    format!("{name}@{} (nested)", resolved.version)
+                } else {
+                    format!("{name}@{}", resolved.version)
+                });
+                classify((
+                    resolved.dependencies,
+                    resolved.optional_dependencies,
+                    resolved.peer_dependencies,
+                ))
+            }
+            _ => {
+                if let Err(e) = fetch_local(&spec, &base, &dest) {
                     let _ = fs::remove_dir_all(&dest);
                     if optional {
-                        if e != npm::UNSUPPORTED {
-                            log(&format!("skipping optional {name}: {e}"));
-                        }
+                        log(&format!("skipping optional {name}: {e}"));
                         continue;
                     }
                     return Err(format!("{name}: {e}"));
                 }
+                placed.insert(dest.clone(), None);
+                fresh.push((name.clone(), dest.clone(), optional));
+                report.injected.push(name.clone());
+                dependencies_of(&dest)?
             }
-        }
-        for (n, (s, k)) in dependencies_of(&dest)? {
-            if k == DepKind::Peer {
-                peers.push_back((n, s, root.to_path_buf(), root.to_path_buf(), k));
-            } else {
-                queue.push_back((n, s, origin.clone(), dest.clone(), k));
+        };
+        enqueue(
+            &registry, &mut queue, &mut peers, root, deps, &origin, &dest,
+        );
+    }
+    let mut outcomes = registry.finish();
+    outcomes.sort_by_key(|(id, _)| *id);
+    for (id, outcome) in outcomes {
+        let Err(e) = outcome else {
+            continue;
+        };
+        let (name, dest, optional) = &pending[id];
+        let _ = fs::remove_dir_all(dest);
+        if *optional {
+            if e != npm::UNSUPPORTED {
+                log(&format!("skipping optional {name}: {e}"));
             }
+            continue;
         }
+        return Err(format!("{name}: {e}"));
     }
     for (name, dest) in &all {
         if dest.is_dir() {

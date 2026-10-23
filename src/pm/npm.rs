@@ -1,6 +1,10 @@
 use super::semver::{Range, Version};
 use indexmap::IndexMap;
+use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::thread::JoinHandle;
 
 pub const REGISTRY: &str = "https://registry.npmjs.org";
 
@@ -9,16 +13,46 @@ pub struct Resolved {
     pub version: Version,
     pub tarball: String,
     pub dependencies: IndexMap<String, String>,
+    pub optional_dependencies: IndexMap<String, String>,
+    pub peer_dependencies: IndexMap<String, String>,
     pub platforms: (Vec<String>, Vec<String>, Vec<String>),
 }
 
-fn string_list(v: &serde_json::Value, key: &str) -> Vec<String> {
-    match v.get(key) {
-        Some(serde_json::Value::Array(a)) => a
+#[derive(Deserialize, Default)]
+struct Entry {
+    #[serde(default)]
+    dependencies: serde_json::Value,
+    #[serde(default, rename = "optionalDependencies")]
+    optional_dependencies: serde_json::Value,
+    #[serde(default, rename = "peerDependencies")]
+    peer_dependencies: serde_json::Value,
+    #[serde(default, rename = "peerDependenciesMeta")]
+    peer_meta: serde_json::Value,
+    #[serde(default)]
+    os: serde_json::Value,
+    #[serde(default)]
+    cpu: serde_json::Value,
+    #[serde(default)]
+    libc: serde_json::Value,
+    #[serde(default)]
+    dist: serde_json::Value,
+}
+
+#[derive(Deserialize, Default)]
+pub struct Packument {
+    #[serde(default, rename = "dist-tags")]
+    dist_tags: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    versions: IndexMap<String, Entry>,
+}
+
+fn string_list(v: &serde_json::Value) -> Vec<String> {
+    match v {
+        serde_json::Value::Array(a) => a
             .iter()
             .filter_map(|x| x.as_str().map(str::to_string))
             .collect(),
-        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        serde_json::Value::String(s) => vec![s.clone()],
         _ => Vec::new(),
     }
 }
@@ -81,20 +115,16 @@ fn registry_url() -> String {
         .to_string()
 }
 
-fn packument(name: &str) -> Result<serde_json::Value, String> {
+fn packument(name: &str) -> Result<Packument, String> {
     let url = format!("{}/{}", registry_url(), encode_name(name));
     let bytes = crate::io::http_get(&url, Some("application/vnd.npm.install-v1+json"))
         .map_err(|e| format!("cannot fetch {name} from the npm registry: {e}"))?;
     serde_json::from_slice(&bytes).map_err(|e| format!("invalid registry response for {name}: {e}"))
 }
 
-fn deps_of(v: &serde_json::Value) -> IndexMap<String, String> {
-    deps_in(v, "dependencies")
-}
-
-fn deps_in(v: &serde_json::Value, key: &str) -> IndexMap<String, String> {
+fn string_map(v: &serde_json::Value) -> IndexMap<String, String> {
     let mut out = IndexMap::new();
-    if let Some(obj) = v.get(key).and_then(|d| d.as_object()) {
+    if let Some(obj) = v.as_object() {
         for (k, val) in obj {
             if let Some(s) = val.as_str() {
                 out.insert(k.clone(), s.to_string());
@@ -104,59 +134,225 @@ fn deps_in(v: &serde_json::Value, key: &str) -> IndexMap<String, String> {
     out
 }
 
-fn pick<'a>(
-    doc: &'a serde_json::Value,
-    name: &str,
-    range: &Range,
-) -> Result<(Version, &'a serde_json::Value), String> {
-    let versions = doc
-        .get("versions")
-        .and_then(|v| v.as_object())
-        .ok_or_else(|| format!("package {name} has no versions in the registry"))?;
-    let tag = range.text();
-    if let Some(tagged) = doc
-        .get("dist-tags")
-        .and_then(|t| t.get(if tag.is_empty() { "latest" } else { tag }))
-        .and_then(|v| v.as_str())
-    {
-        if tag.is_empty() || Range::parse(tag).is_none() || tag == "latest" {
-            if let (Some(ver), Some(entry)) = (Version::parse(tagged), versions.get(tagged)) {
-                return Ok((ver, entry));
-            }
-        }
-    }
-    let mut parsed: Vec<(Version, &serde_json::Value)> = versions
-        .iter()
-        .filter_map(|(k, v)| Version::parse(k).map(|ver| (ver, v)))
-        .collect();
-    parsed.sort_by(|a, b| a.0.cmp(&b.0));
-    let best = parsed
-        .iter()
-        .rev()
-        .find(|(ver, _)| range.matches(ver))
-        .ok_or_else(|| format!("no version of {name} satisfies '{}'", range.text()))?;
-    Ok((best.0.clone(), best.1))
+fn required_peers(peers: &serde_json::Value, meta: &serde_json::Value) -> IndexMap<String, String> {
+    string_map(peers)
+        .into_iter()
+        .filter(|(name, _)| {
+            !meta
+                .get(name)
+                .and_then(|v| v.get("optional"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+        .collect()
 }
 
-pub fn resolve(name: &str, range: &Range) -> Result<Resolved, String> {
-    let doc = packument(name)?;
-    let (version, entry) = pick(&doc, name, range)?;
+fn pick<'a>(doc: &'a Packument, name: &str, range: &Range) -> Result<(Version, &'a Entry), String> {
+    if doc.versions.is_empty() {
+        return Err(format!("package {name} has no versions in the registry"));
+    }
+    let tag = range.text();
+    let tagged = |t: &str| {
+        let v = doc.dist_tags.get(t)?.as_str()?;
+        Some((Version::parse(v)?, doc.versions.get(v)?))
+    };
+    if tag.is_empty() || tag == "latest" || Range::parse(tag).is_none() {
+        if let Some(found) = tagged(if tag.is_empty() { "latest" } else { tag }) {
+            return Ok(found);
+        }
+    }
+    if let Some((ver, entry)) = tagged("latest") {
+        if range.matches(&ver) {
+            return Ok((ver, entry));
+        }
+    }
+    doc.versions
+        .iter()
+        .filter_map(|(k, v)| Version::parse(k).map(|ver| (ver, v)))
+        .filter(|(ver, _)| range.matches(ver))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .ok_or_else(|| format!("no version of {name} satisfies '{}'", range.text()))
+}
+
+fn resolved_from(doc: &Packument, name: &str, range: &Range) -> Result<Resolved, String> {
+    let (version, entry) = pick(doc, name, range)?;
     let tarball = entry
-        .get("dist")
-        .and_then(|d| d.get("tarball"))
+        .dist
+        .get("tarball")
         .and_then(|t| t.as_str())
         .ok_or_else(|| format!("{name}@{version} has no tarball in the registry"))?
         .to_string();
     Ok(Resolved {
         version,
         tarball,
-        dependencies: deps_of(entry),
+        dependencies: string_map(&entry.dependencies),
+        optional_dependencies: string_map(&entry.optional_dependencies),
+        peer_dependencies: required_peers(&entry.peer_dependencies, &entry.peer_meta),
         platforms: (
-            string_list(entry, "os"),
-            string_list(entry, "cpu"),
-            string_list(entry, "libc"),
+            string_list(&entry.os),
+            string_list(&entry.cpu),
+            string_list(&entry.libc),
         ),
     })
+}
+
+pub fn resolve(name: &str, range: &Range) -> Result<Resolved, String> {
+    resolved_from(&packument(name)?, name, range)
+}
+
+type Job = Box<dyn FnOnce() + Send>;
+
+struct Pool {
+    tx: Option<mpsc::Sender<Job>>,
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl Pool {
+    fn new(size: usize) -> Pool {
+        let (tx, rx) = mpsc::channel::<Job>();
+        let rx = Arc::new(Mutex::new(rx));
+        let handles = (0..size)
+            .map(|_| {
+                let rx = rx.clone();
+                std::thread::spawn(move || {
+                    loop {
+                        let job = match rx.lock() {
+                            Ok(guard) => guard.recv(),
+                            Err(_) => return,
+                        };
+                        match job {
+                            Ok(job) => job(),
+                            Err(_) => return,
+                        }
+                    }
+                })
+            })
+            .collect();
+        Pool {
+            tx: Some(tx),
+            handles,
+        }
+    }
+
+    fn run(&self, job: impl FnOnce() + Send + 'static) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(Box::new(job));
+        }
+    }
+
+    fn join(&mut self) {
+        self.tx.take();
+        for h in self.handles.drain(..) {
+            let _ = h.join();
+        }
+    }
+}
+
+impl Drop for Pool {
+    fn drop(&mut self) {
+        self.join();
+    }
+}
+
+type DocSlot = Option<Result<Arc<Packument>, String>>;
+
+pub type Outcome = (usize, Result<(), String>);
+
+pub struct Registry {
+    docs: Arc<(Mutex<HashMap<String, DocSlot>>, Condvar)>,
+    doc_pool: Pool,
+    tar_pool: Pool,
+    done: Arc<Mutex<Vec<Outcome>>>,
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Registry::new()
+    }
+}
+
+impl Registry {
+    pub fn new() -> Registry {
+        Registry {
+            docs: Arc::new((Mutex::new(HashMap::new()), Condvar::new())),
+            doc_pool: Pool::new(16),
+            tar_pool: Pool::new(16),
+            done: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub fn prefetch(&self, name: &str) {
+        let (lock, _) = &*self.docs;
+        let mut docs = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if docs.contains_key(name) {
+            return;
+        }
+        docs.insert(name.to_string(), None);
+        drop(docs);
+        let shared = self.docs.clone();
+        let name = name.to_string();
+        self.doc_pool.run(move || {
+            let result = std::panic::catch_unwind(|| packument(&name).map(Arc::new))
+                .unwrap_or_else(|_| Err(format!("cannot read the registry entry of {name}")));
+            let (lock, ready) = &*shared;
+            lock.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(name, Some(result));
+            ready.notify_all();
+        });
+    }
+
+    fn packument(&self, name: &str) -> Result<Arc<Packument>, String> {
+        self.prefetch(name);
+        let (lock, ready) = &*self.docs;
+        let mut docs = lock.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(Some(result)) = docs.get(name) {
+                return result.clone();
+            }
+            docs = ready.wait(docs).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    pub fn resolve(&self, name: &str, range: &Range) -> Result<Resolved, String> {
+        resolved_from(&*self.packument(name)?, name, range)
+    }
+
+    pub fn install(&self, id: usize, name: &str, resolved: &Resolved, dest: PathBuf) {
+        let url = resolved.tarball.clone();
+        let label = format!("{name}@{}", resolved.version);
+        let done = self.done.clone();
+        self.tar_pool.run(move || {
+            let result = std::panic::catch_unwind(|| download_into(&url, &label, &dest))
+                .unwrap_or_else(|_| Err(format!("cannot unpack {label}")));
+            done.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((id, result));
+        });
+    }
+
+    pub fn finish(mut self) -> Vec<Outcome> {
+        self.tar_pool.join();
+        self.doc_pool.join();
+        std::mem::take(&mut *self.done.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+}
+
+fn download_into(url: &str, label: &str, dest: &Path) -> Result<(), String> {
+    let tgz =
+        crate::io::http_get(url, None).map_err(|e| format!("cannot download {label}: {e}"))?;
+    std::fs::create_dir_all(dest).map_err(|e| format!("cannot create {}: {e}", dest.display()))?;
+    extract_tarball(&tgz, dest)?;
+    if node_platform() == "linux" {
+        let lib = package_json(dest)
+            .map(|d| string_list(d.get("libc").unwrap_or(&serde_json::Value::Null)))
+            .unwrap_or_default();
+        if !allowed(&lib, libc()) {
+            let _ = std::fs::remove_dir_all(dest);
+            return Err(UNSUPPORTED.to_string());
+        }
+    }
+    Ok(())
 }
 
 pub fn latest_version(name: &str) -> Result<Version, String> {
@@ -279,37 +475,7 @@ pub fn extract_tarball(tgz: &[u8], dest: &Path) -> Result<usize, String> {
     Ok(files)
 }
 
-pub fn install(name: &str, range: &Range, dest: &Path) -> Result<Resolved, String> {
-    install_checked(name, range, dest, false)
-}
-
 pub const UNSUPPORTED: &str = "unsupported platform";
-
-pub fn install_checked(
-    name: &str,
-    range: &Range,
-    dest: &Path,
-    check_platform: bool,
-) -> Result<Resolved, String> {
-    let resolved = resolve(name, range)?;
-    if check_platform && !platform_ok(&resolved) {
-        return Err(UNSUPPORTED.to_string());
-    }
-    let tgz = crate::io::http_get(&resolved.tarball, None)
-        .map_err(|e| format!("cannot download {name}@{}: {e}", resolved.version))?;
-    std::fs::create_dir_all(dest).map_err(|e| format!("cannot create {}: {e}", dest.display()))?;
-    extract_tarball(&tgz, dest)?;
-    if check_platform && node_platform() == "linux" {
-        let lib = package_json(dest)
-            .map(|d| string_list(&d, "libc"))
-            .unwrap_or_default();
-        if !allowed(&lib, libc()) {
-            let _ = std::fs::remove_dir_all(dest);
-            return Err(UNSUPPORTED.to_string());
-        }
-    }
-    Ok(resolved)
-}
 
 fn package_json(dir: &Path) -> Option<serde_json::Value> {
     let text = std::fs::read_to_string(dir.join("package.json")).ok()?;
@@ -321,31 +487,23 @@ pub fn installed_version(dir: &Path) -> Option<Version> {
     Version::parse(doc.get("version")?.as_str()?)
 }
 
-pub fn package_dependencies(dir: &Path) -> IndexMap<String, String> {
-    package_json(dir).map(|d| deps_of(&d)).unwrap_or_default()
-}
+pub type DependencySets = (
+    IndexMap<String, String>,
+    IndexMap<String, String>,
+    IndexMap<String, String>,
+);
 
-pub fn package_peer_dependencies(dir: &Path) -> IndexMap<String, String> {
+pub fn package_dependency_sets(dir: &Path) -> DependencySets {
     let Some(doc) = package_json(dir) else {
-        return IndexMap::new();
+        return Default::default();
     };
-    let meta = doc.get("peerDependenciesMeta").and_then(|m| m.as_object());
-    deps_in(&doc, "peerDependencies")
-        .into_iter()
-        .filter(|(name, _)| {
-            !meta
-                .and_then(|m| m.get(name))
-                .and_then(|v| v.get("optional"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-        })
-        .collect()
-}
-
-pub fn package_optional_dependencies(dir: &Path) -> IndexMap<String, String> {
-    package_json(dir)
-        .map(|d| deps_in(&d, "optionalDependencies"))
-        .unwrap_or_default()
+    let null = serde_json::Value::Null;
+    let field = |k: &str| doc.get(k).unwrap_or(&null);
+    (
+        string_map(field("dependencies")),
+        string_map(field("optionalDependencies")),
+        required_peers(field("peerDependencies"), field("peerDependenciesMeta")),
+    )
 }
 
 pub fn split_name_range(spec: &str) -> (String, String) {

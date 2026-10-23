@@ -1,0 +1,18 @@
+[
+  true,
+  'function',
+  'function',
+  true,
+  'id,path,exports,filename,loaded,children,paths'
+]
+85 ENOENT connection refused EAI_NONAME
+ERR_OUT_OF_RANGE
+ERR_OUT_OF_RANGE
+ERR_INVALID_ARG_TYPE
+true EACCES -4095 -3008
+ENOENT true
+[ 'os', 'fs', 'crypto', 'zlib', 'trace', 'internal' ] true true
+function false true 0
+string 16 true string
+No such module: nope undefined
+function true true true function

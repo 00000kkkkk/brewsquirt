@@ -13,6 +13,7 @@ pub mod reflect;
 pub mod sqlite;
 pub mod threads;
 pub mod typed;
+pub mod uverr;
 pub mod wasm;
 pub use reflect::{array_like, key_value};
 mod number;

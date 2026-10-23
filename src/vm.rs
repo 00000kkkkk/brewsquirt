@@ -359,6 +359,7 @@ pub struct Vm {
     pub exiting: bool,
     pub(crate) main_cjs_pending: bool,
     pub(crate) module_class: Option<Value>,
+    pub(crate) cjs_stub_proto: Option<Rc<Obj>>,
     pub(crate) promise_intrinsic: Option<Rc<Obj>>,
     pub(crate) wasm: Option<Box<builtins::wasm::WasmState>>,
     pub(crate) kept_alive: FxHashMap<usize, Rc<Obj>>,
@@ -826,6 +827,7 @@ impl Vm {
             exiting: false,
             main_cjs_pending: false,
             module_class: None,
+            cjs_stub_proto: None,
             promise_intrinsic: None,
             wasm: None,
             kept_alive: FxHashMap::default(),
@@ -1955,18 +1957,46 @@ impl Vm {
         }
     }
 
+    fn cjs_stub_proto(&mut self) -> Rc<Obj> {
+        if let Some(p) = &self.cjs_stub_proto {
+            return p.clone();
+        }
+        let proto = self.new_object();
+        for (name, getter) in [
+            (
+                "constructor",
+                builtins::node::module_stub_constructor as crate::object::NativeFn,
+            ),
+            ("require", builtins::node::module_stub_require),
+        ] {
+            let acc = Obj::new(ObjKind::Accessor(Box::default()), None);
+            if let ObjKind::Accessor(a) = &acc.kind {
+                *a.get.borrow_mut() = builtins::native_fn(self, name, 0, getter);
+            }
+            proto.set_hidden(name, Value::Object(acc));
+        }
+        self.accessors_used = true;
+        self.cjs_stub_proto = Some(proto.clone());
+        proto
+    }
+
     pub(crate) fn new_cjs_module(&mut self, key: &JsStr, dir: &Path) -> Rc<Obj> {
         let module = self.new_object();
-        if let Some(class) = self.module_class.clone() {
-            if let Ok(Value::Object(proto)) = self.get_prop(&class, "prototype") {
-                *module.proto.borrow_mut() = Some(proto);
-            }
+        let proto = match self.module_class.clone() {
+            Some(class) => match self.get_prop(&class, "prototype") {
+                Ok(Value::Object(proto)) => Some(proto),
+                _ => None,
+            },
+            None => Some(self.cjs_stub_proto()),
+        };
+        if let Some(proto) = proto {
+            *module.proto.borrow_mut() = Some(proto);
         }
         let exports = self.new_object();
-        module.set_own("exports", Value::Object(exports));
         module.set_own("id", Value::Str(key.clone()));
-        module.set_own("filename", Value::Str(key.clone()));
         module.set_own("path", Value::Str(dir.display().to_string().into()));
+        module.set_own("exports", Value::Object(exports));
+        module.set_own("filename", Value::Str(key.clone()));
         module.set_own("loaded", Value::Bool(false));
         let children = self.new_array(Vec::new());
         module.set_own("children", children);
