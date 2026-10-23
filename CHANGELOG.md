@@ -54,6 +54,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `http.Server.listen` lost its callback when it was called with a backlog or an explicit
   `undefined` host, which is how `ws` starts `new WebSocketServer({ port })`; every Node form of
   the call works now.
+- On Windows a connection to a closed local port took two seconds to fail, because Windows
+  retries refused connections; `net`, `http` and `fetch` now fail at once like Node, which also
+  removes a two-second pause when socket.io clients shut down.
+- `fetch` errors carry Node's `code`, `syscall` and `errno` on their `cause`, such as
+  `ECONNREFUSED` and `ENOTFOUND`.
+- Closing an HTTP server ran its callback on every later `close` event, and closing a server that
+  was not running did not report `ERR_SERVER_NOT_RUNNING`.
+- `node:http2` exports `Http2ServerRequest`, `Http2ServerResponse` and the session and stream
+  classes, so `@hono/node-server` no longer answers every request with status 400.
 - On glibc Linux `vrotdaem` also installed the musl builds of platform packages, because the
   registry metadata leaves out `libc`; the `package.json` of each optional package is now checked.
 

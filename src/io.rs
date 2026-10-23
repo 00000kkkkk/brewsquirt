@@ -1165,18 +1165,136 @@ impl ureq::unversioned::resolver::Resolver for LoopbackResolver {
     }
 }
 
+#[derive(Debug)]
+struct FastTcpConnector;
+
+struct FastTcp {
+    stream: TcpStream,
+    buffers: ureq::unversioned::transport::LazyBuffers,
+    read_timeout: Option<Duration>,
+    write_timeout: Option<Duration>,
+}
+
+impl std::fmt::Debug for FastTcp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FastTcp").finish()
+    }
+}
+
+fn transport_error(e: std::io::Error, reason: ureq::Timeout) -> ureq::Error {
+    match e.kind() {
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+            ureq::Error::Timeout(reason)
+        }
+        _ => e.into(),
+    }
+}
+
+impl<In: ureq::unversioned::transport::Transport> ureq::unversioned::transport::Connector<In>
+    for FastTcpConnector
+{
+    type Out = ureq::unversioned::transport::Either<In, FastTcp>;
+
+    fn connect(
+        &self,
+        details: &ureq::unversioned::transport::ConnectionDetails,
+        chained: Option<In>,
+    ) -> Result<Option<Self::Out>, ureq::Error> {
+        use ureq::unversioned::transport::Either;
+        if let Some(t) = chained {
+            return Ok(Some(Either::A(t)));
+        }
+        let addrs: Vec<SocketAddr> = details.addrs.iter().copied().collect();
+        let timeout = details
+            .timeout
+            .not_zero()
+            .map(|d| *d)
+            .unwrap_or(Duration::from_secs(60));
+        let stream =
+            connect_any(&addrs, timeout).map_err(|e| transport_error(e, ureq::Timeout::Connect))?;
+        if details.config.no_delay() {
+            stream.set_nodelay(true)?;
+        }
+        let buffers = ureq::unversioned::transport::LazyBuffers::new(
+            details.config.input_buffer_size(),
+            details.config.output_buffer_size(),
+        );
+        Ok(Some(Either::B(FastTcp {
+            stream,
+            buffers,
+            read_timeout: None,
+            write_timeout: None,
+        })))
+    }
+}
+
+impl ureq::unversioned::transport::Transport for FastTcp {
+    fn buffers(&mut self) -> &mut dyn ureq::unversioned::transport::Buffers {
+        &mut self.buffers
+    }
+
+    fn transmit_output(
+        &mut self,
+        amount: usize,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<(), ureq::Error> {
+        use ureq::unversioned::transport::Buffers;
+        let wanted = timeout.not_zero().map(|d| *d);
+        if wanted != self.write_timeout {
+            self.stream.set_write_timeout(wanted)?;
+            self.write_timeout = wanted;
+        }
+        let output = &self.buffers.output()[..amount];
+        self.stream
+            .write_all(output)
+            .map_err(|e| transport_error(e, timeout.reason))
+    }
+
+    fn await_input(
+        &mut self,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<bool, ureq::Error> {
+        use ureq::unversioned::transport::Buffers;
+        let wanted = timeout.not_zero().map(|d| *d);
+        if wanted != self.read_timeout {
+            self.stream.set_read_timeout(wanted)?;
+            self.read_timeout = wanted;
+        }
+        let input = self.buffers.input_append_buf();
+        let amount = self
+            .stream
+            .read(input)
+            .map_err(|e| transport_error(e, timeout.reason))?;
+        self.buffers.input_appended(amount);
+        Ok(amount > 0)
+    }
+
+    fn is_open(&mut self) -> bool {
+        if self.stream.set_nonblocking(true).is_err() {
+            return false;
+        }
+        let mut buf = [0u8; 1];
+        let open = matches!(
+            self.stream.read(&mut buf),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+        );
+        open && self.stream.set_nonblocking(false).is_ok()
+    }
+}
+
 fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
+        use ureq::unversioned::transport::Connector;
         let config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .user_agent(format!("javasquirt/{}", crate::VERSION))
             .build();
-        ureq::Agent::with_parts(
-            config,
-            ureq::unversioned::transport::DefaultConnector::new(),
-            LoopbackResolver::default(),
-        )
+        let connector = ()
+            .chain(ureq::unversioned::transport::ConnectProxyConnector::default())
+            .chain(FastTcpConnector)
+            .chain(ureq::unversioned::transport::RustlsConnector::default());
+        ureq::Agent::with_parts(config, connector, LoopbackResolver::default())
     })
 }
 
@@ -1202,9 +1320,68 @@ fn interleave_families(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
     out
 }
 
+#[cfg(windows)]
+fn fail_fast_on_loopback(socket: &socket2::Socket) {
+    use std::os::windows::io::AsRawSocket;
+    #[repr(C)]
+    struct InitialRto {
+        rtt: u16,
+        max_syn_retransmissions: u8,
+    }
+    #[link(name = "ws2_32")]
+    unsafe extern "system" {
+        fn WSAIoctl(
+            socket: usize,
+            code: u32,
+            input: *const std::ffi::c_void,
+            input_len: u32,
+            output: *mut std::ffi::c_void,
+            output_len: u32,
+            returned: *mut u32,
+            overlapped: *mut std::ffi::c_void,
+            completion: *mut std::ffi::c_void,
+        ) -> i32;
+    }
+    const SIO_TCP_INITIAL_RTO: u32 = 0x9800_0011;
+    const NO_SYN_RETRANSMISSIONS: u8 = 0xFE;
+    let params = InitialRto {
+        rtt: NO_SYN_RETRANSMISSIONS as u16,
+        max_syn_retransmissions: NO_SYN_RETRANSMISSIONS,
+    };
+    let mut returned = 0u32;
+    unsafe {
+        WSAIoctl(
+            socket.as_raw_socket() as usize,
+            SIO_TCP_INITIAL_RTO,
+            &params as *const InitialRto as *const std::ffi::c_void,
+            std::mem::size_of::<InitialRto>() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+}
+
+pub fn tcp_connect(addr: &SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
+    #[cfg(windows)]
+    if addr.ip().is_loopback() {
+        let socket = socket2::Socket::new(
+            socket2::Domain::for_address(*addr),
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )?;
+        fail_fast_on_loopback(&socket);
+        socket.connect_timeout(&(*addr).into(), timeout)?;
+        return Ok(socket.into());
+    }
+    TcpStream::connect_timeout(addr, timeout)
+}
+
 pub fn connect_any(addrs: &[SocketAddr], timeout: Duration) -> std::io::Result<TcpStream> {
     if addrs.len() == 1 {
-        return TcpStream::connect_timeout(&addrs[0], timeout);
+        return tcp_connect(&addrs[0], timeout);
     }
     let order = interleave_families(addrs);
     let (rtx, rrx) = channel::<std::io::Result<TcpStream>>();
@@ -1216,7 +1393,7 @@ pub fn connect_any(addrs: &[SocketAddr], timeout: Duration) -> std::io::Result<T
             let addr = order[started];
             let rtx = rtx.clone();
             std::thread::spawn(move || {
-                let _ = rtx.send(TcpStream::connect_timeout(&addr, timeout));
+                let _ = rtx.send(tcp_connect(&addr, timeout));
             });
             started += 1;
         }

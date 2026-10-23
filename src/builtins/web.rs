@@ -2872,14 +2872,24 @@ const WEB_SRC: &str = r##"
           return server
         }
         server.listening = true
-        if (typeof cb === "function") handlers.listening.push(cb)
+        if (typeof cb === "function") server.once("listening", cb)
         queueMicrotask(() => emit("listening"))
         return server
       },
       close(cb) {
+        const running = srv !== null
         if (srv) srv.stop()
+        srv = null
         server.listening = false
-        if (typeof cb === "function") handlers.close.push(cb)
+        if (typeof cb === "function") {
+          if (running) server.once("close", cb)
+          else
+            server.once("close", () => {
+              const e = new Error("Server is not running.")
+              e.code = "ERR_SERVER_NOT_RUNNING"
+              cb(e)
+            })
+        }
         queueMicrotask(() => emit("close"))
         return server
       },
@@ -3180,6 +3190,36 @@ pub struct FetchBody {
     queued: Vec<Result<Vec<u8>, Option<String>>>,
 }
 
+fn fetch_error_code(msg: &str) -> Option<(&'static str, &'static str, i32)> {
+    let (code, syscall, [windows, linux, apple]) =
+        if msg.contains("refused") || msg.contains("10061") {
+            ("ECONNREFUSED", "connect", [-4078, -111, -61])
+        } else if msg.contains("reset") || msg.contains("10054") {
+            ("ECONNRESET", "read", [-4077, -104, -54])
+        } else if msg.contains("timed out") || msg.contains("timeout") {
+            ("ETIMEDOUT", "connect", [-4039, -110, -60])
+        } else if msg.contains("host not found")
+            || msg.contains("dns")
+            || msg.contains("no such host")
+            || msg.contains("name or service not known")
+            || msg.contains("nodename nor servname")
+        {
+            ("ENOTFOUND", "getaddrinfo", [-3008, -3008, -3008])
+        } else if msg.contains("unreachable") {
+            ("EHOSTUNREACH", "connect", [-4065, -113, -65])
+        } else {
+            return None;
+        };
+    let errno = if cfg!(windows) {
+        windows
+    } else if cfg!(target_vendor = "apple") {
+        apple
+    } else {
+        linux
+    };
+    Some((code, syscall, errno))
+}
+
 fn fetch_body_deliver(
     vm: &mut Vm,
     id: u64,
@@ -3440,7 +3480,16 @@ pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
                         vm.io.pending -= 1;
                     }
                     let e = vm.type_error("fetch failed");
+                    let lower = msg.to_ascii_lowercase();
+                    let code = fetch_error_code(&lower);
                     let cause = vm.make_error(ErrorKind::Error, msg);
+                    if let (Value::Object(c), Some((code, syscall, errno))) = (&cause, code) {
+                        c.set_own("code", code.into());
+                        c.set_own("syscall", syscall.into());
+                        if errno != 0 {
+                            c.set_own("errno", Value::Number(errno as f64));
+                        }
+                    }
                     if let Value::Object(o) = &e {
                         o.set_own("cause", cause);
                     }
