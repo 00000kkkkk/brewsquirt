@@ -41,6 +41,13 @@ pub fn install(vm: &mut Vm) {
     method(vm, &process, "nextTick", 1, next_tick);
     method(vm, &process, "hrtime", 1, hrtime);
     method(vm, &process, "dlopen", 2, dlopen);
+    method(
+        vm,
+        &process,
+        "getBuiltinModule",
+        1,
+        super::node::get_builtin_module,
+    );
     method(vm, &process, "uptime", 0, uptime);
     method(vm, &process, "memoryUsage", 0, memory_usage);
     method(

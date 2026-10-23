@@ -1,0 +1,35 @@
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+
+const base = fs.mkdtempSync(path.join(os.tmpdir(), "jsq-dir-"))
+fs.mkdirSync(path.join(base, "sub"))
+fs.writeFileSync(path.join(base, "a.txt"), "")
+
+const dir = fs.opendirSync(base)
+const names = []
+let entry
+while ((entry = dir.readSync()) !== null) names.push(`${entry.name}:${entry.isDirectory()}`)
+dir.closeSync()
+console.log(names.sort(), dir.path === base)
+try {
+  dir.readSync()
+} catch (e) {
+  console.log(e.code)
+}
+
+const seen = []
+for await (const e of await fs.promises.opendir(base)) seen.push(e.name)
+console.log(seen.sort())
+
+await new Promise((resolve) =>
+  fs.opendir(base, (err, d) =>
+    d.read((err2, e) => {
+      console.log("callback", err, err2, typeof e.name)
+      d.close(resolve)
+    }),
+  ),
+)
+
+console.log(typeof process.getBuiltinModule("fs").readFileSync, process.getBuiltinModule("node:fs") === fs, process.getBuiltinModule("not-a-module"))
+fs.rmSync(base, { recursive: true })

@@ -1,0 +1,5 @@
+[ 'a.txt:false', 'sub:true' ] true
+ERR_DIR_CLOSED
+[ 'a.txt', 'sub' ]
+callback null null string
+function true undefined

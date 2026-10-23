@@ -1,0 +1,13 @@
+"é€😀 ok"
+"😀"
+windows-1251 windows-1251 Привіт
+koi8-r koi8-r При
+gbk gbk 你好
+shift_jis shift_jis あい
+euc-kr euc-kr 한
+big5 big5 中
+iso-8859-2 iso-8859-2 Ąą
+latin1 windows-1252 €é
+TypeError ERR_ENCODING_INVALID_ENCODED_DATA
+RangeError
+A 2

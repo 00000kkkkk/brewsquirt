@@ -37,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `preinstall`, `install` and `postinstall` scripts of packages listed in `trustedDependencies`
   in `squirt.json`, with `node` resolving to `jsq`. `vrotdaem trust <name>` adds a package to the
   list and runs its scripts, and `gluboko` names the packages whose scripts it skipped.
+- `TextDecoder` decodes every encoding of the WHATWG Encoding Standard, including
+  `windows-1251`, `koi8-r`, the ISO 8859 family, `gbk`, `gb18030`, `big5`, `shift_jis`, `euc-jp`
+  and `euc-kr`, with Node's encoding names and `ERR_ENCODING_INVALID_ENCODED_DATA` in fatal mode.
+- `fs.opendir`, `fs.opendirSync` and `fs.promises.opendir` return a `Dir` with `read`, `readSync`,
+  `close`, async iteration and disposal, so `fs-extra` copies directories.
+- `process.getBuiltinModule(id)` returns a core module or `undefined`, which `h3` relies on.
 - `crypto.subtle` wraps and unwraps keys with AES-KW (RFC 3394) and generates AES-KW keys, so
   `openpgp` encrypts and decrypts messages.
 - Native addons: `require`, `import` and `process.dlopen` load `.node` files built on Node-API
@@ -56,6 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `http.Server.listen` lost its callback when it was called with a backlog or an explicit
   `undefined` host, which is how `ws` starts `new WebSocketServer({ port })`; every Node form of
   the call works now.
+- `TextDecoder` with `{ stream: true }` dropped characters split between chunks, turning them
+  into replacement characters; streaming now keeps the partial sequence until the next call.
 - A CommonJS module imported from an ES module exposes a `"module.exports"` export like Node 24,
   and `export *` passes it on, so `require()` of an ES module that re-exports a CommonJS file
   returns that file's `module.exports`. `require("mocha")` returns the `Mocha` class again.

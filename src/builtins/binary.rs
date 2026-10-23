@@ -326,17 +326,8 @@ fn td_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         Value::Undefined => JsStr::from("utf-8"),
         v => vm.to_string(&v)?,
     };
-    let norm = label.trim().to_ascii_lowercase();
-    let encoding = match norm.as_str() {
-        "utf-8" | "utf8" | "unicode-1-1-utf-8" | "unicode11utf8" | "unicode20utf8"
-        | "x-unicode20utf8" => "utf-8",
-        "utf-16le" | "utf-16" | "ucs-2" | "ucs2" | "csunicode" | "iso-10646-ucs-2" | "unicode"
-        | "unicodefeff" => "utf-16le",
-        "utf-16be" | "unicodefffe" => "utf-16be",
-        "latin1" | "latin-1" | "ascii" | "us-ascii" | "iso-8859-1" | "iso8859-1" | "iso88591"
-        | "iso_8859-1" | "iso_8859-1:1987" | "iso-ir-100" | "l1" | "cp819" | "ibm819"
-        | "csisolatin1" | "windows-1252" | "cp1252" | "x-cp1252" | "ansi_x3.4-1968" | "cp367"
-        | "csascii" | "ibm367" | "iso-ir-6" | "iso646-us" | "us" => "windows-1252",
+    let encoding = match encoding_rs::Encoding::for_label(label.to_string().as_bytes()) {
+        Some(e) if e != encoding_rs::REPLACEMENT => e,
         _ => {
             return Err(vm.range_error(format!("The \"{label}\" encoding is not supported")));
         }
@@ -349,19 +340,45 @@ fn td_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     } else {
         (false, false)
     };
-    o.set_own("encoding", encoding.into());
+    o.set_own("encoding", encoding.name().to_ascii_lowercase().into());
     o.set_own("fatal", Value::Bool(fatal));
     o.set_own("ignoreBOM", Value::Bool(ignore_bom));
     Ok(this)
 }
 
-const WINDOWS_1252_HIGH: [u16; 32] = [
-    0x20AC, 0x81, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039,
-    0x0152, 0x8D, 0x017D, 0x8F, 0x90, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
-    0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x9D, 0x017E, 0x0178,
-];
+struct StreamDecoder {
+    owner: std::rc::Weak<crate::object::Obj>,
+    decoder: encoding_rs::Decoder,
+}
+
+thread_local! {
+    static DECODERS: std::cell::RefCell<Vec<StreamDecoder>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn take_decoder(owner: &std::rc::Rc<crate::object::Obj>) -> Option<encoding_rs::Decoder> {
+    DECODERS.with(|d| {
+        let mut list = d.borrow_mut();
+        list.retain(|s| s.owner.strong_count() > 0);
+        let i = list
+            .iter()
+            .position(|s| std::ptr::eq(s.owner.as_ptr(), std::rc::Rc::as_ptr(owner)))?;
+        Some(list.swap_remove(i).decoder)
+    })
+}
+
+fn keep_decoder(owner: &std::rc::Rc<crate::object::Obj>, decoder: encoding_rs::Decoder) {
+    DECODERS.with(|d| {
+        d.borrow_mut().push(StreamDecoder {
+            owner: std::rc::Rc::downgrade(owner),
+            decoder,
+        })
+    });
+}
 
 fn td_decode(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let Value::Object(owner) = &this else {
+        return Err(vm.type_error("Illegal invocation"));
+    };
     let input = arg(args, 0);
     let bytes = if input.is_undefined() {
         Vec::new()
@@ -375,65 +392,49 @@ fn td_decode(vm: &mut Vm, this: Value, args: &[Value]) -> R {
             }
         }
     };
+    let options = arg(args, 1);
+    let stream = options.is_object() && vm.get_prop(&options, "stream")?.truthy();
     let fatal = vm.get_prop(&this, "fatal")?.truthy();
     let ignore_bom = vm.get_prop(&this, "ignoreBOM")?.truthy();
-    let encoding = vm.get_prop(&this, "encoding")?;
-    let encoding = vm.to_string(&encoding)?;
-    match &*encoding {
-        "utf-16le" | "utf-16be" => {
-            let be = &*encoding == "utf-16be";
-            let mut body = &bytes[..];
-            let bom: [u8; 2] = if be { [0xFE, 0xFF] } else { [0xFF, 0xFE] };
-            if !ignore_bom && body.len() >= 2 && body[..2] == bom {
-                body = &body[2..];
-            }
-            let units: Vec<u16> = body
-                .chunks(2)
-                .map(|c| {
-                    let a = c[0] as u16;
-                    let b = *c.get(1).unwrap_or(&0) as u16;
-                    if be { a << 8 | b } else { b << 8 | a }
-                })
-                .collect();
-            return if fatal {
-                match String::from_utf16(&units) {
-                    Ok(s) => Ok(s.into()),
-                    Err(_) => Err(vm.type_error(format!(
-                        "The encoded data was not valid for encoding {encoding}"
-                    ))),
-                }
-            } else {
-                Ok(String::from_utf16_lossy(&units).into())
-            };
+    let label = vm.get_prop(&this, "encoding")?;
+    let label = vm.to_string(&label)?;
+    let encoding = encoding_rs::Encoding::for_label(label.to_string().as_bytes())
+        .unwrap_or(encoding_rs::UTF_8);
+    let mut decoder = take_decoder(owner).unwrap_or_else(|| {
+        if ignore_bom {
+            encoding.new_decoder_without_bom_handling()
+        } else {
+            encoding.new_decoder_with_bom_removal()
         }
-        "windows-1252" => {
-            let s: String = bytes
-                .iter()
-                .map(|&b| {
-                    if (0x80..0xA0).contains(&b) {
-                        char::from_u32(WINDOWS_1252_HIGH[(b - 0x80) as usize] as u32)
-                            .unwrap_or('\u{FFFD}')
-                    } else {
-                        b as char
-                    }
-                })
-                .collect();
-            return Ok(s.into());
-        }
-        _ => {}
-    }
-    let body = if !ignore_bom && bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        &bytes[3..]
-    } else {
-        &bytes[..]
-    };
+    });
+    let last = !stream;
+    let mut out = String::new();
     if fatal {
-        return match std::str::from_utf8(body) {
-            Ok(s) => Ok(s.into()),
-            Err(_) => Err(vm.type_error("The encoded data was not valid for encoding utf-8")),
-        };
+        let cap = decoder
+            .max_utf8_buffer_length_without_replacement(bytes.len())
+            .unwrap_or(bytes.len() * 3 + 16);
+        out.reserve(cap);
+        let (result, _) = decoder.decode_to_string_without_replacement(&bytes, &mut out, last);
+        if let encoding_rs::DecoderResult::Malformed(_, _) = result {
+            let e = vm.type_error(format!(
+                "The encoded data was not valid for encoding {label}"
+            ));
+            if let Value::Object(o) = &e {
+                o.set_own("code", "ERR_ENCODING_INVALID_ENCODED_DATA".into());
+            }
+            return Err(e);
+        }
+    } else {
+        let cap = decoder
+            .max_utf8_buffer_length(bytes.len())
+            .unwrap_or(bytes.len() * 3 + 16);
+        out.reserve(cap);
+        let _ = decoder.decode_to_string(&bytes, &mut out, last);
     }
-    Ok(String::from_utf8_lossy(body).into_owned().into())
+    if stream {
+        keep_decoder(owner, decoder);
+    }
+    Ok(out.into())
 }
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";

@@ -1707,7 +1707,7 @@ Uint8ClampedArray(3) [ 255, 0, 2 ] Int8Array(1) [ -56 ]
 | API                                   | Description                                               |
 | ------------------------------------- | --------------------------------------------------------- |
 | `new TextEncoder().encode(text)`      | UTF-8 bytes of a string, as a `Uint8Array`                |
-| `new TextDecoder(label?).decode(bytes)` | A string from bytes in `utf-8` (default), `utf-16le`, `utf-16be` or `windows-1252` (also known as `latin1`, `ascii` and `iso-8859-1`); `{ fatal: true }` throws on bad input |
+| `new TextDecoder(label?).decode(bytes, { stream })` | A string from bytes in any WHATWG encoding: `utf-8` (default), `utf-16le`, `utf-16be`, `windows-1252` (also known as `latin1` and `ascii`), the other Windows code pages, the ISO 8859 family, `koi8-r`, `gbk`, `gb18030`, `big5`, `shift_jis`, `euc-jp` and `euc-kr`; `{ stream: true }` keeps a sequence split between chunks for the next call, and `{ fatal: true }` throws on bad input |
 | `btoa(text)`, `atob(base64)`          | Base64 of Latin-1 text and back                           |
 | `bytes.toHex()`, `Uint8Array.fromHex(text)` | Hex encoding of a `Uint8Array`                      |
 | `bytes.toBase64(options?)`, `Uint8Array.fromBase64(text, options?)` | Base64, or base64url with `{ alphabet: "base64url" }` |

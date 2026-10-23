@@ -867,6 +867,87 @@ const NODE_SRC: &str = r##"
 
   const pathOf = (p) => (p instanceof URL ? fileURLToPath(p) : typeof p === "number" ? p : String(p))
 
+  class Dir {
+    #entries
+    #closed = false
+    constructor(path, entries) {
+      Object.defineProperty(this, "path", { value: path, enumerable: true })
+      this.#entries = entries
+    }
+    #check() {
+      if (this.#closed) {
+        const e = new Error("Directory handle was closed")
+        e.code = "ERR_DIR_CLOSED"
+        throw e
+      }
+    }
+    readSync() {
+      this.#check()
+      return this.#entries.shift() ?? null
+    }
+    read(cb) {
+      if (typeof cb === "function") {
+        let entry = null
+        let error = null
+        try {
+          entry = this.readSync()
+        } catch (e) {
+          error = e
+        }
+        queueMicrotask(() => cb(error, entry))
+        return
+      }
+      return new Promise((resolve, reject) => {
+        try {
+          resolve(this.readSync())
+        } catch (e) {
+          reject(e)
+        }
+      })
+    }
+    closeSync() {
+      this.#check()
+      this.#closed = true
+    }
+    close(cb) {
+      if (typeof cb === "function") {
+        let error = null
+        try {
+          this.closeSync()
+        } catch (e) {
+          error = e
+        }
+        queueMicrotask(() => cb(error))
+        return
+      }
+      return new Promise((resolve, reject) => {
+        try {
+          this.closeSync()
+          resolve()
+        } catch (e) {
+          reject(e)
+        }
+      })
+    }
+    async *entries() {
+      try {
+        let entry
+        while ((entry = this.readSync()) !== null) yield entry
+      } finally {
+        if (!this.#closed) this.closeSync()
+      }
+    }
+    [Symbol.asyncIterator]() {
+      return this.entries()
+    }
+    [Symbol.dispose]() {
+      if (!this.#closed) this.closeSync()
+    }
+    async [Symbol.asyncDispose]() {
+      if (!this.#closed) this.closeSync()
+    }
+  }
+
   const fs = {
     readFileSync(path, options) {
       const bytes = native.read(pathOf(path))
@@ -904,6 +985,11 @@ const NODE_SRC: &str = r##"
         if (options?.throwIfNoEntry === false && e.code === "ENOENT") return undefined
         throw e
       }
+    },
+    opendirSync(path, options) {
+      const p = pathOf(path)
+      const entries = native.readdir(p, !!options?.recursive).map(([name, kind, parent]) => new Dirent(name, kind, parent))
+      return new Dir(p, entries)
     },
     readdirSync(path, options) {
       const p = pathOf(path)
@@ -990,6 +1076,7 @@ const NODE_SRC: &str = r##"
     constants: { F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1 },
     Stats,
     Dirent,
+    Dir,
   }
 
   const promises = {}
@@ -8225,6 +8312,22 @@ fn module_create_require(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         }
     }
     Ok(Value::Object(require))
+}
+
+pub fn get_builtin_module(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let name = match arg(args, 0) {
+        Value::Str(s) => s,
+        _ => return Err(vm.type_error("The \"id\" argument must be of type string")),
+    };
+    let bare = name.strip_prefix("node:").unwrap_or(&name);
+    if !BUILTIN_MODULES.contains(&bare) {
+        return Ok(Value::Undefined);
+    }
+    let require = vm.globals.get("require").cloned().unwrap_or_default();
+    if !require.is_callable() {
+        return Ok(Value::Undefined);
+    }
+    vm.call_value(&require, Value::Undefined, &[format!("node:{bare}").into()])
 }
 
 fn module_is_builtin(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
