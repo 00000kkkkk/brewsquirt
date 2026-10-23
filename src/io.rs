@@ -1378,7 +1378,7 @@ fn interleave_families(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
 fn fail_fast_on_loopback(socket: &socket2::Socket) {
     use std::os::windows::io::AsRawSocket;
     #[repr(C)]
-    struct InitialRto {
+    struct RetransmitParams {
         rtt: u16,
         max_syn_retransmissions: u8,
     }
@@ -1396,9 +1396,9 @@ fn fail_fast_on_loopback(socket: &socket2::Socket) {
             completion: *mut std::ffi::c_void,
         ) -> i32;
     }
-    const SIO_TCP_INITIAL_RTO: u32 = 0x9800_0011;
+    const RETRANSMIT_IOCTL: u32 = 0x9800_0011;
     const NO_SYN_RETRANSMISSIONS: u8 = 0xFE;
-    let params = InitialRto {
+    let params = RetransmitParams {
         rtt: NO_SYN_RETRANSMISSIONS as u16,
         max_syn_retransmissions: NO_SYN_RETRANSMISSIONS,
     };
@@ -1406,9 +1406,9 @@ fn fail_fast_on_loopback(socket: &socket2::Socket) {
     unsafe {
         WSAIoctl(
             socket.as_raw_socket() as usize,
-            SIO_TCP_INITIAL_RTO,
-            &params as *const InitialRto as *const std::ffi::c_void,
-            std::mem::size_of::<InitialRto>() as u32,
+            RETRANSMIT_IOCTL,
+            &params as *const RetransmitParams as *const std::ffi::c_void,
+            std::mem::size_of::<RetransmitParams>() as u32,
             std::ptr::null_mut(),
             0,
             &mut returned,

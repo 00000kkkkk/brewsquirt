@@ -187,12 +187,12 @@ pub fn needs_scripts(dest: &Path) -> bool {
 
 fn search_path(root: &Path, dest: &Path) -> Result<std::ffi::OsString, String> {
     let mut dirs = vec![node_shims(root)?];
-    for anc in dest.ancestors() {
-        let bin = anc.join(DEPS_DIR).join(".bin");
+    for ancestor in dest.ancestors() {
+        let bin = ancestor.join(DEPS_DIR).join(".bin");
         if bin.is_dir() && !dirs.contains(&bin) {
             dirs.push(bin);
         }
-        if anc == root {
+        if ancestor == root {
             break;
         }
     }
