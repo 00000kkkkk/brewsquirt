@@ -674,10 +674,14 @@ mod imp {
         }
     }
 
+    unsafe extern "C" {
+        #[link_name = "pthread_once"]
+        fn run_once(control: *mut c_void, init: unsafe extern "C" fn()) -> c_int;
+    }
+
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn uv_once(guard: *mut c_void, cb: unsafe extern "C" fn()) {
-        let cb: extern "C" fn() = unsafe { std::mem::transmute(cb) };
-        check(unsafe { libc::pthread_once(guard.cast(), cb) })
+        check(unsafe { run_once(guard, cb) })
     }
 
     #[unsafe(no_mangle)]

@@ -25,10 +25,12 @@ c.inc()
 c.inc(5)
 console.log(c.value, c instanceof addon.Counter, addon.Counter.name)
 for (let i = 0; i < 1000; i++) new addon.Counter(i).inc()
-addon.asyncSum(100000).then(v => console.log("async", v))
 const seen = []
-addon.ticks(v => {
-  seen.push(v)
-  if (seen.length === 5) console.log("ticks", seen.join(" "))
-}, 5)
+const ticked = new Promise(resolve => {
+  addon.ticks(v => {
+    seen.push(v)
+    if (seen.length === 5) resolve(seen.join(" "))
+  }, 5)
+})
+Promise.all([addon.asyncSum(100000), ticked]).then(([sum, ticks]) => console.log("async", sum, "ticks", ticks))
 process.on("exit", () => console.log("exit", seen.length))

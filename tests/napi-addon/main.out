@@ -11,6 +11,5 @@ true
 rethrown from js
 true E_TEST native failure
 16 true Counter
-async 5000050000
-ticks 0 1 2 3 4
+async 5000050000 ticks 0 1 2 3 4
 exit 5
