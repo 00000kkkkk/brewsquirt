@@ -6,11 +6,11 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 static MIN_THRESHOLD: AtomicUsize = AtomicUsize::new(200_000);
-static THRESHOLD: AtomicUsize = AtomicUsize::new(200_000);
 
 thread_local! {
+    static ALLOCS: Cell<usize> = const { Cell::new(0) };
+    static THRESHOLD: Cell<usize> = const { Cell::new(200_000) };
     static HEAP: RefCell<Vec<*const Obj>> = const { RefCell::new(Vec::new()) };
     static ENABLED: Cell<bool> = const { Cell::new(true) };
 }
@@ -21,7 +21,7 @@ pub(crate) fn register(o: &Rc<Obj>) {
         o.heap_slot.set(h.len() as u32);
         h.push(Rc::as_ptr(o));
     });
-    ALLOCS.fetch_add(1, Ordering::Relaxed);
+    ALLOCS.with(|a| a.set(a.get() + 1));
 }
 
 pub(crate) fn unregister(o: &Obj) {
@@ -44,7 +44,7 @@ pub(crate) fn unregister(o: &Obj) {
 
 #[inline]
 pub fn due() -> bool {
-    ALLOCS.load(Ordering::Relaxed) >= THRESHOLD.load(Ordering::Relaxed)
+    ALLOCS.with(|a| a.get()) >= THRESHOLD.with(|t| t.get())
 }
 
 pub fn configure_from_env() {
@@ -54,7 +54,7 @@ pub fn configure_from_env() {
     {
         let n = n.max(1);
         MIN_THRESHOLD.store(n, Ordering::Relaxed);
-        THRESHOLD.store(n, Ordering::Relaxed);
+        THRESHOLD.with(|t| t.set(n));
     }
 }
 
@@ -437,7 +437,7 @@ fn clear(n: &Node, grave: &mut Graveyard) {
 }
 
 pub fn collect() -> Stats {
-    ALLOCS.store(0, Ordering::Relaxed);
+    ALLOCS.with(|a| a.set(0));
     if !ENABLED.with(|e| e.get()) {
         return Stats::default();
     }
@@ -520,10 +520,7 @@ pub fn collect() -> Stats {
     drop(nodes);
     drop(grave);
     let live = obj_count - freed;
-    THRESHOLD.store(
-        (live * 2).max(MIN_THRESHOLD.load(Ordering::Relaxed)),
-        Ordering::Relaxed,
-    );
+    THRESHOLD.with(|t| t.set((live * 2).max(MIN_THRESHOLD.load(Ordering::Relaxed))));
     Stats {
         scanned: obj_count,
         freed,

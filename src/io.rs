@@ -78,6 +78,19 @@ pub enum IoEvent {
         id: u64,
         event: WatchEvent,
     },
+    Port {
+        port: u64,
+        event: crate::builtins::threads::PortEvent,
+    },
+    Broadcast {
+        id: u64,
+        data: crate::builtins::threads::Wire,
+    },
+    Worker {
+        id: u64,
+        event: crate::builtins::threads::WorkerEvent,
+    },
+    Wake,
 }
 
 pub struct WatchEvent {

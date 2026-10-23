@@ -468,6 +468,10 @@ fn exit(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let code = exit_code(vm);
     super::netio::flush_sockets(vm);
     vm.flush();
+    if vm.threads.worker.is_some() {
+        vm.threads.exit_code = Some(code);
+        return Err(vm.terminate_value());
+    }
     std::process::exit(code)
 }
 

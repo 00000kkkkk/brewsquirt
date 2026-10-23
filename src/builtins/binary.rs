@@ -1,10 +1,8 @@
 use super::{arg, make_ctor, method, native_fn};
-use crate::inspect::inspect_plain;
 use crate::jsstr::JsStr;
-use crate::object::{MapKey, Obj, ObjKind, TypedKind, View};
+use crate::object::{ObjKind, TypedKind};
 use crate::value::Value;
 use crate::vm::{ErrorKind, Vm};
-use std::rc::Rc;
 
 type R = Result<Value, Value>;
 
@@ -509,7 +507,7 @@ pub fn base64_decode(s: &str, url: bool) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn dom_error(vm: &mut Vm, name: &str, msg: &str) -> Value {
+pub(crate) fn dom_error(vm: &mut Vm, name: &str, msg: &str) -> Value {
     let _ = vm.load_lazy_global("DOMException");
     if let Some(ctor) = vm.globals.get("DOMException").cloned() {
         if ctor.is_callable() {
@@ -617,154 +615,15 @@ fn random_uuid(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
 }
 
 fn structured_clone(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    let mut memo: Vec<(*const Obj, Value)> = Vec::new();
-    clone_value(vm, &arg(args, 0), &mut memo)
-}
-
-fn not_cloneable(vm: &mut Vm, v: &Value) -> Value {
-    dom_error(
-        vm,
-        "DataCloneError",
-        &format!("{} could not be cloned.", inspect_plain(v)),
-    )
-}
-
-fn clone_value(vm: &mut Vm, v: &Value, memo: &mut Vec<(*const Obj, Value)>) -> R {
-    let o = match v {
-        Value::Symbol(_) => return Err(not_cloneable(vm, v)),
-        Value::Object(o) => o,
-        other => return Ok(other.clone()),
+    let options = arg(args, 1);
+    let transfer = match &options {
+        Value::Undefined | Value::Null => Vec::new(),
+        Value::Object(_) => match vm.get_prop(&options, "transfer")? {
+            Value::Undefined => Vec::new(),
+            t => vm.iterate(&t)?,
+        },
+        _ => return Err(vm.type_error("The \"options\" argument must be of type object.")),
     };
-    let ptr = Rc::as_ptr(o);
-    if let Some((_, c)) = memo.iter().find(|(p, _)| *p == ptr) {
-        return Ok(c.clone());
-    }
-    let out = match &o.kind {
-        ObjKind::Array(a) => {
-            let out = vm.new_array(Vec::new());
-            memo.push((ptr, out.clone()));
-            let items = a.borrow().clone();
-            let mut cloned = Vec::with_capacity(items.len());
-            for x in &items {
-                cloned.push(clone_value(vm, x, memo)?);
-            }
-            if let Value::Object(n) = &out {
-                if let ObjKind::Array(na) = &n.kind {
-                    *na.borrow_mut() = cloned;
-                }
-            }
-            return Ok(out);
-        }
-        ObjKind::Ordinary | ObjKind::Error => {
-            let n = if matches!(o.kind, ObjKind::Error) {
-                let e = vm.make_error(ErrorKind::Error, "");
-                if let Value::Object(e) = &e {
-                    for key in ["name", "message", "stack"] {
-                        if let Some(x) = o.get_chain(key) {
-                            if matches!(x, Value::Str(_)) {
-                                e.set_hidden(key, x);
-                            }
-                        }
-                    }
-                    if let Some(Value::Str(name)) = o.get_chain("name") {
-                        if let Some(Value::Object(c)) = vm.globals.get(&name).cloned() {
-                            if let Some(Value::Object(p)) = c.get_own("prototype") {
-                                *e.proto.borrow_mut() = Some(p);
-                            }
-                        }
-                    }
-                }
-                e
-            } else {
-                Value::Object(vm.new_object())
-            };
-            memo.push((ptr, n.clone()));
-            let entries = vm.own_entries_resolved(v, false)?;
-            for (k, x) in entries {
-                if x.is_callable() {
-                    return Err(not_cloneable(vm, &x));
-                }
-                let c = clone_value(vm, &x, memo)?;
-                if let Value::Object(no) = &n {
-                    no.set_own(k, c);
-                }
-            }
-            return Ok(n);
-        }
-        ObjKind::Map(m) => {
-            let out = Obj::new(
-                ObjKind::Map(Box::default()),
-                Some(vm.realm.map_proto.clone()),
-            );
-            let outv = Value::Object(out.clone());
-            memo.push((ptr, outv.clone()));
-            let entries: Vec<(Value, Value)> = m
-                .borrow()
-                .iter()
-                .map(|(k, v)| (k.to_value(), v.clone()))
-                .collect();
-            for (k, x) in entries {
-                let ck = clone_value(vm, &k, memo)?;
-                let cx = clone_value(vm, &x, memo)?;
-                if let ObjKind::Map(nm) = &out.kind {
-                    nm.borrow_mut().insert(MapKey::from_value(&ck), cx);
-                }
-            }
-            return Ok(outv);
-        }
-        ObjKind::Set(s) => {
-            let out = Obj::new(
-                ObjKind::Set(Box::default()),
-                Some(vm.realm.set_proto.clone()),
-            );
-            let outv = Value::Object(out.clone());
-            memo.push((ptr, outv.clone()));
-            let items: Vec<Value> = s.borrow().iter().map(|k| k.to_value()).collect();
-            for x in items {
-                let cx = clone_value(vm, &x, memo)?;
-                if let ObjKind::Set(ns) = &out.kind {
-                    ns.borrow_mut().insert(MapKey::from_value(&cx));
-                }
-            }
-            return Ok(outv);
-        }
-        ObjKind::Date(t) => Value::Object(Obj::new(
-            ObjKind::Date(std::cell::Cell::new(t.get())),
-            Some(vm.realm.date_proto.clone()),
-        )),
-        ObjKind::RegExp(r) => {
-            let d = r.data.borrow().clone();
-            crate::builtins::make_regexp(vm, &d.source, &d.flags)?
-        }
-        ObjKind::ArrayBuffer(b) => {
-            let bytes = b.borrow().clone();
-            Value::Object(new_buffer(vm, bytes))
-        }
-        ObjKind::Typed(t) => {
-            let buf = clone_value(vm, &Value::Object(t.buffer.clone()), memo)?;
-            let Value::Object(buf) = buf else {
-                return Err(not_cloneable(vm, v));
-            };
-            new_typed(vm, t.kind, buf, t.offset, t.length)
-        }
-        ObjKind::DataView(t) => {
-            let buf = clone_value(vm, &Value::Object(t.buffer.clone()), memo)?;
-            let Value::Object(buf) = buf else {
-                return Err(not_cloneable(vm, v));
-            };
-            Value::Object(Obj::new(
-                ObjKind::DataView(Box::new(View {
-                    kind: TypedKind::Uint8,
-                    buffer: buf,
-                    offset: t.offset,
-                    length: t.length,
-                    tracking: t.tracking,
-                })),
-                Some(vm.realm.dataview_proto.clone()),
-            ))
-        }
-        _ => return Err(not_cloneable(vm, v)),
-    };
-    memo.push((ptr, out.clone()));
-    Ok(out)
+    let wire = super::threads::serialize(vm, &arg(args, 0), &transfer)?;
+    super::threads::deserialize(vm, &wire)
 }

@@ -28,6 +28,7 @@ fn new_buffer_with_max(vm: &Vm, bytes: Vec<u8>, max: Option<usize>) -> Rc<Obj> {
             max,
             shared: false,
             external: false,
+            shared_mem: None,
         })),
         Some(vm.realm.array_buffer_proto.clone()),
     )
@@ -45,6 +46,7 @@ pub(crate) unsafe fn new_external_buffer(vm: &Vm, ptr: *mut u8, len: usize) -> R
             max: None,
             shared: false,
             external: true,
+            shared_mem: None,
         })),
         Some(vm.realm.array_buffer_proto.clone()),
     )
@@ -55,12 +57,20 @@ pub fn is_external(o: &Obj) -> bool {
 }
 
 fn new_shared_buffer(vm: &Vm, bytes: Vec<u8>, max: Option<usize>) -> Rc<Obj> {
+    let len = bytes.len();
+    if let Some(mem) = super::threads::SharedMem::new(len, max.unwrap_or(len)) {
+        if bytes.iter().any(|b| *b != 0) {
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), mem.ptr(), len) };
+        }
+        return super::threads::shared_buffer(vm, mem, max);
+    }
     Obj::new(
         ObjKind::ArrayBuffer(Box::new(BufferData {
             bytes: RefCell::new(bytes),
             max,
             shared: true,
             external: false,
+            shared_mem: None,
         })),
         Some(vm.realm.shared_buffer_proto.clone()),
     )
@@ -596,7 +606,10 @@ fn this_buffer(vm: &mut Vm, this: &Value, name: &str) -> Result<Rc<Obj>, Value> 
 
 fn buffer_len(o: &Obj) -> usize {
     match &o.kind {
-        ObjKind::ArrayBuffer(b) => b.borrow().len(),
+        ObjKind::ArrayBuffer(b) => {
+            b.sync_shared();
+            b.borrow().len()
+        }
         _ => 0,
     }
 }
@@ -686,6 +699,10 @@ fn ab_resize(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     }
     if let ObjKind::ArrayBuffer(b) = &o.kind {
         b.borrow_mut().resize(new_len, 0);
+        if let Some(m) = &b.shared_mem {
+            m.len
+                .fetch_max(new_len, std::sync::atomic::Ordering::AcqRel);
+        }
     }
     Ok(Value::Undefined)
 }
@@ -1975,10 +1992,114 @@ fn revalidate(vm: &mut Vm, o: &Obj, i: usize) -> Result<(), Value> {
     Ok(())
 }
 
+fn shared_slot(o: &Obj, i: usize) -> Option<(*mut u8, TypedKind)> {
+    let t = view_of(o);
+    let ObjKind::ArrayBuffer(b) = &t.buffer.kind else {
+        return None;
+    };
+    b.shared_mem.as_ref()?;
+    let base = b.bytes.borrow().as_ptr() as *mut u8;
+    Some((unsafe { base.add(t.offset + i * t.kind.size()) }, t.kind))
+}
+
+fn to_bits(kind: TypedKind, v: &Value) -> u64 {
+    let mut b = [0u8; 8];
+    kind.write_value(&mut b[..kind.size()], v, true);
+    u64::from_le_bytes(b)
+}
+
+fn from_bits(kind: TypedKind, bits: u64) -> Value {
+    let b = bits.to_le_bytes();
+    kind.read_value(&b[..kind.size()], true)
+}
+
+fn atomic_load_bits(addr: *mut u8, size: usize) -> u64 {
+    use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering::SeqCst};
+    unsafe {
+        match size {
+            1 => AtomicU8::from_ptr(addr).load(SeqCst) as u64,
+            2 => AtomicU16::from_ptr(addr as *mut u16).load(SeqCst) as u64,
+            4 => AtomicU32::from_ptr(addr as *mut u32).load(SeqCst) as u64,
+            _ => AtomicU64::from_ptr(addr as *mut u64).load(SeqCst),
+        }
+    }
+}
+
+fn atomic_rmw_bits(addr: *mut u8, size: usize, op: usize, v: u64) -> u64 {
+    use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering::SeqCst};
+    macro_rules! apply {
+        ($a:expr, $v:expr) => {
+            match op {
+                0 => $a.fetch_add($v, SeqCst),
+                1 => $a.fetch_and($v, SeqCst),
+                2 => $a.swap($v, SeqCst),
+                3 => $a.fetch_or($v, SeqCst),
+                4 => $a.fetch_sub($v, SeqCst),
+                6 => {
+                    $a.store($v, SeqCst);
+                    $v
+                }
+                _ => $a.fetch_xor($v, SeqCst),
+            }
+        };
+    }
+    unsafe {
+        match size {
+            1 => apply!(AtomicU8::from_ptr(addr), v as u8) as u64,
+            2 => apply!(AtomicU16::from_ptr(addr as *mut u16), v as u16) as u64,
+            4 => apply!(AtomicU32::from_ptr(addr as *mut u32), v as u32) as u64,
+            _ => apply!(AtomicU64::from_ptr(addr as *mut u64), v),
+        }
+    }
+}
+
+fn atomic_cas_bits(addr: *mut u8, size: usize, expected: u64, replacement: u64) -> u64 {
+    use std::sync::atomic::{AtomicU8, AtomicU16, AtomicU32, AtomicU64, Ordering::SeqCst};
+    unsafe {
+        match size {
+            1 => match AtomicU8::from_ptr(addr).compare_exchange(
+                expected as u8,
+                replacement as u8,
+                SeqCst,
+                SeqCst,
+            ) {
+                Ok(x) | Err(x) => x as u64,
+            },
+            2 => match AtomicU16::from_ptr(addr as *mut u16).compare_exchange(
+                expected as u16,
+                replacement as u16,
+                SeqCst,
+                SeqCst,
+            ) {
+                Ok(x) | Err(x) => x as u64,
+            },
+            4 => match AtomicU32::from_ptr(addr as *mut u32).compare_exchange(
+                expected as u32,
+                replacement as u32,
+                SeqCst,
+                SeqCst,
+            ) {
+                Ok(x) | Err(x) => x as u64,
+            },
+            _ => match AtomicU64::from_ptr(addr as *mut u64).compare_exchange(
+                expected,
+                replacement,
+                SeqCst,
+                SeqCst,
+            ) {
+                Ok(x) | Err(x) => x,
+            },
+        }
+    }
+}
+
 fn atomics_load(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let o = integer_view(vm, &arg(args, 0), false)?;
     let i = atomic_index(vm, &o, &arg(args, 1))?;
     revalidate(vm, &o, i)?;
+    if let Some((addr, kind)) = shared_slot(&o, i) {
+        return Ok(from_bits(kind, atomic_load_bits(addr, kind.size())));
+    }
     Ok(get_el(&o, i))
 }
 
@@ -1988,6 +2109,10 @@ fn atomics_store(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let kind = view_of(&o).kind;
     let v = atomic_value(vm, kind, &arg(args, 2))?;
     revalidate(vm, &o, i)?;
+    if let Some((addr, kind)) = shared_slot(&o, i) {
+        atomic_rmw_bits(addr, kind.size(), 6, to_bits(kind, &v));
+        return Ok(v);
+    }
     view_of(&o).set(i, &v);
     Ok(v)
 }
@@ -2021,6 +2146,15 @@ fn atomics_rmw<const OP: usize>(vm: &mut Vm, _this: Value, args: &[Value]) -> R 
     let kind = view_of(&o).kind;
     let v = coerce(vm, kind, &arg(args, 2))?;
     revalidate(vm, &o, i)?;
+    if let Some((addr, kind)) = shared_slot(&o, i) {
+        let operand = match &v {
+            Value::Number(n) if !n.is_finite() => Value::Number(0.0),
+            Value::Number(n) => Value::Number(n.trunc()),
+            other => other.clone(),
+        };
+        let old = atomic_rmw_bits(addr, kind.size(), OP, to_bits(kind, &operand));
+        return Ok(from_bits(kind, old));
+    }
     let old = get_el(&o, i);
     let new = match (&old, &v) {
         (Value::BigInt(a), Value::BigInt(b)) => Value::BigInt(Rc::new(big_op(OP, a, b))),
@@ -2041,6 +2175,15 @@ fn atomics_compare_exchange(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let expected = coerce(vm, kind, &arg(args, 2))?;
     let replacement = coerce(vm, kind, &arg(args, 3))?;
     revalidate(vm, &o, i)?;
+    if let Some((addr, kind)) = shared_slot(&o, i) {
+        let old = atomic_cas_bits(
+            addr,
+            kind.size(),
+            to_bits(kind, &expected),
+            to_bits(kind, &replacement),
+        );
+        return Ok(from_bits(kind, old));
+    }
     let t = view_of(&o);
     let old = get_el(&o, i);
     let size = kind.size();
@@ -2068,12 +2211,23 @@ fn atomics_notify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let o = integer_view(vm, &arg(args, 0), true)?;
     let i = atomic_index(vm, &o, &arg(args, 1))?;
     let count = arg(args, 2);
-    if !count.is_undefined() {
+    let count = if count.is_undefined() {
+        usize::MAX
+    } else {
         let c = to_integer(vm, &count)?;
-        let _ = c.max(0.0);
-    }
+        if c.is_infinite() {
+            usize::MAX
+        } else {
+            c.max(0.0) as usize
+        }
+    };
     revalidate(vm, &o, i)?;
-    Ok(Value::Number(0.0))
+    match shared_slot(&o, i) {
+        Some((addr, _)) => Ok(Value::Number(
+            super::threads::notify(addr as usize, count) as f64
+        )),
+        None => Ok(Value::Number(0.0)),
+    }
 }
 
 fn atomics_wait(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
@@ -2090,6 +2244,24 @@ fn atomics_wait(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     } else {
         t.max(0.0)
     };
+    if let Some((addr, kind)) = shared_slot(&o, i) {
+        let expected = to_bits(kind, &v);
+        let size = kind.size();
+        let limit = if timeout.is_finite() {
+            Some(std::time::Duration::from_secs_f64(timeout / 1000.0))
+        } else {
+            None
+        };
+        vm.flush();
+        let interrupt = vm.threads.interrupt.clone();
+        let r = super::threads::wait_on(
+            addr as usize,
+            || atomic_load_bits(addr, size) == expected,
+            limit,
+            interrupt,
+        );
+        return Ok(r.into());
+    }
     if !get_el(&o, i).strict_eq(&v) {
         return Ok("not-equal".into());
     }

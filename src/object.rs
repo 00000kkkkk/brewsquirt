@@ -720,6 +720,21 @@ pub struct BufferData {
     pub max: Option<usize>,
     pub shared: bool,
     pub external: bool,
+    pub shared_mem: Option<std::sync::Arc<crate::builtins::threads::SharedMem>>,
+}
+
+impl BufferData {
+    #[inline]
+    pub fn sync_shared(&self) {
+        if let Some(m) = &self.shared_mem {
+            let n = m.len.load(std::sync::atomic::Ordering::Acquire);
+            if let Ok(mut v) = self.bytes.try_borrow_mut() {
+                if v.len() < n && n <= v.capacity() {
+                    unsafe { v.set_len(n) };
+                }
+            }
+        }
+    }
 }
 
 impl Drop for BufferData {
@@ -792,7 +807,10 @@ impl View {
 
     pub fn store(&self) -> &RefCell<Vec<u8>> {
         match &self.buffer.kind {
-            ObjKind::ArrayBuffer(b) => &b.bytes,
+            ObjKind::ArrayBuffer(b) => {
+                b.sync_shared();
+                &b.bytes
+            }
             _ => unreachable!("view over a non-buffer"),
         }
     }

@@ -733,32 +733,36 @@ const NODE_SRC: &str = r##"
     return new Promise((resolve, reject) => {
       const signal = options?.signal
       if (signal?.aborted) return reject(new DOMException("The operation was aborted", "AbortError"))
-      const cleanup = () => {
-        emitter.removeListener(name, onEvent)
-        if (name !== "error" && typeof emitter.removeListener === "function") emitter.removeListener("error", onError)
-        if (signal) signal.removeEventListener("abort", onAbort)
+      const add = (target, type, fn) => {
+        if (typeof target.on === "function") target.once(type, fn)
+        else if (typeof target.addEventListener === "function") target.addEventListener(type, fn, { once: true })
+        else throw new TypeError('The "emitter" argument must be an instance of EventEmitter or EventTarget.')
+      }
+      const remove = (target, type, fn) => {
+        if (typeof target.removeListener === "function") target.removeListener(type, fn)
+        else if (typeof target.removeEventListener === "function") target.removeEventListener(type, fn)
       }
       const onError = (err) => {
-        cleanup()
+        remove(emitter, name, onEvent)
+        if (signal) signal.removeEventListener("abort", onAbort)
         reject(err)
       }
       const onEvent = (...args) => {
-        cleanup()
+        if (typeof emitter.removeListener === "function") emitter.removeListener("error", onError)
+        if (signal) signal.removeEventListener("abort", onAbort)
         resolve(args)
       }
       const onAbort = () => {
-        cleanup()
+        remove(emitter, name, onEvent)
+        remove(emitter, "error", onError)
         reject(signal.reason ?? new DOMException("The operation was aborted", "AbortError"))
       }
-      if (typeof emitter.addEventListener === "function" && typeof emitter.once !== "function") {
-        emitter.addEventListener(name, (ev) => onEvent(ev), { once: true })
-      } else {
-        emitter.once(name, onEvent)
-        if (name !== "error") emitter.once("error", onError)
-      }
+      add(emitter, name, onEvent)
+      if (name !== "error" && typeof emitter.once === "function") emitter.once("error", onError)
       if (signal) signal.addEventListener("abort", onAbort, { once: true })
     })
   }
+
   EventEmitter.on = function on(emitter, name, options) {
     const queue = []
     let wake = null
@@ -5668,63 +5672,65 @@ const NODE_SRC: &str = r##"
     },
   }
 
-  let workerSeq = 0
-  const workerError = (payload) => {
-    const e = new Error(payload?.message ?? "Worker error")
-    if (payload?.name) e.name = payload.name
-    if (payload?.stack) e.stack = payload.stack
-    if (payload?.code) e.code = payload.code
-    return e
-  }
+  const environmentData = new Map()
+  const SHARE_ENV = Symbol.for("nodejs.worker_threads.SHARE_ENV")
+  const kPortId = Symbol.for("squirt.portId")
   class Worker extends EventEmitter {
-    #child
-    #server
+    #id
+    #port
     #exited = false
     constructor(filename, options = {}) {
       super()
-      this.threadId = ++workerSeq
-      this.resourceLimits = {}
+      if (options === null || typeof options !== "object") options = {}
+      const isEval = !!options.eval
+      let target = filename instanceof URL ? fileURLToPath(filename) : String(filename)
+      if (!isEval) {
+        if (target.startsWith("file:")) target = fileURLToPath(target)
+        if (!/^([A-Za-z]:[\\/]|[\\/])/.test(target)) target = `${process.cwd()}${process.platform === "win32" ? "\\" : "/"}${target}`
+      }
+      if (options.env !== undefined && options.env !== SHARE_ENV && (options.env === null || typeof options.env !== "object")) {
+        const e = new TypeError(`The "options.env" property must be of type object or one of undefined, null, or worker.SHARE_ENV. Received ${describeReceived(options.env)}`)
+        e.code = "ERR_INVALID_ARG_TYPE"
+        throw e
+      }
+      const handler = (type, value) => {
+        if (type === "online") this.emit("online")
+        else if (type === "error") this.emit("error", value)
+        else if (type === "exit") {
+          this.#exited = true
+          this.emit("exit", value)
+        }
+      }
+      const argv = Array.isArray(options.argv) ? options.argv.map(String) : []
+      const info = native.workerSpawn(target, isEval, argv, options.workerData, options.transferList, [...environmentData], options.name ?? "", handler)
+      this.threadId = info.threadId
+      this.#id = info.threadId
+      this.#port = info.port
+      this.#port.on("message", (message) => this.emit("message", message))
+      this.#port.on("messageerror", (error) => this.emit("messageerror", error))
+      this.#port.unref()
+      this.resourceLimits = options.resourceLimits ?? {}
       this.performance = { eventLoopUtilization: () => ({ idle: 0, active: 0, utilization: 0 }) }
-      const server = ipcServer()
-      this.#server = server
-      const baseEnv = options.env === workerThreads.SHARE_ENV || options.env === undefined ? process.env : options.env
-      const env = { ...baseEnv, JSQ_IPC: String(server.address().port), JSQ_WORKER: String(this.threadId), JSQ_WORKER_DATA: JSON.stringify(options.workerData === undefined ? null : options.workerData) }
-      let file = String(filename)
-      if (file.startsWith("file:")) file = fileURLToPath(file)
-      const args = options.eval ? ["-e", file] : [file]
-      const stdio = ["pipe", options.stdout ? "pipe" : "inherit", options.stderr ? "pipe" : "inherit"]
-      const child = spawn(process.execPath, [...(options.execArgv ?? []), ...args, ...(options.argv ?? []).map(String)], { env, stdio })
-      this.#child = child
-      this.stdin = options.stdin ? child.stdin : null
-      this.stdout = child.stdout
-      this.stderr = child.stderr
-      attachIpc(child, server, (message) => {
-        if (message && typeof message === "object" && "__workerMessage" in message) this.emit("message", message.__workerMessage)
-        else if (message && typeof message === "object" && "__workerError" in message) this.emit("error", workerError(message.__workerError))
-        else if (message && typeof message === "object" && message.__workerOnline) this.emit("online")
-      })
-      child.on("error", (e) => this.emit("error", e))
-      child.on("exit", (code) => {
-        this.#exited = true
-        this.emit("exit", code ?? 1)
-      })
+      this.stdin = options.stdin ? new Writable({ write: (chunk, enc, cb) => cb() }) : null
+      this.stdout = new Readable({ read() {} })
+      this.stderr = new Readable({ read() {} })
     }
-    postMessage(message) {
-      if (!this.#exited) this.#child.send({ __workerMessage: message === undefined ? null : message })
+    postMessage(message, transferList) {
+      if (!this.#exited) this.#port.postMessage(message, transferList)
     }
     terminate() {
       return new Promise((resolve) => {
-        if (this.#exited) return resolve(1)
-        this.#child.once("exit", (code) => resolve(code ?? 1))
-        this.#child.kill()
+        if (this.#exited) return resolve(undefined)
+        this.once("exit", (code) => resolve(code))
+        native.workerTerminate(this.#id)
       })
     }
     ref() {
-      this.#child.ref()
+      native.workerRef(this.#id, true)
       return this
     }
     unref() {
-      this.#child.unref()
+      native.workerRef(this.#id, false)
       return this
     }
     getHeapSnapshot() {
@@ -5735,13 +5741,18 @@ const NODE_SRC: &str = r##"
       }
     }
   }
+  const workerInfo = native.workerInfo()
+  if (workerInfo && Array.isArray(workerInfo.environmentData)) {
+    for (const [k, v] of workerInfo.environmentData) environmentData.set(k, v)
+  }
   const workerThreads = {
-    isMainThread: true,
-    threadId: 0,
-    parentPort: null,
-    workerData: null,
+    isMainThread: workerInfo === null,
+    threadId: workerInfo ? workerInfo.threadId : 0,
+    threadName: workerInfo ? workerInfo.name || "WorkerThread" : "main",
+    parentPort: workerInfo ? workerInfo.port : null,
+    workerData: workerInfo ? workerInfo.workerData : null,
     resourceLimits: {},
-    SHARE_ENV: Symbol.for("nodejs.worker_threads.SHARE_ENV"),
+    SHARE_ENV,
     Worker,
     MessageChannel: globalThis.MessageChannel,
     MessagePort: globalThis.MessagePort,
@@ -5750,13 +5761,21 @@ const NODE_SRC: &str = r##"
     isMarkedAsUntransferable: () => false,
     markAsUncloneable() {},
     moveMessagePortToContext: (port) => port,
-    receiveMessageOnPort: () => undefined,
+    receiveMessageOnPort(port) {
+      const id = port?.[kPortId]
+      if (typeof id !== "number") {
+        const e = new TypeError('The "port" argument must be a MessagePort instance')
+        e.code = "ERR_INVALID_ARG_TYPE"
+        throw e
+      }
+      return native.portReceive(id)
+    },
     setEnvironmentData(key, value) {
-      environmentData.set(key, value)
+      if (value === undefined) environmentData.delete(key)
+      else environmentData.set(key, value)
     },
     getEnvironmentData: (key) => environmentData.get(key),
   }
-  const environmentData = new Map()
   function setupIpc() {
     const port = Number(process.env.JSQ_IPC)
     if (!port) return
@@ -5794,12 +5813,7 @@ const NODE_SRC: &str = r##"
       sock.end()
       queueMicrotask(() => process.emit("disconnect"))
     }
-    const isWorker = process.env.JSQ_WORKER !== undefined
     const deliver = (message) => {
-      if (isWorker) {
-        if (message && typeof message === "object" && "__workerMessage" in message) parentPort.emit("message", message.__workerMessage)
-        return
-      }
       process.emit("message", message)
     }
     ipcWire(process, sock, [], deliver)
@@ -5814,34 +5828,6 @@ const NODE_SRC: &str = r##"
     process.on = refOn(process.on)
     process.addListener = refOn(process.addListener)
     process.once = refOn(process.once)
-    if (!isWorker) return
-    const parentPort = new EventEmitter()
-    parentPort.postMessage = (message) => process.send({ __workerMessage: message === undefined ? null : message })
-    parentPort.close = () => process.disconnect()
-    parentPort.ref = () => sock.ref()
-    parentPort.unref = () => sock.unref()
-    parentPort.start = () => {}
-    const portOn = parentPort.on.bind(parentPort)
-    parentPort.on = parentPort.addListener = (name, fn) => {
-      if (name === "message") {
-        listening = true
-        sock.ref()
-      }
-      return portOn(name, fn)
-    }
-    workerThreads.isMainThread = false
-    workerThreads.threadId = Number(process.env.JSQ_WORKER) || 1
-    workerThreads.parentPort = parentPort
-    try {
-      workerThreads.workerData = JSON.parse(process.env.JSQ_WORKER_DATA ?? "null")
-    } catch {
-      workerThreads.workerData = null
-    }
-    process.on("uncaughtException", (e) => {
-      process.send({ __workerError: { message: e?.message ?? String(e), name: e?.name, stack: e?.stack, code: e?.code } })
-      process.exit(1)
-    })
-    process.send({ __workerOnline: true })
   }
 
   const v8 = {
@@ -6845,6 +6831,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     for (name, arity, f) in natives {
         method(vm, &n, name, arity, f);
     }
+    super::threads::install_natives(vm, &n);
     let exports = vm.call_value(&factory, Value::Undefined, &[Value::Object(n)])?;
     let buffer = vm.get_prop(&exports, "Buffer")?;
     vm.define_global("Buffer", buffer);

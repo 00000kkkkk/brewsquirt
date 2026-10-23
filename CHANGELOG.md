@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `worker_threads.Worker` runs each worker on its own operating-system thread with a separate
+  heap, so CPU-bound work runs in parallel. Messages are structured clones that keep `Date`,
+  `Map`, `Set`, typed arrays, errors, holes and cycles, transfer lists move `ArrayBuffer`s and
+  `MessagePort`s between threads, `SharedArrayBuffer` memory is shared, and the `Atomics`
+  operations are real atomic instructions with `Atomics.wait` and `Atomics.notify` blocking and
+  waking across threads. `terminate()` interrupts running code, `process.exit` in a worker ends
+  only that worker, uncaught errors reach the parent's `error` event with their class, and
+  `receiveMessageOnPort`, `environmentData` and cross-thread `BroadcastChannel` work. `piscina`
+  and `tinypool` run unchanged.
+- `structuredClone` accepts `{ transfer }` and shares the memory of `SharedArrayBuffer`s.
+
 ### Changed
 
 - Strings are reference-counted through a thin 8-byte handle, which shrinks every JavaScript
@@ -18,6 +31,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `process.memoryUsage()` reported zero for every field; it now returns the resident set size
   and the allocator's committed memory.
+- Events from unreferenced handles, such as an `unref`'d worker or socket, are delivered while
+  the program waits for a timer instead of after it fires.
+- `events.once` works with emitters that have `once` but no `removeListener`, as in Node.
+- A `MessagePort` with a `message` listener keeps the program alive until it is closed or
+  unreferenced, and removing the last listener releases it, matching Node.
 
 ## [1.4.0] - 2026-10-23
 

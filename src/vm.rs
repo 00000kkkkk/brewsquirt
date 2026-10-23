@@ -359,6 +359,7 @@ pub struct Vm {
     pub(crate) promise_intrinsic: Option<Rc<Obj>>,
     pub(crate) wasm: Option<Box<builtins::wasm::WasmState>>,
     pub(crate) kept_alive: FxHashMap<usize, Rc<Obj>>,
+    pub(crate) threads: builtins::threads::ThreadState,
     pub symbol_seq: u64,
     pub symbol_registry: FxHashMap<JsStr, Value>,
     pub symbol_iterator: Value,
@@ -400,7 +401,34 @@ impl Vm {
         )
     }
 
+    pub fn for_worker(
+        argv: Vec<String>,
+        io: crate::io::Io,
+        init: builtins::threads::WorkerInit,
+        interrupt: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Vm {
+        Self::build(
+            argv,
+            Box::new(std::io::BufWriter::new(std::io::stdout())),
+            Box::new(std::io::stderr()),
+            Some((io, init, interrupt)),
+        )
+    }
+
     pub fn with_output(argv: Vec<String>, out: Box<dyn Write>, err: Box<dyn Write>) -> Vm {
+        Self::build(argv, out, err, None)
+    }
+
+    fn build(
+        argv: Vec<String>,
+        out: Box<dyn Write>,
+        err: Box<dyn Write>,
+        worker: Option<(
+            crate::io::Io,
+            builtins::threads::WorkerInit,
+            std::sync::Arc<std::sync::atomic::AtomicBool>,
+        )>,
+    ) -> Vm {
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
@@ -482,11 +510,18 @@ impl Vm {
             promise_intrinsic: None,
             wasm: None,
             kept_alive: FxHashMap::default(),
+            threads: builtins::threads::ThreadState::default(),
         };
+        let is_worker = worker.is_some();
+        if let Some((io, init, interrupt)) = worker {
+            vm.io = io;
+            vm.threads.worker = Some(init);
+            vm.threads.interrupt = interrupt;
+        }
         crate::gc::configure_from_env();
         builtins::install(&mut vm);
         builtins::run_prelude(&mut vm);
-        if std::env::var_os("JSQ_IPC").is_some() {
+        if !is_worker && std::env::var_os("JSQ_IPC").is_some() {
             let _ = builtins::node::setup_ipc(&mut vm);
         }
         builtins::hide_builtin_members(&mut vm);
@@ -1865,6 +1900,9 @@ impl Vm {
         if self.frames.len() >= MAX_FRAMES {
             return Err(self.range_error("Maximum call stack size exceeded"));
         }
+        if self.threads.interrupted() {
+            return Err(self.terminate_value());
+        }
         let p = &c.proto;
         let np = p.num_params as usize;
         let ci = self.stack.len() - argc - 2;
@@ -1926,9 +1964,14 @@ impl Vm {
         Ok(())
     }
 
+    pub(crate) fn terminate_value(&mut self) -> Value {
+        self.threads.terminating = true;
+        self.make_error(ErrorKind::Error, "terminated")
+    }
+
     pub(crate) fn unwind(&mut self, err: Value, stop: usize) -> Result<(), Value> {
         if let Some(h) = self.handlers.last() {
-            if h.frame >= stop {
+            if h.frame >= stop && !self.threads.terminating {
                 let h = self.handlers.pop().expect("handler");
                 self.frames.truncate(h.frame + 1);
                 self.close_upvalues(h.stack_len);
@@ -5169,7 +5212,14 @@ impl Vm {
                     let v = pop!();
                     self.stack.push(Value::Str(v.type_of().into()));
                 }
-                Op::Jump(t) => ip = t as usize,
+                Op::Jump(t) => {
+                    if (t as usize) < ip && self.threads.interrupted() {
+                        self.frames[fi].ip = ip;
+                        let e = self.terminate_value();
+                        throw!(e);
+                    }
+                    ip = t as usize
+                }
                 Op::JumpIfFalse(t) => {
                     if !pop!().truthy() {
                         ip = t as usize;

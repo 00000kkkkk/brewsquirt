@@ -1,0 +1,18 @@
+main true 0
+transferred 0
+{
+  isMainThread: false,
+  threadId: 1,
+  date: '1970-01-01T00:00:00.000Z',
+  map: [ [ 'k', 1 ] ],
+  bytes: [ 7, 8, 9 ]
+}
+{ hello: 'through a transferred port' }
+{ woke: 'ok', value: 5 }
+exit 0 1000
+{ message: { sync: [ 1, 2 ] } } undefined
+terminated 1
+exit code 7
+error true out of range
+shares memory 1000
+[ 1, <1 empty item>, 3 ] g

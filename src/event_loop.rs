@@ -678,7 +678,9 @@ impl Vm {
         let mut pending = first;
         loop {
             if let Err(e) = pending {
-                if self.process_listener_count("uncaughtException")? == 0 {
+                if self.threads.terminating
+                    || self.process_listener_count("uncaughtException")? == 0
+                {
                     return Err(e);
                 }
                 self.emit_process(
@@ -797,6 +799,13 @@ impl Vm {
     }
 
     fn next_event(&mut self) -> Result<bool, Value> {
+        if self.threads.interrupted() {
+            return Err(self.terminate_value());
+        }
+        if let Some(ev) = self.threads.deferred.pop_front() {
+            crate::builtins::web::handle_io(self, ev)?;
+            return Ok(true);
+        }
         if let Ok(ev) = self.io.rx.try_recv() {
             crate::builtins::web::handle_io(self, ev)?;
             return Ok(true);
@@ -804,6 +813,21 @@ impl Vm {
         if self.io.pending == 0 {
             if !self.has_refed_timers() {
                 return Ok(false);
+            }
+            let first = self.timers.first_key_value().map(|((due, _), _)| *due);
+            if let Some(due) = first {
+                let now = self.start.elapsed().as_nanos();
+                if due > now {
+                    self.flush();
+                    if let Ok(ev) = self
+                        .io
+                        .rx
+                        .recv_timeout(Duration::from_nanos((due - now) as u64))
+                    {
+                        crate::builtins::web::handle_io(self, ev)?;
+                        return Ok(true);
+                    }
+                }
             }
             return self.run_next_timer();
         }

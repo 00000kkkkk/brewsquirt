@@ -1731,9 +1731,12 @@ name=jsq&tags=fast%26wet false
 
 `EventTarget`, `Event`, `CustomEvent`, `MessageEvent`, `CloseEvent`, `ErrorEvent`,
 `AbortController`, `AbortSignal` and `DOMException` are globals. `MessageChannel` creates two
-entangled `MessagePort`s that deliver structured clones of posted messages asynchronously, and
-`BroadcastChannel` delivers to every other channel with the same name; both accept `onmessage`,
-`addEventListener("message")` and Node's `on("message")`.
+entangled `MessagePort`s that deliver structured clones of posted messages asynchronously, also
+across worker threads when a port is transferred, and `BroadcastChannel` delivers to every other
+channel with the same name in any thread; both accept `onmessage`, `addEventListener("message")`
+and Node's `on("message")`. A port with a `message` listener keeps the program running until it
+is closed or `unref`'d, as in Node. `structuredClone(value, { transfer })` uses the same
+algorithm.
 
 `WebSocket` is the standard client: `new WebSocket(url, protocols?)` connects over `ws:` or
 `wss:` (TLS verified against the bundled root store), fires `open`, `message`, `close` and
@@ -1875,7 +1878,7 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:vm`                      | `Script`, `runInThisContext`, `runInNewContext` and `runInContext` (sandboxes are plain objects scoped with `with`), `createContext`, `compileFunction` |
 | `node:async_hooks`             | `AsyncLocalStorage` whose store is visible to synchronous callees of `run` and `enterWith`, `AsyncResource`, `createHook` as a no-op |
 | `node:punycode`                | `encode`, `decode`, `toASCII`, `toUnicode`, `ucs2`                |
-| `node:worker_threads`          | `Worker` runs a file (or `eval: true` source) in a separate `jsq` process and exchanges JSON messages: `postMessage`, `message`, `online`, `error` and `exit` events, `terminate`, `ref`/`unref`; inside the worker `isMainThread` is `false` and `parentPort`, `workerData` and `threadId` are set. `SharedArrayBuffer`, transfer lists and `resourceLimits` are not shared between the processes |
+| `node:worker_threads`          | `Worker` runs a file (or `eval: true` source) on its own thread with a separate heap, so workers execute in parallel: messages, `workerData` and `environmentData` are structured clones, transfer lists move `ArrayBuffer`s and `MessagePort`s, `SharedArrayBuffer`s share memory and `Atomics.wait`/`notify` block and wake across threads; `online`, `message`, `error` and `exit` events, `terminate` (which interrupts running code), `ref`/`unref`, `process.exit` ending only the worker, `receiveMessageOnPort`, `isMainThread`, `parentPort`, `workerData` and `threadId`. Pools such as `piscina`, `tinypool` and `workerpool` work. `resourceLimits` and piped worker stdio are not implemented |
 | `node:http2`, `node:cluster`, `node:v8`, `node:inspector`, `node:diagnostics_channel`, `node:constants` | Load with their constants and classes so that packages importing them work; operations that need HTTP/2 or the inspector throw `ENOTSUP` |
 | `node:net`                     | Real TCP: `connect`/`createConnection` return a `Socket` (a duplex stream with `connect`, `ready`, `data`, `end`, `close`, `error` and `timeout` events, `setTimeout`, `setEncoding`, `ref`/`unref`, `address`, `remoteAddress`/`remotePort`, `bytesRead`/`bytesWritten`); `createServer` listens with `connection`, `listening` and `close` events, `address`, `maxConnections`, `getConnections` and `closeAllConnections`; plus `isIP`, `isIPv4`, `isIPv6`, `SocketAddress`, `BlockList`. Unix domain sockets and IPC are not available |
 | `node:tls`                     | `connect` opens a TLS 1.2/1.3 connection verified against the bundled Mozilla root store (or the PEM `ca` you pass; `rejectUnauthorized: false` and `NODE_TLS_REJECT_UNAUTHORIZED=0` skip verification) and emits `secureConnect`; `TLSSocket` reports `encrypted`, `authorized`, `getProtocol` and `getCipher`; `createServer({ key, cert })` accepts TLS connections from PEM material and emits `secureConnection`. PFX bundles and client certificates are not supported |
@@ -2161,8 +2164,7 @@ Dependency specs:
 These are on the roadmap and currently produce a `SyntaxError` or are absent:
 
 - `URL.createObjectURL` and BYOB stream readers
-- Unix domain sockets, HTTP/2, shared memory between `worker_threads`, and
-  ciphers, key pairs and signatures in `node:crypto`
+- Unix domain sockets, HTTP/2, and ciphers, key pairs and signatures in `node:crypto`
 - Shared WebAssembly memories, threads and the JavaScript promise integration
 - `Intl` covers numbers, plural rules, lists, relative times, collation and segmentation in a
   handful of locales; dates know the month and weekday names, date orders and separators of
@@ -2175,7 +2177,7 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
   throws a `RangeError` instead of creating a sparse array
 - Private names are shared by all evaluations of a class body, so instances of two classes made
   by the same factory can access each other's private members
-- Several realms in one process; `Atomics.wait` never blocks because there is one thread
+- Several realms in one thread (`vm` contexts share one realm) and `Atomics.waitAsync`
 - `Temporal`, `ShadowRealm`, decorators and `using` declarations
 - Tracing garbage collection
 - JIT compilation

@@ -238,9 +238,6 @@ const WEB_SRC: &str = r##"
 
   const SIGNAL_KEY = Symbol("signal")
   const ABORT = Symbol("abort")
-  const kDeliver = Symbol("deliver")
-  const kPeer = Symbol("peer")
-  const kClosed = Symbol("closed")
 
   class NodeEventTarget extends EventTarget {
     #wrapped = []
@@ -298,18 +295,21 @@ const WEB_SRC: &str = r##"
     }
   }
 
+  const kPortId = Symbol.for("squirt.portId")
   class MessagePort extends NodeEventTarget {
-    #peer = null
-    #started = false
+    #id = 0
     #closed = false
-    #queue = []
     #onmessage = null
     #refed = true
-    constructor(key) {
+    constructor(key, id) {
       if (key !== SIGNAL_KEY) throw new TypeError("Illegal constructor")
       super()
+      this.#id = id
       this.onmessageerror = null
       this.onclose = null
+    }
+    get [kPortId]() {
+      return this.#id
     }
     get onmessage() {
       return this.#onmessage
@@ -318,71 +318,74 @@ const WEB_SRC: &str = r##"
       this.#onmessage = typeof fn === "function" ? fn : null
       this.start()
     }
+    #listening = 0
     addEventListener(type, listener, options) {
       super.addEventListener(type, listener, options)
-      if (String(type) === "message") this.start()
+      if (String(type) === "message" && typeof listener === "function") {
+        this.#listening++
+        if (this.#listening === 1 && this.#refed && !this.#closed) native.portRef(this.#id, true)
+        this.start()
+      }
     }
-    [kPeer](port) {
-      this.#peer = port
+    removeEventListener(type, listener, options) {
+      super.removeEventListener(type, listener, options)
+      if (String(type) === "message" && typeof listener === "function" && this.#listening > 0) {
+        this.#listening--
+        if (this.#listening === 0 && this.#onmessage === null && !this.#closed) native.portRef(this.#id, false)
+      }
     }
-    postMessage(message) {
-      if (this.#closed || !this.#peer) return
-      this.#peer[kDeliver](structuredClone(message))
-    }
-    [kDeliver](data) {
-      this.#queue.push(data)
-      this.#flush()
-    }
-    #flush() {
-      if (!this.#started || this.#closed || this.#queue.length === 0) return
-      const batch = this.#queue.splice(0)
-      setTimeout(() => {
-        for (const data of batch) {
-          if (this.#closed) break
-          this.dispatchEvent(new MessageEvent("message", { data }))
-        }
-      }, 0)
+    postMessage(message, transfer) {
+      if (this.#closed) return
+      const list = Array.isArray(transfer) ? transfer : transfer && typeof transfer === "object" ? transfer.transfer : undefined
+      native.portPost(this.#id, message, list)
     }
     start() {
-      if (this.#started) return
-      this.#started = true
-      this.#flush()
+      if (!this.#closed) native.portStart(this.#id)
     }
     close() {
       if (this.#closed) return
-      this.#closed = true
-      const peer = this.#peer
-      this.#peer = null
-      setTimeout(() => this.dispatchEvent(new Event("close")), 0)
-      if (peer) peer.close()
+      native.portClose(this.#id)
     }
     ref() {
       this.#refed = true
+      if (!this.#closed) native.portRef(this.#id, true)
       return this
     }
     unref() {
       this.#refed = false
+      if (!this.#closed) native.portRef(this.#id, false)
       return this
     }
     hasRef() {
-      return this.#refed
+      return this.#refed && !this.#closed
+    }
+    static [Symbol.for("squirt.portClosed")](port) {
+      port.#closed = true
     }
   }
+  native.portFactory((id) => {
+    const port = new MessagePort(SIGNAL_KEY, id)
+    const deliver = function (data) {
+      this.dispatchEvent(new MessageEvent("message", { data }))
+    }
+    const closed = function () {
+      MessagePort[Symbol.for("squirt.portClosed")](this)
+      setTimeout(() => this.dispatchEvent(new Event("close")), 0)
+    }
+    return [port, deliver, closed]
+  })
 
   class MessageChannel {
     constructor() {
-      const a = new MessagePort(SIGNAL_KEY)
-      const b = new MessagePort(SIGNAL_KEY)
-      a[kPeer](b)
-      b[kPeer](a)
+      const [a, b] = native.portPair()
       Object.defineProperty(this, "port1", { value: a, enumerable: true, configurable: true })
       Object.defineProperty(this, "port2", { value: b, enumerable: true, configurable: true })
     }
   }
 
-  const broadcastChannels = new Map()
   class BroadcastChannel extends NodeEventTarget {
     #name
+    #id
     #closed = false
     constructor(name) {
       if (arguments.length === 0) throw new TypeError('The "name" argument must be specified')
@@ -390,30 +393,21 @@ const WEB_SRC: &str = r##"
       this.onmessage = null
       this.onmessageerror = null
       this.#name = String(name)
-      let set = broadcastChannels.get(this.#name)
-      if (!set) broadcastChannels.set(this.#name, (set = new Set()))
-      set.add(this)
+      this.#id = native.broadcastOpen(this.#name, (data) => {
+        if (!this.#closed) this.dispatchEvent(new MessageEvent("message", { data }))
+      })
     }
     get name() {
       return this.#name
     }
-    get [kClosed]() {
-      return this.#closed
-    }
     postMessage(message) {
       if (this.#closed) throw new DOMException("BroadcastChannel is closed", "InvalidStateError")
-      const data = structuredClone(message)
-      for (const other of broadcastChannels.get(this.#name) ?? []) {
-        if (other === this) continue
-        setTimeout(() => {
-          if (!other[kClosed]) other.dispatchEvent(new MessageEvent("message", { data }))
-        }, 0)
-      }
+      native.broadcastPost(this.#name, this.#id, message)
     }
     close() {
       if (this.#closed) return
       this.#closed = true
-      broadcastChannels.get(this.#name)?.delete(this)
+      native.broadcastClose(this.#name, this.#id)
     }
     ref() {
       return this
@@ -2829,6 +2823,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     method(vm, &natives, "close", 1, native_close);
     method(vm, &natives, "abort", 1, native_abort);
     method(vm, &natives, "unref", 1, native_unref);
+    super::threads::install_natives(vm, &natives);
     let codes = vm.new_object();
     for code in 100..600u16 {
         let text = io::status_text(code);
@@ -3155,6 +3150,10 @@ pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
         } => super::netio::handle_accept(vm, server, id, local, remote, cmd)?,
         IoEvent::Child { id, event } => super::netio::handle_child(vm, id, event)?,
         IoEvent::Watch { id, event } => super::netio::handle_watch(vm, id, event)?,
+        IoEvent::Port { port, event } => super::threads::handle_port(vm, port, event)?,
+        IoEvent::Broadcast { id, data } => super::threads::handle_broadcast(vm, id, data)?,
+        IoEvent::Worker { id, event } => super::threads::handle_worker(vm, id, event)?,
+        IoEvent::Wake => {}
         IoEvent::Fetch { id, result } => {
             let Some(p) = vm.io_fetches.remove(&id) else {
                 return Ok(());
