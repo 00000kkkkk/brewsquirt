@@ -4828,6 +4828,7 @@ const NODE_SRC: &str = r##"
       "AES-GCM": ["AesKeyGenParams", "length"],
       "AES-CBC": ["AesKeyGenParams", "length"],
       "AES-CTR": ["AesKeyGenParams", "length"],
+      "AES-KW": ["AesKeyGenParams", "length"],
       "RSASSA-PKCS1-v1_5": ["RsaHashedKeyGenParams", "modulusLength", "publicExponent", "hash"],
       "RSA-PSS": ["RsaHashedKeyGenParams", "modulusLength", "publicExponent", "hash"],
       "RSA-OAEP": ["RsaHashedKeyGenParams", "modulusLength", "publicExponent", "hash"],
@@ -4916,6 +4917,12 @@ const NODE_SRC: &str = r##"
     const name = algName(alg)
     const bits = key.algorithm.length
     const material = key[kKeyMaterial]
+    if (name === "AES-KW") {
+      if (data.length % 8 !== 0) throw new DOMException("The AES-KW input length must be a multiple of 8 bytes", "OperationError")
+      const out = native.aesKw(material, data, encrypt)
+      if (out === null) throw new DOMException("The operation failed for an operation-specific reason", "OperationError")
+      return out
+    }
     if (name === "AES-GCM") {
       const tagBytes = (alg.tagLength ?? 128) / 8
       const iv = subtleBytes(alg.iv, "iv")
@@ -5693,6 +5700,9 @@ const NODE_SRC: &str = r##"
       this[kSock] = { id: null, address: null, connections: new Set(), closing: false, options: options ?? {} }
       this.listening = false
       this.maxConnections = undefined
+    }
+    get _handle() {
+      return this[kSock].id === null ? null : { fd: -1 }
     }
     listen(...args) {
       const cb = typeof args[args.length - 1] === "function" ? args.pop() : null

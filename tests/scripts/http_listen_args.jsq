@@ -21,3 +21,10 @@ for (const [i, listen] of forms.entries()) {
   await new Promise((resolve) => server.close(resolve))
 }
 clearTimeout(guard)
+
+const probe = http.createServer()
+console.log("handle before", probe._handle)
+await new Promise((resolve) => probe.listen(0, resolve))
+console.log("handle while listening", typeof probe._handle)
+await new Promise((resolve) => probe.close(resolve))
+console.log("handle after", probe._handle)

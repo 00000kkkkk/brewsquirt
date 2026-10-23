@@ -2768,6 +2768,9 @@ const WEB_SRC: &str = r##"
     }
     const server = {
       listening: false,
+      get _handle() {
+        return srv ? { fd: -1 } : null
+      },
       timeout: 0,
       keepAliveTimeout: 5000,
       headersTimeout: 60000,

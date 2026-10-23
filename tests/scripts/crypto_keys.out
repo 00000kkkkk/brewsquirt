@@ -9,3 +9,5 @@ gcm 66a3bd212f39b594b0adc8ad38 0b054a549907a546ea399dedbe7916f6
 oaep 128 oaep
 scrypt 4c367f271c389fd3613349feffb95eff
 webcrypto true 1024
+aes-kw 1fa68b0a8112b447aef34bd8fb5a7b829d3e862371d2cfe5
+aes-kw unwrap 00112233445566778899aabbccddeeff

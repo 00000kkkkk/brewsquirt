@@ -37,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `preinstall`, `install` and `postinstall` scripts of packages listed in `trustedDependencies`
   in `squirt.json`, with `node` resolving to `jsq`. `vrotdaem trust <name>` adds a package to the
   list and runs its scripts, and `gluboko` names the packages whose scripts it skipped.
+- `crypto.subtle` wraps and unwraps keys with AES-KW (RFC 3394) and generates AES-KW keys, so
+  `openpgp` encrypts and decrypts messages.
 - Native addons: `require`, `import` and `process.dlopen` load `.node` files built on Node-API
   version 9, with wrapped objects and finalizers, references, promises, async work, threadsafe
   functions called from native threads, buffers and `BigInt`, plus the libuv thread primitives
@@ -54,6 +56,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `http.Server.listen` lost its callback when it was called with a backlog or an explicit
   `undefined` host, which is how `ws` starts `new WebSocketServer({ port })`; every Node form of
   the call works now.
+- A CommonJS module imported from an ES module exposes a `"module.exports"` export like Node 24,
+  and `export *` passes it on, so `require()` of an ES module that re-exports a CommonJS file
+  returns that file's `module.exports`. `require("mocha")` returns the `Mocha` class again.
+- HTTP and TCP servers have Node's `_handle` while they listen, so `supertest` closes the server it
+  starts and the process exits when the tests finish.
 - On Windows a connection to a closed local port took two seconds to fail, because Windows
   retries refused connections; `net`, `http` and `fetch` now fail at once like Node, which also
   removes a two-second pause when socket.io clients shut down.

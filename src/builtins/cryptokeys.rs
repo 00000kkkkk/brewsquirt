@@ -1394,6 +1394,78 @@ impl AesKey {
     }
 }
 
+const KW_IV: [u8; 8] = [0xA6; 8];
+
+fn kw_xor(a: &mut [u8; 8], t: u64) {
+    for (x, y) in a.iter_mut().zip(t.to_be_bytes()) {
+        *x ^= y;
+    }
+}
+
+fn aes_key_wrap(key: &AesKey, data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() % 8 != 0 || data.len() < 16 {
+        return None;
+    }
+    let n = data.len() / 8;
+    let mut a = KW_IV;
+    let mut r: Vec<[u8; 8]> = data.chunks(8).filter_map(|c| c.try_into().ok()).collect();
+    for j in 0..6 {
+        for (i, ri) in r.iter_mut().enumerate() {
+            let mut b = [0u8; 16];
+            b[..8].copy_from_slice(&a);
+            b[8..].copy_from_slice(ri);
+            key.encrypt(&mut b);
+            a.copy_from_slice(&b[..8]);
+            kw_xor(&mut a, (n * j + i + 1) as u64);
+            ri.copy_from_slice(&b[8..]);
+        }
+    }
+    let mut out = a.to_vec();
+    for b in r {
+        out.extend_from_slice(&b);
+    }
+    Some(out)
+}
+
+fn aes_key_unwrap(key: &AesKey, data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() % 8 != 0 || data.len() < 24 {
+        return None;
+    }
+    let n = data.len() / 8 - 1;
+    let mut a: [u8; 8] = data[..8].try_into().ok()?;
+    let mut r: Vec<[u8; 8]> = data[8..]
+        .chunks(8)
+        .filter_map(|c| c.try_into().ok())
+        .collect();
+    for j in (0..6).rev() {
+        for (i, ri) in r.iter_mut().enumerate().rev() {
+            kw_xor(&mut a, (n * j + i + 1) as u64);
+            let mut b = [0u8; 16];
+            b[..8].copy_from_slice(&a);
+            b[8..].copy_from_slice(ri);
+            key.decrypt(&mut b);
+            a.copy_from_slice(&b[..8]);
+            ri.copy_from_slice(&b[8..]);
+        }
+    }
+    (a == KW_IV).then(|| r.concat())
+}
+
+fn native_aes_kw(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let key = bytes_arg(vm, &arg(args, 0))?;
+    let data = bytes_arg(vm, &arg(args, 1))?;
+    let wrap = arg(args, 2).truthy();
+    let Some(aes) = AesKey::new(&key) else {
+        return Ok(Value::Null);
+    };
+    let out = if wrap {
+        aes_key_wrap(&aes, &data)
+    } else {
+        aes_key_unwrap(&aes, &data)
+    };
+    Ok(out.map(|b| out_bytes(vm, b)).unwrap_or(Value::Null))
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Cbc,
@@ -1800,7 +1872,7 @@ fn native_cipher_ctl(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 pub fn install_natives(vm: &mut Vm, natives: &Rc<Obj>) {
-    let list: [(&str, u32, crate::object::NativeFn); 16] = [
+    let list: [(&str, u32, crate::object::NativeFn); 17] = [
         ("keyImport", 5, native_key_import),
         ("keyImportJwk", 2, native_key_import_jwk),
         ("keyExport", 5, native_key_export),
@@ -1817,6 +1889,7 @@ pub fn install_natives(vm: &mut Vm, natives: &Rc<Obj>) {
         ("cipherUpdate", 2, native_cipher_update),
         ("cipherFinal", 1, native_cipher_final),
         ("cipherCtl", 3, native_cipher_ctl),
+        ("aesKw", 3, native_aes_kw),
     ];
     for (name, arity, f) in list {
         method(vm, natives, name, arity, f);

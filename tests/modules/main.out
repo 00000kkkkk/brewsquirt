@@ -2,4 +2,4 @@
 9 visible true 1 undefined
 true deep
 false
-circle square 3 true true Kind,area,cjs,esm
+circle square 3 true true Kind,area,cjs,esm,module.exports

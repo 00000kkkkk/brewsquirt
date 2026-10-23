@@ -34,3 +34,10 @@ const subtle = crypto.webcrypto.subtle
 const cryptoKey = rsa.toCryptoKey({ name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["sign"])
 const webSig = new Uint8Array(await subtle.sign("RSASSA-PKCS1-v1_5", cryptoKey, data))
 console.log("webcrypto", Buffer.from(webSig).equals(rsaSig), cryptoKey.algorithm.modulusLength)
+
+const kek = await subtle.importKey("raw", Buffer.from("000102030405060708090A0B0C0D0E0F", "hex"), "AES-KW", false, ["wrapKey", "unwrapKey"])
+const plainKey = await subtle.importKey("raw", Buffer.from("00112233445566778899AABBCCDDEEFF", "hex"), "AES-GCM", true, ["encrypt"])
+const kwWrapped = await subtle.wrapKey("raw", plainKey, kek, "AES-KW")
+console.log("aes-kw", Buffer.from(kwWrapped).toString("hex"))
+const kwBack = await subtle.unwrapKey("raw", kwWrapped, kek, "AES-KW", "AES-GCM", true, ["encrypt"])
+console.log("aes-kw unwrap", Buffer.from(await subtle.exportKey("raw", kwBack)).toString("hex"))

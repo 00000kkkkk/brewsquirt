@@ -1203,11 +1203,12 @@ impl Vm {
         ns.set_own("default", exports.clone());
         if exports.is_object() {
             for (k, v) in self.own_entries(&exports) {
-                if &*k != "default" {
+                if &*k != "default" && &*k != "module.exports" {
                     ns.set_own(k, v);
                 }
             }
         }
+        ns.set_own("module.exports", exports.clone());
         let ns = Value::Object(ns);
         self.modules.insert(path.clone(), ns.clone());
         Ok(ns)
