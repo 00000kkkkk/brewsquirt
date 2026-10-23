@@ -105,6 +105,16 @@ impl Shape {
         self.keys.iter().position(|k| **k == *key)
     }
 
+    #[inline]
+    fn cached_child(&self, key: &JsStr) -> Option<Rc<Shape>> {
+        if let Some((k, w)) = &*self.last.borrow() {
+            if JsStr::ptr_eq(k, key) || k == key {
+                return w.upgrade();
+            }
+        }
+        None
+    }
+
     fn child(self: &Rc<Self>, key: &JsStr) -> Rc<Shape> {
         if let Some((k, w)) = &*self.last.borrow() {
             if JsStr::ptr_eq(k, key) || k == key {
@@ -328,10 +338,34 @@ impl PropMap {
             })
     }
 
+    #[inline]
+    fn try_append(&mut self, key: &JsStr, v: Value) -> Result<(), Value> {
+        if self.shape.dictionary {
+            return Err(v);
+        }
+        match self.shape.cached_child(key) {
+            Some(child) => {
+                self.note_value(&v);
+                self.shape = child;
+                self.values.push(v);
+                Ok(())
+            }
+            None => Err(v),
+        }
+    }
+
     pub fn insert_fast(&mut self, key: JsStr, v: Value, adding_ok: bool) -> bool {
         if key.len() == 9 && &*key == "__proto__" {
             return false;
         }
+        let v = if adding_ok {
+            match self.try_append(&key, v) {
+                Ok(()) => return true,
+                Err(v) => v,
+            }
+        } else {
+            v
+        };
         if let Some(i) = self.find(&key) {
             if self.extra.is_some() && self.attrs(&key) & READ_ONLY != 0 {
                 return false;
@@ -386,6 +420,10 @@ impl PropMap {
     }
 
     pub fn insert(&mut self, key: JsStr, v: Value) -> Option<Value> {
+        let v = match self.try_append(&key, v) {
+            Ok(()) => return None,
+            Err(v) => v,
+        };
         self.note_value(&v);
         if let Some(i) = self.find(&key) {
             return Some(std::mem::replace(&mut self.values[i], v));

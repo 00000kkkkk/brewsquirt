@@ -16,6 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in Node, instead of leaving readers waiting.
 - `util._extend`, `require.extensions` and `Module._preloadModules` exist, so `http-proxy` and
   `ts-node/register` load.
+- `nock` and `msw` intercept requests. `http.request` takes its socket from
+  `agent.createConnection` or `options.createConnection` when an agent provides its own, writes
+  the request to it and parses the reply with a new `_http_common` `HTTPParser`; requests send
+  `Connection: close` or `keep-alive` from the agent like Node and keep the case of header names.
+  `http.OutgoingMessage` exists, a standalone `http.ServerResponse` with an assigned socket writes
+  raw HTTP to it, and `IncomingMessage` is a real `Readable` for server requests and for
+  `new IncomingMessage(socket)`, with its stream state created on first use.
+- `Event` keeps `defaultPrevented`, `target`, `currentTarget`, `bubbles` and the other fields as
+  prototype getters like Node, so subclasses that override them work, and adds `eventPhase`,
+  `composed`, `returnValue`, `cancelBubble` and `composedPath`.
+- File system calls on Windows report `ENOENT` for paths with characters such as `*` instead of
+  `EIO`, which broke `globby`, and `EBUSY`, `EXDEV`, `ENOSPC`, `ENAMETOOLONG` and `ELOOP` get their
+  Node codes on every platform.
 
 ## [1.7.0] - 2026-10-23
 

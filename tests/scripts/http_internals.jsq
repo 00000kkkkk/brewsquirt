@@ -1,0 +1,100 @@
+import http from "node:http"
+import { Duplex } from "node:stream"
+import { createRequire } from "node:module"
+import fs from "node:fs"
+
+const require = createRequire(import.meta.url)
+const { HTTPParser, methods } = require("_http_common")
+
+const parser = new HTTPParser()
+parser.initialize(HTTPParser.REQUEST, {})
+const seen = []
+parser[HTTPParser.kOnHeadersComplete] = (major, minor, headers, method, url, status, message, upgrade, keepAlive) => seen.push(["head", major, minor, headers, methods[method], url, upgrade, keepAlive])
+parser[HTTPParser.kOnBody] = (chunk) => seen.push(["body", String(chunk)])
+parser[HTTPParser.kOnMessageComplete] = () => seen.push(["done"])
+parser.execute(Buffer.from("POST /p?q=1 HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n"))
+parser.execute(Buffer.from("2\r\nde\r\n0\r\n\r\n"))
+console.log(JSON.stringify(seen))
+
+class FakeSocket extends Duplex {
+  constructor(reply) {
+    super()
+    this.reply = reply
+    this.sent = ""
+  }
+  _read() {}
+  _write(chunk, encoding, cb) {
+    this.sent += String(chunk)
+    if (this.sent.includes("\r\n\r\n") && !this.answered) {
+      this.answered = true
+      queueMicrotask(() => {
+        for (const part of this.reply) this.push(part)
+      })
+    }
+    cb()
+  }
+}
+class FakeAgent extends http.Agent {
+  createConnection(options) {
+    this.last = options
+    return (this.socket = new FakeSocket(["HTTP/1.1 201 Created\r\nX-A: 1\r\nX-A: 2\r\nTransfer-", "Encoding: chunked\r\n\r\n4\r\nwiki\r\n5\r\npedia\r\n0\r\n\r\n"]))
+  }
+}
+const agent = new FakeAgent()
+const body = await new Promise((resolve, reject) => {
+  const req = http.request({ host: "fake.test", port: 8080, path: "/items?x=1", method: "POST", agent, headers: { "content-type": "text/plain" } }, (res) => {
+    let text = ""
+    res.setEncoding("utf8")
+    res.on("data", (c) => (text += c))
+    res.on("end", () => resolve([res.statusCode, res.statusMessage, res.headers["x-a"], text]))
+  })
+  req.on("error", reject)
+  req.end("payload")
+})
+console.log(body, agent.last.host, agent.last.port, agent.last.path)
+console.log(agent.socket.sent.split("\r\n")[0], agent.socket.sent.includes("content-length: 7"), agent.socket.sent.endsWith("payload"))
+
+const sink = new Duplex({ read() {}, write(chunk, encoding, cb) { out.push(String(chunk)); cb() } })
+const out = []
+const res = new http.ServerResponse(new http.IncomingMessage(sink))
+res.assignSocket(sink)
+res.removeHeader("date")
+res.removeHeader("connection")
+res.writeHead(200, "OK", [["X-Raw", "Case"], ["Content-Type", "text/plain"]])
+res.write("hello ")
+res.end("world")
+await new Promise((resolve) => res.on("finish", resolve))
+console.log(JSON.stringify(out.join("")))
+
+const msg = new http.IncomingMessage(null)
+const chunks = []
+msg.on("data", (c) => chunks.push(String(c)))
+await new Promise((resolve) => {
+  msg.on("end", resolve)
+  msg.push("a")
+  msg.push("b")
+  msg.push(null)
+})
+console.log(chunks, msg instanceof (await import("node:stream")).Readable)
+
+const outgoing = new http.OutgoingMessage()
+outgoing.setHeader("X-One", "1")
+outgoing.appendHeader("x-one", "2")
+console.log(outgoing.getHeaders(), outgoing.getRawHeaderNames(), outgoing.hasHeader("x-one"), outgoing.headersSent)
+
+const ev = new Event("ping", { cancelable: true })
+console.log(Object.keys(ev).length, ev.eventPhase, ev.returnValue)
+ev.preventDefault()
+console.log(ev.defaultPrevented, ev.returnValue)
+class Custom extends Event {
+  get defaultPrevented() {
+    return "custom"
+  }
+}
+console.log(new Custom("x").defaultPrevented)
+
+try {
+  fs.statSync("no*such?file")
+} catch (e) {
+  console.log(e.code)
+}

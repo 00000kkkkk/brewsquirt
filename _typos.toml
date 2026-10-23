@@ -16,6 +16,7 @@ anull = "anull"
 ba = "ba"
 Jod = "Jod"
 tru = "tru"
+HPE = "HPE"
 
 [default.extend-identifiers]
 vrotdaem = "vrotdaem"

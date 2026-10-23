@@ -77,31 +77,101 @@ const WEB_SRC: &str = r##"
 
   const STOP = Symbol("stop")
 
+  const DISPATCH = Symbol("dispatch")
   class Event {
+    static NONE = 0
+    static CAPTURING_PHASE = 1
+    static AT_TARGET = 2
+    static BUBBLING_PHASE = 3
     #type
     #stopped = false
+    #propagationStopped = false
+    #bubbles
+    #cancelable
+    #composed
+    #defaultPrevented = false
+    #timeStamp
+    #target = null
+    #currentTarget = null
+    #phase = 0
     constructor(type, init = {}) {
       if (arguments.length === 0) throw new TypeError('The "type" argument must be specified')
       this.#type = String(type)
-      this.bubbles = !!init?.bubbles
-      this.cancelable = !!init?.cancelable
-      this.defaultPrevented = false
-      this.timeStamp = performance.now()
-      this.target = null
-      this.currentTarget = null
+      this.#bubbles = !!init?.bubbles
+      this.#cancelable = !!init?.cancelable
+      this.#composed = !!init?.composed
+      this.#timeStamp = performance.now()
     }
     get type() {
       return this.#type
     }
-    preventDefault() {
-      if (this.cancelable) this.defaultPrevented = true
+    get bubbles() {
+      return this.#bubbles
     }
-    stopPropagation() {}
+    get cancelable() {
+      return this.#cancelable
+    }
+    get composed() {
+      return this.#composed
+    }
+    get defaultPrevented() {
+      return this.#cancelable && this.#defaultPrevented
+    }
+    get timeStamp() {
+      return this.#timeStamp
+    }
+    get target() {
+      return this.#target
+    }
+    get currentTarget() {
+      return this.#currentTarget
+    }
+    get srcElement() {
+      return this.#target
+    }
+    get eventPhase() {
+      return this.#phase
+    }
+    get isTrusted() {
+      return false
+    }
+    get returnValue() {
+      return !this.defaultPrevented
+    }
+    set returnValue(v) {
+      if (!v) this.preventDefault()
+    }
+    get cancelBubble() {
+      return this.#propagationStopped
+    }
+    set cancelBubble(v) {
+      if (v) this.stopPropagation()
+    }
+    composedPath() {
+      return this.#currentTarget ? [this.#currentTarget] : []
+    }
+    initEvent(type, bubbles = false, cancelable = false) {
+      this.#type = String(type)
+      this.#bubbles = !!bubbles
+      this.#cancelable = !!cancelable
+    }
+    preventDefault() {
+      if (this.#cancelable) this.#defaultPrevented = true
+    }
+    stopPropagation() {
+      this.#propagationStopped = true
+    }
     stopImmediatePropagation() {
       this.#stopped = true
+      this.#propagationStopped = true
     }
     get [STOP]() {
       return this.#stopped
+    }
+    [DISPATCH](target, current, phase) {
+      this.#target = target
+      this.#currentTarget = current
+      this.#phase = phase
     }
   }
 
@@ -221,8 +291,7 @@ const WEB_SRC: &str = r##"
     }
     dispatchEvent(event) {
       if (!(event instanceof Event)) throw new TypeError('The "event" argument must be an instance of Event')
-      event.target = this
-      event.currentTarget = this
+      event[DISPATCH](this, this, 2)
       const handler = this["on" + event.type]
       if (typeof handler === "function") handler.call(this, event)
       for (const l of [...(this.#listeners.get(event.type) ?? [])]) {
@@ -231,7 +300,7 @@ const WEB_SRC: &str = r##"
         if (typeof l.listener === "function") l.listener.call(this, event)
         else l.listener.handleEvent(event)
       }
-      event.currentTarget = null
+      event[DISPATCH](this, null, 0)
       return !event.defaultPrevented
     }
   }
@@ -2451,7 +2520,17 @@ const WEB_SRC: &str = r##"
   }
 
   const kMessage = Symbol("messageState")
+  const kClosed = Symbol("messageClosed")
   const closeMessage = (msg) => {
+    if (msg[Symbol.for("jsq.incomingReadableMode")]) {
+      if (msg[kClosed]) return
+      Object.defineProperty(msg, kClosed, { value: true, configurable: true })
+      queueMicrotask(() => {
+        msg.destroyed = true
+        msg.emit("close")
+      })
+      return
+    }
     const state = msg[kMessage]
     if (!state || state.closed) return
     state.closed = true
@@ -2460,7 +2539,61 @@ const WEB_SRC: &str = r##"
       msg.emit("close")
     })
   }
+  const kReadableMode = Symbol.for("jsq.incomingReadableMode")
+  const kReadableInit = Symbol.for("jsq.incomingReadableInit")
   function IncomingMessage(req) {
+    const raw = req?.[kRawRequest]
+    const requestLike = !raw && req && typeof req.url === "string" && req.headers && typeof req.headers.entries === "function"
+    const init = IncomingMessage[kReadableInit]
+    if (typeof init === "function") {
+      Object.defineProperty(this, kReadableMode, { value: true, configurable: true })
+      this.statusCode = null
+      this.statusMessage = null
+      this.aborted = false
+      this.trailers = {}
+      this.rawTrailers = []
+      let body = null
+      if (raw) {
+        const parsed = nodeHeaders(raw.headers)
+        this.method = raw.method
+        this.url = raw.target
+        this.headers = parsed.headers
+        this.rawHeaders = parsed.rawHeaders
+        this.httpVersion = "1.1"
+        this.httpVersionMajor = 1
+        this.httpVersionMinor = 1
+        this.socket = nullSocket(raw.remote)
+        body = req[kRaw]
+      } else if (requestLike) {
+        const u = new URL(req.url)
+        this.method = req.method
+        this.url = u.pathname + u.search
+        this.headers = Object.fromEntries(req.headers)
+        this.rawHeaders = [...req.headers].flat()
+        this.httpVersion = "1.1"
+        this.httpVersionMajor = 1
+        this.httpVersionMinor = 1
+        this.socket = nullSocket(req.remoteAddress)
+        body = req[kRaw]
+      } else {
+        this.method = null
+        this.url = ""
+        this.headers = {}
+        this.rawHeaders = []
+        this.httpVersion = null
+        this.httpVersionMajor = null
+        this.httpVersionMinor = null
+        this.complete = false
+        this.socket = req && typeof req === "object" ? req : nullSocket(undefined)
+        this.connection = this.socket
+        init(this, undefined)
+        return
+      }
+      this.connection = this.socket
+      this.complete = true
+      init(this, body == null ? new Uint8Array(0) : typeof body === "string" ? encoder.encode(body) : body)
+      return
+    }
     const state = { bytes: new Uint8Array(0), encoding: null, closed: false }
     Object.defineProperty(this, kMessage, { value: state, configurable: true })
     this.method = "GET"
@@ -2476,7 +2609,6 @@ const WEB_SRC: &str = r##"
     this.destroyed = false
     this.trailers = {}
     this.rawTrailers = []
-    const raw = req?.[kRawRequest]
     if (raw) {
       const parsed = nodeHeaders(raw.headers)
       this.method = raw.method
@@ -2583,6 +2715,33 @@ const WEB_SRC: &str = r##"
       if (messageState(this).bytes.length !== 0) yield messageChunk(this)
     },
   })
+  const readableText = async (msg) => {
+    const parts = []
+    for await (const chunk of msg) parts.push(typeof chunk === "string" ? encoder.encode(chunk) : chunk)
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0))
+    let at = 0
+    for (const p of parts) {
+      out.set(p, at)
+      at += p.length
+    }
+    return out
+  }
+  for (const key of Reflect.ownKeys(IncomingMessage.prototype)) {
+    if (key === "constructor") continue
+    const custom = Object.getOwnPropertyDescriptor(IncomingMessage.prototype, key).value
+    if (typeof custom !== "function") continue
+    const viaStream = key === "text" ? (m) => readableText(m).then((b) => decoder.decode(b)) : key === "json" ? (m) => readableText(m).then((b) => JSON.parse(decoder.decode(b))) : key === "arrayBuffer" ? (m) => readableText(m).then((b) => b.buffer) : null
+    defineMethods(IncomingMessage.prototype, {
+      [key]: function (...args) {
+        if (this[kReadableMode]) {
+          if (viaStream) return viaStream(this)
+          const base = Object.getPrototypeOf(IncomingMessage.prototype)?.[key]
+          if (typeof base === "function") return base.apply(this, args)
+        }
+        return custom.apply(this, args)
+      },
+    })
+  }
 
   const kResponse = Symbol("responseState")
   const responseState = (res) => {
@@ -2608,6 +2767,54 @@ const WEB_SRC: &str = r##"
     for (const c of state.chunks) controller.enqueue(responseBytes(c))
     state.chunks = []
     state.done(res.statusCode, [...state.headers], stream)
+  }
+  const rememberName = (state, name) => {
+    const key = String(name).toLowerCase()
+    state.names ??= new Map()
+    state.order ??= []
+    if (!state.names.has(key)) state.order.push(key)
+    state.names.set(key, String(name))
+  }
+  const socketMode = (res) => !responseState(res).done && res.socket != null && typeof res.socket.write === "function" && !(res.socket instanceof NullSocket)
+  const socketHead = (res) => {
+    const state = responseState(res)
+    if (state.socketHead) return
+    state.socketHead = true
+    const { headers } = state
+    const status = res.statusCode
+    const bodyless = res.req?.method === "HEAD" || status === 204 || status === 304 || (status >= 100 && status < 200)
+    const req = res.req
+    const legacy = req != null && (req.httpVersionMajor < 1 || req.httpVersionMinor < 1)
+    const chunkedDefault = legacy ? /(?:^|\W)chunked(?:$|\W)/i.test(req.headers?.te ?? "") : true
+    state.chunked = chunkedDefault && !bodyless && !headers.has("content-length") && !headers.has("transfer-encoding")
+    let text = `HTTP/1.1 ${status} ${res.statusMessage || STATUS_CODES[status] || ""}\r\n`
+    const order = state.order ?? []
+    const listed = new Set(order)
+    for (const key of [...order, ...[...headers.keys()].filter((k) => !listed.has(k))]) {
+      if (!headers.has(key)) continue
+      const name = state.names?.get(key) ?? key
+      const values = key === "set-cookie" ? headers.getSetCookie() : [headers.get(key)]
+      for (const value of values) text += `${name}: ${value}\r\n`
+    }
+    if (!headers.has("date") && res.sendDate !== false && !state.noDate) text += `Date: ${httpDate()}\r\n`
+    if (!headers.has("connection") && !state.noConnection) text += "Connection: keep-alive\r\n"
+    if (state.chunked) text += "Transfer-Encoding: chunked\r\n"
+    text += "\r\n"
+    res._header = text
+    res._headerSent = true
+    res.headersSent = true
+    res.socket.write(text)
+  }
+  const socketWrite = (res, chunk, encoding) => {
+    socketHead(res)
+    if (chunk == null) return
+    const bytes = typeof chunk === "string" ? (typeof Buffer === "function" ? Buffer.from(chunk, typeof encoding === "string" ? encoding : "utf8") : encoder.encode(chunk)) : chunk
+    if (!bytes.length) return
+    if (responseState(res).chunked) {
+      res.socket.write(bytes.length.toString(16) + "\r\n")
+      res.socket.write(bytes)
+      res.socket.write("\r\n")
+    } else res.socket.write(bytes)
   }
   const abortResponse = (res) => {
     const state = responseState(res)
@@ -2687,14 +2894,16 @@ const WEB_SRC: &str = r##"
       return this
     },
     setHeader(name, value) {
-      const { headers } = responseState(this)
-      headers.delete(name)
-      for (const v of Array.isArray(value) ? value : [value]) headers.append(name, v)
+      const state = responseState(this)
+      state.headers.delete(name)
+      rememberName(state, name)
+      for (const v of Array.isArray(value) ? value : [value]) state.headers.append(name, v)
       return this
     },
     appendHeader(name, value) {
-      const { headers } = responseState(this)
-      for (const v of Array.isArray(value) ? value : [value]) headers.append(name, v)
+      const state = responseState(this)
+      rememberName(state, name)
+      for (const v of Array.isArray(value) ? value : [value]) state.headers.append(name, v)
       return this
     },
     getHeader(name) {
@@ -2710,13 +2919,20 @@ const WEB_SRC: &str = r##"
       return responseState(this).headers.has(name)
     },
     removeHeader(name) {
-      responseState(this).headers.delete(name)
+      const state = responseState(this)
+      const key = String(name).toLowerCase()
+      if (key === "date") state.noDate = true
+      if (key === "connection") state.noConnection = true
+      state.headers.delete(name)
     },
     writeHead(status, message, headers) {
       if (typeof message === "object" && message !== null) [message, headers] = [undefined, message]
       this.statusCode = status
       if (message !== undefined) this.statusMessage = message
-      if (headers) for (const k of Object.keys(headers)) this.setHeader(k, headers[k])
+      if (Array.isArray(headers)) {
+        if (headers.length && Array.isArray(headers[0])) for (const [k, v] of headers) this.appendHeader(k, v)
+        else for (let i = 0; i + 1 < headers.length; i += 2) this.appendHeader(headers[i], headers[i + 1])
+      } else if (headers) for (const k of Object.keys(headers)) this.setHeader(k, headers[k])
       sendHeaders(this)
       return this
     },
@@ -2732,6 +2948,11 @@ const WEB_SRC: &str = r##"
       if (this.destroyed) {
         if (typeof cb === "function") queueMicrotask(cb)
         return false
+      }
+      if (socketMode(this)) {
+        socketWrite(this, chunk, encoding)
+        if (typeof cb === "function") queueMicrotask(cb)
+        return true
       }
       if (chunk != null) {
         const encoded = typeof chunk === "string" && typeof encoding === "string" && !/^utf-?8$/i.test(encoding) && typeof Buffer === "function" ? Buffer.from(chunk, encoding) : chunk
@@ -2754,6 +2975,20 @@ const WEB_SRC: &str = r##"
       else if (typeof encoding === "function") [encoding, cb] = [undefined, encoding]
       if (this.writableEnded) return this
       const state = responseState(this)
+      if (socketMode(this)) {
+        if (chunk != null) socketWrite(this, chunk, encoding)
+        socketHead(this)
+        if (state.chunked) this.socket.write("0\r\n\r\n")
+        this.writableEnded = true
+        this.finished = true
+        if (typeof cb === "function") queueMicrotask(cb)
+        queueMicrotask(() => {
+          this.writableFinished = true
+          this.emit("finish")
+          this.emit("close")
+        })
+        return this
+      }
       if (state.controller) {
         if (chunk != null) this.write(chunk, encoding)
         this.writableEnded = true

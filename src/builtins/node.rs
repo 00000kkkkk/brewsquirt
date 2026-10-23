@@ -4391,12 +4391,226 @@ const NODE_SRC: &str = r##"
     }
   }
 
+  const HTTP_METHODS = ["DELETE", "GET", "HEAD", "POST", "PUT", "CONNECT", "OPTIONS", "TRACE", "COPY", "LOCK", "MKCOL", "MOVE", "PROPFIND", "PROPPATCH", "SEARCH", "UNLOCK", "BIND", "REBIND", "UNBIND", "ACL", "REPORT", "MKACTIVITY", "CHECKOUT", "MERGE", "M-SEARCH", "NOTIFY", "SUBSCRIBE", "UNSUBSCRIBE", "PATCH", "PURGE", "MKCALENDAR", "LINK", "UNLINK", "SOURCE", "QUERY"]
+  const parserError = (code, message, bytesParsed) => Object.assign(new Error(message), { code, bytesParsed, reason: message })
+  class HTTPParser {
+    static REQUEST = 1
+    static RESPONSE = 2
+    static kOnMessageBegin = 0
+    static kOnHeaders = 1
+    static kOnHeadersComplete = 2
+    static kOnBody = 3
+    static kOnMessageComplete = 4
+    static kOnExecute = 5
+    static kOnTimeout = 6
+    static kLenientNone = 0
+    static kLenientHeaders = 1
+    static kLenientChunkedLength = 2
+    static kLenientKeepAlive = 4
+    static kLenientAll = 255
+    static methods = HTTP_METHODS
+    initialize(type, resource) {
+      this.type = type
+      this.resource = resource
+      this.paused = false
+      this.reset()
+    }
+    reset() {
+      this.state = "line"
+      this.pending = Buffer.alloc(0)
+      this.headers = []
+      this.firstLine = null
+      this.remaining = 0
+      this.chunked = false
+      this.keepAlive = true
+      this.skipBody = false
+    }
+    #emit(index, ...args) {
+      const fn = this[index]
+      return typeof fn === "function" ? fn.apply(this, args) : undefined
+    }
+    #takeLine() {
+      const i = this.pending.indexOf("\r\n")
+      if (i < 0) return null
+      const line = this.pending.subarray(0, i).toString("latin1")
+      this.pending = this.pending.subarray(i + 2)
+      return line
+    }
+    #headersComplete() {
+      const line = this.firstLine
+      let versionMajor = 1
+      let versionMinor = 1
+      let method
+      let url
+      let statusCode
+      let statusMessage
+      if (this.type === HTTPParser.REQUEST) {
+        const m = /^([A-Z-]+) (\S+) HTTP\/(\d)\.(\d)$/.exec(line)
+        if (!m) return parserError("HPE_INVALID_METHOD", "Invalid method encountered", 0)
+        method = HTTP_METHODS.indexOf(m[1])
+        if (method < 0) return parserError("HPE_INVALID_METHOD", "Invalid method encountered", 0)
+        url = m[2]
+        versionMajor = Number(m[3])
+        versionMinor = Number(m[4])
+      } else {
+        const m = /^HTTP\/(\d)\.(\d) (\d{3})(?: (.*))?$/.exec(line)
+        if (!m) return parserError("HPE_INVALID_CONSTANT", "Expected HTTP/", 0)
+        versionMajor = Number(m[1])
+        versionMinor = Number(m[2])
+        statusCode = Number(m[3])
+        statusMessage = m[4] ?? ""
+      }
+      let contentLength = null
+      let connection = ""
+      let upgradeHeader = false
+      for (let i = 0; i < this.headers.length; i += 2) {
+        const key = this.headers[i].toLowerCase()
+        const value = this.headers[i + 1]
+        if (key === "content-length") contentLength = Number(value)
+        else if (key === "transfer-encoding" && /chunked/i.test(value)) this.chunked = true
+        else if (key === "connection") connection = value.toLowerCase()
+        else if (key === "upgrade") upgradeHeader = true
+      }
+      this.keepAlive = versionMajor === 1 && versionMinor === 0 ? connection.includes("keep-alive") : !connection.includes("close")
+      const upgrade = this.type === HTTPParser.REQUEST ? (upgradeHeader && connection.includes("upgrade")) || HTTP_METHODS[method] === "CONNECT" : statusCode === 101
+      const r = this.#emit(HTTPParser.kOnHeadersComplete, versionMajor, versionMinor, this.headers, method, url, statusCode, statusMessage, upgrade, this.keepAlive)
+      if (upgrade || r === 2) {
+        this.state = "upgraded"
+        return null
+      }
+      const noBody = r === 1 || (this.type === HTTPParser.RESPONSE && ((statusCode >= 100 && statusCode < 200) || statusCode === 204 || statusCode === 304))
+      if (noBody) return this.#complete()
+      if (this.chunked) this.state = "chunk-size"
+      else if (contentLength !== null) {
+        if (contentLength === 0) return this.#complete()
+        this.remaining = contentLength
+        this.state = "body"
+      } else if (this.type === HTTPParser.RESPONSE) this.state = "eof"
+      else return this.#complete()
+      return null
+    }
+    #complete() {
+      this.#emit(HTTPParser.kOnMessageComplete)
+      const keep = this.keepAlive
+      this.reset()
+      if (!keep) this.state = "closed"
+      return null
+    }
+    execute(data) {
+      const total = data.length
+      let offset = 0
+      if (this.state === "body" || this.state === "eof" || this.state === "chunk-data") {
+        this.pending = Buffer.concat([this.pending, data])
+      } else this.pending = this.pending.length ? Buffer.concat([this.pending, data]) : Buffer.from(data)
+      for (;;) {
+        if (this.state === "line") {
+          const line = this.#takeLine()
+          if (line === null) break
+          if (line === "" && this.firstLine === null) continue
+          this.#emit(HTTPParser.kOnMessageBegin)
+          this.firstLine = line
+          this.state = "headers"
+        } else if (this.state === "headers") {
+          const line = this.#takeLine()
+          if (line === null) break
+          if (line === "") {
+            const err = this.#headersComplete()
+            if (err) return err
+            if (this.state === "upgraded") {
+              offset = total - this.pending.length
+              return offset < 0 ? 0 : offset
+            }
+            continue
+          }
+          const i = line.indexOf(":")
+          if (i <= 0) return parserError("HPE_INVALID_HEADER_TOKEN", "Invalid header value char", total - this.pending.length)
+          this.headers.push(line.slice(0, i).trim(), line.slice(i + 1).trim())
+        } else if (this.state === "body") {
+          if (!this.pending.length) break
+          const take = Math.min(this.remaining, this.pending.length)
+          const chunk = this.pending.subarray(0, take)
+          this.pending = this.pending.subarray(take)
+          this.remaining -= take
+          this.#emit(HTTPParser.kOnBody, chunk)
+          if (this.remaining === 0) this.#complete()
+        } else if (this.state === "eof") {
+          if (this.pending.length) this.#emit(HTTPParser.kOnBody, this.pending)
+          this.pending = Buffer.alloc(0)
+          break
+        } else if (this.state === "chunk-size") {
+          const line = this.#takeLine()
+          if (line === null) break
+          const size = parseInt(line.split(";")[0].trim(), 16)
+          if (Number.isNaN(size)) return parserError("HPE_INVALID_CHUNK_SIZE", "Invalid character in chunk size", total - this.pending.length)
+          if (size === 0) this.state = "trailers"
+          else {
+            this.remaining = size
+            this.state = "chunk-data"
+          }
+        } else if (this.state === "chunk-data") {
+          if (!this.pending.length) break
+          const take = Math.min(this.remaining, this.pending.length)
+          const chunk = this.pending.subarray(0, take)
+          this.pending = this.pending.subarray(take)
+          this.remaining -= take
+          this.#emit(HTTPParser.kOnBody, chunk)
+          if (this.remaining === 0) this.state = "chunk-end"
+        } else if (this.state === "chunk-end") {
+          if (this.pending.length < 2) break
+          this.pending = this.pending.subarray(2)
+          this.state = "chunk-size"
+        } else if (this.state === "trailers") {
+          const line = this.#takeLine()
+          if (line === null) break
+          if (line === "") this.#complete()
+        } else break
+      }
+      return total
+    }
+    finish() {
+      if (this.state === "eof") {
+        this.#complete()
+        return undefined
+      }
+      if (this.state === "line" || this.state === "closed" || this.state === "upgraded") return undefined
+      return parserError("HPE_INVALID_EOF_STATE", "Invalid EOF state", 0)
+    }
+    close() {}
+    free() {}
+    remove() {}
+    consume() {}
+    unconsume() {}
+    pause() {
+      this.paused = true
+    }
+    resume() {
+      this.paused = false
+    }
+    getCurrentBuffer() {
+      return this.pending
+    }
+  }
+  const httpCommon = {
+    HTTPParser,
+    methods: HTTP_METHODS,
+    CRLF: "\r\n",
+    chunkExpression: /(?:^|\W)chunked(?:$|\W)/i,
+    continueExpression: /(?:^|\W)100-continue(?:$|\W)/i,
+    freeParser(parser) {
+      if (parser && typeof parser.remove === "function") parser.remove()
+    },
+    parsers: { alloc: () => new HTTPParser(), free() {} },
+    _checkIsHttpToken: (v) => /^[\^_`a-zA-Z\-0-9!#$%&'*+.|~]+$/.test(v),
+    _checkInvalidHeaderChar: (v) => /[^\t\x20-\x7e\x80-\xff]/.test(v),
+    kIncomingMessage: Symbol("IncomingMessage"),
+    isLenient: () => false,
+  }
+  const kRequestState = Symbol("requestState")
+  const requestState = (req) => (req[kRequestState] ??= { chunks: [], sent: false, controller: new AbortController(), headers: new Headers() })
+  const requestHeaders = (req) => requestState(req).headers
   class ClientRequest extends Writable {
     #url
     #options
-    #chunks = []
-    #sent = false
-    #controller = new AbortController()
     constructor(url, options, cb) {
       super({ highWaterMark: Infinity, autoDestroy: false })
       if (typeof url === "string" || url instanceof URL) {
@@ -4419,34 +4633,35 @@ const NODE_SRC: &str = r##"
       this.aborted = false
       this.headersSent = false
       this.reusedSocket = false
-      this.#headers = new Headers()
       for (const [k, v] of Object.entries(this.#options.headers ?? {})) this.setHeader(k, v)
       if (typeof cb === "function") this.once("response", cb)
       if (this.#options.timeout) this.setTimeout(this.#options.timeout)
       if (this.#options.signal) this.#options.signal.addEventListener("abort", () => this.destroy(this.#options.signal.reason), { once: true })
     }
-    #headers
     setHeader(name, value) {
-      this.#headers.delete(name)
-      for (const v of Array.isArray(value) ? value : [value]) this.#headers.append(name, String(v))
+      const st = requestState(this)
+      st.headers.delete(name)
+      st.names ??= new Map()
+      st.names.set(String(name).toLowerCase(), String(name))
+      for (const v of Array.isArray(value) ? value : [value]) st.headers.append(name, String(v))
       return this
     }
     getHeader(name) {
-      return this.#headers.get(name) ?? undefined
+      return requestHeaders(this).get(name) ?? undefined
     }
     getHeaders() {
-      return Object.fromEntries(this.#headers)
+      return Object.fromEntries(requestHeaders(this))
     }
     removeHeader(name) {
-      this.#headers.delete(name)
+      requestHeaders(this).delete(name)
     }
     hasHeader(name) {
-      return this.#headers.has(name)
+      return requestHeaders(this).has(name)
     }
     setTimeout(ms, cb) {
       if (typeof cb === "function") this.once("timeout", cb)
       setTimeout(() => {
-        if (!this.#sent || this.destroyed) return
+        if (!requestState(this).sent || this.destroyed) return
         this.emit("timeout")
       }, ms)
       return this
@@ -4456,99 +4671,183 @@ const NODE_SRC: &str = r##"
     flushHeaders() {}
     abort() {
       this.aborted = true
-      this.#controller.abort()
+      requestState(this).controller.abort()
       this.destroy()
     }
     _write(chunk, encoding, cb) {
-      this.#chunks.push(chunk)
+      requestState(this).chunks.push(chunk)
       cb()
     }
-    _destroy(err, cb) {
-      if (this.socket && !this.socket.destroyed) this.socket.destroy()
-      this.#controller.abort()
-      cb(err)
+    destroy(err) {
+      const st = requestState(this)
+      if (st.destroyCalled) return this
+      st.destroyCalled = true
+      this.destroyed = true
+      if (this[kWrite]) {
+        this[kWrite].destroyed = true
+        this[kWrite].queue = []
+      }
+      st.controller.abort()
+      const sock = this.socket
+      if (sock && sock._httpMessage !== this && typeof sock.destroy === "function") {
+        sock.destroy(err)
+        return this
+      }
+      if (sock && !sock.destroyed) sock.destroy()
+      queueMicrotask(() => {
+        if (err) this.emit("error", err)
+        this.emit("close")
+      })
+      return this
     }
-    #rawRequest(body, cb) {
+    #socketRequest(body, cb) {
       const secure = this.#url.protocol === "https:" || this.#url.protocol === "wss:"
       const port = Number(this.#url.port) || (secure ? 443 : 80)
       const host = this.#url.hostname.replace(/^\[|\]$/g, "")
-      const agentOptions = this.#options.agent?.options ?? {}
-      const sock = secure ? tls.connect({ host, port, servername: this.#options.servername ?? host, rejectUnauthorized: this.#options.rejectUnauthorized ?? agentOptions.rejectUnauthorized, ca: this.#options.ca ?? agentOptions.ca }) : net.connect({ host, port })
+      const agent = this.#options.agent
+      const agentOptions = agent?.options ?? {}
+      const connectOptions = {
+        ...this.#options,
+        ...agentOptions,
+        host,
+        hostname: host,
+        port,
+        path: agentOptions.path ?? null,
+        method: this.method,
+        protocol: this.#url.protocol === "wss:" ? "https:" : this.#url.protocol === "ws:" ? "http:" : this.#url.protocol,
+        servername: this.#options.servername ?? host,
+        headers: this.getHeaders(),
+        _defaultAgent: secure ? httpsClient.globalAgent : httpClient.globalAgent,
+      }
+      const create = this.#options.createConnection ?? (agent && typeof agent.createConnection === "function" ? (o, done) => agent.createConnection(o, done) : null)
+      let attached = false
+      const attach = (sock) => {
+        if (attached || !sock) return
+        attached = true
+        this.#onSocket(sock, body, cb)
+      }
+      if (create) {
+        try {
+          const ret = create(connectOptions, (err, sock) => {
+            if (err) {
+              cb()
+              if (!this.destroyed) this.destroy(err)
+              return
+            }
+            attach(sock)
+          })
+          attach(ret)
+        } catch (e) {
+          cb()
+          if (!this.destroyed) this.destroy(e)
+        }
+        return
+      }
+      attach(defaultConnection(connectOptions))
+    }
+    #onSocket(sock, body, cb) {
       this.socket = sock
       this.connection = sock
+      sock._httpMessage = this
       this.emit("socket", sock)
-      sock.once(secure ? "secureConnect" : "connect", () => {
-        if (!this.#headers.has("host")) this.setHeader("Host", this.#url.host)
-        if (body && !this.#headers.has("content-length")) this.setHeader("Content-Length", String(body.length))
-        let head = `${this.method} ${this.path} HTTP/1.1\r\n`
-        for (const [k, v] of this.#headers) head += `${k}: ${v}\r\n`
-        head += "\r\n"
-        sock.write(head)
-        if (body) sock.write(body)
-        cb()
-      })
-      let buffered = Buffer.alloc(0)
-      let headDone = false
-      const onData = (chunk) => {
-        if (headDone) return
-        buffered = Buffer.concat([buffered, chunk])
-        const idx = buffered.indexOf("\r\n\r\n")
-        if (idx < 0) return
-        headDone = true
-        sock.removeListener("data", onData)
-        const lines = buffered.subarray(0, idx).toString("latin1").split("\r\n")
-        const rest = buffered.subarray(idx + 4)
-        const [, statusText, ...message] = lines[0].split(" ")
-        const statusCode = Number(statusText)
+      if (!requestHeaders(this).has("host")) this.setHeader("Host", this.#url.host)
+      if (!requestHeaders(this).has("connection")) {
+        const agent = this.#options.agent
+        this.setHeader("Connection", agent && agent.keepAlive ? "keep-alive" : "close")
+      }
+      if (body && !requestHeaders(this).has("content-length") && !requestHeaders(this).has("transfer-encoding")) this.setHeader("Content-Length", String(body.length))
+      let head = `${this.method} ${this.path} HTTP/1.1\r\n`
+      const names = requestState(this).names
+      for (const [k, v] of requestHeaders(this)) head += `${names?.get(k) ?? k}: ${v}\r\n`
+      head += "\r\n"
+      sock.write(head)
+      if (body) sock.write(body)
+      cb()
+      const parser = new HTTPParser()
+      parser.initialize(HTTPParser.RESPONSE, {})
+      let res = null
+      let upgraded = false
+      parser[HTTPParser.kOnHeadersComplete] = (versionMajor, versionMinor, rawHeaders, method, url, statusCode, statusMessage, upgrade) => {
         const headers = {}
-        const rawHeaders = []
-        for (const line of lines.slice(1)) {
-          const i = line.indexOf(":")
-          if (i < 0) continue
-          const name = line.slice(0, i).trim()
-          const key = name.toLowerCase()
-          const value = line.slice(i + 1).trim()
-          rawHeaders.push(name, value)
-          if (headers[key] === undefined) headers[key] = value
-          else if (key === "set-cookie") headers[key] = [].concat(headers[key], value)
+        for (let i = 0; i < rawHeaders.length; i += 2) {
+          const key = rawHeaders[i].toLowerCase()
+          const value = rawHeaders[i + 1]
+          if (headers[key] === undefined) headers[key] = key === "set-cookie" ? [value] : value
+          else if (key === "set-cookie") headers[key].push(value)
           else headers[key] += ", " + value
         }
-        const res = new Readable({ read() {} })
-        Object.assign(res, { statusCode, statusMessage: message.join(" "), headers, rawHeaders, trailers: {}, rawTrailers: [], httpVersion: "1.1", httpVersionMajor: 1, httpVersionMinor: 1, complete: false, socket: sock, req: this, url: "", method: null, aborted: false })
+        res = new Readable({ read() {} })
+        Object.assign(res, { statusCode, statusMessage, headers, rawHeaders, trailers: {}, rawTrailers: [], httpVersion: `${versionMajor}.${versionMinor}`, httpVersionMajor: versionMajor, httpVersionMinor: versionMinor, complete: false, socket: sock, connection: sock, req: this, url: "", method: null, aborted: false })
         res.setTimeout = () => res
         this.res = res
-        if (statusCode === 101 && this.listenerCount("upgrade") > 0) {
-          this.emit("upgrade", res, sock, rest)
+        if (upgrade) {
+          upgraded = true
+          return 2
+        }
+        if (statusCode >= 100 && statusCode < 200) {
+          this.emit("information", { statusCode, statusMessage, headers, rawHeaders, httpVersion: res.httpVersion })
+          return 0
+        }
+        this.emit("response", res)
+        return this.method === "HEAD" ? 1 : 0
+      }
+      parser[HTTPParser.kOnBody] = (chunk) => {
+        if (res) res.push(Buffer.from(chunk))
+      }
+      parser[HTTPParser.kOnMessageComplete] = () => {
+        if (!res || res.statusCode < 200) return
+        res.complete = true
+        res.push(null)
+        sock.removeListener("data", onData)
+        if (typeof sock.end === "function" && !sock.destroyed) sock.end()
+      }
+      const onData = (chunk) => {
+        const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        const used = parser.execute(data)
+        if (used instanceof Error) {
+          sock.removeListener("data", onData)
+          if (!this.destroyed) this.destroy(used)
           return
         }
-        if (rest.length) res.push(rest)
-        sock.on("data", (c) => res.push(c))
-        sock.on("end", () => {
-          res.complete = true
-          res.push(null)
-        })
-        this.emit("response", res)
+        if (upgraded) {
+          sock.removeListener("data", onData)
+          const rest = data.subarray(used)
+          if (this.listenerCount("upgrade") > 0) this.emit("upgrade", res, sock, rest)
+          else sock.destroy()
+        }
       }
       sock.on("data", onData)
+      sock.on("end", () => {
+        const r = parser.finish()
+        if (r instanceof Error && !this.destroyed) this.destroy(r)
+      })
       sock.on("error", (e) => {
         if (!this.destroyed) this.destroy(e)
       })
       sock.on("close", () => {
-        if (!headDone && !this.destroyed) {
+        if (!res && !this.destroyed) {
           const e = new Error("socket hang up")
           e.code = "ECONNRESET"
           this.destroy(e)
+        } else if (res && !res.complete && !upgraded) {
+          parser.finish()
+          if (!res.complete) {
+            res.aborted = true
+            res.destroy(Object.assign(new Error("aborted"), { code: "ECONNRESET" }))
+          }
         }
       })
     }
     _final(cb) {
-      this.#sent = true
+      requestState(this).sent = true
       this.headersSent = true
-      const body = this.#chunks.length ? Buffer.concat(this.#chunks) : undefined
-      if (this.#headers.has("upgrade") || this.#options.createConnection) return this.#rawRequest(body, cb)
+      const body = requestState(this).chunks.length ? Buffer.concat(requestState(this).chunks) : undefined
+      const agent = this.#options.agent
+      const customAgent = agent && typeof agent.createConnection === "function" && agent.createConnection !== Agent.prototype.createConnection
+      if (requestHeaders(this).has("upgrade") || this.#options.createConnection || customAgent) return this.#socketRequest(body, cb)
       const agentOptions = this.#options.agent?.options ?? {}
       const tlsOptions = { rejectUnauthorized: this.#options.rejectUnauthorized ?? agentOptions.rejectUnauthorized, ca: this.#options.ca ?? agentOptions.ca }
-      fetch(this.#url, { method: this.method, headers: this.#headers, body, signal: this.#controller.signal, redirect: "manual", tls: tlsOptions, [Symbol.for("jsq.rawBody")]: true }).then(
+      fetch(this.#url, { method: this.method, headers: requestHeaders(this), body, signal: requestState(this).controller.signal, redirect: "manual", tls: tlsOptions, [Symbol.for("jsq.rawBody")]: true }).then(
         (res) => {
           const incoming = new IncomingResponse(res)
           incoming.req = this
@@ -4587,15 +4886,148 @@ const NODE_SRC: &str = r##"
     req.end()
     return req
   }
-  class Agent {
+  const defaultConnection = (options) => {
+    const secure = options.protocol === "https:"
+    return secure
+      ? tls.connect({ host: options.host, port: options.port, servername: options.servername, rejectUnauthorized: options.rejectUnauthorized, ca: options.ca })
+      : net.connect({ host: options.host, port: options.port })
+  }
+  class Agent extends EventEmitter {
     constructor(options = {}) {
-      this.options = options
+      super()
+      this.options = { path: null, ...options }
+      this.defaultPort = options.defaultPort ?? 80
+      this.protocol = options.protocol ?? "http:"
       this.maxSockets = options.maxSockets ?? Infinity
+      this.maxFreeSockets = options.maxFreeSockets ?? 256
+      this.maxTotalSockets = options.maxTotalSockets ?? Infinity
       this.keepAlive = !!options.keepAlive
+      this.keepAliveMsecs = options.keepAliveMsecs ?? 1000
+      this.requests = Object.create(null)
+      this.sockets = Object.create(null)
+      this.freeSockets = Object.create(null)
     }
+    createConnection(options, cb) {
+      const sock = defaultConnection(options)
+      if (typeof cb === "function") {
+        sock.once(options.protocol === "https:" ? "secureConnect" : "connect", () => cb(null, sock))
+        sock.once("error", (e) => cb(e))
+      }
+      return sock
+    }
+    getName(options = {}) {
+      return `${options.host ?? "localhost"}:${options.port ?? ""}:${options.localAddress ?? ""}`
+    }
+    keepSocketAlive() {
+      return true
+    }
+    reuseSocket() {}
     destroy() {}
   }
-  const httpClient = { request: httpRequest, get: httpGet, Agent, globalAgent: new Agent(), ClientRequest, IncomingMessage: IncomingResponse, METHODS: ["ACL", "BIND", "CHECKOUT", "CONNECT", "COPY", "DELETE", "GET", "HEAD", "LINK", "LOCK", "M-SEARCH", "MERGE", "MKACTIVITY", "MKCALENDAR", "MKCOL", "MOVE", "NOTIFY", "OPTIONS", "PATCH", "POST", "PROPFIND", "PROPPATCH", "PURGE", "PUT", "QUERY", "REBIND", "REPORT", "SEARCH", "SOURCE", "SUBSCRIBE", "TRACE", "UNBIND", "UNLINK", "UNLOCK", "UNSUBSCRIBE"] }
+  const kOutHeaders = Symbol("kOutHeaders")
+  function OutgoingMessage(options) {
+    Stream.call(this, options)
+    this.outputData = []
+    this.outputSize = 0
+    this.writable = true
+    this.destroyed = false
+    this._last = false
+    this.chunkedEncoding = false
+    this.shouldKeepAlive = true
+    this.sendDate = false
+    this.finished = false
+    this._headerSent = false
+    this._header = null
+    this[kOutHeaders] = null
+    this.socket = null
+  }
+  Object.setPrototypeOf(OutgoingMessage.prototype, Stream.prototype)
+  Object.setPrototypeOf(OutgoingMessage, Stream)
+  Object.defineProperties(OutgoingMessage.prototype, {
+    headersSent: {
+      get() {
+        return !!this._header
+      },
+      configurable: true,
+    },
+    connection: {
+      get() {
+        return this.socket
+      },
+      set(v) {
+        this.socket = v
+      },
+      configurable: true,
+    },
+    writableEnded: {
+      get() {
+        return this.finished
+      },
+      configurable: true,
+    },
+  })
+  Object.assign(OutgoingMessage.prototype, {
+    setHeader(name, value) {
+      if (this._header) throw Object.assign(new Error("Cannot set headers after they are sent to the client"), { code: "ERR_HTTP_HEADERS_SENT" })
+      ;(this[kOutHeaders] ??= Object.create(null))[String(name).toLowerCase()] = [name, value]
+      return this
+    },
+    appendHeader(name, value) {
+      const key = String(name).toLowerCase()
+      const table = (this[kOutHeaders] ??= Object.create(null))
+      const prev = table[key]
+      table[key] = prev ? [prev[0], [].concat(prev[1], value)] : [name, value]
+      return this
+    },
+    getHeader(name) {
+      return this[kOutHeaders]?.[String(name).toLowerCase()]?.[1]
+    },
+    getHeaders() {
+      const out = Object.create(null)
+      for (const key of Object.keys(this[kOutHeaders] ?? {})) out[key] = this[kOutHeaders][key][1]
+      return out
+    },
+    getHeaderNames() {
+      return Object.keys(this[kOutHeaders] ?? {})
+    },
+    getRawHeaderNames() {
+      return Object.values(this[kOutHeaders] ?? {}).map((entry) => entry[0])
+    },
+    hasHeader(name) {
+      return !!this[kOutHeaders]?.[String(name).toLowerCase()]
+    },
+    removeHeader(name) {
+      if (this[kOutHeaders]) delete this[kOutHeaders][String(name).toLowerCase()]
+    },
+    flushHeaders() {},
+    setTimeout(ms, cb) {
+      if (typeof cb === "function") this.once("timeout", cb)
+      return this
+    },
+    write(chunk, encoding, cb) {
+      if (typeof encoding === "function") cb = encoding
+      if (chunk != null) this.outputData.push(chunk)
+      if (typeof cb === "function") queueMicrotask(cb)
+      return true
+    },
+    end(chunk, encoding, cb) {
+      if (typeof chunk === "function") [chunk, cb] = [undefined, chunk]
+      else if (typeof encoding === "function") cb = encoding
+      if (chunk != null) this.outputData.push(chunk)
+      this.finished = true
+      if (typeof cb === "function") queueMicrotask(cb)
+      queueMicrotask(() => this.emit("finish"))
+      return this
+    },
+    destroy(error) {
+      if (this.destroyed) return this
+      this.destroyed = true
+      if (error) queueMicrotask(() => this.emit("error", error))
+      queueMicrotask(() => this.emit("close"))
+      return this
+    },
+  })
+  const httpClient = { request: httpRequest, get: httpGet, Agent, globalAgent: new Agent(), ClientRequest, OutgoingMessage, IncomingMessage: IncomingResponse, METHODS: ["ACL", "BIND", "CHECKOUT", "CONNECT", "COPY", "DELETE", "GET", "HEAD", "LINK", "LOCK", "M-SEARCH", "MERGE", "MKACTIVITY", "MKCALENDAR", "MKCOL", "MOVE", "NOTIFY", "OPTIONS", "PATCH", "POST", "PROPFIND", "PROPPATCH", "PURGE", "PUT", "QUERY", "REBIND", "REPORT", "SEARCH", "SOURCE", "SUBSCRIBE", "TRACE", "UNBIND", "UNLINK", "UNLOCK", "UNSUBSCRIBE"] }
   const withHttps = (url, options) => {
     if (typeof url === "object" && url !== null && !(url instanceof URL)) return [url.protocol == null ? { ...url, protocol: "https:" } : url, options]
     if (typeof options === "object" && options !== null && options.protocol == null) return [url, { ...options, protocol: "https:" }]
@@ -7619,8 +8051,40 @@ const NODE_SRC: &str = r##"
   Module.constants = { compileCacheStatus: { FAILED: 0, ENABLED: 1, ALREADY_ENABLED: 2, DISABLED: 3 } }
   native.setModuleClass(Module)
 
+  const kPendingBody = Symbol("pendingBody")
+  const linkIncomingMessage = (IM) => {
+    const key = Symbol.for("jsq.incomingReadableInit")
+    if (typeof IM !== "function" || IM[key]) return
+    Object.setPrototypeOf(IM.prototype, Readable.prototype)
+    Object.defineProperty(IM.prototype, kRead, {
+      get() {
+        if (this === IM.prototype) return undefined
+        Object.defineProperty(this, kRead, { value: undefined, writable: true, configurable: true })
+        initReadable(this, { autoDestroy: false })
+        if (Object.prototype.hasOwnProperty.call(this, kPendingBody)) {
+          const body = this[kPendingBody]
+          delete this[kPendingBody]
+          if (body != null && body.length) this.push(Buffer.from(body.buffer, body.byteOffset, body.byteLength))
+          this.push(null)
+        }
+        return this[kRead]
+      },
+      set(v) {
+        Object.defineProperty(this, kRead, { value: v, writable: true, configurable: true })
+      },
+      configurable: true,
+    })
+    IM[key] = (self, body) => {
+      self.readable = true
+      self.destroyed = false
+      if (body !== undefined) Object.defineProperty(self, kPendingBody, { value: body, writable: true, configurable: true })
+    }
+  }
+
   return {
     Module,
+    httpCommon,
+    linkIncomingMessage,
     crypto,
     zlib,
     stream,
@@ -7857,12 +8321,18 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                     }
                     h.set_hidden("default", Value::Object(h.clone()));
                 }
+                let link = vm.get_prop(&n, "linkIncomingMessage")?;
+                let incoming = vm.get_prop(&h, "IncomingMessage")?;
+                vm.call_value(&link, Value::Undefined, &[incoming])?;
                 h
             }
             "https" => {
                 let h = vm.import_builtin("http")?;
                 let n = load(vm)?;
                 let client = vm.get_prop(&n, "httpsClient")?;
+                let link = vm.get_prop(&n, "linkIncomingMessage")?;
+                let incoming = vm.get_prop(&h, "IncomingMessage")?;
+                vm.call_value(&link, Value::Undefined, &[incoming])?;
                 let o = vm.new_object();
                 for (k, v) in vm.own_entries(&h) {
                     o.set_own(k, v);
@@ -7976,6 +8446,11 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
             "diagnostics_channel" => {
                 let n = load(vm)?;
                 let m = vm.get_prop(&n, "diagnosticsChannel")?;
+                with_default(vm, m)?
+            }
+            "_http_common" => {
+                let n = load(vm)?;
+                let m = vm.get_prop(&n, "httpCommon")?;
                 with_default(vm, m)?
             }
             "async_hooks" => {
@@ -8424,7 +8899,8 @@ fn zlib_crc32(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(Value::Number(h.finalize() as f64))
 }
 
-pub const BUILTIN_MODULES: [&str; 56] = [
+pub const BUILTIN_MODULES: [&str; 57] = [
+    "_http_common",
     "assert",
     "assert/strict",
     "async_hooks",
@@ -8686,11 +9162,38 @@ fn error_code(e: &std::io::Error) -> (&'static str, &'static str, i32) {
         K::IsADirectory => ("EISDIR", "illegal operation on a directory", -21),
         K::NotADirectory => ("ENOTDIR", "not a directory", -20),
         K::InvalidInput => ("EINVAL", "invalid argument", -22),
-        _ => match e.raw_os_error() {
-            Some(267) => ("ENOTDIR", "not a directory", -20),
-            Some(145) => ("ENOTEMPTY", "directory not empty", -39),
-            _ => ("EIO", "i/o error", -5),
-        },
+        _ => raw_error_code(e.raw_os_error()),
+    }
+}
+
+#[cfg(windows)]
+fn raw_error_code(code: Option<i32>) -> (&'static str, &'static str, i32) {
+    match code {
+        Some(267) => ("ENOTDIR", "not a directory", -20),
+        Some(145) => ("ENOTEMPTY", "directory not empty", -39),
+        Some(123) | Some(161) => ("ENOENT", "no such file or directory", -2),
+        Some(206) => ("ENAMETOOLONG", "name too long", -36),
+        Some(32) | Some(33) => ("EBUSY", "resource busy or locked", -16),
+        Some(17) => ("EXDEV", "cross-device link not permitted", -18),
+        Some(112) => ("ENOSPC", "no space left on device", -28),
+        _ => ("EIO", "i/o error", -5),
+    }
+}
+
+#[cfg(not(windows))]
+fn raw_error_code(code: Option<i32>) -> (&'static str, &'static str, i32) {
+    let (name_too_long, symlink_loop) = if cfg!(target_os = "macos") {
+        (63, 62)
+    } else {
+        (36, 40)
+    };
+    match code {
+        Some(c) if c == name_too_long => ("ENAMETOOLONG", "name too long", -36),
+        Some(c) if c == symlink_loop => ("ELOOP", "too many symbolic links encountered", -40),
+        Some(16) => ("EBUSY", "resource busy or locked", -16),
+        Some(18) => ("EXDEV", "cross-device link not permitted", -18),
+        Some(28) => ("ENOSPC", "no space left on device", -28),
+        _ => ("EIO", "i/o error", -5),
     }
 }
 

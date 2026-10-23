@@ -1,0 +1,10 @@
+[["head",1,1,["Host","x","Transfer-Encoding","chunked"],"POST","/p?q=1",false,true],["done"]]
+[ 201, 'Created', '1, 2', 'wikipedia' ] fake.test 8080 null
+POST /items?x=1 HTTP/1.1 false true
+"HTTP/1.1 200 OK\r\nX-Raw: Case\r\nContent-Type: text/plain\r\n\r\nhello world"
+[ 'a', 'b' ] true
+[Object: null prototype] { 'x-one': [ '1', '2' ] } [ 'X-One' ] true false
+0 0 true
+true false
+custom
+ENOENT
