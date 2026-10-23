@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `receiveMessageOnPort`, `environmentData` and cross-thread `BroadcastChannel` work. `piscina`
   and `tinypool` run unchanged.
 - `structuredClone` accepts `{ transfer }` and shares the memory of `SharedArrayBuffer`s.
+- Regular expressions with the `v` flag accept nested classes, `&&` intersections and `\q{...}`
+  string alternatives.
+- `Atomics.waitAsync` returns a promise that settles when another thread notifies the location
+  or the timeout passes; every `Atomics` test in test262 now passes, including the multi-agent
+  ones.
 
 ### Changed
 

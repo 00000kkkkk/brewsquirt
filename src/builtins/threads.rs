@@ -575,6 +575,7 @@ pub struct ThreadState {
     workers: FxHashMap<u64, LocalWorker>,
     broadcasts: FxHashMap<u64, Value>,
     port_factory: Option<Value>,
+    async_waits: FxHashMap<u64, Rc<Obj>>,
 }
 
 impl Default for ThreadState {
@@ -590,6 +591,7 @@ impl Default for ThreadState {
             workers: FxHashMap::default(),
             broadcasts: FxHashMap::default(),
             port_factory: None,
+            async_waits: FxHashMap::default(),
         }
     }
 }
@@ -918,9 +920,19 @@ fn native_port_receive(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             Ok(IoEvent::Port {
                 port,
                 event: PortEvent::Message(w),
-            }) if port == id => {
-                if let Some(p) = vm.threads.ports.get_mut(&id) {
-                    p.queue.push_back(w);
+            }) if vm.threads.ports.contains_key(&port) => {
+                let started = match vm.threads.ports.get_mut(&port) {
+                    Some(p) => {
+                        p.queue.push_back(w);
+                        p.started
+                    }
+                    None => false,
+                };
+                if port != id && started {
+                    vm.threads.deferred.push_back(IoEvent::Port {
+                        port,
+                        event: PortEvent::Flush,
+                    });
                 }
             }
             Ok(other) => vm.threads.deferred.push_back(other),
@@ -988,6 +1000,33 @@ fn native_broadcast_close(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         }
     }
     Ok(Value::Undefined)
+}
+
+pub fn start_async_wait(vm: &mut Vm, handle: WaitHandle, timeout: Option<Duration>) -> Rc<Obj> {
+    let p = vm.new_promise();
+    let id = next_id();
+    vm.threads.async_waits.insert(id, p.clone());
+    vm.io.pending += 1;
+    let tx = vm.io.tx.clone();
+    let spawned = std::thread::Builder::new()
+        .name("jsq-wait-async".into())
+        .spawn(move || {
+            let r = block_on(&handle, timeout);
+            let _ = tx.send(IoEvent::WaitDone { id, result: r });
+        });
+    if spawned.is_err() {
+        vm.threads.async_waits.remove(&id);
+        vm.io.pending = vm.io.pending.saturating_sub(1);
+        vm.resolve_promise(&p, "timed-out".into());
+    }
+    p
+}
+
+pub fn handle_wait_done(vm: &mut Vm, id: u64, result: &'static str) {
+    if let Some(p) = vm.threads.async_waits.remove(&id) {
+        vm.io.pending = vm.io.pending.saturating_sub(1);
+        vm.resolve_promise(&p, result.into());
+    }
 }
 
 pub fn handle_broadcast(vm: &mut Vm, id: u64, data: Wire) -> Result<(), Value> {
@@ -1264,25 +1303,41 @@ struct Waiter {
 
 static WAITERS: LazyLock<Mutex<Vec<Arc<Waiter>>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 
-pub fn wait_on(
+pub struct WaitHandle(Arc<Waiter>);
+
+pub fn register_waiter(
     addr: usize,
     check: impl FnOnce() -> bool,
-    timeout: Option<Duration>,
     interrupt: Arc<AtomicBool>,
-) -> &'static str {
+) -> Option<WaitHandle> {
     let waiter = Arc::new(Waiter {
         addr,
         woken: Mutex::new(false),
         cv: Condvar::new(),
         interrupt,
     });
-    {
-        let mut list = WAITERS.lock().unwrap_or_else(|e| e.into_inner());
-        if !check() {
-            return "not-equal";
-        }
-        list.push(waiter.clone());
+    let mut list = WAITERS.lock().unwrap_or_else(|e| e.into_inner());
+    if !check() {
+        return None;
     }
+    list.push(waiter.clone());
+    Some(WaitHandle(waiter))
+}
+
+pub fn wait_on(
+    addr: usize,
+    check: impl FnOnce() -> bool,
+    timeout: Option<Duration>,
+    interrupt: Arc<AtomicBool>,
+) -> &'static str {
+    match register_waiter(addr, check, interrupt) {
+        Some(h) => block_on(&h, timeout),
+        None => "not-equal",
+    }
+}
+
+pub fn block_on(handle: &WaitHandle, timeout: Option<Duration>) -> &'static str {
+    let waiter = handle.0.clone();
     let mut woken = waiter.woken.lock().unwrap_or_else(|e| e.into_inner());
     let deadline = timeout.map(|t| std::time::Instant::now() + t);
     while !*woken && !waiter.interrupt.load(Ordering::SeqCst) {

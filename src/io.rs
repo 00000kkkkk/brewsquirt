@@ -91,6 +91,10 @@ pub enum IoEvent {
         event: crate::builtins::threads::WorkerEvent,
     },
     Wake,
+    WaitDone {
+        id: u64,
+        result: &'static str,
+    },
 }
 
 pub struct WatchEvent {

@@ -3154,6 +3154,7 @@ pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
         IoEvent::Broadcast { id, data } => super::threads::handle_broadcast(vm, id, data)?,
         IoEvent::Worker { id, event } => super::threads::handle_worker(vm, id, event)?,
         IoEvent::Wake => {}
+        IoEvent::WaitDone { id, result } => super::threads::handle_wait_done(vm, id, result),
         IoEvent::Fetch { id, result } => {
             let Some(p) = vm.io_fetches.remove(&id) else {
                 return Ok(());

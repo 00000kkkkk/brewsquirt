@@ -1920,7 +1920,7 @@ fn sab_slice(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 
 fn install_atomics(vm: &mut Vm) {
     let atomics = vm.new_object();
-    let fns: [(&str, u32, NativeFn); 13] = [
+    let fns: [(&str, u32, NativeFn); 14] = [
         ("add", 3, atomics_rmw::<0>),
         ("and", 3, atomics_rmw::<1>),
         ("compareExchange", 4, atomics_compare_exchange),
@@ -1932,6 +1932,7 @@ fn install_atomics(vm: &mut Vm) {
         ("store", 3, atomics_store),
         ("sub", 3, atomics_rmw::<4>),
         ("wait", 4, atomics_wait),
+        ("waitAsync", 4, atomics_wait_async),
         ("xor", 3, atomics_rmw::<5>),
         ("pause", 0, atomics_pause),
     ];
@@ -1966,8 +1967,9 @@ fn integer_view(vm: &mut Vm, v: &Value, waitable: bool) -> Result<Rc<Obj>, Value
 }
 
 fn atomic_index(vm: &mut Vm, o: &Obj, v: &Value) -> Result<usize, Value> {
+    let len = view_of(o).len();
     let i = to_index(vm, v, "atomic access index")?;
-    if i >= view_of(o).len() {
+    if i >= len {
         return Err(vm.range_error("Invalid atomic access index"));
     }
     Ok(i)
@@ -2221,6 +2223,9 @@ fn atomics_notify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             c.max(0.0) as usize
         }
     };
+    if !is_shared(&view_of(&o).buffer) {
+        return Ok(Value::Number(0.0));
+    }
     revalidate(vm, &o, i)?;
     match shared_slot(&o, i) {
         Some((addr, _)) => Ok(Value::Number(
@@ -2270,6 +2275,68 @@ fn atomics_wait(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         return Ok("timed-out".into());
     }
     Err(vm.type_error("Atomics.wait would block forever on the main thread"))
+}
+
+fn atomics_wait_async(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let o = integer_view(vm, &arg(args, 0), true)?;
+    if !is_shared(&view_of(&o).buffer) {
+        return Err(vm.type_error("Atomics.waitAsync requires a shared typed array"));
+    }
+    let i = atomic_index(vm, &o, &arg(args, 1))?;
+    let kind = view_of(&o).kind;
+    let v = coerce(vm, kind, &arg(args, 2))?;
+    let t = vm.to_number(&arg(args, 3))?;
+    let timeout = if t.is_nan() {
+        f64::INFINITY
+    } else {
+        t.max(0.0)
+    };
+    revalidate(vm, &o, i)?;
+    let result = vm.new_object();
+    let Some((addr, kind)) = shared_slot(&o, i) else {
+        result.set_own("async", Value::Bool(false));
+        result.set_own("value", "timed-out".into());
+        return Ok(Value::Object(result));
+    };
+    let expected = to_bits(kind, &v);
+    let size = kind.size();
+    let interrupt = vm.threads.interrupt.clone();
+    let handle = if timeout == 0.0 {
+        if atomic_load_bits(addr, size) == expected {
+            None
+        } else {
+            result.set_own("async", Value::Bool(false));
+            result.set_own("value", "not-equal".into());
+            return Ok(Value::Object(result));
+        }
+    } else {
+        match super::threads::register_waiter(
+            addr as usize,
+            || atomic_load_bits(addr, size) == expected,
+            interrupt,
+        ) {
+            Some(h) => Some(h),
+            None => {
+                result.set_own("async", Value::Bool(false));
+                result.set_own("value", "not-equal".into());
+                return Ok(Value::Object(result));
+            }
+        }
+    };
+    let Some(handle) = handle else {
+        result.set_own("async", Value::Bool(false));
+        result.set_own("value", "timed-out".into());
+        return Ok(Value::Object(result));
+    };
+    let limit = if timeout.is_finite() {
+        Some(std::time::Duration::from_secs_f64(timeout / 1000.0))
+    } else {
+        None
+    };
+    let p = super::threads::start_async_wait(vm, handle, limit);
+    result.set_own("async", Value::Bool(true));
+    result.set_own("value", Value::Object(p));
+    Ok(Value::Object(result))
 }
 
 fn atomics_pause(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

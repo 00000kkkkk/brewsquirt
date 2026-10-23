@@ -16,3 +16,6 @@ exit code 7
 error true out of range
 shares memory 1000
 [ 1, <1 empty item>, 3 ] g
+async true
+waitAsync ok
+not-equal timed-out

@@ -114,8 +114,155 @@ fn class_atom(
 
 const EMOJI_SEQUENCE: &str = r"(?:[\x{1F1E6}-\x{1F1FF}]{2}|[0-9#*]\x{FE0F}?\x{20E3}|\x{1F3F4}[\x{E0020}-\x{E007E}]+\x{E007F}|(?:\p{Emoji_Presentation}|\p{Emoji}\x{FE0F})[\x{1F3FB}-\x{1F3FF}]?(?:\x{200D}(?:\p{Emoji_Presentation}|\p{Emoji}\x{FE0F}?)[\x{1F3FB}-\x{1F3FF}]?)*)";
 
+fn class_end(chars: &[char], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 1,
+            '[' => depth += 1,
+            ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn expand_class_strings(chars: Vec<char>) -> Vec<char> {
+    let mut out = Vec::with_capacity(chars.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' {
+            out.push(c);
+            if let Some(&n) = chars.get(i + 1) {
+                out.push(n);
+            }
+            i += 2;
+            continue;
+        }
+        if c != '[' || chars.get(i + 1) == Some(&'^') {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let Some(end) = class_end(&chars, i) else {
+            out.extend_from_slice(&chars[i..]);
+            break;
+        };
+        let body = &chars[i + 1..end];
+        let mut operator = false;
+        let mut k = 0;
+        while k + 1 < body.len() {
+            if body[k] == '\\' {
+                k += 2;
+                continue;
+            }
+            if (body[k] == '&' && body[k + 1] == '&') || (body[k] == '-' && body[k + 1] == '-') {
+                operator = true;
+                break;
+            }
+            k += 1;
+        }
+        if operator {
+            out.extend_from_slice(&chars[i..=end]);
+            i = end + 1;
+            continue;
+        }
+        let mut rest: Vec<char> = Vec::new();
+        let mut strings: Vec<Vec<char>> = Vec::new();
+        let mut found = false;
+        let mut j = 0;
+        while j < body.len() {
+            if body[j] == '\\' && body.get(j + 1) == Some(&'q') && body.get(j + 2) == Some(&'{') {
+                found = true;
+                let mut k = j + 3;
+                let mut cur: Vec<char> = Vec::new();
+                while k < body.len() && body[k] != '}' {
+                    if body[k] == '\\' {
+                        cur.push('\\');
+                        if let Some(&n) = body.get(k + 1) {
+                            cur.push(n);
+                        }
+                        k += 2;
+                        continue;
+                    }
+                    if body[k] == '|' {
+                        strings.push(std::mem::take(&mut cur));
+                    } else {
+                        cur.push(body[k]);
+                    }
+                    k += 1;
+                }
+                strings.push(cur);
+                j = k + 1;
+                continue;
+            }
+            if body[j] == '\\' {
+                rest.push('\\');
+                if let Some(&n) = body.get(j + 1) {
+                    rest.push(n);
+                }
+                j += 2;
+                continue;
+            }
+            rest.push(body[j]);
+            j += 1;
+        }
+        if !found {
+            out.extend_from_slice(&chars[i..=end]);
+            i = end + 1;
+            continue;
+        }
+        let units = |s: &Vec<char>| s.iter().filter(|c| **c != '\\').count();
+        let mut singles: Vec<Vec<char>> = Vec::new();
+        let mut multi: Vec<Vec<char>> = Vec::new();
+        for s in strings {
+            if units(&s) == 1 {
+                singles.push(s);
+            } else {
+                multi.push(s);
+            }
+        }
+        multi.sort_by_key(|s| std::cmp::Reverse(units(s)));
+        out.extend("(?:".chars());
+        let mut first = true;
+        for s in multi {
+            if !first {
+                out.push('|');
+            }
+            first = false;
+            out.extend(s);
+        }
+        if !rest.is_empty() || !singles.is_empty() {
+            if !first {
+                out.push('|');
+            }
+            out.push('[');
+            out.extend(rest);
+            for s in singles {
+                out.extend(s);
+            }
+            out.push(']');
+        }
+        out.push(')');
+        i = end + 1;
+    }
+    out
+}
+
 pub fn translate(source: &str, flags: &str) -> Result<String, String> {
-    let chars: Vec<char> = source.chars().collect();
+    let vmode = flags.contains('v');
+    let mut chars: Vec<char> = source.chars().collect();
+    if vmode && source.contains("\\q{") {
+        chars = expand_class_strings(chars);
+    }
     let (groups, has_names) = crate::regexp_syntax::prescan(&chars, flags.contains('v'));
     let mut out = String::new();
     let mut inline = String::new();
@@ -134,6 +281,7 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
     let dot_all = flags.contains('s');
     let unicode = flags.contains('u') || flags.contains('v');
     let mut in_class = false;
+    let mut class_depth = 0usize;
     let mut class_last: Option<u32> = None;
     let mut pending_dash: Option<usize> = None;
     let mut groups_open: Vec<Option<usize>> = Vec::new();
@@ -376,10 +524,28 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                     i += 1;
                 }
             }
+            '[' if vmode => {
+                class_depth += 1;
+                class_last = None;
+                pending_dash = None;
+                out.push('[');
+                if chars.get(i + 1) == Some(&'^') {
+                    out.push('^');
+                    i += 1;
+                }
+            }
             '[' => out.push_str("\\["),
+            ']' if in_class && class_depth > 0 => {
+                class_depth -= 1;
+                out.push(']');
+            }
             ']' if in_class => {
                 in_class = false;
                 out.push(']');
+            }
+            '&' if in_class && vmode && chars.get(i + 1) == Some(&'&') => {
+                out.push_str("&&");
+                i += 1;
             }
             '&' | '~' if in_class => {
                 out.push('\\');
