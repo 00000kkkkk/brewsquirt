@@ -54,11 +54,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `@babel/parser` and `acorn` quadratic on big inputs; parsing a 1 MB bundle with `@babel/parser`
   is about twice as fast. Comparisons and conditional jumps on numbers and booleans skip a slow
   path in the interpreter.
+- `http.createServer` hands requests from the native server straight to `IncomingMessage` and
+  `ServerResponse` instead of going through `Request`, `Response` and a promise chain, and response
+  dates are cached per second, which doubles the throughput of Node-style servers such as Express.
+  `req.url` is the raw request target and `req.headers` follows Node's rules for repeated headers:
+  `set-cookie` becomes an array, `cookie` values are joined with `; ` and single-value headers keep
+  their first value.
+- `Headers` keeps its sorted entries until it changes and copies another `Headers` directly.
 
 ### Fixed
 
 - Errors thrown while assigning a property, deleting one or writing through `super` reported the
   location of an earlier call instead of the failing statement.
+- `require()` of a directory path uses the package's `main` field and ignores `exports`, as Node
+  does, so `require("/path/to/koa")` loads the CommonJS build instead of the ES module one.
 
 ## [1.6.0] - 2026-10-23
 

@@ -1,0 +1,10 @@
+{
+  "name": "dirpkg",
+  "main": "lib/main.js",
+  "exports": {
+    ".": {
+      "import": "./dist/entry.mjs",
+      "default": "./dist/entry.mjs"
+    }
+  }
+}

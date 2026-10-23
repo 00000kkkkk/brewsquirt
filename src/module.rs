@@ -363,7 +363,7 @@ pub fn package_subpath(dir: &Path, sub: &str, cjs: bool) -> Option<PathBuf> {
     if sub.is_empty() {
         package_main(dir, cjs)
     } else {
-        resolve_file(&dir.join(sub))
+        resolve_path(&dir.join(sub), cjs)
     }
 }
 
@@ -396,6 +396,17 @@ fn index_file(dir: &Path) -> Option<PathBuf> {
 }
 
 fn resolve_file(p: &Path) -> Option<PathBuf> {
+    resolve_path(p, false)
+}
+
+fn directory_main(dir: &Path) -> Option<PathBuf> {
+    package_json(dir)
+        .and_then(|v| v.get("main").and_then(|m| m.as_str()).map(str::to_string))
+        .and_then(|main| resolve_in_package(dir, &main))
+        .or_else(|| index_file(dir))
+}
+
+fn resolve_path(p: &Path, cjs: bool) -> Option<PathBuf> {
     if p.is_file() {
         return Some(p.to_path_buf());
     }
@@ -409,7 +420,11 @@ fn resolve_file(p: &Path) -> Option<PathBuf> {
         }
     }
     if p.is_dir() {
-        return package_main(p, false);
+        return if cjs {
+            directory_main(p)
+        } else {
+            package_main(p, false)
+        };
     }
     None
 }
@@ -931,7 +946,7 @@ fn resolve_uncached(spec: &str, from_dir: &Path, cjs: bool) -> Result<PathBuf, S
         || Path::new(spec).is_absolute();
     if relative {
         let target = lexical_normalize(&from_dir.join(spec));
-        return resolve_file(&target)
+        return resolve_path(&target, cjs)
             .map(|p| real_path(&p))
             .ok_or_else(|| format!("Cannot find module '{spec}'"));
     }

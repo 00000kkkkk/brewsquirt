@@ -82,6 +82,7 @@ pub struct FetchResponse {
 pub struct HttpRequest {
     pub method: String,
     pub url: String,
+    pub target: String,
     pub headers: Headers,
     pub body: Vec<u8>,
     pub remote: String,
@@ -1841,7 +1842,7 @@ fn read_request(
         .map(|(_, v)| v.clone())
         .unwrap_or_else(|| local.to_string());
     let url = if target.starts_with("http://") || target.starts_with("https://") {
-        target
+        target.clone()
     } else if secure {
         format!("https://{host}{target}")
     } else {
@@ -1854,6 +1855,7 @@ fn read_request(
         request: HttpRequest {
             method,
             url,
+            target,
             headers,
             body,
             remote: remote.ip().to_string(),
@@ -1864,9 +1866,20 @@ fn read_request(
 }
 
 fn http_date() -> String {
-    chrono::Utc::now()
-        .format("%a, %d %b %Y %H:%M:%S GMT")
-        .to_string()
+    thread_local! {
+        static CACHE: std::cell::RefCell<(i64, String)> = const { std::cell::RefCell::new((i64::MIN, String::new())) };
+    }
+    let now = chrono::Utc::now();
+    CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.0 != now.timestamp() {
+            *c = (
+                now.timestamp(),
+                now.format("%a, %d %b %Y %H:%M:%S GMT").to_string(),
+            );
+        }
+        c.1.clone()
+    })
 }
 
 fn write_reply(

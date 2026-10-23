@@ -1,0 +1,10 @@
+HTTP/1.1 200 OK
+method "GET"
+url "/some%20path/../x?q=1&q=2#frag"
+cookie "a=1; b=2"
+setCookie ["s=1","s=2"]
+accept "text/html, application/json"
+ua "first"
+custom "one, two"
+raw "host,accept,accept,user-agent,user-agent,cookie,cookie,set-cookie,set-cookie,x-custom,x-custom,connection"
+socket "function"

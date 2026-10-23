@@ -484,12 +484,21 @@ const WEB_SRC: &str = r##"
 
   class Headers {
     #map = new Map()
+    #sorted = null
     constructor(init) {
       if (init == null) return
+      if (typeof init === "object" && #map in init) {
+        this.#map = new Map(init.#map)
+        return
+      }
       if (typeof init[Symbol.iterator] === "function") {
         for (const pair of init) {
-          const [k, v] = [...pair]
-          this.append(k, v)
+          if (Array.isArray(pair) && pair.length === 2) {
+            this.append(pair[0], pair[1])
+          } else {
+            const [k, v] = [...pair]
+            this.append(k, v)
+          }
         }
       } else {
         for (const k of Object.keys(init)) this.append(k, init[k])
@@ -499,9 +508,11 @@ const WEB_SRC: &str = r##"
       const k = lower(name)
       const v = String(value).trim()
       const cur = this.#map.get(k)
+      this.#sorted = null
       this.#map.set(k, cur === undefined ? v : k === "set-cookie" ? `${cur}\n${v}` : `${cur}, ${v}`)
     }
     set(name, value) {
+      this.#sorted = null
       this.#map.set(lower(name), String(value).trim())
     }
     get(name) {
@@ -517,18 +528,25 @@ const WEB_SRC: &str = r##"
       return this.#map.has(lower(name))
     }
     delete(name) {
+      this.#sorted = null
       this.#map.delete(lower(name))
     }
     forEach(fn, thisArg) {
       for (const [k, v] of this) fn.call(thisArg, v, k, this)
     }
     entries() {
-      const out = []
-      for (const [k, v] of this.#map) {
-        if (k === "set-cookie") for (const c of v.split("\n")) out.push([k, c])
-        else out.push([k, v])
+      if (this.#sorted === null) {
+        const out = []
+        for (const [k, v] of this.#map) {
+          if (k === "set-cookie") for (const c of v.split("\n")) out.push([k, c])
+          else out.push([k, v])
+        }
+        if (out.length > 1) out.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+        this.#sorted = out
       }
-      out.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+      const sorted = this.#sorted
+      const out = new Array(sorted.length)
+      for (let i = 0; i < sorted.length; i++) out[i] = [sorted[i][0], sorted[i][1]]
       return out[Symbol.iterator]()
     }
     keys() {
@@ -1965,6 +1983,7 @@ const WEB_SRC: &str = r##"
   }
 
   const kRaw = Symbol("rawBody")
+  const kRawRequest = Symbol("rawRequest")
   class Body {
     #body
     #used = false
@@ -2204,6 +2223,45 @@ const WEB_SRC: &str = r##"
     return [200, [["content-type", "application/json"]], JSON.stringify(res)]
   }
 
+  const chunkBytes = (c) => (typeof c === "string" ? encoder.encode(c) : c instanceof Uint8Array ? c : c instanceof ArrayBuffer ? new Uint8Array(c) : ArrayBuffer.isView(c) ? viewBytes(c) : encoder.encode(String(c)))
+  async function pump(replyId, status, headers, stream) {
+    native.replyHead(replyId, status, headers)
+    let reader
+    try {
+      reader = stream.getReader()
+      for (;;) {
+        const { value, done } = await reader.read()
+        if (done) break
+        if (!native.replyChunk(replyId, chunkBytes(value))) {
+          reader.cancel().catch(() => {})
+          break
+        }
+      }
+      native.replyEnd(replyId, false)
+    } catch (err) {
+      native.replyEnd(replyId, true)
+    }
+  }
+  const sendReply = (replyId, status, headers, body) => {
+    if (body instanceof ReadableStream) return pump(replyId, status, headers, body)
+    native.reply(replyId, status, headers, typeof body === "string" ? body : toBytes(body))
+  }
+  const nativeListen = (options, dispatch) => {
+    const tls = options.tls ?? null
+    const [id, port, hostname] = native.serve(String(options.hostname ?? "127.0.0.1"), Number(options.port ?? 3000), dispatch, typeof options.upgrade === "function" ? options.upgrade : null, tls?.key ?? null, tls?.cert ?? null)
+    let open = true
+    return {
+      hostname,
+      port,
+      stop() {
+        if (open) {
+          open = false
+          native.close(id)
+        }
+      },
+    }
+  }
+
   function serve(options, handler) {
     if (typeof options === "function") [options, handler] = [{}, options]
     options ??= {}
@@ -2229,25 +2287,6 @@ const WEB_SRC: &str = r##"
       },
     }
     const closers = new Map()
-    const chunkBytes = (c) => (typeof c === "string" ? encoder.encode(c) : c instanceof Uint8Array ? c : c instanceof ArrayBuffer ? new Uint8Array(c) : ArrayBuffer.isView(c) ? viewBytes(c) : encoder.encode(String(c)))
-    async function pump(replyId, status, headers, stream) {
-      native.replyHead(replyId, status, headers)
-      let reader
-      try {
-        reader = stream.getReader()
-        for (;;) {
-          const { value, done } = await reader.read()
-          if (done) break
-          if (!native.replyChunk(replyId, chunkBytes(value))) {
-            reader.cancel().catch(() => {})
-            break
-          }
-        }
-        native.replyEnd(replyId, false)
-      } catch (err) {
-        native.replyEnd(replyId, true)
-      }
-    }
     function dispatch(raw, replyId) {
       if (raw === null) {
         closers.get(replyId)?.()
@@ -2262,6 +2301,7 @@ const WEB_SRC: &str = r##"
         const hasBody = raw.body.length > 0 && raw.method !== "GET" && raw.method !== "HEAD"
         req = new Request(raw.url, { method: raw.method, headers: raw.headers, body: hasBody ? raw.body : null, signal: aborter.signal })
         req.remoteAddress = raw.remote
+        req[kRawRequest] = raw
       } finally {
         internal = false
       }
@@ -2277,8 +2317,7 @@ const WEB_SRC: &str = r##"
           return [500, [["content-type", "text/plain;charset=UTF-8"]], "Internal Server Error"]
         })
         .then(async ([status, headers, body]) => {
-          if (body instanceof ReadableStream) await pump(replyId, status, headers, body)
-          else native.reply(replyId, status, headers, typeof body === "string" ? body : toBytes(body))
+          await sendReply(replyId, status, headers, body)
           server.pendingRequests--
           closers.delete(replyId)
         })
@@ -2371,15 +2410,17 @@ const WEB_SRC: &str = r##"
   const defineMethods = (proto, methods) => {
     for (const key of Reflect.ownKeys(methods)) Object.defineProperty(proto, key, { value: methods[key], writable: true, configurable: true })
   }
-  const nullSocket = (remoteAddress) => ({
-    remoteAddress,
-    remotePort: 0,
-    localAddress: "127.0.0.1",
-    localPort: 0,
-    encrypted: false,
-    readable: true,
-    writable: true,
-    destroyed: false,
+  function NullSocket(remoteAddress) {
+    this.remoteAddress = remoteAddress
+    this.remotePort = 0
+    this.localAddress = "127.0.0.1"
+    this.localPort = 0
+    this.encrypted = false
+    this.readable = true
+    this.writable = true
+    this.destroyed = false
+  }
+  defineMethods(NullSocket.prototype, {
     setTimeout() {},
     setNoDelay() {},
     setKeepAlive() {},
@@ -2390,6 +2431,24 @@ const WEB_SRC: &str = r##"
     destroy() {},
     address: () => ({ address: "127.0.0.1", family: "IPv4", port: 0 }),
   })
+  const nullSocket = (remoteAddress) => new NullSocket(remoteAddress)
+  const SINGLE_HEADERS = new Set(["age", "authorization", "content-length", "content-type", "etag", "expires", "from", "host", "if-modified-since", "if-unmodified-since", "last-modified", "location", "max-forwards", "proxy-authorization", "referer", "retry-after", "server", "user-agent"])
+  const nodeHeaders = (pairs) => {
+    const headers = {}
+    const rawHeaders = new Array(pairs.length * 2)
+    for (let i = 0; i < pairs.length; i++) {
+      const name = pairs[i][0]
+      const value = pairs[i][1]
+      rawHeaders[2 * i] = name
+      rawHeaders[2 * i + 1] = value
+      const key = name.toLowerCase()
+      const cur = headers[key]
+      if (cur === undefined) headers[key] = key === "set-cookie" ? [value] : value
+      else if (key === "set-cookie") cur.push(value)
+      else if (!SINGLE_HEADERS.has(key)) headers[key] = key === "cookie" ? `${cur}; ${value}` : `${cur}, ${value}`
+    }
+    return { headers, rawHeaders }
+  }
 
   const kMessage = Symbol("messageState")
   const closeMessage = (msg) => {
@@ -2417,7 +2476,17 @@ const WEB_SRC: &str = r##"
     this.destroyed = false
     this.trailers = {}
     this.rawTrailers = []
-    if (req && typeof req.url === "string" && req.headers && typeof req.headers.entries === "function") {
+    const raw = req?.[kRawRequest]
+    if (raw) {
+      const parsed = nodeHeaders(raw.headers)
+      this.method = raw.method
+      this.url = raw.target
+      this.headers = parsed.headers
+      this.rawHeaders = parsed.rawHeaders
+      this.socket = nullSocket(raw.remote)
+      const b = req[kRaw]
+      state.bytes = b == null ? new Uint8Array(0) : typeof b === "string" ? encoder.encode(b) : b
+    } else if (req && typeof req.url === "string" && req.headers && typeof req.headers.entries === "function") {
       const u = new URL(req.url)
       this.method = req.method
       this.url = u.pathname + u.search
@@ -2538,12 +2607,7 @@ const WEB_SRC: &str = r##"
     state.controller = controller
     for (const c of state.chunks) controller.enqueue(responseBytes(c))
     state.chunks = []
-    internal = true
-    try {
-      state.done(new Response(stream, { status: res.statusCode, headers: state.headers }))
-    } finally {
-      internal = false
-    }
+    state.done(res.statusCode, [...state.headers], stream)
   }
   const abortResponse = (res) => {
     const state = responseState(res)
@@ -2572,12 +2636,22 @@ const WEB_SRC: &str = r##"
     this.socket = null
     this.connection = null
   }
+  let dateSecond = -1
+  let dateText = ""
+  const httpDate = () => {
+    const second = Math.floor(Date.now() / 1000)
+    if (second !== dateSecond) {
+      dateSecond = second
+      dateText = new Date(second * 1000).toUTCString()
+    }
+    return dateText
+  }
   const sendHeaders = (res) => {
     if (res.headersSent && typeof res._header === "string") return
     const { headers } = responseState(res)
     let text = `HTTP/1.1 ${res.statusCode} ${res.statusMessage || STATUS_CODES[res.statusCode] || ""}\r\n`
     for (const [name, value] of headers) text += `${name}: ${value}\r\n`
-    if (!headers.has("date") && res.sendDate !== false) text += `Date: ${new Date().toUTCString()}\r\n`
+    if (!headers.has("date") && res.sendDate !== false) text += `Date: ${httpDate()}\r\n`
     if (!headers.has("connection")) text += "Connection: keep-alive\r\n"
     text += "\r\n"
     res._header = text
@@ -2713,14 +2787,7 @@ const WEB_SRC: &str = r##"
           at += p.length
         }
       }
-      if (state.done) {
-        internal = true
-        try {
-          state.done(new Response(body, { status: this.statusCode, headers: state.headers }))
-        } finally {
-          internal = false
-        }
-      }
+      if (state.done) state.done(this.statusCode, [...state.headers], body)
       if (typeof cb === "function") queueMicrotask(cb)
       queueMicrotask(() => {
         this.writableFinished = true
@@ -2885,15 +2952,34 @@ const WEB_SRC: &str = r##"
             e.code = "ERR_MISSING_ARGS"
             throw e
           }
-          srv = serve({ port, hostname: host ?? "::", upgrade: onUpgrade, tls }, (req) =>
-            new Promise((resolve) => {
-              const message = new IncomingMessage(req)
-              const response = new ServerResponse(resolve)
-              response.req = message
-              req.signal.addEventListener("abort", () => abortResponse(response), { once: true })
+          const closers = new Map()
+          srv = nativeListen({ port, hostname: host ?? "::", upgrade: onUpgrade, tls }, (raw, replyId) => {
+            if (raw === null) {
+              closers.get(replyId)?.()
+              return
+            }
+            let replied = false
+            const reply = (status, headers, body) => {
+              if (replied) return
+              replied = true
+              closers.delete(replyId)
+              sendReply(replyId, status, headers, body)
+            }
+            const hasBody = raw.body.length > 0 && raw.method !== "GET" && raw.method !== "HEAD"
+            const message = new IncomingMessage({ [kRawRequest]: raw, [kRaw]: hasBody ? raw.body : null })
+            const response = new ServerResponse(reply)
+            response.req = message
+            closers.set(replyId, () => {
+              closers.delete(replyId)
+              abortResponse(response)
+            })
+            try {
               emit("request", message, response)
-            }),
-          )
+            } catch (err) {
+              console.error(err)
+              reply(500, [["content-type", "text/plain;charset=UTF-8"]], "Internal Server Error")
+            }
+          })
         } catch (e) {
           if ((handlers.error?.length ?? 0) === 0) throw e
           queueMicrotask(() => emit("error", e))
@@ -3474,6 +3560,7 @@ fn request_value(vm: &mut Vm, r: HttpRequest) -> Value {
     let o = vm.new_object();
     o.set_own("method", r.method.into());
     o.set_own("url", r.url.into());
+    o.set_own("target", r.target.into());
     let headers = pairs_value(vm, r.headers);
     o.set_own("headers", headers);
     o.set_own("body", super::binary::new_uint8(vm, r.body));

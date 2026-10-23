@@ -1,0 +1,51 @@
+import http from "node:http"
+import net from "node:net"
+
+const server = http.createServer((req, res) => {
+  const info = {
+    method: req.method,
+    url: req.url,
+    cookie: req.headers.cookie,
+    setCookie: req.headers["set-cookie"],
+    accept: req.headers.accept,
+    ua: req.headers["user-agent"],
+    custom: req.headers["x-custom"],
+    raw: req.rawHeaders.filter((_, i) => i % 2 === 0).join(","),
+    socket: typeof req.socket.setTimeout,
+  }
+  res.end(JSON.stringify(info))
+})
+
+server.listen(0, "127.0.0.1", () => {
+  const { port } = server.address()
+  const socket = net.connect(port, "127.0.0.1", () => {
+    socket.write(
+      [
+        "GET /some%20path/../x?q=1&q=2#frag HTTP/1.1",
+        `host: 127.0.0.1:${port}`,
+        "accept: text/html",
+        "accept: application/json",
+        "user-agent: first",
+        "user-agent: second",
+        "cookie: a=1",
+        "cookie: b=2",
+        "set-cookie: s=1",
+        "set-cookie: s=2",
+        "x-custom: one",
+        "x-custom: two",
+        "connection: close",
+        "",
+        "",
+      ].join("\r\n"),
+    )
+  })
+  let data = ""
+  socket.on("data", (d) => (data += d))
+  socket.on("end", () => {
+    const [head, body] = data.split("\r\n\r\n")
+    console.log(head.split("\r\n")[0])
+    const parsed = JSON.parse(body.replace(/^[0-9a-f]+\r\n/, "").replace(/\r\n0\r\n$/, ""))
+    for (const [k, v] of Object.entries(parsed)) console.log(k, JSON.stringify(v))
+    server.close()
+  })
+})

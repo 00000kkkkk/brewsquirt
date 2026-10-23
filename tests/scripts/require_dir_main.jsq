@@ -1,0 +1,6 @@
+import { createRequire } from "node:module"
+
+const require = createRequire(import.meta.url)
+const fromDir = require("./fixtures/dirpkg")
+console.log(typeof fromDir, fromDir())
+console.log(require.resolve("./fixtures/dirpkg").replaceAll("\\", "/").split("/").slice(-3).join("/"))
