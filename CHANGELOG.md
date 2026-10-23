@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   TypeScript extensions, and `tsconfig.json`/`jsconfig.json` `paths` and `baseUrl` (with
   `extends`, comments and trailing commas) resolve path aliases such as `@/lib/x`.
 
+- `vrotdaem` installs `optionalDependencies`, skipping packages whose `os`, `cpu` or `libc` do not
+  match the machine, and keeps the executable bit of files on Linux and macOS, so the native
+  `esbuild` package runs its platform binary.
+
 ### Fixed
 
 - Packages in `node_modules` were not found; bare specifiers now look in `node_modules` as well as

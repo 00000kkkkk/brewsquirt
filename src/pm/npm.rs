@@ -9,6 +9,63 @@ pub struct Resolved {
     pub version: Version,
     pub tarball: String,
     pub dependencies: IndexMap<String, String>,
+    pub platforms: (Vec<String>, Vec<String>, Vec<String>),
+}
+
+fn string_list(v: &serde_json::Value, key: &str) -> Vec<String> {
+    match v.get(key) {
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect(),
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        _ => Vec::new(),
+    }
+}
+
+pub fn node_platform() -> &'static str {
+    match std::env::consts::OS {
+        "windows" => "win32",
+        "macos" => "darwin",
+        other => other,
+    }
+}
+
+pub fn node_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        "x86" => "ia32",
+        "arm" => "arm",
+        other => other,
+    }
+}
+
+fn libc() -> &'static str {
+    if std::path::Path::new("/etc/alpine-release").exists()
+        || std::path::Path::new("/lib/ld-musl-x86_64.so.1").exists()
+        || std::path::Path::new("/lib/ld-musl-aarch64.so.1").exists()
+    {
+        "musl"
+    } else {
+        "glibc"
+    }
+}
+
+fn allowed(list: &[String], value: &str) -> bool {
+    if list.is_empty() {
+        return true;
+    }
+    let blocked = list.iter().any(|x| x.strip_prefix('!') == Some(value));
+    let positives: Vec<&String> = list.iter().filter(|x| !x.starts_with('!')).collect();
+    !blocked && (positives.is_empty() || positives.iter().any(|x| x.as_str() == value))
+}
+
+pub fn platform_ok(r: &Resolved) -> bool {
+    let (os, cpu, lib) = &r.platforms;
+    allowed(os, node_platform())
+        && allowed(cpu, node_arch())
+        && (node_platform() != "linux" || allowed(lib, libc()))
 }
 
 fn encode_name(name: &str) -> String {
@@ -32,8 +89,12 @@ fn packument(name: &str) -> Result<serde_json::Value, String> {
 }
 
 fn deps_of(v: &serde_json::Value) -> IndexMap<String, String> {
+    deps_in(v, "dependencies")
+}
+
+fn deps_in(v: &serde_json::Value, key: &str) -> IndexMap<String, String> {
     let mut out = IndexMap::new();
-    if let Some(obj) = v.get("dependencies").and_then(|d| d.as_object()) {
+    if let Some(obj) = v.get(key).and_then(|d| d.as_object()) {
         for (k, val) in obj {
             if let Some(s) = val.as_str() {
                 out.insert(k.clone(), s.to_string());
@@ -90,6 +151,11 @@ pub fn resolve(name: &str, range: &Range) -> Result<Resolved, String> {
         version,
         tarball,
         dependencies: deps_of(entry),
+        platforms: (
+            string_list(entry, "os"),
+            string_list(entry, "cpu"),
+            string_list(entry, "libc"),
+        ),
     })
 }
 
@@ -201,13 +267,34 @@ pub fn extract_tarball(tgz: &[u8], dest: &Path) -> Result<usize, String> {
         }
         std::fs::write(&target, data)
             .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if octal(&header[100..108]) & 0o111 != 0 {
+                let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o755));
+            }
+        }
         files += 1;
     }
     Ok(files)
 }
 
 pub fn install(name: &str, range: &Range, dest: &Path) -> Result<Resolved, String> {
+    install_checked(name, range, dest, false)
+}
+
+pub const UNSUPPORTED: &str = "unsupported platform";
+
+pub fn install_checked(
+    name: &str,
+    range: &Range,
+    dest: &Path,
+    check_platform: bool,
+) -> Result<Resolved, String> {
     let resolved = resolve(name, range)?;
+    if check_platform && !platform_ok(&resolved) {
+        return Err(UNSUPPORTED.to_string());
+    }
     let tgz = crate::io::http_get(&resolved.tarball, None)
         .map_err(|e| format!("cannot download {name}@{}: {e}", resolved.version))?;
     std::fs::create_dir_all(dest).map_err(|e| format!("cannot create {}: {e}", dest.display()))?;
@@ -227,6 +314,12 @@ pub fn installed_version(dir: &Path) -> Option<Version> {
 
 pub fn package_dependencies(dir: &Path) -> IndexMap<String, String> {
     package_json(dir).map(|d| deps_of(&d)).unwrap_or_default()
+}
+
+pub fn package_optional_dependencies(dir: &Path) -> IndexMap<String, String> {
+    package_json(dir)
+        .map(|d| deps_in(&d, "optionalDependencies"))
+        .unwrap_or_default()
 }
 
 pub fn split_name_range(spec: &str) -> (String, String) {

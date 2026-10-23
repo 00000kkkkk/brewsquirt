@@ -2281,6 +2281,11 @@ Dependency specs:
 | `git:<url>`        | A git repository at its default branch; requires `git` on `PATH`        |
 | `git:<url>#<ref>`  | A git repository at a branch, tag or commit                             |
 
+npm packages bring their `dependencies` and their `optionalDependencies`; optional packages
+whose `os`, `cpu` or `libc` fields exclude the current machine are skipped, so tools that ship a
+platform binary as an optional package, such as `esbuild`, install the binary they need.
+Executable files keep their mode on Linux and macOS. Install scripts are not run.
+
 ### `squirt.json`
 
 ```json

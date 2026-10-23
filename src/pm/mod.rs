@@ -178,10 +178,10 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn fetch(spec: &Spec, base: &Path, dest: &Path) -> Result<Option<String>, String> {
+fn fetch(spec: &Spec, base: &Path, dest: &Path, optional: bool) -> Result<Option<String>, String> {
     match spec {
         Spec::Npm { name, range } => {
-            let resolved = npm::install(name, range, dest)?;
+            let resolved = npm::install_checked(name, range, dest, optional)?;
             Ok(Some(resolved.version.to_string()))
         }
         Spec::File(p) => {
@@ -213,12 +213,21 @@ fn fetch(spec: &Spec, base: &Path, dest: &Path) -> Result<Option<String>, String
     }
 }
 
-fn dependencies_of(dir: &Path) -> Result<IndexMap<String, String>, String> {
+fn dependencies_of(dir: &Path) -> Result<IndexMap<String, (String, bool)>, String> {
     if dir.join(MANIFEST).is_file() {
-        return Ok(read_manifest(dir)?.dependencies);
+        return Ok(read_manifest(dir)?
+            .dependencies
+            .into_iter()
+            .map(|(k, v)| (k, (v, false)))
+            .collect());
     }
     let mut out = IndexMap::new();
-    for (name, raw) in npm::package_dependencies(dir) {
+    let optional = npm::package_optional_dependencies(dir);
+    let mut all = npm::package_dependencies(dir);
+    for (k, v) in &optional {
+        all.insert(k.clone(), v.clone());
+    }
+    for (name, raw) in all {
         let spec = if let Some(alias) = raw.strip_prefix("npm:") {
             format!("npm:{alias}")
         } else if Range::parse(&raw).is_some() {
@@ -226,7 +235,8 @@ fn dependencies_of(dir: &Path) -> Result<IndexMap<String, String>, String> {
         } else {
             continue;
         };
-        out.insert(name, spec);
+        let is_optional = optional.contains_key(&name);
+        out.insert(name, (spec, is_optional));
     }
     Ok(out)
 }
@@ -238,14 +248,22 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
         fs::remove_dir_all(&nude).map_err(|e| format!("cannot wipe {DEPS_DIR}: {e}"))?;
     }
     fs::create_dir_all(&nude).map_err(|e| format!("cannot create {DEPS_DIR}: {e}"))?;
-    let mut queue: VecDeque<(String, String, PathBuf, PathBuf)> = manifest
+    let mut queue: VecDeque<(String, String, PathBuf, PathBuf, bool)> = manifest
         .dependencies
         .iter()
-        .map(|(n, s)| (n.clone(), s.clone(), root.to_path_buf(), root.to_path_buf()))
+        .map(|(n, s)| {
+            (
+                n.clone(),
+                s.clone(),
+                root.to_path_buf(),
+                root.to_path_buf(),
+                false,
+            )
+        })
         .collect();
     let mut seen: Vec<PathBuf> = Vec::new();
     let mut report = Report::default();
-    while let Some((name, raw, base, holder)) = queue.pop_front() {
+    while let Some((name, raw, base, holder, optional)) = queue.pop_front() {
         let spec = Spec::parse_for(Some(&name), &raw)?;
         let top = nude.join(&name);
         let (dest, satisfied) = match &spec {
@@ -276,7 +294,9 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
         if satisfied {
             report.skipped.push(name.clone());
         } else {
-            log(&format!("injecting {name} ({raw})"));
+            if !optional {
+                log(&format!("injecting {name} ({raw})"));
+            }
             if dest.exists() {
                 fs::remove_dir_all(&dest)
                     .map_err(|e| format!("cannot replace {}: {e}", dest.display()))?;
@@ -284,8 +304,11 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
             if let Some(parent) = dest.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
-            match fetch(&spec, &base, &dest) {
+            match fetch(&spec, &base, &dest, optional) {
                 Ok(Some(version)) => {
+                    if optional {
+                        log(&format!("injecting {name} ({raw})"));
+                    }
                     let nested = dest != top;
                     report.injected.push(if nested {
                         format!("{name}@{version} (nested)")
@@ -296,12 +319,18 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
                 Ok(None) => report.injected.push(name.clone()),
                 Err(e) => {
                     let _ = fs::remove_dir_all(&dest);
+                    if optional {
+                        if e != npm::UNSUPPORTED {
+                            log(&format!("skipping optional {name}: {e}"));
+                        }
+                        continue;
+                    }
                     return Err(format!("{name}: {e}"));
                 }
             }
         }
-        for (n, s) in dependencies_of(&dest)? {
-            queue.push_back((n, s, origin.clone(), dest.clone()));
+        for (n, (s, opt)) in dependencies_of(&dest)? {
+            queue.push_back((n, s, origin.clone(), dest.clone(), opt));
         }
     }
     Ok(report)
