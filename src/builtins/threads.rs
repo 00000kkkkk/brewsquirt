@@ -1266,8 +1266,294 @@ fn native_structured_clone(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     deserialize(vm, &wire)
 }
 
+const WIRE_MAGIC: &[u8; 4] = b"JSQ\x01";
+
+fn put_u32(out: &mut Vec<u8>, n: usize) {
+    out.extend_from_slice(&(n as u32).to_le_bytes());
+}
+
+fn put_str(out: &mut Vec<u8>, s: &str) {
+    put_u32(out, s.len());
+    out.extend_from_slice(s.as_bytes());
+}
+
+fn put_opt_str(out: &mut Vec<u8>, s: &Option<String>) {
+    match s {
+        Some(s) => {
+            out.push(1);
+            put_str(out, s);
+        }
+        None => out.push(0),
+    }
+}
+
+fn wire_bytes(w: &Wire, out: &mut Vec<u8>) -> Result<(), &'static str> {
+    match w {
+        Wire::Undefined => out.push(0),
+        Wire::Null => out.push(1),
+        Wire::Bool(b) => out.extend_from_slice(&[2, *b as u8]),
+        Wire::Number(n) => {
+            out.push(3);
+            out.extend_from_slice(&n.to_le_bytes());
+        }
+        Wire::BigInt(s) => {
+            out.push(4);
+            put_str(out, s);
+        }
+        Wire::Str(s) => {
+            out.push(5);
+            put_str(out, s);
+        }
+        Wire::Ref(r) => {
+            out.push(6);
+            put_u32(out, *r as usize);
+        }
+        Wire::Array(items) => {
+            out.push(7);
+            put_u32(out, items.len());
+            for item in items {
+                match item {
+                    Some(v) => {
+                        out.push(1);
+                        wire_bytes(v, out)?;
+                    }
+                    None => out.push(0),
+                }
+            }
+        }
+        Wire::Object(props) => {
+            out.push(8);
+            put_u32(out, props.len());
+            for (k, v) in props {
+                put_str(out, k);
+                wire_bytes(v, out)?;
+            }
+        }
+        Wire::Date(t) => {
+            out.push(9);
+            out.extend_from_slice(&t.to_le_bytes());
+        }
+        Wire::RegExp(src, flags) => {
+            out.push(10);
+            put_str(out, src);
+            put_str(out, flags);
+        }
+        Wire::Map(entries) => {
+            out.push(11);
+            put_u32(out, entries.len());
+            for (k, v) in entries {
+                wire_bytes(k, out)?;
+                wire_bytes(v, out)?;
+            }
+        }
+        Wire::Set(items) => {
+            out.push(12);
+            put_u32(out, items.len());
+            for v in items {
+                wire_bytes(v, out)?;
+            }
+        }
+        Wire::Buffer(bytes, max) => {
+            out.push(13);
+            put_u32(out, bytes.len());
+            out.extend_from_slice(bytes);
+            match max {
+                Some(m) => {
+                    out.push(1);
+                    put_u32(out, *m);
+                }
+                None => out.push(0),
+            }
+        }
+        Wire::View(kind, buf, offset, length, tracking) => {
+            out.push(14);
+            out.push(*kind);
+            wire_bytes(buf, out)?;
+            put_u32(out, *offset);
+            put_u32(out, *length);
+            out.push(*tracking as u8);
+        }
+        Wire::Error {
+            name,
+            message,
+            stack,
+            cause,
+        } => {
+            out.push(15);
+            put_str(out, name);
+            put_opt_str(out, message);
+            put_opt_str(out, stack);
+            match cause {
+                Some(c) => {
+                    out.push(1);
+                    wire_bytes(c, out)?;
+                }
+                None => out.push(0),
+            }
+        }
+        Wire::Boxed(v) => {
+            out.push(16);
+            wire_bytes(v, out)?;
+        }
+        Wire::Shared(..) => return Err("SharedArrayBuffer cannot be serialized"),
+        Wire::Port(_) => return Err("MessagePort cannot be serialized"),
+    }
+    Ok(())
+}
+
+struct WireReader<'a> {
+    bytes: &'a [u8],
+    at: usize,
+}
+
+impl WireReader<'_> {
+    fn take(&mut self, n: usize) -> Option<&[u8]> {
+        let end = self.at.checked_add(n)?;
+        let s = self.bytes.get(self.at..end)?;
+        self.at = end;
+        Some(s)
+    }
+    fn byte(&mut self) -> Option<u8> {
+        self.take(1).map(|b| b[0])
+    }
+    fn u32(&mut self) -> Option<usize> {
+        let b = self.take(4)?;
+        Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+    }
+    fn f64(&mut self) -> Option<f64> {
+        let b = self.take(8)?;
+        let mut a = [0u8; 8];
+        a.copy_from_slice(b);
+        Some(f64::from_le_bytes(a))
+    }
+    fn string(&mut self) -> Option<String> {
+        let n = self.u32()?;
+        String::from_utf8(self.take(n)?.to_vec()).ok()
+    }
+    fn opt_string(&mut self) -> Option<Option<String>> {
+        match self.byte()? {
+            0 => Some(None),
+            _ => Some(Some(self.string()?)),
+        }
+    }
+    fn wire(&mut self, depth: usize) -> Option<Wire> {
+        if depth > 10_000 {
+            return None;
+        }
+        Some(match self.byte()? {
+            0 => Wire::Undefined,
+            1 => Wire::Null,
+            2 => Wire::Bool(self.byte()? != 0),
+            3 => Wire::Number(self.f64()?),
+            4 => Wire::BigInt(self.string()?),
+            5 => Wire::Str(self.string()?),
+            6 => Wire::Ref(self.u32()? as u32),
+            7 => {
+                let n = self.u32()?;
+                let mut items = Vec::with_capacity(n.min(1 << 16));
+                for _ in 0..n {
+                    items.push(match self.byte()? {
+                        0 => None,
+                        _ => Some(self.wire(depth + 1)?),
+                    });
+                }
+                Wire::Array(items)
+            }
+            8 => {
+                let n = self.u32()?;
+                let mut props = Vec::with_capacity(n.min(1 << 16));
+                for _ in 0..n {
+                    let k = self.string()?;
+                    props.push((k, self.wire(depth + 1)?));
+                }
+                Wire::Object(props)
+            }
+            9 => Wire::Date(self.f64()?),
+            10 => {
+                let src = self.string()?;
+                Wire::RegExp(src, self.string()?)
+            }
+            11 => {
+                let n = self.u32()?;
+                let mut entries = Vec::with_capacity(n.min(1 << 16));
+                for _ in 0..n {
+                    let k = self.wire(depth + 1)?;
+                    entries.push((k, self.wire(depth + 1)?));
+                }
+                Wire::Map(entries)
+            }
+            12 => {
+                let n = self.u32()?;
+                let mut items = Vec::with_capacity(n.min(1 << 16));
+                for _ in 0..n {
+                    items.push(self.wire(depth + 1)?);
+                }
+                Wire::Set(items)
+            }
+            13 => {
+                let n = self.u32()?;
+                let bytes = self.take(n)?.to_vec();
+                let max = match self.byte()? {
+                    0 => None,
+                    _ => Some(self.u32()?),
+                };
+                Wire::Buffer(bytes, max)
+            }
+            14 => {
+                let kind = self.byte()?;
+                let buf = self.wire(depth + 1)?;
+                let offset = self.u32()?;
+                let length = self.u32()?;
+                Wire::View(kind, Box::new(buf), offset, length, self.byte()? != 0)
+            }
+            15 => {
+                let name = self.string()?;
+                let message = self.opt_string()?;
+                let stack = self.opt_string()?;
+                let cause = match self.byte()? {
+                    0 => None,
+                    _ => Some(Box::new(self.wire(depth + 1)?)),
+                };
+                Wire::Error {
+                    name,
+                    message,
+                    stack,
+                    cause,
+                }
+            }
+            16 => Wire::Boxed(Box::new(self.wire(depth + 1)?)),
+            _ => return None,
+        })
+    }
+}
+
+fn native_wire_serialize(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let wire = serialize(vm, &arg(args, 0), &[])?;
+    let mut out = WIRE_MAGIC.to_vec();
+    if let Err(msg) = wire_bytes(&wire, &mut out) {
+        return Err(clone_error(vm, msg));
+    }
+    Ok(super::typed::new_uint8(vm, out))
+}
+
+fn native_wire_deserialize(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let bytes = super::binary::buffer_source_bytes(&arg(args, 0)).unwrap_or_default();
+    let parsed = bytes.strip_prefix(WIRE_MAGIC).and_then(|body| {
+        let mut r = WireReader { bytes: body, at: 0 };
+        let w = r.wire(0)?;
+        (r.at == body.len()).then_some(w)
+    });
+    match parsed {
+        Some(w) => deserialize(vm, &w),
+        None => Err(vm.make_error(
+            crate::vm::ErrorKind::Error,
+            "Unable to deserialize cloned data.",
+        )),
+    }
+}
+
 pub fn install_natives(vm: &mut Vm, natives: &Rc<Obj>) {
-    let list: [(&str, u32, crate::object::NativeFn); 16] = [
+    let list: [(&str, u32, crate::object::NativeFn); 18] = [
         ("portPair", 0, native_port_pair),
         ("portPost", 3, native_port_post),
         ("portStart", 1, native_port_start),
@@ -1284,6 +1570,8 @@ pub fn install_natives(vm: &mut Vm, natives: &Rc<Obj>) {
         ("workerInfo", 0, native_worker_info),
         ("structuredClone", 2, native_structured_clone),
         ("isMainThread", 0, native_is_main_thread),
+        ("wireSerialize", 1, native_wire_serialize),
+        ("wireDeserialize", 1, native_wire_deserialize),
     ];
     for (name, arity, f) in list {
         method(vm, natives, name, arity, f);

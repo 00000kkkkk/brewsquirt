@@ -1621,33 +1621,84 @@ define(
   }[Symbol.asyncDispose],
 )
 
-define(globalThis, "%makeCallSite%", function makeCallSite(file, line, name, top, construct, isEval) {
-  const site = {
-    getThis: () => undefined,
-    getTypeName: () => (top ? null : "Object"),
-    getFunction: () => undefined,
-    getFunctionName: () => name || null,
-    getMethodName: () => null,
-    getFileName: () => file,
-    getLineNumber: () => line,
-    getColumnNumber: () => 1,
-    getEnclosingLineNumber: () => line,
-    getEnclosingColumnNumber: () => 1,
-    getEvalOrigin: () => undefined,
-    getScriptNameOrSourceURL: () => file,
-    getScriptHash: () => "",
-    getPosition: () => 0,
-    getPromiseIndex: () => null,
-    isToplevel: () => top,
-    isEval: () => isEval,
-    isNative: () => false,
-    isConstructor: () => construct,
-    isAsync: () => false,
-    isPromiseAll: () => false,
-    toString: () => (name ? `${name} (${file}:${line}:1)` : `${file}:${line}:1`),
+{
+  const siteData = new WeakMap()
+  const data = (site) => siteData.get(site) ?? { file: undefined, line: null, name: null, top: true, construct: false, isEval: false }
+  class CallSite {
+    getThis() {
+      return undefined
+    }
+    getTypeName() {
+      return data(this).top ? null : "Object"
+    }
+    getFunction() {
+      return undefined
+    }
+    getFunctionName() {
+      return data(this).name || null
+    }
+    getMethodName() {
+      return null
+    }
+    getFileName() {
+      return data(this).file
+    }
+    getLineNumber() {
+      return data(this).line
+    }
+    getColumnNumber() {
+      return 1
+    }
+    getEnclosingLineNumber() {
+      return data(this).line
+    }
+    getEnclosingColumnNumber() {
+      return 1
+    }
+    getEvalOrigin() {
+      return undefined
+    }
+    getScriptNameOrSourceURL() {
+      return data(this).file
+    }
+    getScriptHash() {
+      return ""
+    }
+    getPosition() {
+      return 0
+    }
+    getPromiseIndex() {
+      return null
+    }
+    isToplevel() {
+      return data(this).top
+    }
+    isEval() {
+      return data(this).isEval
+    }
+    isNative() {
+      return false
+    }
+    isConstructor() {
+      return data(this).construct
+    }
+    isAsync() {
+      return false
+    }
+    isPromiseAll() {
+      return false
+    }
+    toString() {
+      const d = data(this)
+      return d.name ? `${d.name} (${d.file}:${d.line}:1)` : `${d.file}:${d.line}:1`
+    }
   }
-  return site
-})
+  define(globalThis, "%makeCallSite%", function makeCallSite(file, line, name, top, construct, isEval) {
+    const site = new CallSite()
+    siteData.set(site, { file, line, name, top, construct, isEval })
+    return site
+  })
+}
 define(globalThis, "global", globalThis)
 {
   const registry = Object.create(null)

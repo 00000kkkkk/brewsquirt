@@ -230,3 +230,43 @@ fn stdin_readline_and_exit_code() {
     assert_eq!(normalize(&out.stdout), "1 ONE\n2 TWO\n3 THREE\n");
     assert_eq!(out.status.code(), Some(3));
 }
+
+#[test]
+fn node_flags_preload_and_env_file() {
+    let dir = std::env::temp_dir().join(format!("jsq-node-flags-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    std::fs::write(dir.join("pre.cjs"), "globalThis.order = [\"require\"]\n").unwrap();
+    std::fs::write(dir.join("pre.mjs"), "globalThis.order.push(\"import\")\n").unwrap();
+    std::fs::write(
+        dir.join(".env"),
+        "GREETING=hello\nexport QUOTED=\"two\nlines\"\n# skipped\nSINGLE='raw $x'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("main.js"),
+        "console.log(order.join(\",\"), process.env.GREETING, JSON.stringify(process.env.QUOTED), process.env.SINGLE)\nconsole.log(JSON.stringify(process.execArgv), JSON.stringify(process.argv.slice(2)))\n",
+    )
+    .unwrap();
+    let out = run_in(
+        &dir,
+        &[
+            "--no-warnings",
+            "-r",
+            "./pre.cjs",
+            "--import=./pre.mjs",
+            "--env-file",
+            ".env",
+            "--env-file-if-exists=missing.env",
+            "main.js",
+            "--flag",
+            "x",
+        ],
+    );
+    assert!(out.status.success(), "{}", normalize(&out.stderr));
+    assert_eq!(
+        normalize(&out.stdout),
+        "require,import hello \"two\\nlines\" raw $x\n[\"--no-warnings\",\"-r\",\"./pre.cjs\",\"--import=./pre.mjs\",\"--env-file\",\".env\",\"--env-file-if-exists=missing.env\"] [\"--flag\",\"x\"]\n"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

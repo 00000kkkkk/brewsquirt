@@ -210,3 +210,167 @@ fn bins_and_trusted_install_scripts() {
     );
     let _ = std::fs::remove_dir_all(&base);
 }
+
+fn tar_gz(files: &[(&str, &str)]) -> Vec<u8> {
+    use std::io::Write;
+    let mut tar = Vec::new();
+    for (name, body) in files {
+        let mut header = [0u8; 512];
+        let path = format!("package/{name}");
+        header[..path.len()].copy_from_slice(path.as_bytes());
+        header[100..107].copy_from_slice(b"0000644");
+        header[108..115].copy_from_slice(b"0000000");
+        header[116..123].copy_from_slice(b"0000000");
+        let size = format!("{:011o}", body.len());
+        header[124..135].copy_from_slice(size.as_bytes());
+        header[136..147].copy_from_slice(b"00000000000");
+        header[156] = b'0';
+        header[257..262].copy_from_slice(b"ustar");
+        header[148..156].copy_from_slice(b"        ");
+        let sum: u32 = header.iter().map(|b| *b as u32).sum();
+        let sum = format!("{sum:06o}\0 ");
+        header[148..156].copy_from_slice(sum.as_bytes());
+        tar.extend_from_slice(&header);
+        tar.extend_from_slice(body.as_bytes());
+        let pad = (512 - body.len() % 512) % 512;
+        tar.extend(std::iter::repeat_n(0u8, pad));
+    }
+    tar.extend(std::iter::repeat_n(0u8, 1024));
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(&tar).unwrap();
+    gz.finish().unwrap()
+}
+
+struct Package {
+    name: &'static str,
+    manifest: serde_json::Value,
+    tarball: Vec<u8>,
+}
+
+fn serve_registry(packages: Vec<Package>) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let root = base.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                continue;
+            }
+            loop {
+                let mut h = String::new();
+                if reader.read_line(&mut h).is_err() || h.trim().is_empty() {
+                    break;
+                }
+            }
+            let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
+            let path = path
+                .trim_start_matches('/')
+                .replace("%2F", "/")
+                .replace("%2f", "/");
+            let (status, body): (&str, Vec<u8>) = if let Some(name) = path.strip_suffix(".tgz") {
+                match packages.iter().find(|p| p.name == name) {
+                    Some(p) => ("200 OK", p.tarball.clone()),
+                    None => ("404 Not Found", Vec::new()),
+                }
+            } else {
+                match packages.iter().find(|p| p.name == path) {
+                    Some(p) => {
+                        let version = p.manifest["version"].as_str().unwrap().to_string();
+                        let mut entry = p.manifest.clone();
+                        entry["dist"] =
+                            serde_json::json!({ "tarball": format!("{root}/{}.tgz", p.name) });
+                        let doc = serde_json::json!({
+                            "name": p.name,
+                            "dist-tags": { "latest": version },
+                            "versions": { version: entry },
+                        });
+                        ("200 OK", doc.to_string().into_bytes())
+                    }
+                    None => ("404 Not Found", b"{}".to_vec()),
+                }
+            };
+            let mut out = stream;
+            let _ = write!(
+                out,
+                "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = out.write_all(&body);
+        }
+    });
+    base
+}
+
+fn npm_package(name: &'static str, manifest: serde_json::Value, files: &[(&str, &str)]) -> Package {
+    let mut all = vec![("package.json", manifest.to_string())];
+    for (n, b) in files {
+        all.push((n, b.to_string()));
+    }
+    let borrowed: Vec<(&str, &str)> = all.iter().map(|(n, b)| (*n, b.as_str())).collect();
+    Package {
+        name,
+        manifest,
+        tarball: tar_gz(&borrowed),
+    }
+}
+
+#[test]
+fn peer_dependencies_and_node_modules_link() {
+    let registry = serve_registry(vec![
+        npm_package(
+            "uses-peer",
+            serde_json::json!({
+                "name": "uses-peer",
+                "version": "1.0.0",
+                "main": "index.js",
+                "peerDependencies": { "the-peer": "^2.0.0", "optional-peer": "^1.0.0" },
+                "peerDependenciesMeta": { "optional-peer": { "optional": true } }
+            }),
+            &[(
+                "index.js",
+                "module.exports = () => require(\"the-peer\") + \" via peer\"",
+            )],
+        ),
+        npm_package(
+            "the-peer",
+            serde_json::json!({ "name": "the-peer", "version": "2.1.0", "main": "index.js" }),
+            &[("index.js", "module.exports = \"peer 2.1.0\"")],
+        ),
+        npm_package(
+            "optional-peer",
+            serde_json::json!({ "name": "optional-peer", "version": "1.0.0" }),
+            &[],
+        ),
+    ]);
+    let app = temp_dir("peers");
+    write(
+        app.join("squirt.json"),
+        r#"{"name":"app","version":"0.1.0","main":"index.jsq","dependencies":{"uses-peer":"npm:uses-peer@^1.0.0"}}"#,
+    );
+    write(
+        app.join("index.jsq"),
+        "import usePeer from \"uses-peer\"\nconsole.log(usePeer())\n",
+    );
+    let out = Command::new(env!("CARGO_BIN_EXE_vrotdaem"))
+        .current_dir(&app)
+        .env("JSQ_NPM_REGISTRY", &registry)
+        .arg("gluboko")
+        .output()
+        .expect("run vrotdaem");
+    assert!(
+        out.status.success(),
+        "{}{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+    assert!(app.join("nude_modules/the-peer/index.js").is_file());
+    assert!(!app.join("nude_modules/optional-peer").exists());
+    assert!(app.join("node_modules/the-peer/index.js").is_file());
+    let out = vrotdaem(&app, &["run"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "peer 2.1.0 via peer\n");
+    let _ = std::fs::remove_dir_all(&app);
+}

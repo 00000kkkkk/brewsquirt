@@ -883,7 +883,39 @@ pub fn resolve_with(spec: &str, from_dir: &Path, cjs: bool) -> Result<PathBuf, S
     Ok(found)
 }
 
+pub fn file_url_path(spec: &str) -> Option<String> {
+    let rest = spec.strip_prefix("file://")?;
+    let rest = rest.split(['?', '#']).next().unwrap_or("");
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    let mut bytes = Vec::with_capacity(rest.len());
+    let raw = rest.as_bytes();
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'%' && i + 2 < raw.len() {
+            let hex = |c: u8| (c as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hex(raw[i + 1]), hex(raw[i + 2])) {
+                bytes.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        bytes.push(raw[i]);
+        i += 1;
+    }
+    let path = String::from_utf8(bytes).ok()?;
+    let b = path.as_bytes();
+    if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+        return Some(path[1..].to_string());
+    }
+    Some(path)
+}
+
 fn resolve_uncached(spec: &str, from_dir: &Path, cjs: bool) -> Result<PathBuf, String> {
+    if let Some(path) = file_url_path(spec).filter(|_| !cjs) {
+        return resolve_file(&lexical_normalize(Path::new(&path)))
+            .map(|p| real_path(&p))
+            .ok_or_else(|| format!("Cannot find module '{spec}'"));
+    }
     if spec.starts_with('#') {
         return resolve_import_alias(spec, from_dir, cjs).or_else(|e| {
             config_paths_resolve(spec, from_dir)

@@ -358,6 +358,7 @@ pub struct Vm {
     pub rejection: bool,
     pub exiting: bool,
     pub(crate) main_cjs_pending: bool,
+    pub(crate) module_class: Option<Value>,
     pub(crate) promise_intrinsic: Option<Rc<Obj>>,
     pub(crate) wasm: Option<Box<builtins::wasm::WasmState>>,
     pub(crate) kept_alive: FxHashMap<usize, Rc<Obj>>,
@@ -513,6 +514,7 @@ impl Vm {
             stdin_stopped: false,
             exiting: false,
             main_cjs_pending: false,
+            module_class: None,
             promise_intrinsic: None,
             wasm: None,
             kept_alive: FxHashMap::default(),
@@ -1612,6 +1614,111 @@ impl Vm {
         self.require_path(&path, spec)
     }
 
+    fn cjs_loader_hook(&mut self, path: &Path) -> Option<Value> {
+        let class = self.module_class.clone()?;
+        let ext = path.extension().and_then(|e| e.to_str())?;
+        let exts = self.get_prop(&class, "_extensions").ok()?;
+        let loader = self.get_prop(&exts, &format!(".{ext}")).ok()?;
+        match &loader {
+            Value::Object(o) if loader.is_callable() && o.get_own("%jsqDefault%").is_none() => {
+                Some(loader)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn new_cjs_module(&mut self, key: &JsStr, dir: &Path) -> Rc<Obj> {
+        let module = self.new_object();
+        if let Some(class) = self.module_class.clone() {
+            if let Ok(Value::Object(proto)) = self.get_prop(&class, "prototype") {
+                *module.proto.borrow_mut() = Some(proto);
+            }
+        }
+        let exports = self.new_object();
+        module.set_own("exports", Value::Object(exports));
+        module.set_own("id", Value::Str(key.clone()));
+        module.set_own("filename", Value::Str(key.clone()));
+        module.set_own("path", Value::Str(dir.display().to_string().into()));
+        module.set_own("loaded", Value::Bool(false));
+        let children = self.new_array(Vec::new());
+        module.set_own("children", children);
+        let paths = self.new_array(Vec::new());
+        module.set_own("paths", paths);
+        module
+    }
+
+    fn mark_main_module(&mut self, module: &Rc<Obj>) {
+        if std::mem::take(&mut self.main_cjs_pending) {
+            module.set_own("id", ".".into());
+            if let Some(Value::Object(r)) = self.globals.get("require").cloned() {
+                r.set_own("main", Value::Object(module.clone()));
+            }
+            if let Some(Value::Object(p)) = self.globals.get("process").cloned() {
+                p.set_hidden("mainModule", Value::Object(module.clone()));
+            }
+        }
+    }
+
+    pub(crate) fn cjs_compile(
+        &mut self,
+        module: &Rc<Obj>,
+        content: &str,
+        filename: &str,
+    ) -> Result<Value, Value> {
+        let key: JsStr = filename.into();
+        let dir = Path::new(filename)
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+        let body = if content.starts_with("#!") {
+            match content.find('\n') {
+                Some(i) => &content[i..],
+                None => "",
+            }
+        } else {
+            content
+        };
+        let wrapped =
+            format!("(function (exports, require, module, __filename, __dirname) {{{body}\n}})");
+        let proto = match self.compile_script(&wrapped, &key, dir.clone(), true) {
+            Ok(p) => p,
+            Err(e) => return Err(self.syntax_error_value(&e, &key)),
+        };
+        let wrapper = self.run_script_proto(proto)?;
+        let exports = self.get_prop(&Value::Object(module.clone()), "exports")?;
+        let require = self.globals.get("require").cloned().unwrap_or_default();
+        self.call_value(
+            &wrapper,
+            exports.clone(),
+            &[
+                exports,
+                require,
+                Value::Object(module.clone()),
+                Value::Str(key),
+                Value::Str(dir.display().to_string().into()),
+            ],
+        )
+    }
+
+    fn require_with_hook(&mut self, path: &Path, loader: Value) -> Result<Value, Value> {
+        let key: JsStr = path.display().to_string().into();
+        let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+        let cache = self.require_cache_object();
+        let module = self.new_cjs_module(&key, &dir);
+        cache.set_own(key.clone(), Value::Object(module.clone()));
+        self.mark_main_module(&module);
+        if let Err(e) = self.call_value(
+            &loader,
+            Value::Undefined,
+            &[Value::Object(module.clone()), Value::Str(key.clone())],
+        ) {
+            cache.props.borrow_mut().shift_remove(&key);
+            return Err(e);
+        }
+        module.set_own("loaded", Value::Bool(true));
+        self.get_prop(&Value::Object(module), "exports")
+    }
+
     fn require_path(&mut self, path: &PathBuf, spec: &str) -> Result<Value, Value> {
         let key: JsStr = path.display().to_string().into();
         let cache = self.require_cache_object();
@@ -1620,6 +1727,9 @@ impl Vm {
         }
         if let Some(ns) = self.modules.get(path) {
             return Ok(ns.clone());
+        }
+        if let Some(loader) = self.cjs_loader_hook(path) {
+            return self.require_with_hook(path, loader);
         }
         if path.extension().and_then(|e| e.to_str()) == Some("node") {
             let value = crate::napi::load(self, path)?;
@@ -1692,28 +1802,14 @@ impl Vm {
             }
         };
         let wrapper = self.run_script_proto(proto)?;
-        let module = self.new_object();
-        let exports = self.new_object();
-        module.set_own("exports", Value::Object(exports.clone()));
-        module.set_own("id", Value::Str(key.clone()));
-        module.set_own("filename", Value::Str(key.clone()));
-        module.set_own("path", Value::Str(dir.display().to_string().into()));
-        module.set_own("loaded", Value::Bool(false));
-        let children = self.new_array(Vec::new());
-        module.set_own("children", children);
-        let paths = self.new_array(Vec::new());
-        module.set_own("paths", paths);
+        let module = self.new_cjs_module(&key, &dir);
+        let exports = match self.get_prop(&Value::Object(module.clone()), "exports")? {
+            Value::Object(o) => o,
+            _ => self.new_object(),
+        };
         cache.set_own(key.clone(), Value::Object(module.clone()));
         let require = self.globals.get("require").cloned().unwrap_or_default();
-        if std::mem::take(&mut self.main_cjs_pending) {
-            module.set_own("id", ".".into());
-            if let Value::Object(r) = &require {
-                r.set_own("main", Value::Object(module.clone()));
-            }
-            if let Some(Value::Object(p)) = self.globals.get("process").cloned() {
-                p.set_hidden("mainModule", Value::Object(module.clone()));
-            }
-        }
+        self.mark_main_module(&module);
         let r = self.call_value(
             &wrapper,
             Value::Object(exports.clone()),

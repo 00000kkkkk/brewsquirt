@@ -2817,6 +2817,27 @@ const WEB_SRC: &str = r##"
       listeners(event) {
         return (handlers[event] ?? []).map((h) => onceWrappers.get(h) ?? h)
       },
+      rawListeners(event) {
+        return [...(handlers[event] ?? [])]
+      },
+      eventNames() {
+        return Object.keys(handlers).filter((k) => handlers[k].length > 0)
+      },
+      emit(event, ...args) {
+        return emit(event, ...args)
+      },
+      prependOnceListener(event, fn) {
+        const wrapper = (...args) => fn(...args)
+        onceWrappers.set(wrapper, fn)
+        ;(handlers[event] ??= []).unshift(wrapper)
+        return server
+      },
+      setMaxListeners() {
+        return server
+      },
+      getMaxListeners() {
+        return 10
+      },
       setTimeout(ms, cb) {
         server.timeout = ms
         if (typeof cb === "function") server.on("timeout", cb)
@@ -2904,7 +2925,11 @@ const WEB_SRC: &str = r##"
         return srv ? { address: srv.hostname, family: srv.hostname.includes(":") ? "IPv6" : "IPv4", port: srv.port } : null
       },
     }
+    Object.setPrototypeOf(server, Server.prototype)
     return server
+  }
+  function Server(options, listener) {
+    return createServer(options, listener)
   }
 
   const STATUS_CODES = native.statusCodes
@@ -2985,6 +3010,7 @@ const WEB_SRC: &str = r##"
     serve,
     createServer,
     createSecureServer,
+    Server,
     IncomingMessage,
     ServerResponse,
     STATUS_CODES,
@@ -3037,6 +3063,7 @@ pub fn http_module(vm: &mut Vm) -> Result<Value, Value> {
     for name in [
         "serve",
         "createServer",
+        "Server",
         "IncomingMessage",
         "ServerResponse",
         "STATUS_CODES",

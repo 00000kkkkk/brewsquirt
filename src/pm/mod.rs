@@ -2,7 +2,7 @@ pub mod npm;
 pub mod scripts;
 pub mod semver;
 
-use crate::module::{DEPS_DIR, MANIFEST};
+use crate::module::{DEPS_DIR, MANIFEST, NODE_DEPS_DIR};
 use indexmap::IndexMap;
 use semver::Range;
 use serde::{Deserialize, Serialize};
@@ -223,19 +223,32 @@ fn fetch(spec: &Spec, base: &Path, dest: &Path, optional: bool) -> Result<Option
     }
 }
 
-fn dependencies_of(dir: &Path) -> Result<IndexMap<String, (String, bool)>, String> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DepKind {
+    Regular,
+    Optional,
+    Peer,
+}
+
+fn dependencies_of(dir: &Path) -> Result<IndexMap<String, (String, DepKind)>, String> {
     if dir.join(MANIFEST).is_file() {
         return Ok(read_manifest(dir)?
             .dependencies
             .into_iter()
-            .map(|(k, v)| (k, (v, false)))
+            .map(|(k, v)| (k, (v, DepKind::Regular)))
             .collect());
     }
     let mut out = IndexMap::new();
     let optional = npm::package_optional_dependencies(dir);
+    let peers = npm::package_peer_dependencies(dir);
     let mut all = npm::package_dependencies(dir);
     for (k, v) in &optional {
         all.insert(k.clone(), v.clone());
+    }
+    for (k, v) in &peers {
+        if !all.contains_key(k) {
+            all.insert(k.clone(), v.clone());
+        }
     }
     for (name, raw) in all {
         let spec = if let Some(alias) = raw.strip_prefix("npm:") {
@@ -245,8 +258,14 @@ fn dependencies_of(dir: &Path) -> Result<IndexMap<String, (String, bool)>, Strin
         } else {
             continue;
         };
-        let is_optional = optional.contains_key(&name);
-        out.insert(name, (spec, is_optional));
+        let kind = if optional.contains_key(&name) {
+            DepKind::Optional
+        } else if peers.contains_key(&name) && !npm::package_dependencies(dir).contains_key(&name) {
+            DepKind::Peer
+        } else {
+            DepKind::Regular
+        };
+        out.insert(name, (spec, kind));
     }
     Ok(out)
 }
@@ -258,7 +277,7 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
         fs::remove_dir_all(&nude).map_err(|e| format!("cannot wipe {DEPS_DIR}: {e}"))?;
     }
     fs::create_dir_all(&nude).map_err(|e| format!("cannot create {DEPS_DIR}: {e}"))?;
-    let mut queue: VecDeque<(String, String, PathBuf, PathBuf, bool)> = manifest
+    let mut queue: VecDeque<(String, String, PathBuf, PathBuf, DepKind)> = manifest
         .dependencies
         .iter()
         .map(|(n, s)| {
@@ -267,17 +286,24 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
                 s.clone(),
                 root.to_path_buf(),
                 root.to_path_buf(),
-                false,
+                DepKind::Regular,
             )
         })
         .collect();
+    let mut peers: VecDeque<(String, String, PathBuf, PathBuf, DepKind)> = VecDeque::new();
     let mut seen: Vec<PathBuf> = Vec::new();
     let mut all: Vec<(String, PathBuf)> = Vec::new();
     let mut fresh: Vec<(String, PathBuf, bool)> = Vec::new();
     let mut report = Report::default();
-    while let Some((name, raw, base, holder, optional)) = queue.pop_front() {
+    while let Some((name, raw, base, holder, kind)) =
+        queue.pop_front().or_else(|| peers.pop_front())
+    {
         let spec = Spec::parse_for(Some(&name), &raw)?;
         let top = nude.join(&name);
+        if kind == DepKind::Peer && top.exists() {
+            continue;
+        }
+        let optional = kind == DepKind::Optional;
         let (dest, satisfied) = match &spec {
             Spec::Npm { range, .. } if top.exists() => match npm::installed_version(&top) {
                 Some(v) if range.matches(&v) => (top.clone(), true),
@@ -346,15 +372,21 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
                 }
             }
         }
-        for (n, (s, opt)) in dependencies_of(&dest)? {
-            queue.push_back((n, s, origin.clone(), dest.clone(), opt));
+        for (n, (s, k)) in dependencies_of(&dest)? {
+            if k == DepKind::Peer {
+                peers.push_back((n, s, root.to_path_buf(), root.to_path_buf(), k));
+            } else {
+                queue.push_back((n, s, origin.clone(), dest.clone(), k));
+            }
         }
     }
     for (name, dest) in &all {
         if dest.is_dir() {
             scripts::link_bins(name, dest)?;
+            link_node_modules(dest);
         }
     }
+    link_node_modules(root);
     for (name, dest, optional) in fresh.iter().rev() {
         if !dest.is_dir() || !scripts::needs_scripts(dest) {
             continue;
@@ -375,6 +407,31 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
         }
     }
     Ok(report)
+}
+
+pub fn link_node_modules(dir: &Path) {
+    let nude = dir.join(DEPS_DIR);
+    let node = dir.join(NODE_DEPS_DIR);
+    if !nude.is_dir() || node.symlink_metadata().is_ok() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        let _ = std::os::unix::fs::symlink(DEPS_DIR, &node);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new(std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into()))
+            .raw_arg(format!(
+                "/d /c mklink /J \"{}\" \"{}\"",
+                node.display(),
+                nude.display()
+            ))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
 }
 
 pub fn trust(root: &Path, names: &[String], mut log: impl FnMut(&str)) -> Result<usize, String> {

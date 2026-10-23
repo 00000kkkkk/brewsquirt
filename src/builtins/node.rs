@@ -4006,6 +4006,22 @@ const NODE_SRC: &str = r##"
   }
   Object.defineProperties(Writable.prototype, writableGetters)
   Object.assign(Writable.prototype, writableMethods)
+  for (const stdio of [globalThis.process?.stdout, globalThis.process?.stderr]) {
+    if (!stdio || typeof stdio !== "object" || kWrite in stdio) continue
+    const raw = stdio.write
+    delete stdio.on
+    delete stdio.once
+    Object.setPrototypeOf(stdio, Writable.prototype)
+    initWritable(stdio, {
+      decodeStrings: false,
+      write(chunk, encoding, cb) {
+        raw.call(stdio, chunk, encoding)
+        cb()
+      },
+    })
+    stdio._isStdio = true
+    stdio.destroySoon = stdio.destroy
+  }
   Object.defineProperty(Writable, Symbol.hasInstance, {
     value(object) {
       if (Function.prototype[Symbol.hasInstance].call(this, object)) return true
@@ -6205,7 +6221,7 @@ const NODE_SRC: &str = r##"
         if (!line) continue
         let message
         try {
-          message = JSON.parse(line)
+          message = line[0] === "~" ? native.wireDeserialize(Buffer.from(line.slice(1), "base64")) : JSON.parse(line)
         } catch {
           continue
         }
@@ -6226,7 +6242,14 @@ const NODE_SRC: &str = r##"
     server.unref()
     return server
   }
-  const attachIpc = (child, server, unwrap) => {
+  const ipcLine = (message, advanced) => {
+    if (advanced) {
+      const bytes = native.wireSerialize(message)
+      return "~" + Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64") + "\n"
+    }
+    return JSON.stringify(message === undefined ? null : message) + "\n"
+  }
+  const attachIpc = (child, server, unwrap, advanced) => {
     child.connected = true
     let sock = null
     const pending = []
@@ -6258,7 +6281,7 @@ const NODE_SRC: &str = r##"
         else queueMicrotask(() => child.emit("error", e))
         return false
       }
-      const line = JSON.stringify(message === undefined ? null : message) + "\n"
+      const line = ipcLine(message, advanced)
       if (sock) sock.write(line)
       else pending.push(line)
       if (typeof cb === "function") queueMicrotask(() => cb(null))
@@ -6284,11 +6307,12 @@ const NODE_SRC: &str = r##"
     options = options ?? {}
     const execArgv = options.execArgv ?? []
     const server = ipcServer()
-    const env = { ...(options.env ?? process.env), JSQ_IPC: String(server.address().port) }
+    const advanced = options.serialization === "advanced"
+    const env = { ...(options.env ?? process.env), JSQ_IPC: String(server.address().port), JSQ_IPC_SERIALIZATION: advanced ? "advanced" : "json" }
     let file = String(modulePath)
     if (file.startsWith("file:")) file = fileURLToPath(file)
     const child = spawn(options.execPath ?? process.execPath, [...execArgv, file, ...args.map(String)], { ...options, env, stdio: options.stdio ?? "inherit" })
-    attachIpc(child, server, (message) => child.emit("message", message))
+    attachIpc(child, server, (message) => child.emit("message", message), advanced)
     return child
   }
   const childProcessAsync = { spawn, exec, execFile, fork, ChildProcess }
@@ -6539,7 +6563,7 @@ const NODE_SRC: &str = r##"
         else throw e
         return false
       }
-      const line = JSON.stringify(message === undefined ? null : message) + "\n"
+      const line = ipcLine(message, process.env.JSQ_IPC_SERIALIZATION === "advanced")
       if (connected) sock.write(line)
       else queue.push(line)
       if (typeof cb === "function") queueMicrotask(() => cb(null))
@@ -6577,8 +6601,11 @@ const NODE_SRC: &str = r##"
     getHeapCodeStatistics: () => ({}),
     setFlagsFromString() {},
     cachedDataVersionTag: () => 0,
-    serialize: (v) => Buffer.from(JSON.stringify(v)),
-    deserialize: (b) => JSON.parse(Buffer.from(b).toString()),
+    serialize: (v) => {
+      const bytes = native.wireSerialize(v)
+      return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    },
+    deserialize: (b) => native.wireDeserialize(b),
     writeHeapSnapshot: notSupported("v8.writeHeapSnapshot"),
     takeCoverage() {},
     stopCoverage() {},
@@ -6592,7 +6619,7 @@ const NODE_SRC: &str = r##"
       this.filename = typeof options === "string" ? options : options?.filename ?? "evalmachine.<anonymous>"
     }
     runInThisContext() {
-      return indirectEval(this.#code)
+      return native.vmRunScript(this.#code, this.filename)
     }
     runInContext(context) {
       return vmRun(this.#code, context)
@@ -6630,10 +6657,20 @@ const NODE_SRC: &str = r##"
       return sandbox
     },
     isContext: (o) => contexts.has(o),
-    runInThisContext: (code) => indirectEval(String(code)),
+    runInThisContext: (code, options) => native.vmRunScript(String(code), typeof options === "string" ? options : options?.filename ?? "evalmachine.<anonymous>"),
     runInContext: (code, context) => vmRun(code, context),
     runInNewContext: (code, context = {}) => vmRun(code, context),
-    compileFunction: (code, params = []) => new Function(...params, String(code)),
+    compileFunction: (code, params = [], options = {}) => {
+      const filename = options?.filename ?? "evalmachine.<anonymous>"
+      const sandbox = options?.parsingContext
+      const list = params.join(", ")
+      if (sandbox === undefined || sandbox === null || !contexts.has(sandbox)) {
+        return native.vmRunScript(`(function (${list}) {${String(code)}\n})`, filename)
+      }
+      const scope = "globalThis" in sandbox ? {} : { globalThis: contextGlobal(sandbox), global: contextGlobal(sandbox) }
+      const maker = native.vmRunScript(`(function (__sandbox__, __scope__) { with (__sandbox__) { with (__scope__) { return function (${list}) {${String(code)}\n} } } })`, filename)
+      return maker.call(sandbox, sandbox, scope)
+    },
     measureMemory: async () => ({ total: { jsMemoryEstimate: process.memoryUsage().heapUsed, jsMemoryRange: [0, 0] } }),
   }
 
@@ -7430,7 +7467,87 @@ const NODE_SRC: &str = r##"
 
   const nodeConstants = { O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, S_IFMT: 61440, S_IFREG: 32768, S_IFDIR: 16384, S_IFLNK: 40960, F_OK: 0, R_OK: 4, W_OK: 2, X_OK: 1, SIGINT: 2, SIGTERM: 15, SIGKILL: 9, SIGHUP: 1, E2BIG: 7, EACCES: 13, EEXIST: 17, ENOENT: 2, ENOTDIR: 20, EISDIR: 21, EINVAL: 22, ENOTEMPTY: 39, UV_UDP_REUSEADDR: 4 }
 
+  const modulePath = () => globalThis.require("node:path")
+  function Module(id = "", parent) {
+    this.id = id
+    this.path = id ? modulePath().dirname(id) : "."
+    this.exports = {}
+    this.filename = null
+    this.loaded = false
+    this.children = []
+    this.paths = []
+    if (parent && Array.isArray(parent.children)) parent.children.push(this)
+  }
+  Module.Module = Module
+  Module.wrapper = ["(function (exports, require, module, __filename, __dirname) { ", "\n});"]
+  Module.wrap = (script) => Module.wrapper[0] + script + Module.wrapper[1]
+  const markDefaultLoader = (fn) => {
+    Object.defineProperty(fn, "%jsqDefault%", { value: true })
+    return fn
+  }
+  Module._extensions = Object.create(null)
+  Module._extensions[".js"] = markDefaultLoader(function (module, filename) {
+    module._compile(fs.readFileSync(filename, "utf8"), filename)
+  })
+  Module._extensions[".json"] = markDefaultLoader(function (module, filename) {
+    const text = fs.readFileSync(filename, "utf8")
+    module.exports = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text)
+  })
+  Module._extensions[".node"] = markDefaultLoader(function (module, filename) {
+    process.dlopen(module, filename)
+  })
+  Object.defineProperty(Module, "_cache", {
+    get: () => globalThis.require.cache,
+    set() {},
+    enumerable: true,
+    configurable: true,
+  })
+  Module._pathCache = Object.create(null)
+  Module.globalPaths = []
+  Module._nodeModulePaths = (from) => {
+    const p = modulePath()
+    const out = []
+    let dir = p.resolve(from)
+    for (;;) {
+      if (p.basename(dir) !== "node_modules") out.push(p.join(dir, "node_modules"))
+      const parent = p.dirname(dir)
+      if (parent === dir) break
+      dir = parent
+    }
+    return out
+  }
+  const moduleBase = (parent) => parent?.filename ?? modulePath().join(process.cwd(), "[eval]")
+  Module._resolveFilename = function (request, parent, isMain, options) {
+    return Module.createRequire(moduleBase(parent)).resolve(request, options)
+  }
+  Module._load = function (request, parent) {
+    return Module.createRequire(moduleBase(parent))(request)
+  }
+  Module.prototype._compile = function (content, filename) {
+    return native.cjsCompile(this, String(content), String(filename))
+  }
+  Module.prototype.require = function (id) {
+    return Module._load(id, this, false)
+  }
+  Module.prototype.load = function (filename) {
+    const p = modulePath()
+    this.filename = filename
+    this.paths = Module._nodeModulePaths(p.dirname(filename))
+    const loader = Module._extensions[p.extname(filename)] ?? Module._extensions[".js"]
+    loader(this, filename)
+    this.loaded = true
+  }
+  Module.runMain = () => {}
+  Module.register = () => {}
+  Module.syncBuiltinESMExports = () => {}
+  Module.findSourceMap = () => undefined
+  Module.enableCompileCache = () => ({ status: 3 })
+  Module.getCompileCacheDir = () => undefined
+  Module.constants = { compileCacheStatus: { FAILED: 0, ENABLED: 1, ALREADY_ENABLED: 2, DISABLED: 3 } }
+  native.setModuleClass(Module)
+
   return {
+    Module,
     crypto,
     zlib,
     stream,
@@ -7508,7 +7625,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let n = vm.new_object();
-    let natives: [(&str, u32, crate::object::NativeFn); 56] = [
+    let natives: [(&str, u32, crate::object::NativeFn); 59] = [
         ("isProxy", 1, is_proxy),
         ("watchStart", 4, super::netio::watch_start),
         ("watchClose", 1, super::netio::watch_close),
@@ -7564,6 +7681,9 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         ("zlib", 3, zlib_op),
         ("crc32", 2, zlib_crc32),
         ("format", 0, native_format),
+        ("vmRunScript", 2, vm_run_script),
+        ("setModuleClass", 1, native_set_module_class),
+        ("cjsCompile", 3, native_cjs_compile),
         ("dnsLookup", 1, dns_lookup),
     ];
     for (name, arity, f) in natives {
@@ -7679,7 +7799,9 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 }
                 let web = super::web::load(vm)?;
                 let secure = vm.get_prop(&web, "createSecureServer")?;
-                o.set_own("createServer", secure);
+                o.set_own("createServer", secure.clone());
+                let server = vm.get_prop(&web, "Server")?;
+                o.set_own("Server", server);
                 o.set_hidden("default", Value::Object(o.clone()));
                 Value::Object(o)
             }
@@ -7809,7 +7931,11 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 with_default(vm, d)?
             }
             "module" => {
-                let o = vm.new_object();
+                let n = load(vm)?;
+                let class = vm.get_prop(&n, "Module")?;
+                let Value::Object(o) = class else {
+                    return Ok(None);
+                };
                 let require = vm.globals.get("require").cloned().unwrap_or_default();
                 let create = native_fn(vm, "createRequire", 1, module_create_require);
                 o.set_own("createRequire", create);
@@ -8336,6 +8462,45 @@ fn module_is_builtin(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let name = vm.to_string(&arg(args, 0))?;
     let bare = name.strip_prefix("node:").unwrap_or(&name);
     Ok(Value::Bool(BUILTIN_MODULES.contains(&bare)))
+}
+
+fn native_set_module_class(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let class = arg(args, 0);
+    vm.module_class = Some(class.clone());
+    if let Value::Object(proto) = vm.get_prop(&class, "prototype")? {
+        let cache = vm.require_cache_object_public();
+        for (_, m) in vm.own_entries(&Value::Object(cache)) {
+            if let Value::Object(o) = m {
+                let plain = o
+                    .proto
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|p| std::rc::Rc::ptr_eq(p, &vm.realm.object_proto));
+                if plain {
+                    *o.proto.borrow_mut() = Some(proto.clone());
+                }
+            }
+        }
+    }
+    Ok(Value::Undefined)
+}
+
+fn native_cjs_compile(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let Value::Object(module) = arg(args, 0) else {
+        return Err(vm.type_error("module must be an object"));
+    };
+    let content = vm.to_string(&arg(args, 1))?.to_string();
+    let filename = vm.to_string(&arg(args, 2))?.to_string();
+    vm.cjs_compile(&module, &content, &filename)
+}
+
+fn vm_run_script(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let code = vm.to_string(&arg(args, 0))?.to_string();
+    let name = match arg(args, 1) {
+        Value::Str(s) => s.to_string(),
+        _ => "evalmachine.<anonymous>".to_string(),
+    };
+    vm.run_script(&code, &name)
 }
 
 fn native_format(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

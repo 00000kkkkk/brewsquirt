@@ -325,6 +325,23 @@ pub fn package_dependencies(dir: &Path) -> IndexMap<String, String> {
     package_json(dir).map(|d| deps_of(&d)).unwrap_or_default()
 }
 
+pub fn package_peer_dependencies(dir: &Path) -> IndexMap<String, String> {
+    let Some(doc) = package_json(dir) else {
+        return IndexMap::new();
+    };
+    let meta = doc.get("peerDependenciesMeta").and_then(|m| m.as_object());
+    deps_in(&doc, "peerDependencies")
+        .into_iter()
+        .filter(|(name, _)| {
+            !meta
+                .and_then(|m| m.get(name))
+                .and_then(|v| v.get("optional"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 pub fn package_optional_dependencies(dir: &Path) -> IndexMap<String, String> {
     package_json(dir)
         .map(|d| deps_in(&d, "optionalDependencies"))

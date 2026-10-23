@@ -1,0 +1,12 @@
+import { pathToFileURL, fileURLToPath } from "node:url"
+import { createRequire } from "node:module"
+import path from "node:path"
+
+const here = path.dirname(fileURLToPath(import.meta.url))
+const url = pathToFileURL(path.join(here, "fixtures", "file_url_target.mjs")).href
+console.log((await import(url)).v)
+console.log(import.meta.resolve("./fixtures/file_url_target.mjs").startsWith("file:"))
+const spaced = pathToFileURL(path.join(here, "fixtures", "file_url_target.mjs")).href + "?q=1"
+console.log((await import(spaced)).v)
+const req = createRequire(import.meta.url)
+console.log(path.basename(req.resolve("./fixtures/file_url_target.mjs")))

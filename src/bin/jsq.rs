@@ -43,13 +43,198 @@ struct Cli {
     args: Vec<String>,
 }
 
+#[derive(Default)]
+struct NodeFlags {
+    exec_argv: Vec<String>,
+    require: Vec<String>,
+    import: Vec<String>,
+    env_files: Vec<(String, bool)>,
+}
+
+fn split_node_flags(raw: Vec<String>) -> (Vec<String>, NodeFlags) {
+    let mut flags = NodeFlags::default();
+    let mut out = Vec::new();
+    let mut it = raw.into_iter();
+    if let Some(first) = it.next() {
+        out.push(first);
+    }
+    let rest: Vec<String> = it.collect();
+    let mut i = 0;
+    while i < rest.len() {
+        let a = rest[i].as_str();
+        if !a.starts_with('-') || a == "-" {
+            break;
+        }
+        if a == "--" {
+            i += 1;
+            break;
+        }
+        let next = rest.get(i + 1).cloned();
+        match a {
+            "-e" | "--eval" | "-p" | "--print" | "--prelude" => {
+                out.push(rest[i].clone());
+                if let Some(v) = next {
+                    out.push(v);
+                }
+                i += 2;
+                continue;
+            }
+            "--disasm" | "--script" | "-h" | "--help" | "-V" | "--version" => {
+                out.push(rest[i].clone());
+                i += 1;
+                continue;
+            }
+            "-v" => {
+                out.push("--version".into());
+                i += 1;
+                continue;
+            }
+            "-r" | "--require" | "--import" | "--env-file" | "--env-file-if-exists" => {
+                if let Some(v) = next.clone() {
+                    match a {
+                        "-r" | "--require" => flags.require.push(v),
+                        "--import" => flags.import.push(v),
+                        "--env-file" => flags.env_files.push((v, true)),
+                        _ => flags.env_files.push((v, false)),
+                    }
+                }
+                flags.exec_argv.push(rest[i].clone());
+                flags.exec_argv.extend(next);
+                i += 2;
+                continue;
+            }
+            "-C"
+            | "--conditions"
+            | "--loader"
+            | "--experimental-loader"
+            | "--title"
+            | "--inspect-port"
+            | "--input-type"
+            | "--stack-trace-limit" => {
+                flags.exec_argv.push(rest[i].clone());
+                flags.exec_argv.extend(next);
+                i += 2;
+                continue;
+            }
+            _ => {}
+        }
+        if let Some((name, value)) = a.split_once('=') {
+            match name {
+                "--require" => flags.require.push(value.to_string()),
+                "--import" => flags.import.push(value.to_string()),
+                "--env-file" => flags.env_files.push((value.to_string(), true)),
+                "--env-file-if-exists" => flags.env_files.push((value.to_string(), false)),
+                _ => {}
+            }
+            flags.exec_argv.push(rest[i].clone());
+            i += 1;
+            continue;
+        }
+        if a.starts_with("--") {
+            flags.exec_argv.push(rest[i].clone());
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    out.extend(rest[i..].iter().cloned());
+    (out, flags)
+}
+
+fn load_env_file(path: &str, required: bool) -> Result<(), String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) if !required => return Ok(()),
+        Err(e) => return Err(format!("{path}: {e}")),
+    };
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let mut value = value.trim().to_string();
+        let quote = value
+            .chars()
+            .next()
+            .filter(|c| matches!(c, '"' | '\'' | '`'));
+        if let Some(q) = quote {
+            while !(value.len() > 1 && value[1..].contains(q)) {
+                match lines.next() {
+                    Some(more) => {
+                        value.push('\n');
+                        value.push_str(more);
+                    }
+                    None => break,
+                }
+            }
+        }
+        let value = match quote {
+            Some(q) => {
+                let body = &value[1..];
+                let inner = body.rfind(q).map(|end| &body[..end]).unwrap_or(body);
+                if q == '"' {
+                    inner.replace("\\n", "\n")
+                } else {
+                    inner.to_string()
+                }
+            }
+            None => value.split(" #").next().unwrap_or("").trim().to_string(),
+        };
+        if !key.is_empty() && std::env::var_os(key).is_none() {
+            unsafe { std::env::set_var(key, value) };
+        }
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let (args, flags) = split_node_flags(std::env::args().collect());
+    for (path, required) in &flags.env_files {
+        if let Err(e) = load_env_file(path, *required) {
+            eprintln!("jsq: {e}");
+            return ExitCode::from(9);
+        }
+    }
+    let cli = Cli::parse_from(args);
     let handle = std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)
-        .spawn(move || run(cli))
+        .spawn(move || run(cli, flags))
         .expect("spawn interpreter thread");
     handle.join().unwrap_or(ExitCode::FAILURE)
+}
+
+fn preload(vm: &mut Vm, flags: &NodeFlags) -> Result<(), javasquirt::Value> {
+    let mut exec_argv = Vec::new();
+    for a in &flags.exec_argv {
+        exec_argv.push(javasquirt::Value::from(a.as_str()));
+    }
+    let list = vm.new_array(exec_argv);
+    if let Some(javasquirt::Value::Object(p)) = vm.globals.get("process").cloned() {
+        p.set_own("execArgv", list);
+    }
+    for spec in &flags.require {
+        let code = format!("require({})", serde_json::Value::String(spec.clone()));
+        vm.eval("<preload>", &code, Mode::Repl)?;
+    }
+    for spec in &flags.import {
+        let target = if spec.starts_with('.') {
+            std::env::current_dir()
+                .map(|d| d.join(spec).display().to_string())
+                .unwrap_or_else(|_| spec.clone())
+        } else {
+            spec.clone()
+        };
+        let code = format!("import({})", serde_json::Value::String(target));
+        let promise = vm.eval("<preload>", &code, Mode::Repl)?;
+        vm.await_value(&promise)?;
+    }
+    Ok(())
 }
 
 fn test_command(args: &[String]) -> ExitCode {
@@ -70,7 +255,7 @@ fn test_command(args: &[String]) -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> ExitCode {
+fn run(cli: Cli, flags: NodeFlags) -> ExitCode {
     if let Some(f) = &cli.file {
         if f.as_os_str() == "test" && !f.is_file() {
             return test_command(&cli.args);
@@ -82,6 +267,9 @@ fn run(cli: Cli) -> ExitCode {
     }
     argv.extend(cli.args.iter().cloned());
     let mut vm = Vm::new(argv);
+    if let Err(e) = preload(&mut vm, &flags) {
+        return finish(&mut vm, Err(e));
+    }
 
     if let Some(code) = cli.eval.as_ref().or(cli.print.as_ref()) {
         let show = cli.print.is_some();

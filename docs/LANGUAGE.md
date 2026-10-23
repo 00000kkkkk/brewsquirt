@@ -1446,6 +1446,22 @@ the module has a default export, and a module that exports a value under the nam
 `"module.exports"` is returned as that value, as in Node. `node:module` provides
 `createRequire`, `builtinModules` and `isBuiltin`.
 
+The `module` object of a CommonJS file is an instance of the `Module` class that `node:module`
+exports. A function stored in `Module._extensions[".js"]`, or under a new extension, takes over
+loading those files: it receives the module and the file name and calls
+`module._compile(source, filename)`, which is how `@babel/register`, `pirates` and `ts-node`
+transform code on the fly. `Module._load`, `Module._resolveFilename`, `Module._nodeModulePaths`,
+`Module.wrap` and `Module._cache` are available too.
+
+```js
+const Module = require("node:module")
+Module._extensions[".txt"] = (mod, filename) => {
+  const text = require("node:fs").readFileSync(filename, "utf8")
+  mod._compile(`module.exports = ${JSON.stringify(text.trim())}`, filename)
+}
+console.log(require("./notes.txt"), module instanceof Module)
+```
+
 ```js
 const fs = require("node:fs")
 const { add } = require("./math.cjs")
@@ -1579,7 +1595,9 @@ to stdin) and, for `spawnSync`, `shell: true` to go through the shell.
 starts another `jsq` with inherited stdio and an IPC channel: the parent uses `child.send`,
 `child.on("message")`, `child.disconnect()` and `child.connected`, the child uses
 `process.send`, `process.on("message")` and `process.disconnect()`. Messages travel as JSON
-over a loopback socket, so functions and handles cannot be sent.
+over a loopback socket, so functions and handles cannot be sent. With
+`fork(module, args, { serialization: "advanced" })` they are structured clones instead, and
+`Map`, `Set`, `Date`, `BigInt`, typed arrays, errors and cycles arrive intact.
 
 ```js
 const { spawn, exec } = require("node:child_process")
@@ -2058,7 +2076,7 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:string_decoder`          | `StringDecoder` that keeps incomplete UTF-8, UTF-16 and base64 sequences between chunks |
 | `node:querystring`             | `parse`, `stringify`, `escape`, `unescape`, `encode`, `decode`      |
 | `node:tty`, `node:perf_hooks`  | `isatty`; `performance` with `mark`, `measure`, entries, `eventLoopUtilization`, `nodeTiming` and `timerify`, a `PerformanceObserver` stub, and `createHistogram`/`monitorEventLoopDelay` histograms that record nothing |
-| `node:module`                  | `createRequire`, `builtinModules` and `isBuiltin`                   |
+| `node:module`                  | `createRequire`, `builtinModules`, `isBuiltin` and the `Module` class with `_extensions` loader hooks, `_compile`, `_load`, `_resolveFilename`, `_nodeModulePaths`, `wrap` and `_cache` |
 | `node:console`                 | The global `console` plus `Console`, which writes to any `stdout`/`stderr` pair with groups, tables, timers and counters |
 | `node:util/types`              | `isDate`, `isRegExp`, `isPromise`, `isGeneratorFunction`, `isBoxedPrimitive`, `isArgumentsObject`, typed array checks and the rest of Node's `util.types` |
 | `node:stream/web`, `node:stream/consumers` | The WHATWG stream classes; `text`, `json`, `buffer`, `arrayBuffer` and `blob` over any stream or async iterable |
@@ -2066,11 +2084,12 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:timers`, `node:timers/promises` | Timer functions returning `Timeout`/`Immediate` objects with `ref`, `unref`, `hasRef`, `refresh` and `close` (unreferenced timers do not keep the process alive); promise versions of `setTimeout`, `setImmediate`, async-iterable `setInterval` and `scheduler.wait`/`scheduler.yield` with abort signals |
 | `node:sys`, `node:domain`, `node:trace_events`, `node:repl`, `node:sea`, `node:wasi` | Aliases and small implementations so that packages importing them load |
 | `node:dns`, `node:dns/promises` | `lookup`, `resolve`, `resolve4`, `resolve6` through the system resolver |
-| `node:vm`                      | `Script`, `runInThisContext`, `runInNewContext` and `runInContext` (sandboxes are plain objects scoped with `with`), `createContext`, `compileFunction` |
+| `node:vm`                      | `Script`, `runInThisContext` (with `filename` in stack traces), `runInNewContext` and `runInContext` (sandboxes are plain objects scoped with `with`), `createContext`, `compileFunction` with `params` and `parsingContext` |
+| `node:v8`                      | `serialize` and `deserialize` with the structured-clone algorithm (`Map`, `Set`, `Date`, `RegExp`, `BigInt`, typed arrays, errors and cycles), `getHeapStatistics` and the other introspection functions; heap snapshots throw `ENOTSUP` |
 | `node:async_hooks`             | `AsyncLocalStorage` whose store is visible to synchronous callees of `run` and `enterWith`, `AsyncResource`, `createHook` as a no-op |
 | `node:punycode`                | `encode`, `decode`, `toASCII`, `toUnicode`, `ucs2`                |
 | `node:worker_threads`          | `Worker` runs a file (or `eval: true` source) on its own thread with a separate heap, so workers execute in parallel: messages, `workerData` and `environmentData` are structured clones, transfer lists move `ArrayBuffer`s and `MessagePort`s, `SharedArrayBuffer`s share memory and `Atomics.wait`, `waitAsync` and `notify` block and wake across threads; `online`, `message`, `error` and `exit` events, `terminate` (which interrupts running code), `ref`/`unref`, `process.exit` ending only the worker, `receiveMessageOnPort`, `isMainThread`, `parentPort`, `workerData` and `threadId`. Pools such as `piscina`, `tinypool` and `workerpool` work. `resourceLimits` and piped worker stdio are not implemented |
-| `node:http2`, `node:cluster`, `node:v8`, `node:inspector`, `node:diagnostics_channel`, `node:constants` | Load with their constants and classes so that packages importing them work; operations that need HTTP/2 or the inspector throw `ENOTSUP` |
+| `node:http2`, `node:cluster`, `node:inspector`, `node:diagnostics_channel`, `node:constants` | Load with their constants and classes so that packages importing them work; operations that need HTTP/2 or the inspector throw `ENOTSUP` |
 | `node:net`                     | Real TCP: `connect`/`createConnection` return a `Socket` (a duplex stream with `connect`, `ready`, `data`, `end`, `close`, `error` and `timeout` events, `setTimeout`, `setEncoding`, `ref`/`unref`, `address`, `remoteAddress`/`remotePort`, `bytesRead`/`bytesWritten`); `createServer` listens with `connection`, `listening` and `close` events, `address`, `maxConnections`, `getConnections` and `closeAllConnections`; plus `isIP`, `isIPv4`, `isIPv6`, `SocketAddress`, `BlockList`. Unix domain sockets and IPC are not available |
 | `node:tls`                     | `connect` opens a TLS 1.2/1.3 connection verified against the bundled Mozilla root store (or the PEM `ca` you pass; `rejectUnauthorized: false` and `NODE_TLS_REJECT_UNAUTHORIZED=0` skip verification) and emits `secureConnect`; `TLSSocket` reports `encrypted`, `authorized`, `getProtocol` and `getCipher`; `createServer({ key, cert })` accepts TLS connections from PEM material and emits `secureConnection`. PFX bundles and client certificates are not supported |
 | `node:zlib`                    | `gzip`, `gunzip`, `deflate`, `inflate`, `deflateRaw`, `inflateRaw` and `unzip` as sync, callback and `create*` stream forms, `crc32` and `constants`; the stream classes also expose the `_handle` and `_processChunk` internals that `minizlib` (and so `tar`) drives synchronously; brotli and zstd report `ERR_ZLIB_UNSUPPORTED` |
@@ -2205,6 +2224,14 @@ Matchers: `toBe`, `toEqual`, `toStrictEqual`, `toBeTruthy`, `toBeFalsy`, `toBeNu
 `toBeLessThan`, `toBeLessThanOrEqual`, `toBeCloseTo`, `toBeInstanceOf`, `toContain`,
 `toContainEqual`, `toHaveLength`, `toHaveProperty`, `toMatch`, `toMatchObject` and `toThrow`.
 
+Test runners from npm work as well. Vitest and Jest, installed with `vrotdaem`, run their suites
+under `jsq`:
+
+```sh
+jsq nude_modules/vitest/vitest.mjs run
+jsq nude_modules/jest/bin/jest.js
+```
+
 ## Builtins
 
 ### Global functions and values
@@ -2292,7 +2319,7 @@ a|b 42 7
 | `process.env`         | Object with the environment variables                      |
 | `process.exit(code?)` | Exits immediately with `code`, `process.exitCode` or `0`   |
 | `process.exitCode`    | The exit status used when the program ends normally        |
-| `process.stdout.write(data)` | Writes a string or bytes without a newline          |
+| `process.stdout`, `process.stderr` | `Writable` streams: `write(data)` writes a string or bytes without a newline, and they can be the destination of `pipe` |
 | `process.stdin`       | Standard input, see [Node.js compatibility](#nodejs-compatibility) |
 | `process.platform`, `process.arch`, `process.pid`, `process.versions` | Host details |
 | `process.cwd()`, `process.chdir(dir)` | The working directory                      |
@@ -2334,6 +2361,12 @@ collections (default 200000). Small values are useful for stress testing.
 | `jsq --disasm <file.jsq>`     | Compiles the file and prints its bytecode without running it.    |
 | `jsq test [paths...] [--filter <text>]` | Runs test files, see [Testing](#testing).           |
 | `jsq --version`               | Prints the version.                                              |
+| `jsq -r <module> <file>`      | Requires a module before the entry file runs; `--require` is the long form. |
+| `jsq --import <module> <file>` | Imports an ES module before the entry file runs.                |
+| `jsq --env-file <path> <file>` | Loads `KEY=value` lines into `process.env`; `--env-file-if-exists` skips a missing file. |
+
+Other flags that start with `--` and come before the file are accepted for compatibility with
+`node` and kept in `process.execArgv` together with the ones above.
 
 Exit status is `0` on success, the value passed to `process.exit`, or non-zero after a syntax
 error or an uncaught exception.
@@ -2362,7 +2395,13 @@ Dependency specs:
 npm packages bring their `dependencies` and their `optionalDependencies`; optional packages
 whose `os`, `cpu` or `libc` fields exclude the current machine are skipped, so tools that ship a
 platform binary as an optional package, such as `esbuild`, install the binary they need.
-Executable files keep their mode on Linux and macOS.
+Executable files keep their mode on Linux and macOS. Their `peerDependencies` are installed
+too when no other package provides them, except the ones marked optional in
+`peerDependenciesMeta`.
+
+`gluboko` links `node_modules` to `nude_modules` (a junction on Windows, a symbolic link
+elsewhere) when there is no `node_modules` directory yet, so tools that only look there, such as
+Vitest, Jest and bundlers, find the installed packages.
 
 The `bin` commands of installed packages are linked into `nude_modules/.bin`, as `.cmd` files on
 Windows and shell scripts elsewhere, and JavaScript commands run with `jsq`.

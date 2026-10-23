@@ -1,0 +1,9 @@
+import { Readable, Writable, Stream } from "node:stream"
+import { EventEmitter } from "node:events"
+console.log(process.stdout instanceof Writable, process.stdout instanceof Stream, process.stdout instanceof EventEmitter, process.stdout.getMaxListeners(), process.stdout.writable, process.stdout.writableLength)
+process.stdout.write("a")
+console.log("b")
+process.stdout.write("c\n")
+process.stdout.on("finish", () => {})
+Readable.from(["x", "y\n"]).pipe(process.stdout, { end: false })
+setTimeout(() => { console.log("listeners", process.stdout.listenerCount("finish")); process.stderr.write("err line\n") }, 20)

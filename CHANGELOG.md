@@ -13,6 +13,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in-memory databases, prepared statements with positional and named parameters, `run`, `get`,
   `all`, `iterate`, `columns`, user-defined functions, `readBigInts`, `returnArrays` and Node's
   error codes, so programs get an embedded database without native addons or install scripts.
+- Vitest and Jest run their test suites. The pieces they needed are general Node features:
+  `node:module` exports the `Module` class, every CommonJS `module` is an instance of it, and
+  loaders registered in `Module._extensions` (as `@babel/register`, `pirates` and `ts-node` do)
+  compile `.js` files or new extensions through `module._compile`; `Module._load`,
+  `_resolveFilename`, `_nodeModulePaths`, `wrap` and `_cache` are there as well.
+- `jsq` accepts Node's command-line flags before the script: `-r`/`--require` and `--import`
+  preload modules, `--env-file` and `--env-file-if-exists` load variables (with quoted multi-line
+  values and `export` prefixes), and the rest are accepted and kept in `process.execArgv`, so
+  tools that re-spawn `process.execPath` with `execArgv` work.
+- `v8.serialize` and `v8.deserialize` use a real structured-clone codec, and
+  `fork(..., { serialization: "advanced" })` sends messages with it, so `Map`, `Set`, `Date`,
+  `BigInt`, typed arrays, errors and cyclic objects survive IPC.
+- `vm.runInThisContext` and `Script#runInThisContext` report the given `filename` in stack traces,
+  and `vm.compileFunction` honours `parsingContext`, so code compiled for a context sees its
+  globals.
+- `process.stdout` and `process.stderr` are `Writable` streams, so `pipe(process.stdout)`,
+  `instanceof Writable` and the full emitter API work on them.
+- `import()` and static imports accept `file://` URLs, including percent-encoded paths and Windows
+  drive letters.
+- `http.Server` and `https.Server` are constructors: `new http.Server(handler)` creates a server and
+  servers from `createServer` are instances of them.
+- `Error.prepareStackTrace` receives `CallSite` objects of one class, as in V8.
+- `vrotdaem` installs the required `peerDependencies` of npm packages when nothing else provides
+  them, skipping those marked optional in `peerDependenciesMeta`, and links `node_modules` to
+  `nude_modules`, so tools that only look in `node_modules` find the installed packages.
 
 ## [1.6.0] - 2026-10-23
 
