@@ -191,7 +191,7 @@ import helpers from "./helpers"
 
 ## Features
 
-JavaSquirt 1.4.0 implements modern JavaScript as specified, passing 97% of test262:
+JavaSquirt 1.4.0 implements modern JavaScript as specified, passing 98% of test262:
 
 - **Values**: `undefined`, `null`, booleans, numbers, strings, arrays, objects, functions, classes, `Map`, `Set`, `Error`
 - **Bindings**: block-scoped `let` and `const`, hoisted function declarations
@@ -209,7 +209,7 @@ JavaSquirt 1.4.0 implements modern JavaScript as specified, passing 97% of test2
 - **Dates**: `Date` with local time zones, parsing, formatting, getters and setters
 - **Generators and iterators**: `function*`, `yield`, `yield*`, `Symbol.iterator` and the iterator protocol for `for...of`, spread and destructuring
 - **Accessors and labels**: `get`/`set` in classes and object literals, `break label` and `continue label`
-- **Regular expressions**: `/pattern/flags` literals and `RegExp` with groups, named groups, backreferences and lookaround, plus `match`, `matchAll`, `replace`, `split` and `search`
+- **Regular expressions**: `/pattern/flags` literals and `RegExp` with groups, named groups, backreferences, lookaround, Unicode property escapes and `v`-flag set operations, plus `match`, `matchAll`, `replace`, `split` and `search`
 - **Private members**: `#fields`, `#methods`, static private members and `#field in obj`
 - **Memory**: reference counting plus a cycle collector, so cyclic garbage is reclaimed
 - **Modules**: ES module `import` and `export` (named, default, namespace, renamed), live bindings, cycles, `import()`, `import.meta`, relative and bare-name resolution
@@ -325,13 +325,14 @@ typos
 - [x] `SharedArrayBuffer` and `Atomics`
 - [x] 95% of test262
 - [x] 97% of test262
+- [x] 98% of test262
 - [x] Mapped `arguments` and the global lexical environment
 - [x] 1.0.0
 - [x] Install without Rust: one-liners, Scoop and Homebrew
 - [x] Node compatibility: streams, crypto, zlib, http client, CommonJS `require`
 - [x] Web streams, Blob, File and FormData
 - [x] WebAssembly
-- [ ] 98% of test262
+- [ ] 99% of test262
 - [ ] Own regular expression engine with lookbehind back-references and the `v` flag
 - [ ] WebSockets
 - [ ] Rope strings for fast `+=` in loops
