@@ -4320,15 +4320,16 @@ impl Vm {
                     self.stack.pop();
                 }
                 Op::Dup => {
-                    let v = peek!();
-                    self.stack.push(v);
+                    let n = self.stack.len();
+                    if n > 0 {
+                        self.stack.extend_from_within(n - 1..n);
+                    } else {
+                        self.stack.push(Value::Undefined);
+                    }
                 }
                 Op::Dup2 => {
                     let n = self.stack.len();
-                    let a = self.stack[n - 2].clone();
-                    let b = self.stack[n - 1].clone();
-                    self.stack.push(a);
-                    self.stack.push(b);
+                    self.stack.extend_from_within(n - 2..n);
                 }
                 Op::Swap => {
                     let n = self.stack.len();
@@ -4354,13 +4355,21 @@ impl Vm {
                     }
                 }
                 Op::Uninit => self.stack.push(Value::Uninit),
+                Op::UninitN(n) => {
+                    let len = self.stack.len();
+                    self.stack.resize(len + n as usize, Value::Uninit);
+                }
+                Op::UndefinedN(n) => {
+                    let len = self.stack.len();
+                    self.stack.resize(len + n as usize, Value::Undefined);
+                }
                 Op::GetLocalChecked(s, k) => {
-                    self.flush_builder(base + s as usize);
-                    let v = self.stack[base + s as usize].clone();
-                    if matches!(v, Value::Uninit) {
+                    let at = base + s as usize;
+                    self.flush_builder(at);
+                    if matches!(self.stack[at], Value::Uninit) {
                         throw!(self.tdz_error(&proto, k));
                     }
-                    self.stack.push(v);
+                    self.stack.extend_from_within(at..=at);
                 }
                 Op::SetLocalChecked(s, k) => {
                     if matches!(self.stack[base + s as usize], Value::Uninit) {
@@ -4399,9 +4408,16 @@ impl Vm {
                     }
                 }
                 Op::SetLocal(s) => {
-                    self.drop_builder(base + s as usize);
-                    let v = peek!();
-                    self.stack[base + s as usize] = v;
+                    let dst = base + s as usize;
+                    self.drop_builder(dst);
+                    let top = self.stack.len() - 1;
+                    if let Value::Number(x) = self.stack[top] {
+                        if let Value::Number(d) = &mut self.stack[dst] {
+                            *d = x;
+                            continue;
+                        }
+                    }
+                    copy_slot(&mut self.stack, top, dst);
                 }
                 Op::AppendLocal(s) => {
                     let abs = base + s as usize;
@@ -5813,9 +5829,8 @@ impl Vm {
                     });
                 }
                 Op::Pick(d) => {
-                    let n = self.stack.len();
-                    let v = self.stack[n - 1 - d as usize].clone();
-                    self.stack.push(v);
+                    let at = self.stack.len() - 1 - d as usize;
+                    self.stack.extend_from_within(at..=at);
                 }
                 Op::WithHas(k) => {
                     let obj = pop!();
@@ -6021,8 +6036,7 @@ impl Vm {
                     self.stack.push(ns);
                 }
                 Op::GetCallee => {
-                    let f = self.stack[base - 1].clone();
-                    self.stack.push(f);
+                    self.stack.extend_from_within(base - 1..base);
                 }
                 Op::Await | Op::Yield => {
                     let v = pop!();
@@ -6737,6 +6751,14 @@ fn name_anonymous(f: &Value, key: &str, prefix: &str) {
         Value::Str(format!("{prefix}{base}").into()),
         crate::object::NON_ENUM | crate::object::READ_ONLY,
     );
+}
+
+#[inline(never)]
+fn copy_slot(stack: &mut [Value], from: usize, to: usize) {
+    if from != to {
+        let v = stack[from].clone();
+        stack[to] = v;
+    }
 }
 
 fn private_label(key: &str) -> String {

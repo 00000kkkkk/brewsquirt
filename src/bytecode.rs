@@ -25,6 +25,8 @@ pub enum Op {
     GetUpval(u32),
     SetUpval(u32),
     Uninit,
+    UndefinedN(u32),
+    UninitN(u32),
     GetLocalChecked(u32, u32),
     SetLocalChecked(u32, u32),
     GetUpvalChecked(u32, u32),

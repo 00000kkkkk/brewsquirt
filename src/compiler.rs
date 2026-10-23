@@ -87,6 +87,7 @@ struct FnState {
     line: u32,
     code: Vec<Op>,
     lines: Vec<u32>,
+    target: std::cell::Cell<usize>,
     consts: Vec<Value>,
     const_strs: FxHashMap<JsStr, u32>,
     functions: Vec<Rc<FunctionProto>>,
@@ -126,6 +127,7 @@ impl FnState {
             line,
             code: Vec::new(),
             lines: Vec::new(),
+            target: std::cell::Cell::new(usize::MAX),
             consts: Vec::new(),
             const_strs: FxHashMap::default(),
             functions: Vec::new(),
@@ -845,13 +847,29 @@ impl Compiler {
     fn emit_raw(&mut self, op: Op) -> usize {
         let line = self.line;
         let st = self.st();
+        let at = st.code.len();
+        if at > 0 && st.target.get() != at {
+            let merged = match (st.code[at - 1], op) {
+                (Op::Undefined, Op::Undefined) => Some(Op::UndefinedN(2)),
+                (Op::UndefinedN(n), Op::Undefined) => Some(Op::UndefinedN(n + 1)),
+                (Op::Uninit, Op::Uninit) => Some(Op::UninitN(2)),
+                (Op::UninitN(n), Op::Uninit) => Some(Op::UninitN(n + 1)),
+                _ => None,
+            };
+            if let Some(m) = merged {
+                st.code[at - 1] = m;
+                return at - 1;
+            }
+        }
         st.code.push(op);
         st.lines.push(line);
         st.code.len() - 1
     }
 
     fn here(&self) -> u32 {
-        self.st_ref().code.len() as u32
+        let st = self.st_ref();
+        st.target.set(st.code.len());
+        st.code.len() as u32
     }
 
     fn patch_to(&mut self, at: usize, t: u32) {
