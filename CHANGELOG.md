@@ -47,6 +47,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `vm.runInThisContext`, `vm.Script` and `vm.compileFunction` honour `lineOffset` and
   `columnOffset`.
 
+### Changed
+
+- Regular expressions with `lastIndex`, `charCodeAt` and string indexing on large non-ASCII strings
+  no longer scan the string from the start on every call, which made parsers such as
+  `@babel/parser` and `acorn` quadratic on big inputs; parsing a 1 MB bundle with `@babel/parser`
+  is about twice as fast. Comparisons and conditional jumps on numbers and booleans skip a slow
+  path in the interpreter.
+
 ### Fixed
 
 - Errors thrown while assigning a property, deleting one or writing through `super` reported the

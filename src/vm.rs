@@ -431,6 +431,30 @@ pub(crate) fn offset_positions(proto: &mut Rc<FunctionProto>, lines: i64, cols: 
     }
 }
 
+#[inline(always)]
+fn pop_value(stack: &mut Vec<Value>) -> Value {
+    let n = stack.len();
+    let v = match stack.last() {
+        Some(Value::Number(x)) => Value::Number(*x),
+        Some(Value::Bool(b)) => Value::Bool(*b),
+        Some(Value::Undefined) => Value::Undefined,
+        Some(Value::Null) => Value::Null,
+        _ => return stack.pop().unwrap_or_default(),
+    };
+    unsafe { stack.set_len(n - 1) };
+    v
+}
+
+#[inline(always)]
+fn plain_truthiness(v: &Value) -> Option<bool> {
+    match v {
+        Value::Bool(b) => Some(*b),
+        Value::Number(x) => Some(!(*x == 0.0 || x.is_nan())),
+        Value::Undefined | Value::Null => Some(false),
+        _ => None,
+    }
+}
+
 pub(crate) struct FrameSite {
     pub(crate) file: JsStr,
     pub(crate) line: u32,
@@ -4503,7 +4527,7 @@ impl Vm {
         }
         macro_rules! pop {
             () => {
-                self.stack.pop().unwrap_or_default()
+                pop_value(&mut self.stack)
             };
         }
         macro_rules! peek {
@@ -5718,13 +5742,35 @@ impl Vm {
                     ip = t as usize
                 }
                 Op::JumpIfFalse(t) => {
-                    if !pop!().truthy() {
-                        ip = t as usize;
+                    let n = self.stack.len();
+                    match self.stack.last().and_then(plain_truthiness) {
+                        Some(truthy) => {
+                            unsafe { self.stack.set_len(n - 1) };
+                            if !truthy {
+                                ip = t as usize;
+                            }
+                        }
+                        None => {
+                            if !pop!().truthy() {
+                                ip = t as usize;
+                            }
+                        }
                     }
                 }
                 Op::JumpIfTrue(t) => {
-                    if pop!().truthy() {
-                        ip = t as usize;
+                    let n = self.stack.len();
+                    match self.stack.last().and_then(plain_truthiness) {
+                        Some(truthy) => {
+                            unsafe { self.stack.set_len(n - 1) };
+                            if truthy {
+                                ip = t as usize;
+                            }
+                        }
+                        None => {
+                            if pop!().truthy() {
+                                ip = t as usize;
+                            }
+                        }
                     }
                 }
                 Op::JumpIfFalseKeep(t) => {
@@ -6376,6 +6422,21 @@ impl Vm {
                     return Ok(v);
                 }
                 Op::CmpJump(cmp, t) => {
+                    if let Some((x, y)) = numbers_on_top!() {
+                        unsafe { self.stack.set_len(self.stack.len() - 2) };
+                        let ok = match cmp {
+                            Cmp::Lt => x < y,
+                            Cmp::Le => x <= y,
+                            Cmp::Gt => x > y,
+                            Cmp::Ge => x >= y,
+                            Cmp::StrictEq | Cmp::Eq => x == y,
+                            Cmp::StrictNe | Cmp::Ne => x != y,
+                        };
+                        if !ok {
+                            ip = t as usize;
+                        }
+                        continue;
+                    }
                     let b = pop!();
                     let a = pop!();
                     let ok = match (&a, &b) {

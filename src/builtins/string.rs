@@ -679,9 +679,12 @@ fn replace_impl(vm: &mut Vm, this: Value, args: &[Value], all: bool) -> R {
     } else {
         s.find(&*pat).into_iter().collect()
     };
+    let mut offset = 0;
+    let mut counted = 0;
     for i in positions {
         out.push_str(&s[last..i]);
-        let offset = len16(&s[..i]);
+        offset += len16(&s[counted..i]);
+        counted = i;
         let r = replacement(vm, &rep, &pat, offset, &s)?;
         crate::value::push16(&mut out, &r);
         last = i + pat.len();

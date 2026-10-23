@@ -1,0 +1,45 @@
+const chunk = "ab é 😀 ö\n"
+const big = chunk.repeat(400) + "tail é"
+console.log(big.length, big.charCodeAt(big.length - 1), big.charCodeAt(5), big.charCodeAt(6), big.codePointAt(5))
+
+const word = /[a-zé]+/y
+const seen = []
+let pos = 0
+while (pos < big.length && seen.length < 2000) {
+  word.lastIndex = pos
+  const m = word.exec(big)
+  if (m) {
+    seen.push(m.index)
+    pos = word.lastIndex
+  } else {
+    pos++
+  }
+}
+console.log(seen.length, seen.slice(0, 6).join(","), seen.slice(-3).join(","))
+
+const global = /😀/g
+let count = 0
+let last = -1
+while (global.exec(big)) {
+  count++
+  last = global.lastIndex
+}
+console.log(count, last)
+
+const sticky = /ö/y
+sticky.lastIndex = big.length - 20
+console.log(sticky.test(big), sticky.lastIndex)
+sticky.lastIndex = 7
+console.log(sticky.test(big), sticky.lastIndex)
+
+const offsets = []
+big.slice(0, 200).replaceAll("é", (m, offset) => {
+  offsets.push(offset)
+  return m
+})
+console.log(offsets.join(","))
+console.log(big.search(/tail/), big.lastIndexOf("é"), big.slice(3995, 4005).length)
+const re = /(?<w>ö)/dg
+re.lastIndex = 3000
+const m = re.exec(big)
+console.log(m.index, m.indices[0].join("-"), m.indices.groups.w.join("-"), re.lastIndex)

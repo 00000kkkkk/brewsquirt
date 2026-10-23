@@ -262,6 +262,7 @@ pub struct StrIndex {
     ascii: bool,
     units: usize,
     marks: Vec<(u32, u32)>,
+    code_units: Vec<u16>,
 }
 
 thread_local! {
@@ -275,22 +276,29 @@ fn build_index(s: &str) -> StrIndex {
             ascii: true,
             units: s.len(),
             marks: Vec::new(),
+            code_units: Vec::new(),
         };
     }
     let mut marks = Vec::with_capacity(s.len() / MARK_STEP + 1);
-    let mut units = 0usize;
+    let mut code_units = Vec::with_capacity(s.len());
     let mut next = 0usize;
     for (byte, c) in s.char_indices() {
-        if units >= next {
-            marks.push((units as u32, byte as u32));
-            next = units + MARK_STEP;
+        if code_units.len() >= next {
+            marks.push((code_units.len() as u32, byte as u32));
+            next = code_units.len() + MARK_STEP;
         }
-        units += char_len16(c);
+        if is_lone(c) {
+            code_units.push(lone_unit(c));
+        } else {
+            let mut buf = [0u16; 2];
+            code_units.extend_from_slice(c.encode_utf16(&mut buf));
+        }
     }
     StrIndex {
         ascii: false,
-        units,
+        units: code_units.len(),
         marks,
+        code_units,
     }
 }
 
@@ -317,6 +325,31 @@ impl StrIndex {
         self.units
     }
 
+    pub fn byte_of(&self, s: &str, unit: usize) -> usize {
+        if self.ascii {
+            return unit.min(s.len());
+        }
+        if unit >= self.units {
+            return s.len();
+        }
+        let (mut pos, byte) = self.locate(unit);
+        for (b, c) in s[byte..].char_indices() {
+            if pos >= unit {
+                return byte + b;
+            }
+            pos += char_len16(c);
+        }
+        s.len()
+    }
+
+    pub fn unit_of(&self, s: &str, byte: usize) -> usize {
+        let byte = byte.min(s.len());
+        if self.ascii {
+            return byte;
+        }
+        self.unit_at_byte(s, byte)
+    }
+
     fn locate(&self, i: usize) -> (usize, usize) {
         let k = self.marks.partition_point(|m| m.0 as usize <= i);
         let (u, b) = self.marks[k.saturating_sub(1)];
@@ -327,22 +360,7 @@ impl StrIndex {
         if self.ascii {
             return s.as_bytes().get(i).map(|b| *b as u16);
         }
-        if i >= self.units {
-            return None;
-        }
-        let (mut pos, byte) = self.locate(i);
-        for c in s[byte..].chars() {
-            let n = char_len16(c);
-            if i < pos + n {
-                if is_lone(c) {
-                    return Some(lone_unit(c));
-                }
-                let mut buf = [0u16; 2];
-                return Some(c.encode_utf16(&mut buf)[i - pos]);
-            }
-            pos += n;
-        }
-        None
+        self.code_units.get(i).copied()
     }
 
     fn byte_at(&self, s: &str, i: usize) -> (usize, bool) {
@@ -449,6 +467,22 @@ pub fn len16_rc(s: &JsStr) -> usize {
         len16(s)
     } else {
         str_index(s).len16()
+    }
+}
+
+pub fn byte_index_rc(s: &JsStr, unit: usize) -> usize {
+    if s.len() < INDEX_MIN {
+        crate::regexp::byte_index(s, unit)
+    } else {
+        str_index(s).byte_of(s, unit)
+    }
+}
+
+pub fn utf16_index_rc(s: &JsStr, byte: usize) -> usize {
+    if s.len() < INDEX_MIN {
+        crate::regexp::utf16_index(s, byte)
+    } else {
+        str_index(s).unit_of(s, byte)
     }
 }
 

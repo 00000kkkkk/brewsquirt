@@ -2,8 +2,9 @@ use super::{arg, make_ctor, method};
 use crate::inspect::inspect_plain;
 use crate::jsstr::JsStr;
 use crate::object::{Obj, ObjKind, RegExpObj};
-use crate::regexp::{Match, RegexData, byte_index, compile, next_char_boundary, utf16_index};
-use crate::value::{Value, len16};
+use crate::regexp::{Match, RegexData, compile, next_char_boundary};
+use crate::value::Value;
+use crate::value::{byte_index_rc, len16_rc, utf16_index_rc};
 use crate::vm::{ErrorKind, Vm};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -117,21 +118,26 @@ fn run_error(vm: &mut Vm, msg: String) -> Value {
     vm.make_error(ErrorKind::Error, msg)
 }
 
-pub fn exec_raw(vm: &mut Vm, obj: &Obj, data: &RegexData, s: &str) -> Result<Option<Match>, Value> {
+pub fn exec_raw(
+    vm: &mut Vm,
+    obj: &Obj,
+    data: &RegexData,
+    s: &JsStr,
+) -> Result<Option<Match>, Value> {
     let tracks = data.global || data.sticky;
     let li = last_index(vm, obj)?;
     let start16 = if tracks { li } else { 0.0 };
-    if start16 > len16(s) as f64 {
+    if start16 > len16_rc(s) as f64 {
         if tracks {
             set_last_index(vm, obj, 0.0)?;
         }
         return Ok(None);
     }
-    let pos = byte_index(s, start16 as usize);
+    let pos = byte_index_rc(s, start16 as usize);
     let found = data.find_at(s, pos).map_err(|e| run_error(vm, e))?;
     if tracks {
         match &found {
-            Some(m) => set_last_index(vm, obj, utf16_index(s, m.end) as f64)?,
+            Some(m) => set_last_index(vm, obj, utf16_index_rc(s, m.end) as f64)?,
             None => set_last_index(vm, obj, 0.0)?,
         }
     }
@@ -148,7 +154,7 @@ pub fn match_array(vm: &mut Vm, data: &RegexData, s: &JsStr, m: &Match) -> Value
     }
     let arr = vm.new_array(items.clone());
     if let Value::Object(o) = &arr {
-        o.set_own("index", Value::Number(utf16_index(s, m.start) as f64));
+        o.set_own("index", Value::Number(utf16_index_rc(s, m.start) as f64));
         o.set_own("input", Value::Str(s.clone()));
         o.set_own("groups", groups_object(vm, data, &items));
         if data.flags.contains('d') {
@@ -156,8 +162,8 @@ pub fn match_array(vm: &mut Vm, data: &RegexData, s: &JsStr, m: &Match) -> Value
             for g in &m.groups {
                 pairs.push(match g {
                     Some((a, b)) => vm.new_array(vec![
-                        Value::Number(utf16_index(s, *a) as f64),
-                        Value::Number(utf16_index(s, *b) as f64),
+                        Value::Number(utf16_index_rc(s, *a) as f64),
+                        Value::Number(utf16_index_rc(s, *b) as f64),
                     ]),
                     None => Value::Undefined,
                 });
@@ -248,19 +254,19 @@ fn test(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let tracks = data.global || data.sticky;
     let li = last_index(vm, &o)?;
     let start16 = if tracks { li } else { 0.0 };
-    if start16 > len16(&s) as f64 {
+    if start16 > len16_rc(&s) as f64 {
         if tracks {
             set_last_index(vm, &o, 0.0)?;
         }
         return Ok(Value::Bool(false));
     }
-    let pos = byte_index(&s, start16 as usize);
+    let pos = byte_index_rc(&s, start16 as usize);
     let found = data
         .find_whole(&s, pos, data.sticky)
         .map_err(|e| run_error(vm, e))?;
     if tracks {
         match found {
-            Some((_, end)) => set_last_index(vm, &o, utf16_index(&s, end) as f64)?,
+            Some((_, end)) => set_last_index(vm, &o, utf16_index_rc(&s, end) as f64)?,
             None => set_last_index(vm, &o, 0.0)?,
         }
     }
@@ -368,7 +374,7 @@ pub fn string_search(vm: &mut Vm, s: JsStr, pattern: &Value) -> R {
     let (_, data) = coerce_regexp(vm, pattern, "")?;
     let found = data.find_from(&s, 0, false).map_err(|e| run_error(vm, e))?;
     Ok(Value::Number(match found {
-        Some(m) => utf16_index(&s, m.start) as f64,
+        Some(m) => utf16_index_rc(&s, m.start) as f64,
         None => -1.0,
     }))
 }
@@ -494,7 +500,7 @@ pub fn string_replace_regexp(
             Some(t) => expand_template(t, matched, &s[..m.start], &s[m.end..], &groups, &named),
             None => {
                 let mut call_args = groups.clone();
-                call_args.push(Value::Number(utf16_index(&s, m.start) as f64));
+                call_args.push(Value::Number(utf16_index_rc(&s, m.start) as f64));
                 call_args.push(Value::Str(s.clone()));
                 if !named.is_undefined() {
                     call_args.push(named);
