@@ -899,6 +899,7 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize) -> String {
             }
         }
         ObjKind::Global => "Object [global] {}".to_string(),
+        ObjKind::Host(_) => "[External]".to_string(),
         ObjKind::Typed(t) if class_name(o).as_deref() == Some("Buffer") => {
             let bytes = t.bytes();
             let mut s = String::from("<Buffer");

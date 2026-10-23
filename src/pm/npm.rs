@@ -299,6 +299,15 @@ pub fn install_checked(
         .map_err(|e| format!("cannot download {name}@{}: {e}", resolved.version))?;
     std::fs::create_dir_all(dest).map_err(|e| format!("cannot create {}: {e}", dest.display()))?;
     extract_tarball(&tgz, dest)?;
+    if check_platform && node_platform() == "linux" {
+        let lib = package_json(dest)
+            .map(|d| string_list(&d, "libc"))
+            .unwrap_or_default();
+        if !allowed(&lib, libc()) {
+            let _ = std::fs::remove_dir_all(dest);
+            return Err(UNSUPPORTED.to_string());
+        }
+    }
     Ok(resolved)
 }
 

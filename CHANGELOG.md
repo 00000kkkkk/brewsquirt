@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `vrotdaem` installs `optionalDependencies`, skipping packages whose `os`, `cpu` or `libc` do not
   match the machine, and keeps the executable bit of files on Linux and macOS, so the native
   `esbuild` package runs its platform binary.
+- Native addons: `require`, `import` and `process.dlopen` load `.node` files built on Node-API
+  version 9, with wrapped objects and finalizers, references, promises, async work, threadsafe
+  functions called from native threads, buffers and `BigInt`, plus the libuv thread primitives
+  that addons call directly. `@swc/core`, `lightningcss`, `@tailwindcss/oxide`, `rollup`, `sharp`,
+  `@napi-rs/canvas`, `@parcel/watcher`, `classic-level` and `msgpackr` run. When a package ships a
+  V8-specific build next to a Node-API one, the Node-API build is loaded, and addons that only
+  exist for the V8 C++ API fail with `ERR_DLOPEN_FAILED` and an explanation.
 
 ### Fixed
 
@@ -40,6 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `nude_modules`, so projects installed with npm, pnpm or yarn run unchanged.
 - `module.createRequire(filename)` returned the caller's `require`; it now resolves relative to the
   given path or `file:` URL and has its own `resolve`.
+- On glibc Linux `vrotdaem` also installed the musl builds of platform packages, because the
+  registry metadata leaves out `libc`; the `package.json` of each optional package is now checked.
 
 ## [1.5.0] - 2026-10-23
 

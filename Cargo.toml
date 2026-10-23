@@ -45,6 +45,8 @@ unicode-ident = "1"
 unicode-normalization = "0.1"
 ureq = "3.4"
 socket2 = "0.6"
+libloading = "0.8"
+memchr = "2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 webpki-roots = "1"
 aes = "0.8"
@@ -63,6 +65,9 @@ spki = { version = "0.7", features = ["pem", "std"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 scrypt = { version = "0.11", default-features = false }
 wasmi = { version = "0.46", default-features = false, features = ["std", "simd"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 lto = "fat"

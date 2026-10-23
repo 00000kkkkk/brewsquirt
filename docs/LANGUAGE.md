@@ -2077,6 +2077,34 @@ for await (const line of rl) {
 }
 ```
 
+### Native addons
+
+`require` loads compiled `.node` addons built on Node-API, which is what napi-rs and
+node-addon-api packages use. `@swc/core`, `lightningcss`, `@tailwindcss/oxide`, `rollup`, `sharp`,
+`@napi-rs/canvas`, `@resvg/resvg-js`, `@node-rs/argon2`, `@node-rs/bcrypt`, `@parcel/watcher`,
+`classic-level`, `msgpackr`, `bufferutil` and `utf-8-validate` run unchanged. `process.dlopen`
+and `import` of a `.node` file work too.
+
+jsq implements Node-API version 9: values, objects, classes and wrapped native objects with
+finalizers, references, errors, promises, async work on a thread pool, threadsafe functions that
+native threads call back into JavaScript through, buffers, typed arrays, external memory, type
+tags and `BigInt`. The libuv mutexes, condition variables, read-write locks, semaphores,
+`uv_once`, thread-local keys and threads that some addons call directly are exported as well.
+
+```js
+const { xxh32 } = require("@node-rs/xxhash")
+console.log(xxh32("hello", 0))
+```
+
+```text
+4211111929
+```
+
+Addons compiled against the V8 C++ API, such as NAN-based packages, cannot be loaded. When a
+package ships both kinds of build, as `msgpackr-extract` does, jsq loads the Node-API one. Install
+scripts do not run, so an addon has to arrive prebuilt, which is how platform packages in
+`optionalDependencies` and `prebuilds` folders deliver them.
+
 ## Testing
 
 `jsq test` finds every `*.test.jsq`, `*_test.jsq` and `*.spec.jsq` file under the working
@@ -2315,6 +2343,8 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
 - Unix domain sockets, HTTP/2, DSA and Diffie-Hellman groups in `node:crypto`, and the
   `secp256k1`, P-521, Ed448 and X448 curves
 - Shared WebAssembly memories, threads and the JavaScript promise integration
+- Native addons built against the V8 C++ API instead of Node-API, and the libuv event loop
+  (`napi_get_uv_event_loop`)
 - `Intl` covers numbers, plural rules, lists, relative times, collation and segmentation in a
   handful of locales; dates know the month and weekday names, date orders and separators of
   English (US, GB, AU, CA), Ukrainian, Russian, German, French, Spanish, Italian, Portuguese,

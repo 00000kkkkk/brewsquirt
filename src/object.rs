@@ -420,6 +420,7 @@ pub enum ObjKind {
     Primitive(Value),
     Namespace,
     Arguments(Box<ArgMap>),
+    Host(Box<crate::napi::HostData>),
 }
 
 pub struct ArgMap {

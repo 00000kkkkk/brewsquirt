@@ -44,8 +44,8 @@ pub fn canonical(p: &Path) -> PathBuf {
     c
 }
 
-pub const EXTENSIONS: [&str; 10] = [
-    EXT, "js", "mjs", "cjs", "ts", "mts", "cts", "tsx", "jsx", "json",
+pub const EXTENSIONS: [&str; 11] = [
+    EXT, "js", "mjs", "cjs", "ts", "mts", "cts", "tsx", "jsx", "json", "node",
 ];
 
 pub fn is_typescript(name: &str) -> bool {
@@ -436,7 +436,7 @@ pub fn explicit_commonjs(dir: &Path) -> bool {
 pub fn is_commonjs(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
-        "cjs" | "cts" | "json" => return true,
+        "cjs" | "cts" | "json" | "node" => return true,
         "js" | "ts" | "jsx" | "tsx" => {}
         _ => return false,
     }

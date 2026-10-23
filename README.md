@@ -200,6 +200,7 @@ JavaSquirt 1.5.0 implements modern JavaScript as specified, passing 98% of test2
 - **Control flow**: `if`/`else`, `while`, `do`/`while`, `for`, `for...of`, `for...in`, `switch`, `break`, `continue`
 - **Errors**: `try`/`catch`/`finally`, `throw`, `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, `URIError`, `EvalError`, with stack traces
 - **TypeScript and JSX**: `.ts`, `.mts`, `.cts`, `.tsx` and `.jsx` files run directly with types stripped, plus `enum`, `namespace`, parameter properties, `tsconfig` path aliases and JSX for React, Preact and custom runtimes
+- **Native addons**: `.node` files built on Node-API load with `require`, so `@swc/core`, `lightningcss`, `rollup`, `sharp` and other napi-rs and node-addon-api packages run
 - **Resource management**: `using` and `await using` declarations, `DisposableStack`, `AsyncDisposableStack` and `SuppressedError`
 - **Classes**: constructors, methods, static methods, instance and static fields, `extends`, `super()`, `super.method()`, `new`, `instanceof`, private `#members`
 - **Operators**: arithmetic, `**`, bitwise and shifts including `>>>`, loose and strict equality, `&&`, `||`, `??`, optional chaining `?.`, ternary, `typeof`, `void`, `delete`, `in`, compound assignment including `&&=`, `||=`, `??=`, `++` and `--`
@@ -336,6 +337,7 @@ typos
 - [x] WebAssembly
 - [x] Explicit resource management with `using`
 - [x] TypeScript without a build step
+- [x] Native Node-API addons
 - [ ] 99% of test262
 - [ ] Own regular expression engine with lookbehind back-references and the `v` flag
 - [ ] WebSockets

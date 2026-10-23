@@ -1,0 +1,16 @@
+Counter,add,asyncSum,bufferSum,callBack,fail,hello,keep,makeObject,napiVersion,reverseBuffer,ticks,typeNames
+true
+hello world hello мир ✓
+5.5
+{ n: 1, s: 'x', arr: [ 1, 2, 3 ] }
+0436
+256
+cba
+true
+42
+rethrown from js
+true E_TEST native failure
+16 true Counter
+async 5000050000
+ticks 0 1 2 3 4
+exit 5

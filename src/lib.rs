@@ -11,6 +11,7 @@ pub mod io;
 pub mod jsstr;
 pub mod lexer;
 pub mod module;
+pub mod napi;
 pub mod number;
 pub mod object;
 pub mod parser;

@@ -40,6 +40,7 @@ pub fn install(vm: &mut Vm) {
     method(vm, &process, "chdir", 1, chdir);
     method(vm, &process, "nextTick", 1, next_tick);
     method(vm, &process, "hrtime", 1, hrtime);
+    method(vm, &process, "dlopen", 2, dlopen);
     method(vm, &process, "uptime", 0, uptime);
     method(vm, &process, "memoryUsage", 0, memory_usage);
     method(
@@ -79,6 +80,7 @@ pub fn install(vm: &mut Vm) {
     versions.set_own("v8", "12.4.254.21-node.21".into());
     versions.set_own("uv", "1.49.1".into());
     versions.set_own("modules", "127".into());
+    versions.set_own("napi", "9".into());
     versions.set_own("jsq", crate::VERSION.into());
     versions.set_own("javasquirt", crate::VERSION.into());
     process.set_own("versions", Value::Object(versions));
@@ -634,6 +636,22 @@ fn next_tick(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     expect_fn(vm, &f)?;
     vm.ticks
         .push_back((f, args.get(1..).unwrap_or(&[]).to_vec()));
+    Ok(Value::Undefined)
+}
+
+fn dlopen(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let module = arg(args, 0);
+    let file = vm.to_string(&arg(args, 1))?;
+    let file = file.to_string();
+    let path = match file.strip_prefix("file://") {
+        Some(rest) if cfg!(windows) => rest.trim_start_matches('/').to_string(),
+        Some(rest) => rest.to_string(),
+        None => file,
+    };
+    let current = vm.get_prop(&module, "exports")?;
+    let current = matches!(current, Value::Object(_)).then_some(current);
+    let exports = crate::napi::load_with(vm, std::path::Path::new(&path), current)?;
+    vm.set_prop(&module, "exports".into(), exports)?;
     Ok(Value::Undefined)
 }
 

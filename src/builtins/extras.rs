@@ -1349,6 +1349,13 @@ const runDisposeSteps = async (stack) => {
     }
   }
 }
+define(globalThis, "%napiFunction%", function (name, invoke) {
+  const f = function (...args) {
+    return invoke(new.target, this, args)
+  }
+  Object.defineProperty(f, "name", { value: name, configurable: true })
+  return f
+})
 define(globalThis, "%decorate%", function (decorators, target, key, desc) {
   const c = arguments.length
   let r = c < 3 ? target : desc === null ? (desc = Object.getOwnPropertyDescriptor(target, key)) : desc

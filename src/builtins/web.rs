@@ -3415,6 +3415,7 @@ pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
         IoEvent::Wake => {}
         IoEvent::WaitDone { id, result } => super::threads::handle_wait_done(vm, id, result),
         IoEvent::FetchChunk { id, data } => fetch_body_deliver(vm, id, Ok(data))?,
+        IoEvent::Napi(ev) => crate::napi::handle_event(vm, ev)?,
         IoEvent::FetchEnd { id, error } => fetch_body_deliver(vm, id, Err(error))?,
         IoEvent::Fetch { id, result } => {
             let Some(p) = vm.io_fetches.remove(&id) else {

@@ -56,6 +56,7 @@ pub enum IoEvent {
         id: u64,
         data: Vec<u8>,
     },
+    Napi(crate::napi::NapiEvent),
     FetchEnd {
         id: u64,
         error: Option<String>,

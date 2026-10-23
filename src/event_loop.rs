@@ -868,6 +868,10 @@ impl Vm {
         loop {
             self.run_microtasks()?;
             self.check_rejections()?;
+            if crate::napi::has_finalizers() {
+                crate::napi::run_finalizers(self);
+                continue;
+            }
             if !self.next_event()? {
                 return Ok(());
             }

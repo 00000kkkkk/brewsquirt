@@ -1614,6 +1614,16 @@ impl Vm {
         if let Some(ns) = self.modules.get(path) {
             return Ok(ns.clone());
         }
+        if path.extension().and_then(|e| e.to_str()) == Some("node") {
+            let value = crate::napi::load(self, path)?;
+            let module = self.new_object();
+            module.set_own("exports", value.clone());
+            module.set_own("id", Value::Str(key.clone()));
+            module.set_own("filename", Value::Str(key.clone()));
+            module.set_own("loaded", Value::Bool(true));
+            cache.set_own(key, Value::Object(module));
+            return Ok(value);
+        }
         let src = match std::fs::read_to_string(path) {
             Ok(s) => s,
             Err(e) => {
