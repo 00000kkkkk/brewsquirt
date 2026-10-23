@@ -137,3 +137,76 @@ fn test_command_runs_package_tests() {
     assert!(stdout.contains("1 passed, 1 failed"), "{stdout}");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn bins_and_trusted_install_scripts() {
+    let base = temp_dir("scripts");
+    write(
+        base.join("helper").join("package.json"),
+        r#"{"name":"helper","version":"1.0.0","bin":{"helper-say":"say.js"}}"#,
+    );
+    write(
+        base.join("helper").join("say.js"),
+        "#!/usr/bin/env node\nrequire(\"fs\").appendFileSync(process.argv[2], \"said \" + process.argv.slice(3).join(\" \") + \"\\n\")\n",
+    );
+    write(
+        base.join("hooked").join("package.json"),
+        r#"{"name":"hooked","version":"2.0.0","scripts":{"preinstall":"node step.js pre","postinstall":"node step.js post && helper-say log.txt from hooked"}}"#,
+    );
+    write(
+        base.join("hooked").join("step.js"),
+        "require(\"fs\").appendFileSync(\"log.txt\", [process.argv[2], process.env.npm_lifecycle_event, process.env.npm_package_name, process.env.npm_package_version].join(\" \") + \"\\n\")\n",
+    );
+    let app = base.join("app");
+    write(
+        app.join("squirt.json"),
+        r#"{"name":"app","version":"0.1.0","main":"index.jsq","dependencies":{"helper":"file:../helper","hooked":"file:../hooked"}}"#,
+    );
+    let log = app.join("nude_modules").join("hooked").join("log.txt");
+    let expected = "pre preinstall hooked 2.0.0\npost postinstall hooked 2.0.0\nsaid from hooked\n";
+
+    let out = vrotdaem(&app, &["gluboko"]);
+    let stdout = text(&out.stdout);
+    assert!(out.status.success(), "{stdout}{}", text(&out.stderr));
+    assert!(
+        stdout.contains("hooked has install scripts that were not run"),
+        "{stdout}"
+    );
+    assert!(!log.exists());
+    let bin = app.join("nude_modules").join(".bin");
+    let shim = if cfg!(windows) {
+        "helper-say.cmd"
+    } else {
+        "helper-say"
+    };
+    assert!(bin.join(shim).is_file());
+
+    let out = vrotdaem(&app, &["trust", "hooked"]);
+    assert!(
+        out.status.success(),
+        "{}{}",
+        text(&out.stdout),
+        text(&out.stderr)
+    );
+    assert_eq!(text(&std::fs::read(&log).unwrap()), expected);
+    let manifest = std::fs::read_to_string(app.join("squirt.json")).unwrap();
+    assert!(manifest.contains("\"trustedDependencies\""), "{manifest}");
+
+    let out = vrotdaem(&app, &["gluboko", "--force"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(!text(&out.stdout).contains("were not run"));
+    assert_eq!(text(&std::fs::read(&log).unwrap()), expected);
+
+    write(
+        base.join("hooked").join("package.json"),
+        r#"{"name":"hooked","version":"2.0.1","scripts":{"install":"node -e \"process.exit(3)\""}}"#,
+    );
+    let out = vrotdaem(&app, &["gluboko", "--force"]);
+    assert!(!out.status.success());
+    assert!(
+        text(&out.stderr).contains("the install script of hooked failed with exit code 3"),
+        "{}",
+        text(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}

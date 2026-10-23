@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `vrotdaem` installs `optionalDependencies`, skipping packages whose `os`, `cpu` or `libc` do not
   match the machine, and keeps the executable bit of files on Linux and macOS, so the native
   `esbuild` package runs its platform binary.
+- `vrotdaem` links the `bin` commands of installed packages into `nude_modules/.bin` and runs
+  `preinstall`, `install` and `postinstall` scripts of packages listed in `trustedDependencies`
+  in `squirt.json`, with `node` resolving to `jsq`. `vrotdaem trust <name>` adds a package to the
+  list and runs its scripts, and `gluboko` names the packages whose scripts it skipped.
 - Native addons: `require`, `import` and `process.dlopen` load `.node` files built on Node-API
   version 9, with wrapped objects and finalizers, references, promises, async work, threadsafe
   functions called from native threads, buffers and `BigInt`, plus the libuv thread primitives

@@ -143,6 +143,7 @@ Each archive has a matching `.sha256` checksum file. Unpack it and put `jsq` and
 | `vrotdaem add <name> [spec]`     | Add a dependency from npm (`lodash`, `lodash@^4`), or `npm:<name>@<range>`, `file:<path>`, `git:<url>[#ref]` |
 | `vrotdaem remove <name>`         | Remove a dependency                                             |
 | `vrotdaem gluboko [--force]`     | Install all dependencies into `nude_modules/`                   |
+| `vrotdaem trust <name>...`       | Allow and run the install scripts of these packages             |
 | `vrotdaem run [args...]`         | Run the manifest's `main` with the given arguments              |
 
 ```sh

@@ -1,4 +1,5 @@
 pub mod npm;
+pub mod scripts;
 pub mod semver;
 
 use crate::module::{DEPS_DIR, MANIFEST};
@@ -21,6 +22,12 @@ pub struct Manifest {
     pub main: String,
     #[serde(default)]
     pub dependencies: IndexMap<String, String>,
+    #[serde(
+        default,
+        rename = "trustedDependencies",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub trusted: Vec<String>,
 }
 
 fn default_version() -> String {
@@ -105,6 +112,8 @@ impl Spec {
 pub struct Report {
     pub injected: Vec<String>,
     pub skipped: Vec<String>,
+    pub untrusted: Vec<String>,
+    pub scripts: Vec<String>,
 }
 
 pub fn find_root(start: &Path) -> Option<PathBuf> {
@@ -148,6 +157,7 @@ pub fn init(root: &Path, name: Option<String>) -> Result<Manifest, String> {
         description: None,
         main: default_main(),
         dependencies: IndexMap::new(),
+        trusted: Vec::new(),
     };
     write_manifest(root, &m)?;
     let main = root.join(&m.main);
@@ -262,6 +272,8 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
         })
         .collect();
     let mut seen: Vec<PathBuf> = Vec::new();
+    let mut all: Vec<(String, PathBuf)> = Vec::new();
+    let mut fresh: Vec<(String, PathBuf, bool)> = Vec::new();
     let mut report = Report::default();
     while let Some((name, raw, base, holder, optional)) = queue.pop_front() {
         let spec = Spec::parse_for(Some(&name), &raw)?;
@@ -286,6 +298,7 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
             continue;
         }
         seen.push(dest.clone());
+        all.push((name.clone(), dest.clone()));
         let origin = match &spec {
             Spec::File(p) if p.is_absolute() => p.clone(),
             Spec::File(p) => base.join(p),
@@ -309,6 +322,7 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
                     if optional {
                         log(&format!("injecting {name} ({raw})"));
                     }
+                    fresh.push((name.clone(), dest.clone(), optional));
                     let nested = dest != top;
                     report.injected.push(if nested {
                         format!("{name}@{version} (nested)")
@@ -316,7 +330,10 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
                         format!("{name}@{version}")
                     });
                 }
-                Ok(None) => report.injected.push(name.clone()),
+                Ok(None) => {
+                    fresh.push((name.clone(), dest.clone(), optional));
+                    report.injected.push(name.clone());
+                }
                 Err(e) => {
                     let _ = fs::remove_dir_all(&dest);
                     if optional {
@@ -333,7 +350,48 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
             queue.push_back((n, s, origin.clone(), dest.clone(), opt));
         }
     }
+    for (name, dest) in &all {
+        if dest.is_dir() {
+            scripts::link_bins(name, dest)?;
+        }
+    }
+    for (name, dest, optional) in fresh.iter().rev() {
+        if !dest.is_dir() || !scripts::needs_scripts(dest) {
+            continue;
+        }
+        if !manifest.trusted.iter().any(|t| t == name) {
+            if !report.untrusted.contains(name) {
+                report.untrusted.push(name.clone());
+            }
+            continue;
+        }
+        match scripts::run_lifecycle(root, name, dest, &mut log) {
+            Ok(_) => report.scripts.push(name.clone()),
+            Err(e) if *optional => {
+                log(&format!("skipping optional {name}: {e}"));
+                let _ = fs::remove_dir_all(dest);
+            }
+            Err(e) => return Err(e),
+        }
+    }
     Ok(report)
+}
+
+pub fn trust(root: &Path, names: &[String], mut log: impl FnMut(&str)) -> Result<usize, String> {
+    let mut m = read_manifest(root)?;
+    for n in names {
+        if !m.trusted.contains(n) {
+            m.trusted.push(n.clone());
+        }
+    }
+    write_manifest(root, &m)?;
+    let mut ran = 0;
+    for n in names {
+        for dir in scripts::find_installed(root, n) {
+            ran += scripts::run_lifecycle(root, n, &dir, &mut log)?;
+        }
+    }
+    Ok(ran)
 }
 
 pub fn add(root: &Path, name: &str, spec: Option<&str>) -> Result<(String, String), String> {

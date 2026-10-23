@@ -32,6 +32,13 @@ enum Command {
     Add { name: String, spec: Option<String> },
     #[command(about = "Remove a dependency from squirt.json and nude_modules")]
     Remove { name: String },
+    #[command(
+        about = "Allow the install scripts of these packages, record them in trustedDependencies and run them now"
+    )]
+    Trust {
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
     #[command(about = "Inject every dependency deep into nude_modules")]
     Gluboko {
         #[arg(long, help = "Wipe nude_modules and inject everything again")]
@@ -80,6 +87,11 @@ fn install(root: &Path, force: bool) -> Result<(), String> {
     for name in &report.skipped {
         println!("   {name} is already deep inside, use --force to go again");
     }
+    for name in &report.untrusted {
+        println!(
+            "   {name} has install scripts that were not run, `vrotdaem trust {name}` runs them"
+        );
+    }
     let n = report.injected.len();
     println!(
         "done: {n} dependenc{} injected deep into nude_modules",
@@ -115,6 +127,15 @@ fn execute(command: Command) -> Result<ExitCode, String> {
         Command::Gluboko { force } => {
             let root = root()?;
             install(&root, force)?;
+        }
+        Command::Trust { names } => {
+            let root = root()?;
+            let ran = pm::trust(&root, &names, |line| println!("\u{1f4a6} {line}"))?;
+            println!(
+                "trusted {}, {ran} install script{} ran",
+                names.join(", "),
+                if ran == 1 { "" } else { "s" }
+            );
         }
         Command::Run { args } => {
             let root = root()?;

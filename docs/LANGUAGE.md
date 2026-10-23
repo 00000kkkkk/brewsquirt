@@ -2296,6 +2296,7 @@ error or an uncaught exception.
 | `vrotdaem init [--name <n>]`   | Creates `squirt.json` in the current directory.                           |
 | `vrotdaem add <name> [spec]`   | Adds or replaces a dependency in `squirt.json`; without a spec the name is looked up on npm and pinned to `^latest`. |
 | `vrotdaem remove <name>`       | Removes a dependency from `squirt.json`.                                  |
+| `vrotdaem trust <name>...`     | Adds packages to `trustedDependencies` and runs their install scripts.    |
 | `vrotdaem gluboko`             | Installs every dependency into `nude_modules/<name>`.                     |
 | `vrotdaem gluboko --force`     | Deletes `nude_modules/` and reinstalls everything from scratch.           |
 | `vrotdaem run [args...]`       | Runs the manifest's `main` with `jsq` semantics, passing `args` along.    |
@@ -2312,7 +2313,20 @@ Dependency specs:
 npm packages bring their `dependencies` and their `optionalDependencies`; optional packages
 whose `os`, `cpu` or `libc` fields exclude the current machine are skipped, so tools that ship a
 platform binary as an optional package, such as `esbuild`, install the binary they need.
-Executable files keep their mode on Linux and macOS. Install scripts are not run.
+Executable files keep their mode on Linux and macOS.
+
+The `bin` commands of installed packages are linked into `nude_modules/.bin`, as `.cmd` files on
+Windows and shell scripts elsewhere, and JavaScript commands run with `jsq`.
+
+Install scripts (`preinstall`, `install` and `postinstall`) only run for packages listed in
+`trustedDependencies`, because they execute arbitrary code from the registry. `gluboko` names
+every package whose scripts it skipped, and `vrotdaem trust <name>` records the package and runs
+its scripts at once. Scripts run in the package directory through `sh` or `cmd`, with the
+`nude_modules/.bin` directories on `PATH`, `node` resolving to `jsq`, and the usual
+`npm_lifecycle_event`, `npm_package_name` and `npm_package_version` variables. A failing script
+stops the installation, unless it belongs to an optional dependency, which is then left out.
+Packages whose only script is `node-gyp-build` and that already ship `prebuilds` need no
+scripts, and packages that have to be compiled with `node-gyp` are not built.
 
 ### `squirt.json`
 
@@ -2323,8 +2337,10 @@ Executable files keep their mode on Linux and macOS. Install scripts are not run
   "main": "main.jsq",
   "dependencies": {
     "utils": "file:../utils",
-    "left-pad": "git:https://github.com/someone/left-pad#v1.0.0"
-  }
+    "left-pad": "git:https://github.com/someone/left-pad#v1.0.0",
+    "sqlite3": "npm:sqlite3@^5.1.7"
+  },
+  "trustedDependencies": ["sqlite3"]
 }
 ```
 
@@ -2334,6 +2350,7 @@ Executable files keep their mode on Linux and macOS. Install scripts are not run
 | `version`      | Package version, SemVer recommended                             |
 | `main`         | Entry file, used by `vrotdaem run` and by bare-name imports     |
 | `dependencies` | Map from package name to dependency spec                        |
+| `trustedDependencies` | Packages whose install scripts may run                   |
 
 ## Not yet supported
 
