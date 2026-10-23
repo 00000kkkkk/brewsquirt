@@ -1,0 +1,7 @@
+{
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "mini",
+    "paths": { "mini/jsx-runtime": ["./runtime.ts"] }
+  }
+}

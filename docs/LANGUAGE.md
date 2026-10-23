@@ -1585,8 +1585,8 @@ true
 
 ## TypeScript
 
-`.ts`, `.mts` and `.cts` files run directly: the parser reads TypeScript syntax and drops the
-types, so there is no build step and no type checking (run `tsc --noEmit` for that). `.mts` files
+`.ts`, `.mts`, `.cts` and `.tsx` files run directly: the parser reads TypeScript syntax and drops
+the types, so there is no build step and no type checking (run `tsc --noEmit` for that). `.mts` files
 are ES modules, `.cts` files are CommonJS, and `.ts` files follow the same rules as `.js`.
 
 Supported: type annotations everywhere, interfaces, type aliases, generics on functions, classes,
@@ -1598,8 +1598,7 @@ functions and type predicates. Constructor parameter properties become field ass
 `enum`, `const enum` and `namespace` compile to objects like `tsc` emits them. `import type`,
 `export type` and `type` specifiers are removed, and so are imported names that are only used as
 types; a re-export that names a type is ignored instead of failing to link. `import x =
-require("y")` and `export = value` work in CommonJS files. Decorators and JSX (`.tsx`) are not
-supported.
+require("y")` and `export = value` work in CommonJS files. Decorators are not supported.
 
 ```ts
 interface User {
@@ -1625,6 +1624,29 @@ console.log(admin.describe(), Level.Admin satisfies number)
 
 ```text
 ann (Admin) 10
+```
+
+### JSX
+
+`.jsx` and `.tsx` files may contain JSX. Elements compile to the automatic runtime by default:
+calls to `jsx` and `jsxs` from `react/jsx-runtime`, imported on demand, so React 17 and later
+render with `react-dom/server` as they do under Node. `"jsx": "react"` in the nearest
+`tsconfig.json` or `jsconfig.json` switches to classic `React.createElement` calls, and
+`jsxFactory`, `jsxFragmentFactory` and `jsxImportSource` (for Preact, Hono or a runtime of your
+own) are honoured, as are the `@jsx`, `@jsxFrag`, `@jsxImportSource` and `@jsxRuntime` comment
+pragmas. Fragments, spread attributes and children, `key`, member and namespaced tag names, type
+arguments on tags (`<List<Item> items={x} />`) and generic arrow functions written `<T,>` follow
+TypeScript's rules; text is trimmed with the JSX whitespace rules and HTML entities are decoded.
+
+```jsx
+/** @jsx h */
+const h = (tag, props, ...children) => `<${tag}>${children.flat().join("")}</${tag}>`
+const items = ["read", "write"]
+console.log(<ul>{items.map((x) => <li>{x} &amp; more</li>)}</ul>)
+```
+
+```text
+<ul><li>read & more</li><li>write & more</li></ul>
 ```
 
 ## Binary data
@@ -2293,6 +2315,6 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
 - Private names are shared by all evaluations of a class body, so instances of two classes made
   by the same factory can access each other's private members
 - Several realms in one thread (`vm` contexts share one realm)
-- `Temporal`, `ShadowRealm`, decorators, and JSX/TSX
+- `Temporal`, `ShadowRealm` and decorators
 - Tracing garbage collection
 - JIT compilation

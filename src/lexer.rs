@@ -5,6 +5,13 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, SyntaxError> {
     tokenize_goal(src, false)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Top,
+    Template,
+    JsxExpr,
+}
+
 pub fn tokenize_from(
     src: &str,
     html: bool,
@@ -12,6 +19,7 @@ pub fn tokenize_from(
     line: u32,
     col: u32,
     regex_first: bool,
+    jsx: (bool, bool),
 ) -> Result<Vec<Token>, SyntaxError> {
     let chars: Vec<char> = src.chars().collect();
     let mut offsets = Vec::with_capacity(chars.len() + 1);
@@ -38,13 +46,19 @@ pub fn tokenize_from(
         in_template: false,
         sep_seen: false,
         force_regex: Some(regex_first),
+        jsx: jsx.0,
+        jsx_ts: jsx.1,
     };
     let mut out = Vec::new();
-    lexer.lex_into(&mut out, false)?;
+    lexer.lex_into(&mut out, Mode::Top)?;
     Ok(out)
 }
 
 pub fn tokenize_goal(src: &str, html: bool) -> Result<Vec<Token>, SyntaxError> {
+    tokenize_jsx(src, html, false, false)
+}
+
+pub fn tokenize_jsx(src: &str, html: bool, jsx: bool, ts: bool) -> Result<Vec<Token>, SyntaxError> {
     let chars: Vec<char> = src.chars().collect();
     let mut offsets = Vec::with_capacity(chars.len() + 1);
     let mut b = 0u32;
@@ -66,13 +80,52 @@ pub fn tokenize_goal(src: &str, html: bool) -> Result<Vec<Token>, SyntaxError> {
         in_template: false,
         sep_seen: false,
         force_regex: None,
+        jsx,
+        jsx_ts: ts,
     };
     if lexer.chars.first() == Some(&'#') && lexer.chars.get(1) == Some(&'!') {
         lexer.skip_line();
     }
     let mut out = Vec::new();
-    lexer.lex_into(&mut out, false)?;
+    lexer.lex_into(&mut out, Mode::Top)?;
     Ok(out)
+}
+
+pub fn decode_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i + 1..];
+        let end = tail.find(';').filter(|&e| e > 0 && e <= 10);
+        let decoded = end.and_then(|e| {
+            let name = &tail[..e];
+            let code =
+                if let Some(hex) = name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
+                    u32::from_str_radix(hex, 16).ok()
+                } else if let Some(dec) = name.strip_prefix('#') {
+                    dec.parse::<u32>().ok()
+                } else {
+                    crate::entities::lookup(name)
+                };
+            code.and_then(char::from_u32).map(|c| (c, e))
+        });
+        match decoded {
+            Some((c, e)) => {
+                out.push(c);
+                rest = &tail[e + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = tail;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn regex_allowed(prev: Option<&Tok>) -> bool {
@@ -103,6 +156,7 @@ fn regex_allowed(prev: Option<&Tok>) -> bool {
                 | "default"
         ),
         Some(Tok::Punct(p)) => !matches!(p, P::RParen | P::RBracket | P::PlusPlus | P::MinusMinus),
+        Some(Tok::JsxText(_)) => false,
         Some(Tok::Eof) => true,
     }
 }
@@ -154,6 +208,8 @@ struct Lexer<'a> {
     in_template: bool,
     sep_seen: bool,
     force_regex: Option<bool>,
+    jsx: bool,
+    jsx_ts: bool,
 }
 
 fn ascii_ident(c: char) -> bool {
@@ -295,7 +351,8 @@ impl<'a> Lexer<'a> {
         SyntaxError::new(msg, self.line, self.col)
     }
 
-    fn lex_into(&mut self, out: &mut Vec<Token>, in_template: bool) -> Result<(), SyntaxError> {
+    fn lex_into(&mut self, out: &mut Vec<Token>, mode: Mode) -> Result<(), SyntaxError> {
+        let in_template = mode == Mode::Template;
         let mut depth = 0usize;
         let mut nl = true;
         loop {
@@ -305,6 +362,9 @@ impl<'a> Lexer<'a> {
             let Some(c) = self.peek() else {
                 if in_template {
                     return Err(self.err("Unterminated template literal"));
+                }
+                if mode == Mode::JsxExpr {
+                    return Err(self.err("Unterminated JSX contents"));
                 }
                 out.push(Token {
                     tok: Tok::Eof,
@@ -336,6 +396,24 @@ impl<'a> Lexer<'a> {
                     }
                     depth -= 1;
                 }
+            }
+            if mode == Mode::JsxExpr {
+                if c == '{' {
+                    depth += 1;
+                } else if c == '}' {
+                    if depth == 0 {
+                        let begin = self.pos;
+                        self.bump();
+                        self.jsx_push(out, Tok::Punct(P::RBrace), begin, line, col, nl);
+                        return Ok(());
+                    }
+                    depth -= 1;
+                }
+            }
+            if c == '<' && self.jsx && self.jsx_start(out) {
+                self.lex_jsx_element(out, nl)?;
+                nl = false;
+                continue;
             }
             let begin = self.pos;
             let forced = self.force_regex.take();
@@ -371,6 +449,307 @@ impl<'a> Lexer<'a> {
                 end: self.offsets[self.pos],
             });
             nl = false;
+        }
+    }
+
+    fn jsx_push(
+        &self,
+        out: &mut Vec<Token>,
+        tok: Tok,
+        begin: usize,
+        line: u32,
+        col: u32,
+        nl: bool,
+    ) {
+        out.push(Token {
+            tok,
+            line,
+            col,
+            nl_before: nl,
+            escaped: false,
+            start: self.offsets[begin],
+            end: self.offsets[self.pos],
+        });
+    }
+
+    fn jsx_punct(&mut self, out: &mut Vec<Token>, p: P) {
+        let (line, col, begin) = (self.line, self.col, self.pos);
+        self.bump();
+        self.jsx_push(out, Tok::Punct(p), begin, line, col, false);
+    }
+
+    fn jsx_start(&self, out: &[Token]) -> bool {
+        if !regex_allowed(out.last().map(|t| &t.tok)) {
+            return false;
+        }
+        if let [.., before, last] = out {
+            if matches!(last.tok, Tok::Punct(P::Bang))
+                && last.start == before.end
+                && matches!(
+                    before.tok,
+                    Tok::Ident(_) | Tok::Punct(P::RParen | P::RBracket)
+                )
+            {
+                return false;
+            }
+        }
+        let mut i = self.pos + 1;
+        while self.chars.get(i).is_some_and(|c| *c == ' ' || *c == '\t') {
+            i += 1;
+        }
+        match self.chars.get(i).copied() {
+            Some('>') => true,
+            Some(c) if is_id_start(c) => {
+                if !self.jsx_ts {
+                    return true;
+                }
+                let mut j = i;
+                while self.chars.get(j).is_some_and(|c| is_id_continue(*c)) {
+                    j += 1;
+                }
+                let mut k = j;
+                while self.chars.get(k).is_some_and(|c| c.is_whitespace()) {
+                    k += 1;
+                }
+                if self.chars.get(k) == Some(&',') {
+                    return false;
+                }
+                let word: String = self.chars[k..(k + 7).min(self.chars.len())]
+                    .iter()
+                    .collect();
+                if word == "extends" && k > j {
+                    let mut m = k + 7;
+                    while self.chars.get(m).is_some_and(|c| c.is_whitespace()) {
+                        m += 1;
+                    }
+                    if self
+                        .chars
+                        .get(m)
+                        .is_some_and(|c| !matches!(c, '=' | '>' | '/'))
+                    {
+                        return false;
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn jsx_name(&mut self) -> Option<String> {
+        let c = self.peek()?;
+        if !is_id_start(c) {
+            return None;
+        }
+        let mut s = String::new();
+        while let Some(c) = self.peek() {
+            if is_id_continue(c) || c == '-' {
+                s.push(c);
+                self.bump();
+            } else {
+                break;
+            }
+        }
+        Some(s)
+    }
+
+    fn jsx_ident(&mut self, out: &mut Vec<Token>) -> Result<(), SyntaxError> {
+        let (line, col, begin) = (self.line, self.col, self.pos);
+        let Some(name) = self.jsx_name() else {
+            return Err(self.err("Expected a JSX identifier"));
+        };
+        self.jsx_push(out, Tok::Ident(name.into()), begin, line, col, false);
+        Ok(())
+    }
+
+    fn lex_jsx_tag_name(&mut self, out: &mut Vec<Token>) -> Result<(), SyntaxError> {
+        self.jsx_ident(out)?;
+        if self.peek() == Some(':') {
+            self.jsx_punct(out, P::Colon);
+            return self.jsx_ident(out);
+        }
+        while self.peek() == Some('.') {
+            self.jsx_punct(out, P::Dot);
+            self.jsx_ident(out)?;
+        }
+        Ok(())
+    }
+
+    fn lex_jsx_element(&mut self, out: &mut Vec<Token>, nl: bool) -> Result<(), SyntaxError> {
+        let (line, col, begin) = (self.line, self.col, self.pos);
+        self.bump();
+        self.jsx_push(out, Tok::Punct(P::JsxOpen), begin, line, col, nl);
+        self.skip_trivia()?;
+        if self.peek() == Some('>') {
+            self.jsx_punct(out, P::Gt);
+            return self.lex_jsx_children(out);
+        }
+        self.lex_jsx_tag_name(out)?;
+        if self.jsx_ts {
+            self.skip_trivia()?;
+            if self.peek() == Some('<') {
+                self.lex_jsx_type_args(out)?;
+            }
+        }
+        loop {
+            self.skip_trivia()?;
+            let (line, col, begin) = (self.line, self.col, self.pos);
+            match self.peek() {
+                None => return Err(SyntaxError::new("Unterminated JSX contents", line, col)),
+                Some('/') => {
+                    self.jsx_punct(out, P::Slash);
+                    self.skip_trivia()?;
+                    if self.peek() != Some('>') {
+                        return Err(self.err("Expected '>'"));
+                    }
+                    self.jsx_punct(out, P::Gt);
+                    return Ok(());
+                }
+                Some('>') => {
+                    self.jsx_punct(out, P::Gt);
+                    return self.lex_jsx_children(out);
+                }
+                Some('{') => {
+                    self.jsx_punct(out, P::LBrace);
+                    self.lex_into(out, Mode::JsxExpr)?;
+                }
+                Some(_) => {
+                    let Some(mut name) = self.jsx_name() else {
+                        return Err(self.err("Invalid JSX attribute"));
+                    };
+                    if self.peek() == Some(':') {
+                        self.bump();
+                        if let Some(n2) = self.jsx_name() {
+                            name = format!("{name}:{n2}");
+                        }
+                    }
+                    self.jsx_push(out, Tok::Ident(name.into()), begin, line, col, false);
+                    self.skip_trivia()?;
+                    if self.peek() == Some('=') {
+                        self.jsx_punct(out, P::Eq);
+                        self.skip_trivia()?;
+                        let (line, col, begin) = (self.line, self.col, self.pos);
+                        match self.peek() {
+                            Some(q @ ('"' | '\'')) => {
+                                self.bump();
+                                let mut s = String::new();
+                                loop {
+                                    match self.bump() {
+                                        None => {
+                                            return Err(SyntaxError::new(
+                                                "Unterminated string constant",
+                                                line,
+                                                col,
+                                            ));
+                                        }
+                                        Some(c) if c == q => break,
+                                        Some(c) => s.push(c),
+                                    }
+                                }
+                                self.jsx_push(
+                                    out,
+                                    Tok::Str(decode_entities(&s).into()),
+                                    begin,
+                                    line,
+                                    col,
+                                    false,
+                                );
+                            }
+                            Some('{') => {
+                                self.jsx_punct(out, P::LBrace);
+                                self.lex_into(out, Mode::JsxExpr)?;
+                            }
+                            Some('<') => self.lex_jsx_element(out, false)?,
+                            _ => {
+                                return Err(self.err(
+                                    "JSX value should be either an expression or a quoted JSX text",
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn lex_jsx_type_args(&mut self, out: &mut Vec<Token>) -> Result<(), SyntaxError> {
+        let mut depth = 0usize;
+        loop {
+            self.skip_trivia()?;
+            let (line, col, begin) = (self.line, self.col, self.pos);
+            match self.peek() {
+                None => return Err(SyntaxError::new("Unterminated JSX contents", line, col)),
+                Some('<') => {
+                    self.jsx_punct(out, P::Lt);
+                    depth += 1;
+                }
+                Some('>') => {
+                    self.jsx_punct(out, P::Gt);
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Ok(());
+                    }
+                }
+                Some(c) => {
+                    let tok = self.next_token(c)?;
+                    self.jsx_push(out, tok, begin, line, col, false);
+                }
+            }
+        }
+    }
+
+    fn lex_jsx_children(&mut self, out: &mut Vec<Token>) -> Result<(), SyntaxError> {
+        loop {
+            let (line, col, begin) = (self.line, self.col, self.pos);
+            let mut text = String::new();
+            while let Some(c) = self.peek() {
+                if c == '<' || c == '{' {
+                    break;
+                }
+                text.push(c);
+                self.bump();
+            }
+            if !text.is_empty() {
+                self.jsx_push(
+                    out,
+                    Tok::JsxText(decode_entities(&text).into()),
+                    begin,
+                    line,
+                    col,
+                    false,
+                );
+            }
+            let (line, col, begin) = (self.line, self.col, self.pos);
+            match self.peek() {
+                None => return Err(SyntaxError::new("Unterminated JSX contents", line, col)),
+                Some('{') => {
+                    self.jsx_punct(out, P::LBrace);
+                    self.lex_into(out, Mode::JsxExpr)?;
+                }
+                _ => {
+                    let mut i = self.pos + 1;
+                    while self.chars.get(i).is_some_and(|c| c.is_whitespace()) {
+                        i += 1;
+                    }
+                    if self.chars.get(i) == Some(&'/') {
+                        self.bump();
+                        self.jsx_push(out, Tok::Punct(P::JsxOpen), begin, line, col, false);
+                        self.skip_trivia()?;
+                        self.jsx_punct(out, P::Slash);
+                        self.skip_trivia()?;
+                        if self.peek() != Some('>') {
+                            self.lex_jsx_tag_name(out)?;
+                            self.skip_trivia()?;
+                        }
+                        if self.peek() != Some('>') {
+                            return Err(self.err("Expected '>'"));
+                        }
+                        self.jsx_punct(out, P::Gt);
+                        return Ok(());
+                    }
+                    self.lex_jsx_element(out, false)?;
+                }
+            }
         }
     }
 
@@ -862,7 +1241,7 @@ impl<'a> Lexer<'a> {
                         JsStr::from(std::mem::take(&mut raw)),
                     ));
                     let mut toks = Vec::new();
-                    self.lex_into(&mut toks, true)?;
+                    self.lex_into(&mut toks, Mode::Template)?;
                     parts.push(TemplatePart::Expr(toks));
                 }
                 Some('\r') => {

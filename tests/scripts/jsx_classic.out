@@ -1,0 +1,2 @@
+{"tag":"group","props":null,"children":[{"tag":"Badge","props":{"text":"new"},"children":[]},{"tag":"a","props":{"href":"/item/2"},"children":["link"]},[{"tag":"em","props":{"key":1},"children":[1]},{"tag":"em","props":{"key":2},"children":[2]}]]}
+{"tag":"p","props":{"label":{"tag":"i","props":null,"children":["inner"]}},"children":[]}

@@ -199,7 +199,7 @@ JavaSquirt 1.5.0 implements modern JavaScript as specified, passing 98% of test2
 - **Spread and destructuring**: spread in calls, arrays and objects; object and array destructuring with defaults and rest in `let`, `const` and parameters
 - **Control flow**: `if`/`else`, `while`, `do`/`while`, `for`, `for...of`, `for...in`, `switch`, `break`, `continue`
 - **Errors**: `try`/`catch`/`finally`, `throw`, `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, `URIError`, `EvalError`, with stack traces
-- **TypeScript**: `.ts`, `.mts` and `.cts` files run directly with types stripped, plus `enum`, `namespace`, parameter properties and `tsconfig` path aliases
+- **TypeScript and JSX**: `.ts`, `.mts`, `.cts`, `.tsx` and `.jsx` files run directly with types stripped, plus `enum`, `namespace`, parameter properties, `tsconfig` path aliases and JSX for React, Preact and custom runtimes
 - **Resource management**: `using` and `await using` declarations, `DisposableStack`, `AsyncDisposableStack` and `SuppressedError`
 - **Classes**: constructors, methods, static methods, instance and static fields, `extends`, `super()`, `super.method()`, `new`, `instanceof`, private `#members`
 - **Operators**: arithmetic, `**`, bitwise and shifts including `>>>`, loose and strict equality, `&&`, `||`, `??`, optional chaining `?.`, ternary, `typeof`, `void`, `delete`, `in`, compound assignment including `&&=`, `||=`, `??=`, `++` and `--`

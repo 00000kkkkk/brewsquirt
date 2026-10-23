@@ -62,6 +62,7 @@ pub enum P {
     PipePipeEq,
     Hash,
     At,
+    JsxOpen,
 }
 
 pub const PUNCTUATORS: &[(&str, P)] = &[
@@ -124,6 +125,7 @@ pub const PUNCTUATORS: &[(&str, P)] = &[
     (".", P::Dot),
     ("#", P::Hash),
     ("@", P::At),
+    ("<", P::JsxOpen),
 ];
 
 impl P {
@@ -151,6 +153,7 @@ pub enum Tok {
     Regex(JsStr, JsStr),
     Ident(JsStr),
     Punct(P),
+    JsxText(JsStr),
     Eof,
 }
 
@@ -175,6 +178,7 @@ impl Token {
             Tok::Regex(p, f) => format!("/{p}/{f}"),
             Tok::Ident(s) => s.to_string(),
             Tok::Punct(p) => p.as_str().to_string(),
+            Tok::JsxText(_) => "JSX text".to_string(),
             Tok::Eof => "end of input".to_string(),
         }
     }

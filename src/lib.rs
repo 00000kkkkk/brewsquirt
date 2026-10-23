@@ -3,6 +3,7 @@ pub mod bigint;
 pub mod builtins;
 pub mod bytecode;
 pub mod compiler;
+pub mod entities;
 pub mod event_loop;
 pub mod gc;
 pub mod inspect;

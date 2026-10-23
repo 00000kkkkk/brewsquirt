@@ -22,7 +22,7 @@ fn starts_expression(tok: &Tok) -> bool {
                 | P::Minus
                 | P::Ellipsis
         ),
-        Tok::Eof => false,
+        Tok::JsxText(_) | Tok::Eof => false,
     }
 }
 
@@ -146,8 +146,19 @@ impl Parser {
         }
     }
 
+    pub(super) fn ts_arrow_return_type(&mut self) -> R<()> {
+        let cp = self.ts_checkpoint();
+        if self.ts_type().is_ok() && self.is(P::Arrow) {
+            return Ok(());
+        }
+        self.ts_restore(cp);
+        self.ts_arrow_ret = true;
+        self.ts_type()
+    }
+
     pub(super) fn ts_type(&mut self) -> R<()> {
-        if self.ts_fn_type_ahead() {
+        let arrow_ret = std::mem::take(&mut self.ts_arrow_ret);
+        if !arrow_ret && self.ts_fn_type_ahead() {
             self.eat_kw("abstract");
             self.eat_kw("new");
             if self.is(P::Lt) {
@@ -407,7 +418,8 @@ impl Parser {
         }
         let cp = self.ts_checkpoint();
         self.pos = after_paren + 1;
-        let ok = self.ts_type().is_ok() && self.is(P::Arrow) && !self.peek().nl_before;
+        let ok = self.ts_arrow_return_type().is_ok() && self.is(P::Arrow) && !self.peek().nl_before;
+        self.ts_arrow_ret = false;
         self.ts_restore(cp);
         ok
     }

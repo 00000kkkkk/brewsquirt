@@ -7,7 +7,10 @@ use std::rc::Rc;
 
 type R<T> = Result<T, SyntaxError>;
 
+mod jsx;
 mod ts;
+
+pub use jsx::JsxOptions;
 
 const RESERVED: &[&str] = &[
     "break",
@@ -75,19 +78,27 @@ const STRICT_RESERVED: &[&str] = &[
 type ExportList = Vec<(JsStr, JsStr)>;
 
 pub fn parse(src: &str) -> R<Vec<Stmt>> {
-    parse_goal(src, false, false)
+    parse_goal(src, false, false, None)
 }
 
 pub fn parse_script(src: &str) -> R<Vec<Stmt>> {
-    parse_goal(src, true, false)
+    parse_goal(src, true, false, None)
 }
 
 pub fn parse_ts(src: &str, script: bool) -> R<Vec<Stmt>> {
-    parse_goal(src, script, true)
+    parse_goal(src, script, true, None)
 }
 
-fn parse_goal(src: &str, script: bool, ts: bool) -> R<Vec<Stmt>> {
-    let toks = crate::lexer::tokenize_goal(src, script)?;
+pub fn parse_full(src: &str, script: bool, ts: bool, jsx: Option<JsxOptions>) -> R<Vec<Stmt>> {
+    parse_goal(src, script, ts, jsx)
+}
+
+fn parse_goal(src: &str, script: bool, ts: bool, jsx: Option<JsxOptions>) -> R<Vec<Stmt>> {
+    let jsx = jsx.map(|mut o| {
+        o.apply_pragmas(src);
+        o
+    });
+    let toks = crate::lexer::tokenize_jsx(src, script, jsx.is_some(), ts)?;
     let mut parser = Parser {
         pairs: bracket_pairs(&toks),
         script,
@@ -122,8 +133,12 @@ fn parse_goal(src: &str, script: bool, ts: bool) -> R<Vec<Stmt>> {
         ts_bodyless: false,
         ts_ambient: 0,
         ts_in_extends: false,
+        ts_arrow_ret: false,
+        jsx: None,
+        jsx_used: false,
     };
     parser.ts = ts;
+    parser.jsx = jsx;
     parser.strict = !script || parser.has_use_strict_from(0);
     if script && parser.strict {
         parser.check_prologue_octal(0)?;
@@ -167,6 +182,9 @@ pub fn parse_eval(src: &str, ctx: &EvalCtx) -> R<Vec<Stmt>> {
         ts_bodyless: false,
         ts_ambient: 0,
         ts_in_extends: false,
+        ts_arrow_ret: false,
+        jsx: None,
+        jsx_used: false,
     };
     parser.strict = ctx.strict || parser.has_use_strict_from(0);
     if parser.strict {
@@ -243,6 +261,9 @@ struct Parser {
     ts_bodyless: bool,
     ts_ambient: u32,
     ts_in_extends: bool,
+    ts_arrow_ret: bool,
+    jsx: Option<JsxOptions>,
+    jsx_used: bool,
 }
 
 impl Parser {
@@ -257,8 +278,15 @@ impl Parser {
     fn relex(&mut self, as_regex: bool) -> R<()> {
         let t = &self.toks[self.pos];
         let (start, line, col, nl) = (t.start, t.line, t.col, t.nl_before);
-        let mut new =
-            crate::lexer::tokenize_from(&self.src, self.script, start, line, col, as_regex)?;
+        let mut new = crate::lexer::tokenize_from(
+            &self.src,
+            self.script,
+            start,
+            line,
+            col,
+            as_regex,
+            (self.jsx.is_some(), self.ts),
+        )?;
         if let Some(first) = new.first_mut() {
             first.nl_before = nl;
         }
@@ -592,6 +620,9 @@ impl Parser {
         }
         if self.ts {
             self.ts_elide_imports(&mut out);
+        }
+        if let Some(s) = self.jsx_runtime_import() {
+            out.insert(0, s);
         }
         if let Some((id, is_async)) = self.using_scope.take() {
             let line = self.line();
@@ -2553,8 +2584,8 @@ impl Parser {
             let r = self.params();
             self.ts_props = saved_props;
             let r = r?;
-            if self.ts {
-                self.ts_annotation()?;
+            if self.ts && self.eat(P::Colon) {
+                self.ts_arrow_return_type()?;
             }
             r
         } else {
@@ -3422,6 +3453,9 @@ impl Parser {
                         ts_bodyless: false,
                         ts_ambient: self.ts_ambient,
                         ts_in_extends: false,
+                        ts_arrow_ret: false,
+                        jsx: self.jsx.clone(),
+                        jsx_used: false,
                     };
                     if sub.is_eof() {
                         return Err(sub.error("Unexpected token '}'"));
@@ -3429,6 +3463,7 @@ impl Parser {
                     let e = sub.expression()?;
                     self.using_ids = sub.using_ids;
                     self.ts_refs.extend(std::mem::take(&mut sub.ts_refs));
+                    self.jsx_used |= sub.jsx_used;
                     if !sub.is_eof() {
                         return Err(sub.unexpected());
                     }
@@ -3445,6 +3480,9 @@ impl Parser {
     }
 
     fn primary(&mut self) -> R<Expr> {
+        if self.is(P::JsxOpen) {
+            return self.jsx_element();
+        }
         let line = self.line();
         if matches!(
             self.peek().tok,

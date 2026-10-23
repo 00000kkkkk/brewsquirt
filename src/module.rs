@@ -44,23 +44,78 @@ pub fn canonical(p: &Path) -> PathBuf {
     c
 }
 
-pub const EXTENSIONS: [&str; 8] = [EXT, "js", "mjs", "cjs", "ts", "mts", "cts", "json"];
+pub const EXTENSIONS: [&str; 10] = [
+    EXT, "js", "mjs", "cjs", "ts", "mts", "cts", "tsx", "jsx", "json",
+];
 
 pub fn is_typescript(name: &str) -> bool {
-    (name.ends_with(".ts") || name.ends_with(".mts") || name.ends_with(".cts"))
+    (name.ends_with(".ts")
+        || name.ends_with(".mts")
+        || name.ends_with(".cts")
+        || name.ends_with(".tsx"))
         && !name.ends_with(".d.ts")
+}
+
+pub fn is_jsx(name: &str) -> bool {
+    name.ends_with(".jsx") || name.ends_with(".tsx")
 }
 
 fn typescript_sibling(p: &Path) -> Option<PathBuf> {
     let ext = p.extension()?.to_str()?;
-    let ts = match ext {
-        "js" => "ts",
-        "mjs" => "mts",
-        "cjs" => "cts",
+    let candidates: &[&str] = match ext {
+        "js" => &["ts", "tsx"],
+        "jsx" => &["tsx"],
+        "mjs" => &["mts"],
+        "cjs" => &["cts"],
         _ => return None,
     };
-    let q = p.with_extension(ts);
-    q.is_file().then_some(q)
+    candidates
+        .iter()
+        .map(|e| p.with_extension(e))
+        .find(|q| q.is_file())
+}
+
+pub fn jsx_options(dir: &Path) -> crate::parser::JsxOptions {
+    let mut opts = crate::parser::JsxOptions::default();
+    let mut cur = Some(dir.to_path_buf());
+    while let Some(d) = cur {
+        if d.file_name()
+            .is_some_and(|n| n == DEPS_DIR || n == NODE_DEPS_DIR)
+        {
+            break;
+        }
+        let file = ["tsconfig.json", "jsconfig.json"]
+            .iter()
+            .map(|n| d.join(n))
+            .find(|f| f.is_file());
+        if let Some(f) = file {
+            let mut chain = Vec::new();
+            read_config_chain(&f, 0, &mut chain);
+            let get = |key: &str| {
+                chain.iter().find_map(|(_, v)| {
+                    v.get("compilerOptions")
+                        .and_then(|o| o.get(key))
+                        .and_then(|x| x.as_str())
+                        .map(str::to_string)
+                })
+            };
+            if let Some(mode) = get("jsx") {
+                opts.automatic = mode != "react";
+            }
+            if let Some(f) = get("jsxFactory") {
+                opts.factory = f;
+            }
+            if let Some(f) = get("jsxFragmentFactory") {
+                opts.fragment = f;
+            }
+            if let Some(s) = get("jsxImportSource") {
+                opts.import_source = s;
+            }
+            break;
+        }
+        cur = d.parent().map(Path::to_path_buf);
+    }
+    opts
 }
 
 fn with_extension(p: &Path, ext: &str) -> PathBuf {
@@ -235,10 +290,14 @@ fn resolve_file(p: &Path) -> Option<PathBuf> {
 }
 
 pub fn has_module_syntax(src: &str) -> bool {
+    has_module_syntax_in(src, false, false)
+}
+
+fn has_module_syntax_in(src: &str, jsx: bool, ts: bool) -> bool {
     if !src.contains("import") && !src.contains("export") {
         return false;
     }
-    let Ok(tokens) = crate::lexer::tokenize(src) else {
+    let Ok(tokens) = crate::lexer::tokenize_jsx(src, false, jsx, ts) else {
         return src.lines().any(|line| {
             let t = line.trim_start();
             t.starts_with("import ")
@@ -345,14 +404,15 @@ pub fn is_commonjs(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
         "cjs" | "cts" | "json" => return true,
-        "js" | "ts" => {}
+        "js" | "ts" | "jsx" | "tsx" => {}
         _ => return false,
     }
     if let Some(v) = CJS_CACHE.with(|c| c.borrow().get(path).copied()) {
         return v;
     }
     let src = std::fs::read_to_string(path).unwrap_or_default();
-    let result = if has_module_syntax(&src) {
+    let name = path.display().to_string();
+    let result = if has_module_syntax_in(&src, is_jsx(&name), is_typescript(&name)) {
         false
     } else if looks_like_commonjs(&src) {
         true

@@ -26,7 +26,10 @@ fn scripts_match_expected_output() {
         .expect("scripts dir")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "jsq" || e == "ts"))
+        .filter(|p| {
+            p.extension()
+                .is_some_and(|e| matches!(e.to_str(), Some("jsq" | "ts" | "tsx" | "jsx")))
+        })
         .collect();
     entries.sort();
     for script in entries {
