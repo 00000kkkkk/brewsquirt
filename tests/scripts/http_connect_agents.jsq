@@ -1,0 +1,73 @@
+import http from "node:http"
+import net from "node:net"
+import { StringDecoder } from "node:string_decoder"
+
+const target = http.createServer((req, res) => res.end(`target ${req.method} ${req.url}`))
+const proxy = http.createServer((req, res) => res.end("plain request"))
+const seen = []
+proxy.on("connect", (req, socket, head) => {
+  seen.push([req.method, req.url, req.headers.host, head.length])
+  const [host, port] = req.url.split(":")
+  const upstream = net.connect(Number(port), host, () => {
+    socket.write("HTTP/1.1 200 Connection Established\r\n\r\n")
+    upstream.pipe(socket)
+    socket.pipe(upstream)
+  })
+})
+
+class TunnelAgent extends http.Agent {
+  constructor(proxyPort) {
+    super()
+    this.proxyPort = proxyPort
+  }
+  createSocket(req, options, cb) {
+    seen.push(["createSocket", req._header === undefined || req._header === null, typeof req._implicitHeader])
+    const socket = net.connect(this.proxyPort, "127.0.0.1", () => {
+      socket.write(`CONNECT ${options.host}:${options.port} HTTP/1.1\r\nHost: ${options.host}:${options.port}\r\n\r\n`)
+    })
+    let buffered = ""
+    const onData = (chunk) => {
+      buffered += chunk
+      if (!buffered.includes("\r\n\r\n")) return
+      socket.removeListener("data", onData)
+      seen.push(["tunnel", buffered.split("\r\n")[0]])
+      this.pending = socket
+      super.createSocket(req, options, cb)
+    }
+    socket.on("data", onData)
+  }
+  createConnection() {
+    const socket = this.pending
+    this.pending = null
+    return socket
+  }
+}
+
+await new Promise((resolve) => target.listen(0, "127.0.0.1", resolve))
+await new Promise((resolve) => proxy.listen(0, "127.0.0.1", resolve))
+const body = await new Promise((resolve, reject) => {
+  http
+    .get({ host: "127.0.0.1", port: target.address().port, path: "/through?tunnel=1", agent: new TunnelAgent(proxy.address().port) }, (res) => {
+      let text = ""
+      res.on("data", (c) => (text += c))
+      res.on("end", () => resolve([res.statusCode, text]))
+    })
+    .on("error", reject)
+})
+console.log(body)
+console.log(JSON.stringify(seen).replace(/"[0-9.]+:\d+"/g, '"HOST:PORT"'))
+proxy.close()
+target.close()
+
+function CustomDecoder(encoding) {
+  StringDecoder.call(this, encoding)
+}
+CustomDecoder.prototype = StringDecoder.prototype
+const decoder = new CustomDecoder("utf8")
+console.log(decoder.write(Buffer.from([0xe2, 0x82])), decoder.write(Buffer.from([0xac])), decoder.end(), decoder.encoding)
+
+const shared = new SharedArrayBuffer(4)
+new Uint8Array(shared).set([104, 105, 33, 0])
+const view = Buffer.from(shared, 0, 3)
+new Uint8Array(shared)[0] = 72
+console.log(view.toString(), view.buffer === shared)

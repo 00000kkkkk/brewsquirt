@@ -26,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Event` keeps `defaultPrevented`, `target`, `currentTarget`, `bubbles` and the other fields as
   prototype getters like Node, so subclasses that override them work, and adds `eventPhase`,
   `composed`, `returnValue`, `cancelBubble` and `composedPath`.
+- HTTP agents work the Node way: `http.Agent` has `addRequest`, `createSocket` and
+  `createConnection`, requests receive their socket through `req.onSocket`, and
+  `req._implicitHeader()` regenerates the header block, so `http-proxy-agent` and
+  `https-proxy-agent` (built on `agent-base`) proxy requests. HTTP servers emit `connect` for
+  `CONNECT` requests with the raw socket, which proxy servers and tunnels need.
+- `StringDecoder` is a function constructor, so `StringDecoder.call(this)` in `iconv-lite` (and
+  through it `body-parser` with `express.urlencoded`) works, and `Buffer.from` accepts a
+  `SharedArrayBuffer`, which `pino` transports use.
 - File system calls on Windows report `ENOENT` for paths with characters such as `*` instead of
   `EIO`, which broke `globby`, and `EBUSY`, `EXDEV`, `ENOSPC`, `ENAMETOOLONG` and `ELOOP` get their
   Node codes on every platform.

@@ -2071,7 +2071,7 @@ fn serve_stream<S: Read + Write + CloseNotify + IntoSock + Send + 'static>(
             let _ = tcp.shutdown(std::net::Shutdown::Both);
             return;
         };
-        if wants_upgrade(&parsed.request.headers) {
+        if parsed.request.method == "CONNECT" || wants_upgrade(&parsed.request.headers) {
             let head = reader.buffer().to_vec();
             let stream = reader.into_inner();
             let id = ids.fetch_add(1, Ordering::SeqCst) + 1;

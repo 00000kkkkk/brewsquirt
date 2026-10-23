@@ -1,0 +1,4 @@
+[ 200, 'target GET /through?tunnel=1' ]
+[["createSocket",true,"function"],["CONNECT","HOST:PORT","HOST:PORT",0],["tunnel","HTTP/1.1 200 Connection Established"]]
+ €  utf8
+Hi! true

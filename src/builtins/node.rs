@@ -100,7 +100,7 @@ const NODE_SRC: &str = r##"
   class Buffer extends Uint8Array {
     static from(value, encodingOrOffset, length) {
       if (typeof value === "string") return Buffer.#wrap(bytesFromString(value, encodingOrOffset))
-      if (value instanceof ArrayBuffer) {
+      if (value instanceof ArrayBuffer || (typeof SharedArrayBuffer === "function" && value instanceof SharedArrayBuffer)) {
         const offset = encodingOrOffset ?? 0
         return new Buffer(value, offset, length ?? value.byteLength - offset)
       }
@@ -3303,45 +3303,51 @@ const NODE_SRC: &str = r##"
     }
     return 0
   }
-  class StringDecoder {
-    #pending = new Uint8Array(0)
-    constructor(encoding = "utf8") {
-      this.encoding = normEncoding(encoding)
-    }
-    #join(buf) {
-      const bytes = cryptoBytes(buf, undefined, "buf")
-      if (this.#pending.length === 0) return bytes
-      const out = new Uint8Array(this.#pending.length + bytes.length)
-      out.set(this.#pending)
-      out.set(bytes, this.#pending.length)
-      this.#pending = new Uint8Array(0)
-      return out
-    }
+  const kDecoderPending = Symbol("decoderPending")
+  function StringDecoder(encoding = "utf8") {
+    this.encoding = normEncoding(encoding)
+    this[kDecoderPending] = new Uint8Array(0)
+  }
+  const decoderJoin = (self, buf) => {
+    const bytes = cryptoBytes(buf, undefined, "buf")
+    const pending = self[kDecoderPending] ?? new Uint8Array(0)
+    if (pending.length === 0) return bytes
+    const out = new Uint8Array(pending.length + bytes.length)
+    out.set(pending)
+    out.set(bytes, pending.length)
+    self[kDecoderPending] = new Uint8Array(0)
+    return out
+  }
+  Object.assign(StringDecoder.prototype, {
     write(buf) {
       if (typeof buf === "string") return buf
-      const bytes = this.#join(buf)
+      const bytes = decoderJoin(this, buf)
       let keep = 0
       if (this.encoding === "utf8") keep = utf8Incomplete(bytes)
       else if (this.encoding === "utf16le") keep = bytes.length % 2
       else if (this.encoding === "base64" || this.encoding === "base64url") keep = bytes.length % 3
       if (keep) {
-        this.#pending = bytes.slice(bytes.length - keep)
+        this[kDecoderPending] = bytes.slice(bytes.length - keep)
         return stringFromBytes(bytes.subarray(0, bytes.length - keep), this.encoding)
       }
       return stringFromBytes(bytes, this.encoding)
-    }
+    },
     end(buf) {
       let out = buf === undefined ? "" : this.write(buf)
-      if (this.#pending.length) {
-        out += stringFromBytes(this.#pending, this.encoding)
-        this.#pending = new Uint8Array(0)
+      const pending = this[kDecoderPending]
+      if (pending && pending.length) {
+        out += stringFromBytes(pending, this.encoding)
+        this[kDecoderPending] = new Uint8Array(0)
       }
       return out
-    }
-    get lastNeed() {
-      return this.#pending.length
-    }
-  }
+    },
+  })
+  Object.defineProperty(StringDecoder.prototype, "lastNeed", {
+    get() {
+      return this[kDecoderPending]?.length ?? 0
+    },
+    configurable: true,
+  })
 
   const qsEscape = (s) => encodeURIComponent(s).replace(/[!'()*]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase())
   const qsUnescape = (s) => {
@@ -4666,6 +4672,12 @@ const NODE_SRC: &str = r##"
       }, ms)
       return this
     }
+    _implicitHeader() {
+      const names = requestState(this).names
+      let head = `${this.method} ${this.path} HTTP/1.1\r\n`
+      for (const [k, v] of requestHeaders(this)) head += `${names?.get(k) ?? k}: ${v}\r\n`
+      this._header = head + "\r\n"
+    }
     setNoDelay() {}
     setSocketKeepAlive() {}
     flushHeaders() {}
@@ -4719,31 +4731,34 @@ const NODE_SRC: &str = r##"
         headers: this.getHeaders(),
         _defaultAgent: secure ? httpsClient.globalAgent : httpClient.globalAgent,
       }
-      const create = this.#options.createConnection ?? (agent && typeof agent.createConnection === "function" ? (o, done) => agent.createConnection(o, done) : null)
-      let attached = false
-      const attach = (sock) => {
-        if (attached || !sock) return
-        attached = true
-        this.#onSocket(sock, body, cb)
-      }
-      if (create) {
-        try {
-          const ret = create(connectOptions, (err, sock) => {
-            if (err) {
-              cb()
-              if (!this.destroyed) this.destroy(err)
-              return
-            }
-            attach(sock)
-          })
-          attach(ret)
-        } catch (e) {
-          cb()
-          if (!this.destroyed) this.destroy(e)
+      const st = requestState(this)
+      st.pending = { body, cb }
+      const create = this.#options.createConnection
+      try {
+        if (typeof create === "function") {
+          const ret = create(connectOptions, (err, sock) => this.onSocket(sock, err))
+          if (ret) this.onSocket(ret)
+        } else if (agent && typeof agent.addRequest === "function") {
+          agent.addRequest(this, connectOptions)
+        } else {
+          this.onSocket(defaultConnection(connectOptions))
         }
+      } catch (e) {
+        this.onSocket(null, e)
+      }
+    }
+    onSocket(sock, err) {
+      const st = requestState(this)
+      const pending = st.pending
+      if (!pending) return
+      if (err || !sock) {
+        st.pending = null
+        pending.cb()
+        if (!this.destroyed) this.destroy(err ?? new Error("No socket was returned"))
         return
       }
-      attach(defaultConnection(connectOptions))
+      st.pending = null
+      this.#onSocket(sock, pending.body, pending.cb)
     }
     #onSocket(sock, body, cb) {
       this.socket = sock
@@ -4843,7 +4858,7 @@ const NODE_SRC: &str = r##"
       this.headersSent = true
       const body = requestState(this).chunks.length ? Buffer.concat(requestState(this).chunks) : undefined
       const agent = this.#options.agent
-      const customAgent = agent && typeof agent.createConnection === "function" && agent.createConnection !== Agent.prototype.createConnection
+      const customAgent = agent && ((typeof agent.createConnection === "function" && agent.createConnection !== Agent.prototype.createConnection) || (typeof agent.addRequest === "function" && agent.addRequest !== Agent.prototype.addRequest) || (typeof agent.createSocket === "function" && agent.createSocket !== Agent.prototype.createSocket))
       if (requestHeaders(this).has("upgrade") || this.#options.createConnection || customAgent) return this.#socketRequest(body, cb)
       const agentOptions = this.#options.agent?.options ?? {}
       const tlsOptions = { rejectUnauthorized: this.#options.rejectUnauthorized ?? agentOptions.rejectUnauthorized, ca: this.#options.ca ?? agentOptions.ca }
@@ -4917,6 +4932,25 @@ const NODE_SRC: &str = r##"
     }
     getName(options = {}) {
       return `${options.host ?? "localhost"}:${options.port ?? ""}:${options.localAddress ?? ""}`
+    }
+    addRequest(req, options) {
+      this.createSocket(req, options, (err, socket) => req.onSocket(socket, err))
+    }
+    createSocket(req, options, cb) {
+      const merged = { ...options, ...this.options }
+      merged.path = options.path ?? this.options.path ?? null
+      merged._agentKey = this.getName(merged)
+      let settled = false
+      const oncreate = (err, socket) => {
+        if (settled) return
+        settled = true
+        if (err) return cb(err)
+        const key = merged._agentKey
+        ;(this.sockets[key] ??= []).push(socket)
+        cb(null, socket)
+      }
+      const socket = this.createConnection(merged, oncreate)
+      if (socket) oncreate(null, socket)
     }
     keepSocketAlive() {
       return true

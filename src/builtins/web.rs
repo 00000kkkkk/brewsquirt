@@ -3170,16 +3170,15 @@ const WEB_SRC: &str = r##"
         if (typeof port === "string" && /^\d+$/.test(port)) port = Number(port)
         const onUpgrade = (raw, id, localAddress, localPort, remoteAddress, remotePort, head) => {
           const socket = require("node:net")[Symbol.for("jsq.socketFromId")]({ id, localAddress, localPort, remoteAddress, remotePort })
-          if ((handlers.upgrade?.length ?? 0) === 0) {
+          const event = raw.method === "CONNECT" ? "connect" : "upgrade"
+          if ((handlers[event]?.length ?? 0) === 0) {
             socket.destroy()
             return
           }
-          const request = new Request(raw.url, { method: raw.method, headers: raw.headers })
-          request.remoteAddress = raw.remote
-          const req = new IncomingMessage(request)
+          const req = new IncomingMessage({ [kRawRequest]: raw, [kRaw]: null })
           req.socket = socket
           req.connection = socket
-          emit("upgrade", req, socket, Buffer.from(head.buffer, head.byteOffset, head.byteLength))
+          emit(event, req, socket, Buffer.from(head.buffer, head.byteOffset, head.byteLength))
         }
         try {
           if (secure && (tls.key == null || tls.cert == null)) {
