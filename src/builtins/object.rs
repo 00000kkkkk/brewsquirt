@@ -896,6 +896,9 @@ fn error_ctor<const K: usize>(vm: &mut Vm, this: Value, args: &[Value]) -> R {
             o
         }
     };
+    if target.get_own("stack").is_none() {
+        target.set_hidden("stack", Value::Str("".into()));
+    }
     if let Some(m) = msg {
         target.set_hidden("message", Value::Str(m));
     }
@@ -1035,6 +1038,7 @@ fn aggregate_error_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
             .and_then(|p| p.as_object().cloned()),
     };
     let target = Obj::new(ObjKind::Error, proto);
+    target.set_hidden("stack", Value::Str("".into()));
     let msg = arg(args, 1);
     if !msg.is_undefined() {
         let m = vm.to_string(&msg)?;

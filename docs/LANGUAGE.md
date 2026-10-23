@@ -1593,6 +1593,39 @@ Uint8Array(6) [ 104, 195, 169, 108, 108, 111 ] héllo
 true true true
 ```
 
+### WebAssembly
+
+`WebAssembly` runs modules on the bundled `wasmi` interpreter: `validate`, `compile`,
+`instantiate`, `compileStreaming` and `instantiateStreaming` (from a `Response` or a promise of
+one), `Module` with `imports`, `exports` and `customSections`, `Instance`, `Memory`, `Table`,
+`Global`, and the `CompileError`, `LinkError` and `RuntimeError` classes. Exported functions
+convert arguments and results like V8 (`i64` travels as `BigInt`), imports call back into
+JavaScript, traps throw `RuntimeError` with V8's messages, and `memory.buffer` is an
+`ArrayBuffer` over the module's linear memory that is detached when the memory grows. SIMD,
+bulk memory, reference types and multi-value are enabled; shared memories and threads are not.
+
+```js
+const bytes = new Uint8Array([
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+  0x01, 0x07, 0x01, 0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f,
+  0x03, 0x02, 0x01, 0x00,
+  0x07, 0x07, 0x01, 0x03, 0x61, 0x64, 0x64, 0x00, 0x00,
+  0x0a, 0x09, 0x01, 0x07, 0x00, 0x20, 0x00, 0x20, 0x01, 0x6a, 0x0b,
+])
+
+const { instance, module } = await WebAssembly.instantiate(bytes)
+console.log(instance.exports.add(40, 2), WebAssembly.Module.exports(module))
+
+const memory = new WebAssembly.Memory({ initial: 1, maximum: 2 })
+new Uint8Array(memory.buffer).set([1, 2, 3])
+console.log(memory.buffer.byteLength, memory.grow(1), memory.buffer.byteLength)
+```
+
+```text
+42 [ { name: 'add', kind: 'function' } ]
+65536 1 131072
+```
+
 ## Web APIs
 
 The web platform classes are globals, loaded the first time a program mentions one of them.
@@ -1824,7 +1857,7 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:path`, `node:os`, `node:child_process` | As `squirt:path`, `squirt:os` and `squirt:child_process` |
 | `node:events`                  | `EventEmitter` with `on`, `once`, `off`, `emit`, `prependListener`, `listenerCount`, `eventNames`, `errorMonitor`, `EventEmitterAsyncResource`, and the static `once`, `on`, `getEventListeners`, `getMaxListeners`, `setMaxListeners` and `addAbortListener` |
 | `node:buffer`                  | `Buffer` (with `copy`, `lastIndexOf`, `swap16/32/64`, the fixed-width and variable-width readers and writers including the `BigInt64` ones, `toLocaleString`, the `*Slice` and `*Write` helpers, `parent` and `offset`), `SlowBuffer`, `kMaxLength`, `constants`, `isUtf8`, `isAscii`, `transcode`, `atob`, `btoa`, `Blob`, `File` |
-| `node:assert`                  | `ok`, `equal`, `strictEqual`, `deepStrictEqual`, `throws`, `rejects`, `match` and the rest |
+| `node:assert`                  | `ok`, `equal`, `strictEqual`, `deepStrictEqual`, `partialDeepStrictEqual`, `throws`, `rejects`, `match` and the rest, `assert/strict`, `CallTracker` and `Assert`; failure messages carry Node's `+ actual - expected` diffs and quote the failing `assert(...)` expression from the source |
 | `node:util`                    | `inspect`, `format`, `promisify`, `callbackify`, `inherits`, `types`, `isDeepStrictEqual` |
 | `node:url`                     | `URL`, `URLSearchParams`, `fileURLToPath`, `pathToFileURL`, and the legacy `parse`, `format`, `resolve`, `resolveObject`, `Url`, `domainToASCII`, `domainToUnicode`, `urlToHttpOptions` |
 | `node:readline`, `node:readline/promises` | `createInterface` with `line` events, async iteration and `question` |
@@ -2000,7 +2033,7 @@ numeric arrays and `<ref *1>` markers for cycles. A first argument containing `%
 | `Set`    | `new Set(values?)`, `add`, `has`, `delete`, `clear`, `size`, `forEach`                         |
 | Errors   | `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, `URIError`, `EvalError`   |
 | Web      | `URL`, `URLSearchParams`, `Headers`, `Request`, `Response`, `EventTarget`, `Event`, `AbortController`, `AbortSignal`, `DOMException`, `WebSocket`, `MessageChannel`, `BroadcastChannel` |
-| Binary   | `ArrayBuffer`, typed arrays, `DataView`, `TextEncoder`, `TextDecoder`, `Buffer`, `atob`, `btoa`, `structuredClone`, `crypto` |
+| Binary   | `ArrayBuffer`, typed arrays, `DataView`, `TextEncoder`, `TextDecoder`, `Buffer`, `atob`, `btoa`, `structuredClone`, `crypto`, `WebAssembly` |
 | Weak     | `WeakMap` (`get`, `set`, `has`, `delete`), `WeakSet` (`add`, `has`, `delete`), `WeakRef` (`deref`) with object keys |
 | Timing   | `performance.now()` for a monotonic clock in milliseconds, `Date.now()` for epoch milliseconds |
 | `squirt` | `squirt(n = 3)` returns `n` droplets, the one builtin no other language ships                   |
@@ -2130,7 +2163,7 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
 - `URL.createObjectURL` and BYOB stream readers
 - Unix domain sockets, HTTP/2, shared memory between `worker_threads`, and
   ciphers, key pairs and signatures in `node:crypto`
-- WebAssembly
+- Shared WebAssembly memories, threads and the JavaScript promise integration
 - `Intl` covers numbers, plural rules, lists, relative times, collation and segmentation in a
   handful of locales; dates know the month and weekday names, date orders and separators of
   English (US, GB, AU, CA), Ukrainian, Russian, German, French, Spanish, Italian, Portuguese,

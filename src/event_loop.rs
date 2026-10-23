@@ -600,6 +600,9 @@ impl Vm {
                 self.run_job(Job::Callback(f, args))?;
                 continue;
             }
+            if !self.kept_alive.is_empty() {
+                self.kept_alive.clear();
+            }
             return Ok(());
         }
     }

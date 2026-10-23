@@ -46,6 +46,7 @@ unicode-normalization = "0.1"
 ureq = "3.4"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 webpki-roots = "1"
+wasmi = { version = "0.46", default-features = false, features = ["std", "simd"] }
 
 [profile.release]
 lto = "fat"

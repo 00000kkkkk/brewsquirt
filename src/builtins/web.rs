@@ -894,7 +894,8 @@ const WEB_SRC: &str = r##"
   }
 
   const kStream = Symbol("streamState")
-  const kDisturbed = Symbol("disturbed")
+  const kDisturbed = Symbol.for("squirt.stream.disturbed")
+  const kErrored = Symbol.for("squirt.stream.errored")
   const defer = () => {
     let resolve
     let reject
@@ -1123,6 +1124,9 @@ const WEB_SRC: &str = r##"
     }
     get [kDisturbed]() {
       return this[kStream].disturbed
+    }
+    get [kErrored]() {
+      return this[kStream].state === "errored"
     }
     getReader(options) {
       if (options?.mode !== undefined) {

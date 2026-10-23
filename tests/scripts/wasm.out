@@ -1,0 +1,47 @@
+object [object WebAssembly] [
+  'compile',
+  'validate',
+  'instantiate',
+  'compileStreaming',
+  'instantiateStreaming',
+  'promising'
+]
+true false
+[
+  { module: 'env', name: 'log', kind: 'function' },
+  { module: 'env', name: 'mem', kind: 'memory' }
+]
+[
+  { name: 'add', kind: 'function' },
+  { name: 'run', kind: 'function' },
+  { name: 'mul64', kind: 'function' },
+  { name: 'boom', kind: 'function' },
+  { name: 'div', kind: 'function' },
+  { name: 'half', kind: 'function' },
+  { name: 'mem', kind: 'memory' },
+  { name: 'tbl', kind: 'table' },
+  { name: 'counter', kind: 'global' }
+]
+[ [ 1, 2, 3 ] ]
+true null [object WebAssembly.Instance]
+5 -2147483648 8 1 2 function
+123456789864197523n -2n
+2.5 -0.25
+65536 true true
+7
+1 [ 42 ] undefined 99
+0 131072 8
+101 [ 42, 42 ]
+3 262144
+RangeError WebAssembly.Memory.grow(): Maximum memory size exceeded
+2 true 42n true
+true RuntimeError unreachable
+RuntimeError divide by zero
+RuntimeError divide result unrepresentable
+from js
+true CompileError
+true LinkError
+9n 1.100000023841858
+2 true null 2 5
+true true 42
+true

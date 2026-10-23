@@ -574,8 +574,10 @@ fn weakref_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
             )));
         }
     };
+    let weak = Rc::downgrade(&target);
+    vm.kept_alive.insert(Rc::as_ptr(&target) as usize, target);
     Ok(Value::Object(Obj::new(
-        ObjKind::WeakRef(Rc::downgrade(&target)),
+        ObjKind::WeakRef(weak),
         Some(vm.realm.weakref_proto.clone()),
     )))
 }
@@ -583,7 +585,15 @@ fn weakref_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 fn weakref_deref(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     match &this {
         Value::Object(o) => match &o.kind {
-            ObjKind::WeakRef(w) => Ok(w.upgrade().map(Value::Object).unwrap_or_default()),
+            ObjKind::WeakRef(w) => match w.upgrade() {
+                Some(target) => {
+                    vm.kept_alive
+                        .entry(Rc::as_ptr(&target) as usize)
+                        .or_insert_with(|| target.clone());
+                    Ok(Value::Object(target))
+                }
+                None => Ok(Value::Undefined),
+            },
             _ => Err(vm.type_error("WeakRef.prototype.deref called on incompatible receiver")),
         },
         _ => Err(vm.type_error("WeakRef.prototype.deref called on incompatible receiver")),

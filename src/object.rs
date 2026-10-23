@@ -711,6 +711,15 @@ pub struct BufferData {
     pub bytes: RefCell<Vec<u8>>,
     pub max: Option<usize>,
     pub shared: bool,
+    pub external: bool,
+}
+
+impl Drop for BufferData {
+    fn drop(&mut self) {
+        if self.external {
+            std::mem::forget(std::mem::take(self.bytes.get_mut()));
+        }
+    }
 }
 
 impl std::ops::Deref for BufferData {

@@ -1328,149 +1328,782 @@ const NODE_SRC: &str = r##"
     return url
   }
 
+  const nodeTypeError = (code, message) => {
+    const e = new TypeError(message)
+    e.code = code
+    return e
+  }
+  const kReadableOperator = {
+    deepStrictEqual: "Expected values to be strictly deep-equal:",
+    partialDeepStrictEqual: "Expected values to be partially and strictly deep-equal:",
+    strictEqual: "Expected values to be strictly equal:",
+    strictEqualObject: 'Expected "actual" to be reference-equal to "expected":',
+    deepEqual: "Expected values to be loosely deep-equal:",
+    notDeepStrictEqual: 'Expected "actual" not to be strictly deep-equal to:',
+    notStrictEqual: 'Expected "actual" to be strictly unequal to:',
+    notStrictEqualObject: 'Expected "actual" not to be reference-equal to "expected":',
+    notDeepEqual: 'Expected "actual" not to be loosely deep-equal to:',
+    notIdentical: "Values have same structure but are not reference-equal:",
+    notDeepEqualUnequal: "Expected values not to be loosely deep-equal:",
+  }
+  const kMaxShortStringLength = 12
+  const kMaxLongStringLength = 512
+  const kNopLinesToCollapse = 5
+  const inspectValue = (v) =>
+    native.inspect(v, { compact: false, customInspect: false, depth: 1000, maxArrayLength: Infinity, showHidden: false, showProxy: false, sorted: true, getters: true })
+
+  const linesEqual = (a, b, commas) => a === b || (commas && (`${a},` === b || a === `${b},`))
+  function myersDiff(actual, expected, commas) {
+    const max = actual.length + expected.length
+    const v = new Int32Array(2 * max + 1)
+    const trace = []
+    for (let level = 0; level <= max; level++) {
+      trace.push(new Int32Array(v))
+      for (let diagonal = -level; diagonal <= level; diagonal += 2) {
+        const offset = diagonal + max
+        let x = diagonal === -level || (diagonal !== level && v[offset - 1] < v[offset + 1]) ? v[offset + 1] : v[offset - 1] + 1
+        let y = x - diagonal
+        while (x < actual.length && y < expected.length && linesEqual(actual[x], expected[y], commas)) {
+          x++
+          y++
+        }
+        v[offset] = x
+        if (x >= actual.length && y >= expected.length) return backtrack(trace, actual, expected, commas)
+      }
+    }
+    return []
+  }
+  function backtrack(trace, actual, expected, commas) {
+    const max = actual.length + expected.length
+    let x = actual.length
+    let y = expected.length
+    const result = []
+    for (let level = trace.length - 1; level >= 0; level--) {
+      const v = trace[level]
+      const diagonal = x - y
+      const offset = diagonal + max
+      const prevDiagonal = diagonal === -level || (diagonal !== level && v[offset - 1] < v[offset + 1]) ? diagonal + 1 : diagonal - 1
+      const prevX = v[prevDiagonal + max]
+      const prevY = prevX - prevDiagonal
+      while (x > prevX && y > prevY) {
+        const item = actual[x - 1]
+        result.push({ type: "nop", value: commas && !item.endsWith(",") ? expected[y - 1] : item })
+        x--
+        y--
+      }
+      if (level > 0) {
+        if (x > prevX) {
+          result.push({ type: "insert", value: actual[x - 1] })
+          x--
+        } else {
+          result.push({ type: "delete", value: expected[y - 1] })
+          y--
+        }
+      }
+    }
+    return result
+  }
+  function printMyersDiff(diff, operator) {
+    let message = ""
+    let skipped = false
+    let nopCount = 0
+    for (let i = diff.length - 1; i >= 0; i--) {
+      const { type, value } = diff[i]
+      const previousType = i < diff.length - 1 ? diff[i + 1].type : null
+      if (previousType === "nop" && type !== previousType) {
+        if (nopCount === kNopLinesToCollapse + 1) {
+          message += `  ${diff[i + 1].value}\n`
+        } else if (nopCount === kNopLinesToCollapse + 2) {
+          message += `  ${diff[i + 2].value}\n`
+          message += `  ${diff[i + 1].value}\n`
+        } else if (nopCount >= kNopLinesToCollapse + 3) {
+          message += "...\n"
+          message += `  ${diff[i + 1].value}\n`
+          skipped = true
+        }
+        nopCount = 0
+      }
+      if (type === "insert") message += operator === "partialDeepStrictEqual" ? `+ ${value}\n` : `+ ${value}\n`
+      else if (type === "delete") message += `- ${value}\n`
+      else if (nopCount < kNopLinesToCollapse) {
+        message += `  ${value}\n`
+        nopCount++
+      } else {
+        nopCount++
+      }
+    }
+    return { message: `\n${message.trimEnd()}`, skipped }
+  }
+  function stackedDiff(actual, expected) {
+    let message = `\n+ ${actual}\n- ${expected}`
+    if (actual.length + expected.length <= 80 && actual.startsWith("'") && expected.startsWith("'")) {
+      for (let i = 0; i < actual.length; i++) {
+        if (actual[i] !== expected[i]) {
+          if (i >= 3) message += `\n${" ".repeat(i + 2)}^`
+          break
+        }
+      }
+    }
+    return message
+  }
+  function createErrDiff(actual, expected, operator, customMessage) {
+    if (operator === "strictEqual" && ((typeof actual === "object" && actual !== null && typeof expected === "object" && expected !== null) || (typeof actual === "function" && typeof expected === "function"))) {
+      operator = "strictEqualObject"
+    }
+    let skipped = false
+    let message
+    const inspectedActual = inspectValue(actual)
+    const inspectedExpected = inspectValue(expected)
+    const splitActual = inspectedActual.split("\n")
+    const splitExpected = inspectedExpected.split("\n")
+    let header = "+ actual - expected"
+    const simple = splitActual.length <= 1 && splitExpected.length <= 1 && (typeof actual !== "object" || actual === null || typeof expected !== "object" || expected === null)
+    if (simple) {
+      const a = splitActual[0]
+      const b = splitExpected[0]
+      let len = a.length + b.length
+      if (typeof actual === "string") len -= 2
+      if (typeof expected === "string") len -= 2
+      if (len <= kMaxShortStringLength && (actual !== 0 || expected !== 0)) {
+        message = `${a} !== ${b}`
+        header = ""
+      } else {
+        message = stackedDiff(a, b)
+      }
+    } else if (inspectedActual === inspectedExpected) {
+      operator = "notIdentical"
+      if (splitActual.length > 50) {
+        message = `${splitActual.slice(0, 50).join("\n")}\n...}`
+        skipped = true
+      } else {
+        message = splitActual.join("\n")
+      }
+      header = ""
+    } else {
+      const diff = myersDiff(splitActual, splitExpected, actual != null && typeof actual === "object")
+      const printed = printMyersDiff(diff, operator)
+      message = printed.message
+      skipped = printed.skipped
+    }
+    const head = `${customMessage || kReadableOperator[operator]}\n${header}`
+    return `${head}${skipped ? "\n... Skipped lines" : ""}\n${message}\n`
+  }
+  const copyError = (source) => {
+    const target = Object.assign(Object.create(Object.getPrototypeOf(source)), source)
+    Object.defineProperty(target, "message", { value: source.message })
+    return target
+  }
+
   class AssertionError extends Error {
     constructor(options) {
-      super(options.message)
-      this.name = "AssertionError"
+      if (options === null || typeof options !== "object") {
+        throw nodeTypeError("ERR_INVALID_ARG_TYPE", `The "options" argument must be of type object. Received ${describeReceived(options)}`)
+      }
+      const { message, operator, stackStartFn, stackStartFunction } = options
+      let { actual, expected } = options
+      let text
+      if (message != null) {
+        if (operator === "deepStrictEqual" || operator === "strictEqual") text = createErrDiff(actual, expected, operator, message)
+        else text = String(message)
+      } else {
+        if (actual instanceof Error && expected instanceof Error) {
+          actual = copyError(actual)
+          expected = copyError(expected)
+        }
+        if (operator === "deepStrictEqual" || operator === "strictEqual" || operator === "partialDeepStrictEqual") {
+          text = createErrDiff(actual, expected, operator)
+        } else if (operator === "notDeepStrictEqual" || operator === "notStrictEqual") {
+          let base = kReadableOperator[operator]
+          const res = inspectValue(actual).split("\n")
+          if (operator === "notStrictEqual" && ((typeof actual === "object" && actual !== null) || typeof actual === "function")) base = kReadableOperator.notStrictEqualObject
+          if (res.length > 50) {
+            res[46] = "..."
+            res.length = 47
+          }
+          text = res.length === 1 ? `${base}${res[0].length > 5 ? "\n\n" : " "}${res[0]}` : `${base}\n\n${res.join("\n")}\n`
+        } else {
+          let res = inspectValue(actual)
+          let other = inspectValue(expected)
+          const known = kReadableOperator[operator]
+          if (operator === "notDeepEqual" && res === other) {
+            res = `${known}\n\n${res}`
+            if (res.length > 1024) res = `${res.slice(0, 1021)}...`
+            text = res
+          } else {
+            if (res.length > kMaxLongStringLength) res = `${res.slice(0, 509)}...`
+            if (other.length > kMaxLongStringLength) other = `${other.slice(0, 509)}...`
+            if (operator === "deepEqual") res = `${known}\n\n${res}\n\nshould loosely deep-equal\n\n`
+            else {
+              const unequal = kReadableOperator[`${operator}Unequal`]
+              if (unequal) res = `${unequal}\n\n${res}\n\nshould not loosely deep-equal\n\n`
+              else other = ` ${operator} ${other}`
+            }
+            text = `${res}${other}`
+          }
+        }
+      }
+      super(text)
+      this.generatedMessage = !message
+      Object.defineProperty(this, "name", { value: "Error", writable: true, enumerable: false, configurable: true })
       this.code = "ERR_ASSERTION"
-      this.actual = options.actual
-      this.expected = options.expected
-      this.operator = options.operator
-      this.generatedMessage = !options.userMessage
+      this.actual = actual
+      this.expected = expected
+      this.operator = operator
+      this.diff = "simple"
+      if (typeof Error.captureStackTrace === "function") Error.captureStackTrace(this, stackStartFn || stackStartFunction)
+      this.name = "AssertionError [ERR_ASSERTION]"
+      Object.defineProperty(this, "name", { value: "AssertionError", writable: true, enumerable: false, configurable: true })
+    }
+    toString() {
+      return `${this.name} [${this.code}]: ${this.message}`
     }
   }
 
-  function deepEqual(a, b, strict) {
-    if (strict ? Object.is(a, b) : a == b || Object.is(a, b)) return true
-    if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false
-    if (strict && Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return false
-    if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime()
-    if (a instanceof RegExp && b instanceof RegExp) return String(a) === String(b)
-    if (a instanceof Map && b instanceof Map) {
-      if (a.size !== b.size) return false
-      for (const [k, v] of a) if (!b.has(k) || !deepEqual(v, b.get(k), strict)) return false
-      return true
+  const tagOf = (v) => Object.prototype.toString.call(v)
+  const isBoxed = (v) => v instanceof Number || v instanceof String || v instanceof Boolean || v instanceof BigInt || v instanceof Symbol
+  function innerDeepEqual(a, b, strict, memo) {
+    if (a === b) return a !== 0 || !strict || Object.is(a, b)
+    if (strict) {
+      if (typeof a !== "object") return typeof a === "number" && Number.isNaN(a) && Number.isNaN(b)
+      if (typeof b !== "object" || a === null || b === null) return false
+      if (Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return false
+    } else {
+      if (a === null || typeof a !== "object") {
+        if (b === null || typeof b !== "object") return a == b || (Number.isNaN(a) && Number.isNaN(b))
+        return false
+      }
+      if (b === null || typeof b !== "object") return false
     }
-    if (a instanceof Set && b instanceof Set) {
-      if (a.size !== b.size) return false
-      for (const v of a) if (!b.has(v)) return false
-      return true
+    const tag = tagOf(a)
+    if (tag !== tagOf(b)) return false
+    if (Array.isArray(a)) {
+      if (!Array.isArray(b) || a.length !== b.length) return false
+      return keyCheck(a, b, strict, memo, "array")
     }
-    if (ArrayBuffer.isView(a) && ArrayBuffer.isView(b)) {
-      if (a.length !== b.length) return false
-      for (let i = 0; i < a.length; i++) if (!Object.is(a[i], b[i])) return false
-      return true
+    if (tag === "[object Object]" && !isBoxed(a) && !(a instanceof Error)) {
+      return keyCheck(a, b, strict, memo, "object")
     }
-    if (Array.isArray(a) !== Array.isArray(b)) return false
-    const ka = Object.keys(a)
-    const kb = Object.keys(b)
+    if (a instanceof Date) {
+      if (!(b instanceof Date) || a.getTime() !== b.getTime()) return false
+    } else if (a instanceof RegExp) {
+      if (!(b instanceof RegExp) || a.source !== b.source || a.flags !== b.flags || a.lastIndex !== b.lastIndex) return false
+    } else if (a instanceof Error) {
+      if (!(b instanceof Error) || a.message !== b.message || a.name !== b.name) return false
+      if ("cause" in a !== "cause" in b || ("cause" in a && !innerDeepEqual(a.cause, b.cause, strict, memo))) return false
+      if ("errors" in a !== "errors" in b || ("errors" in a && !innerDeepEqual(a.errors, b.errors, strict, memo))) return false
+    } else if (ArrayBuffer.isView(a)) {
+      if (!ArrayBuffer.isView(b) || a.byteLength !== b.byteLength) return false
+      if (!strict && !(a instanceof DataView) && (a instanceof Float32Array || a instanceof Float64Array)) {
+        for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+      } else {
+        const x = new Uint8Array(a.buffer, a.byteOffset, a.byteLength)
+        const y = new Uint8Array(b.buffer, b.byteOffset, b.byteLength)
+        for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false
+      }
+      return keyCheck(a, b, strict, memo, "view")
+    } else if (a instanceof ArrayBuffer || (typeof SharedArrayBuffer === "function" && a instanceof SharedArrayBuffer)) {
+      if (a.byteLength !== b.byteLength) return false
+      const x = new Uint8Array(a)
+      const y = new Uint8Array(b)
+      for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false
+    } else if (a instanceof Set) {
+      if (!(b instanceof Set) || a.size !== b.size) return false
+      return keyCheck(a, b, strict, memo, "set")
+    } else if (a instanceof Map) {
+      if (!(b instanceof Map) || a.size !== b.size) return false
+      return keyCheck(a, b, strict, memo, "map")
+    } else if (isBoxed(a)) {
+      if (!isBoxed(b) || !Object.is(a.valueOf(), b.valueOf())) return false
+    } else if (a instanceof WeakMap || a instanceof WeakSet || a instanceof Promise || a instanceof WeakRef) {
+      return false
+    } else if (typeof a === "function" || typeof b === "function") {
+      return false
+    }
+    return keyCheck(a, b, strict, memo, "object")
+  }
+  function ownKeys(o, strict) {
+    const keys = Object.keys(o)
+    if (strict) for (const s of Object.getOwnPropertySymbols(o)) if (Object.prototype.propertyIsEnumerable.call(o, s)) keys.push(s)
+    return keys
+  }
+  function keyCheck(a, b, strict, memo, kind) {
+    let ka = ownKeys(a, strict)
+    let kb = ownKeys(b, strict)
+    if (kind === "view") {
+      ka = ka.filter((k) => typeof k !== "string" || !/^\d+$/.test(k))
+      kb = kb.filter((k) => typeof k !== "string" || !/^\d+$/.test(k))
+    }
     if (ka.length !== kb.length) return false
-    for (const k of ka) if (!Object.hasOwn(b, k) || !deepEqual(a[k], b[k], strict)) return false
+    for (const k of ka) if (!Object.prototype.propertyIsEnumerable.call(b, k)) return false
+    if (memo.a.has(a) && memo.a.get(a) === b) return true
+    memo.a.set(a, b)
+    try {
+      for (const k of ka) if (!innerDeepEqual(a[k], b[k], strict, memo)) return false
+      if (kind === "set") return setEquiv(a, b, strict, memo)
+      if (kind === "map") return mapEquiv(a, b, strict, memo)
+      return true
+    } finally {
+      memo.a.delete(a)
+    }
+  }
+  function setEquiv(a, b, strict, memo) {
+    const pending = []
+    for (const v of a) {
+      if (v !== null && typeof v === "object") pending.push(v)
+      else if (!b.has(v)) {
+        if (strict) return false
+        pending.push(v)
+      }
+    }
+    if (pending.length === 0) return true
+    const candidates = [...b].filter((v) => (v !== null && typeof v === "object") || !a.has(v))
+    for (const v of pending) {
+      const i = candidates.findIndex((c) => innerDeepEqual(v, c, strict, memo))
+      if (i === -1) return false
+      candidates.splice(i, 1)
+    }
+    return true
+  }
+  function mapEquiv(a, b, strict, memo) {
+    const pending = []
+    for (const [k, v] of a) {
+      if (k !== null && typeof k === "object") pending.push([k, v])
+      else {
+        if (!b.has(k)) {
+          if (strict) return false
+          pending.push([k, v])
+          continue
+        }
+        if (!innerDeepEqual(v, b.get(k), strict, memo)) return false
+      }
+    }
+    if (pending.length === 0) return true
+    const candidates = [...b].filter(([k]) => (k !== null && typeof k === "object") || !a.has(k))
+    for (const [k, v] of pending) {
+      const i = candidates.findIndex(([ck, cv]) => innerDeepEqual(k, ck, strict, memo) && innerDeepEqual(v, cv, strict, memo))
+      if (i === -1) return false
+      candidates.splice(i, 1)
+    }
+    return true
+  }
+  const deepEqual = (a, b, strict) => innerDeepEqual(a, b, strict, { a: new Map() })
+  function partialEqual(actual, expected) {
+    if (expected === null || typeof expected !== "object") return innerDeepEqual(actual, expected, true, { a: new Map() })
+    if (actual === null || typeof actual !== "object") return false
+    if (Object.getPrototypeOf(actual) !== Object.getPrototypeOf(expected)) return false
+    if (expected instanceof Set) {
+      if (!(actual instanceof Set)) return false
+      const pool = [...actual]
+      for (const v of expected) {
+        const i = pool.findIndex((c) => partialEqual(c, v))
+        if (i === -1) return false
+        pool.splice(i, 1)
+      }
+      return true
+    }
+    if (expected instanceof Map) {
+      if (!(actual instanceof Map)) return false
+      for (const [k, v] of expected) if (!actual.has(k) || !partialEqual(actual.get(k), v)) return false
+      return true
+    }
+    if (Array.isArray(expected)) {
+      if (!Array.isArray(actual)) return false
+      let j = 0
+      for (const v of expected) {
+        while (j < actual.length && !partialEqual(actual[j], v)) j++
+        if (j === actual.length) return false
+        j++
+      }
+      return true
+    }
+    if (expected instanceof Date || expected instanceof RegExp || expected instanceof Error || ArrayBuffer.isView(expected) || isBoxed(expected)) {
+      return innerDeepEqual(actual, expected, true, { a: new Map() })
+    }
+    for (const k of ownKeys(expected, true)) {
+      if (!(k in actual) || !partialEqual(actual[k], expected[k])) return false
+    }
     return true
   }
 
-  const inspect = (v) => native.inspect(v)
+  const readSource = (() => {
+    const cache = new Map()
+    return (file) => {
+      if (!cache.has(file)) {
+        let text = null
+        try {
+          text = fs.readFileSync(file, "utf8")
+        } catch {}
+        cache.set(file, text)
+      }
+      return cache.get(file)
+    }
+  })()
+  function callSiteText(names) {
+    const stack = String(new Error().stack ?? "").split("\n").slice(1)
+    for (const line of stack) {
+      const m = /\((.+):(\d+)\)\s*$/.exec(line) ?? /at (.+):(\d+)\s*$/.exec(line)
+      if (!m || m[1].startsWith("<") || m[1].startsWith("node:")) continue
+      const source = readSource(m[1])
+      if (source === null) return null
+      const lines = source.split(/\r?\n/)
+      const start = Number(m[2]) - 1
+      const text = lines.slice(start, start + 20).join("\n")
+      const re = new RegExp(`(?:^|[^\\w$.])((?:[A-Za-z_$][\\w$]*\\.)*(?:${names.join("|")}))\\s*\\(`, "g")
+      const hit = re.exec(text)
+      if (!hit) return null
+      const begin = hit.index + hit[0].indexOf(hit[1])
+      let depth = 0
+      let quote = null
+      for (let i = hit.index + hit[0].length - 1; i < text.length; i++) {
+        const c = text[i]
+        if (quote) {
+          if (c === "\\") i++
+          else if (c === quote) quote = null
+          continue
+        }
+        if (c === '"' || c === "'" || c === "`") quote = c
+        else if (c === "(") depth++
+        else if (c === ")") {
+          depth--
+          if (depth === 0) return text.slice(begin, i + 1)
+        }
+      }
+      return null
+    }
+    return null
+  }
 
-  function fail(actual, expected, message, operator, defaultMessage) {
+  function innerOk(fn, argLen, value, message, names) {
+    if (value) return
+    let generated = false
     if (message instanceof Error) throw message
-    throw new AssertionError({ message: message ?? defaultMessage, actual, expected, operator, userMessage: message !== undefined })
+    if (message === undefined) {
+      generated = true
+      if (argLen === 0) message = "No value argument passed to `assert.ok()`"
+      else {
+        const code = callSiteText(names)
+        message = code === null ? `${inspectValue(value)} == true` : `The expression evaluated to a falsy value:\n\n  ${code.split("\n").join("\n  ")}\n`
+      }
+    }
+    const err = new AssertionError({ actual: value, expected: true, message, operator: "==", stackStartFn: fn })
+    err.generatedMessage = generated
+    throw err
+  }
+  function innerFail(obj) {
+    if (obj.message instanceof Error) throw obj.message
+    throw new AssertionError(obj)
   }
 
-  function matchesError(error, expected) {
-    if (expected === undefined) return true
-    if (typeof expected === "function") {
-      if (expected.prototype !== undefined && error instanceof expected) return true
-      if (Error.isPrototypeOf(expected) || expected === Error) return false
-      return expected(error) === true
+  const kTracked = Symbol("tracked")
+  class Comparison {}
+  let trackerWarned = false
+  class CallTracker {
+    #calls = []
+    constructor() {
+      if (!trackerWarned) {
+        trackerWarned = true
+        process.emitWarning("assert.CallTracker is deprecated.", "DeprecationWarning", "DEP0173")
+      }
     }
-    if (expected instanceof RegExp) return expected.test(String(error?.message ?? error))
-    if (typeof expected === "object") {
-      return Object.keys(expected).every((k) =>
-        expected[k] instanceof RegExp && typeof error[k] === "string" ? expected[k].test(error[k]) : deepEqual(error[k], expected[k], true),
-      )
+    calls(fn, exact = 1) {
+      if (typeof fn === "number") {
+        exact = fn
+        fn = undefined
+      }
+      const target = fn ?? function () {}
+      const context = { exact, actual: 0, name: target.name || "calls", stackTrace: new Error(), calls: [] }
+      this.#calls.push(context)
+      const tracked = function (...args) {
+        context.actual++
+        context.calls.push({ thisArg: this, arguments: args })
+        return Reflect.apply(target, this, args)
+      }
+      Object.defineProperty(tracked, "length", { value: target.length })
+      tracked[kTracked] = context
+      return tracked
     }
-    return false
+    getCalls(fn) {
+      const context = fn?.[kTracked]
+      if (!context) throw nodeTypeError("ERR_INVALID_ARG_VALUE", "The argument 'fn' must be a tracked function.")
+      return context.calls.map((c) => ({ ...c }))
+    }
+    reset(fn) {
+      if (fn === undefined) {
+        for (const c of this.#calls) {
+          c.actual = 0
+          c.calls = []
+        }
+        return
+      }
+      const context = fn?.[kTracked]
+      if (!context) throw nodeTypeError("ERR_INVALID_ARG_VALUE", "The argument 'fn' must be a tracked function.")
+      context.actual = 0
+      context.calls = []
+    }
+    report() {
+      return this.#calls
+        .filter((c) => c.actual !== c.exact)
+        .map((c) => ({
+          message: `Expected the ${c.name} function to be executed ${c.exact} time(s) but was executed ${c.actual} time(s).`,
+          actual: c.actual,
+          expected: c.exact,
+          operator: c.name,
+          stack: c.stackTrace,
+        }))
+    }
+    verify() {
+      const errors = this.report()
+      if (errors.length === 0) return
+      const message = errors.length === 1 ? errors[0].message : "Functions were not called the expected number of times"
+      throw new AssertionError({ message, details: errors })
+    }
   }
 
-  function assert(value, message) {
-    if (!value) fail(value, true, message, "==", "The expression evaluated to a falsy value:\n\n  assert(" + inspect(value) + ")\n")
-  }
-  assert.ok = (value, message) => {
-    if (!value) fail(value, true, message, "==", "The expression evaluated to a falsy value:\n\n  assert.ok(" + inspect(value) + ")\n")
-  }
-  assert.equal = (a, b, message) => {
-    if (!(a == b || (a !== a && b !== b))) fail(a, b, message, "==", `${inspect(a)} == ${inspect(b)}`)
-  }
-  assert.notEqual = (a, b, message) => {
-    if (a == b) fail(a, b, message, "!=", `${inspect(a)} != ${inspect(b)}`)
-  }
-  assert.strictEqual = (a, b, message) => {
-    if (!Object.is(a, b)) fail(a, b, message, "strictEqual", `Expected values to be strictly equal:\n\n${inspect(a)} !== ${inspect(b)}\n`)
-  }
-  assert.notStrictEqual = (a, b, message) => {
-    if (Object.is(a, b)) fail(a, b, message, "notStrictEqual", `Expected "actual" to be strictly unequal to: ${inspect(b)}`)
-  }
-  assert.deepEqual = (a, b, message) => {
-    if (!deepEqual(a, b, false)) fail(a, b, message, "deepEqual", `Expected values to be loosely deep-equal:\n\n${inspect(a)}\n\nshould loosely deep-equal\n\n${inspect(b)}`)
-  }
-  assert.deepStrictEqual = (a, b, message) => {
-    if (!deepEqual(a, b, true)) fail(a, b, message, "deepStrictEqual", `Expected values to be strictly deep-equal:\n${inspect(a)}\n\nshould equal\n\n${inspect(b)}`)
-  }
-  assert.notDeepStrictEqual = (a, b, message) => {
-    if (deepEqual(a, b, true)) fail(a, b, message, "notDeepStrictEqual", `Expected "actual" not to be strictly deep-equal to: ${inspect(b)}`)
-  }
-  assert.notDeepEqual = (a, b, message) => {
-    if (deepEqual(a, b, false)) fail(a, b, message, "notDeepEqual", `Expected "actual" not to be loosely deep-equal to: ${inspect(b)}`)
-  }
-  assert.throws = (fn, expected, message) => {
-    if (typeof expected === "string") [expected, message] = [undefined, expected]
-    try {
-      fn()
-    } catch (e) {
-      if (!matchesError(e, expected)) throw e
-      return
+  function makeAssert(strictMode) {
+    const assert = function ok(...args) {
+      innerOk(ok, args.length, args[0], args[1], ["assert", "ok", "strict"])
     }
-    fail(undefined, expected, message, "throws", "Missing expected exception.")
+    const ok = function ok(...args) {
+      innerOk(ok, args.length, args[0], args[1], ["ok", "assert"])
+    }
+    const equal = function equal(actual, expected, message) {
+      if (!(actual == expected || (Number.isNaN(actual) && Number.isNaN(expected)))) innerFail({ actual, expected, message, operator: "==", stackStartFn: equal })
+    }
+    const notEqual = function notEqual(actual, expected, message) {
+      if (actual == expected || (Number.isNaN(actual) && Number.isNaN(expected))) innerFail({ actual, expected, message, operator: "!=", stackStartFn: notEqual })
+    }
+    const strictEqual = function strictEqual(actual, expected, message) {
+      if (!Object.is(actual, expected)) innerFail({ actual, expected, message, operator: "strictEqual", stackStartFn: strictEqual })
+    }
+    const notStrictEqual = function notStrictEqual(actual, expected, message) {
+      if (Object.is(actual, expected)) innerFail({ actual, expected, message, operator: "notStrictEqual", stackStartFn: notStrictEqual })
+    }
+    const deepEqualFn = function deepEqual(actual, expected, message) {
+      if (!innerDeepEqual(actual, expected, false, { a: new Map() })) innerFail({ actual, expected, message, operator: "deepEqual", stackStartFn: deepEqualFn })
+    }
+    const notDeepEqual = function notDeepEqual(actual, expected, message) {
+      if (innerDeepEqual(actual, expected, false, { a: new Map() })) innerFail({ actual, expected, message, operator: "notDeepEqual", stackStartFn: notDeepEqual })
+    }
+    const deepStrictEqual = function deepStrictEqual(actual, expected, message) {
+      if (!innerDeepEqual(actual, expected, true, { a: new Map() })) innerFail({ actual, expected, message, operator: "deepStrictEqual", stackStartFn: deepStrictEqual })
+    }
+    const notDeepStrictEqual = function notDeepStrictEqual(actual, expected, message) {
+      if (innerDeepEqual(actual, expected, true, { a: new Map() })) innerFail({ actual, expected, message, operator: "notDeepStrictEqual", stackStartFn: notDeepStrictEqual })
+    }
+    const partialDeepStrictEqual = function partialDeepStrictEqual(actual, expected, message) {
+      if (!partialEqual(actual, expected)) innerFail({ actual, expected, message, operator: "partialDeepStrictEqual", stackStartFn: partialDeepStrictEqual })
+    }
+    const fail = function fail(actual, expected, message, operator, stackStartFn) {
+      const argsLen = arguments.length
+      let internalMessage = false
+      if (argsLen === 0) {
+        internalMessage = true
+        message = "Failed"
+      } else if (argsLen === 1) {
+        message = actual
+        actual = undefined
+      } else {
+        if (argsLen === 2) operator = "!="
+      }
+      if (message instanceof Error) throw message
+      const err = new AssertionError({ actual, expected, operator: operator === undefined ? "fail" : operator, stackStartFn: stackStartFn || fail, message })
+      if (internalMessage) err.generatedMessage = true
+      throw err
+    }
+    const getActual = (fn) => {
+      try {
+        fn()
+      } catch (e) {
+        return { threw: true, error: e }
+      }
+      return { threw: false }
+    }
+    const checkThrows = (fnName, threw, error, expected, message, stackStartFn) => {
+      if (typeof expected === "string") {
+        message = expected
+        expected = undefined
+      }
+      if (!threw) {
+        let details = ""
+        if (expected && expected.name) details += ` (${expected.name})`
+        details += message ? `: ${message}` : "."
+        throw new AssertionError({ actual: undefined, expected, operator: fnName, message: `Missing expected ${fnName === "rejects" ? "rejection" : "exception"}${details}`, stackStartFn })
+      }
+      if (expected === undefined) return
+      if (expected instanceof RegExp) {
+        const str = String(error)
+        if (expected.exec(str) !== null) return
+        const err = new AssertionError({ actual: error, expected, message: message || `The input did not match the regular expression ${inspectValue(expected)}. Input:\n\n${inspectValue(str)}\n`, operator: fnName, stackStartFn })
+        err.generatedMessage = !message
+        throw err
+      }
+      if (typeof expected === "function") {
+        if (expected.prototype !== undefined && error instanceof expected) return
+        if (Error.isPrototypeOf(expected) || expected === Error) throw error
+        const res = expected.call({}, error)
+        if (res !== true) {
+          const err = new AssertionError({ actual: error, expected, message: message || `The ${expected.name ? `"${expected.name}" validation function` : "validation function"} is expected to return "true". Received ${inspectValue(res)}\n\nCaught error:\n\n${error}`, operator: fnName, stackStartFn })
+          err.generatedMessage = !message
+          throw err
+        }
+        return
+      }
+      if (typeof expected === "object" && expected !== null) {
+        const keys = Object.keys(expected)
+        if (expected instanceof Error) keys.push("name", "message")
+        else if (keys.length === 0) {
+          const e = new TypeError(`The argument 'error' may not be an empty object. Received {}`)
+          e.code = "ERR_INVALID_ARG_VALUE"
+          throw e
+        }
+        const comparison = (obj, source) => {
+          const out = Object.create(Comparison.prototype)
+          for (const k of keys) {
+            if (!(k in Object(obj))) continue
+            out[k] = source !== undefined && typeof source[k] === "string" && obj[k] instanceof RegExp && obj[k].exec(source[k]) !== null ? source[k] : obj[k]
+          }
+          return out
+        }
+        for (const k of keys) {
+          const want = expected[k]
+          const got = error?.[k]
+          if (typeof got === "string" && want instanceof RegExp && want.exec(got) !== null) continue
+          if (!(k in Object(error)) || !innerDeepEqual(got, want, true, { a: new Map() })) {
+            if (message) throw new AssertionError({ actual: error, expected, message, operator: fnName, stackStartFn })
+            const err = new AssertionError({ actual: comparison(error), expected: comparison(expected, error), operator: "deepStrictEqual", stackStartFn })
+            err.actual = error
+            err.expected = expected
+            err.operator = fnName
+            throw err
+          }
+        }
+        return
+      }
+      throw nodeTypeError("ERR_INVALID_ARG_TYPE", `The "expected" argument must be of type function or an instance of Error, RegExp, or Object. Received ${describeReceived(expected)}`)
+    }
+    const throws = function throws(fn, expected, message) {
+      if (typeof fn !== "function") throw nodeTypeError("ERR_INVALID_ARG_TYPE", `The "fn" argument must be of type function. Received ${describeReceived(fn)}`)
+      const r = getActual(fn)
+      checkThrows("throws", r.threw, r.error, expected, message, throws)
+    }
+    const doesNotThrow = function doesNotThrow(fn, expected, message) {
+      const r = getActual(fn)
+      if (!r.threw) return
+      if (typeof expected === "string") {
+        message = expected
+        expected = undefined
+      }
+      if (expected === undefined || (typeof expected === "function" && r.error instanceof expected) || (expected instanceof RegExp && expected.test(String(r.error)))) {
+        const details = message ? `: ${message}` : "."
+        throw new AssertionError({ actual: r.error, expected, operator: "doesNotThrow", message: `Got unwanted exception${details}\nActual message: "${r.error?.message}"`, stackStartFn: doesNotThrow })
+      }
+      throw r.error
+    }
+    const rejects = async function rejects(promiseFn, expected, message) {
+      let threw = false
+      let error
+      try {
+        await (typeof promiseFn === "function" ? promiseFn() : promiseFn)
+      } catch (e) {
+        threw = true
+        error = e
+      }
+      checkThrows("rejects", threw, error, expected, message, rejects)
+    }
+    const doesNotReject = async function doesNotReject(promiseFn, expected, message) {
+      try {
+        await (typeof promiseFn === "function" ? promiseFn() : promiseFn)
+      } catch (e) {
+        if (typeof expected === "string") {
+          message = expected
+          expected = undefined
+        }
+        if (expected === undefined || (typeof expected === "function" && e instanceof expected) || (expected instanceof RegExp && expected.test(String(e)))) {
+          const details = message ? `: ${message}` : "."
+          throw new AssertionError({ actual: e, expected, operator: "doesNotReject", message: `Got unwanted rejection${details}\nActual message: "${e?.message}"`, stackStartFn: doesNotReject })
+        }
+        throw e
+      }
+    }
+    const internalMatch = (string, regexp, message, fn, negate) => {
+      if (!(regexp instanceof RegExp)) throw nodeTypeError("ERR_INVALID_ARG_TYPE", `The "regexp" argument must be an instance of RegExp. Received ${describeReceived(regexp)}`)
+      if (typeof string !== "string" || (regexp.exec(string) !== null) === negate) {
+        if (message instanceof Error) throw message
+        const generated = !message
+        message =
+          message ||
+          (typeof string !== "string"
+            ? `The "string" argument must be of type string. Received type ${typeof string} (${inspectValue(string)})`
+            : (negate ? "The input was expected to not match the regular expression " : "The input did not match the regular expression ") + `${inspectValue(regexp)}. Input:\n\n${inspectValue(string)}\n`)
+        const err = new AssertionError({ actual: string, expected: regexp, message, operator: fn.name, stackStartFn: fn })
+        err.generatedMessage = generated
+        throw err
+      }
+    }
+    const match = function match(string, regexp, message) {
+      internalMatch(string, regexp, message, match, false)
+    }
+    const doesNotMatch = function doesNotMatch(string, regexp, message) {
+      internalMatch(string, regexp, message, doesNotMatch, true)
+    }
+    const ifError = function ifError(err) {
+      if (err !== null && err !== undefined) {
+        let message = "ifError got unwanted exception: "
+        if (typeof err === "object" && typeof err.message === "string") {
+          if (err.message.length === 0 && err.constructor) message += err.constructor.name
+          else message += err.message
+        } else {
+          message += inspectValue(err)
+        }
+        const newErr = new AssertionError({ actual: err, expected: null, operator: "ifError", message, stackStartFn: ifError })
+        throw newErr
+      }
+    }
+    Object.assign(assert, {
+      AssertionError,
+      CallTracker,
+      ok,
+      fail,
+      equal: strictMode ? strictEqual : equal,
+      notEqual: strictMode ? notStrictEqual : notEqual,
+      deepEqual: strictMode ? deepStrictEqual : deepEqualFn,
+      notDeepEqual: strictMode ? notDeepStrictEqual : notDeepEqual,
+      deepStrictEqual,
+      notDeepStrictEqual,
+      strictEqual,
+      notStrictEqual,
+      partialDeepStrictEqual,
+      match,
+      doesNotMatch,
+      throws,
+      rejects,
+      doesNotThrow,
+      doesNotReject,
+      ifError,
+    })
+    return assert
   }
-  assert.doesNotThrow = (fn, message) => {
-    try {
-      fn()
-    } catch (e) {
-      fail(e, undefined, typeof message === "string" ? message : undefined, "doesNotThrow", `Got unwanted exception.\nActual message: "${e?.message}"`)
+  const assert = makeAssert(false)
+  const strictAssert = function strict(...args) {
+    innerOk(strictAssert, args.length, args[0], args[1], ["assert", "ok", "strict"])
+  }
+  Object.assign(strictAssert, assert, {
+    equal: assert.strictEqual,
+    notEqual: assert.notStrictEqual,
+    deepEqual: assert.deepStrictEqual,
+    notDeepEqual: assert.notDeepStrictEqual,
+  })
+  assert.strict = strictAssert
+  strictAssert.strict = strictAssert
+  class Assert {
+    constructor(options = {}) {
+      const source = options?.strict === false ? assert : strictAssert
+      for (const k of Object.keys(source)) {
+        if (typeof source[k] === "function" && !["AssertionError", "CallTracker", "strict", "Assert"].includes(k)) this[k] = source[k]
+      }
     }
   }
-  assert.rejects = async (promiseOrFn, expected, message) => {
-    if (typeof expected === "string") [expected, message] = [undefined, expected]
-    try {
-      await (typeof promiseOrFn === "function" ? promiseOrFn() : promiseOrFn)
-    } catch (e) {
-      if (!matchesError(e, expected)) throw e
-      return
-    }
-    fail(undefined, expected, message, "rejects", "Missing expected rejection.")
-  }
-  assert.doesNotReject = async (promiseOrFn, message) => {
-    try {
-      await (typeof promiseOrFn === "function" ? promiseOrFn() : promiseOrFn)
-    } catch (e) {
-      fail(e, undefined, message, "doesNotReject", `Got unwanted rejection.\nActual message: "${e?.message}"`)
-    }
-  }
-  assert.match = (s, re, message) => {
-    if (!re.test(s)) fail(s, re, message, "match", `The input did not match the regular expression ${re}. Input:\n\n${inspect(s)}\n`)
-  }
-  assert.doesNotMatch = (s, re, message) => {
-    if (re.test(s)) fail(s, re, message, "doesNotMatch", `The input was expected to not match the regular expression ${re}. Input:\n\n${inspect(s)}\n`)
-  }
-  assert.fail = (message = "Failed") => {
-    if (message instanceof Error) throw message
-    throw new AssertionError({ message, operator: "fail", userMessage: true })
-  }
-  assert.ifError = (value) => {
-    if (value !== null && value !== undefined) throw value
-  }
-  assert.AssertionError = AssertionError
-  assert.strict = assert
+  assert.Assert = Assert
 
   const kPromisifyCustom = Symbol.for("nodejs.util.promisify.custom")
   function promisify(fn) {
@@ -2396,6 +3029,10 @@ const NODE_SRC: &str = r##"
     stream.destroyed = true
     const done = (e) => {
       const error = e === undefined ? err : e
+      if (error) {
+        if (r) r.errored = error
+        if (w) w.errored = error
+      }
       queueMicrotask(() => {
         if (error) stream.emit("error", error)
         stream.emit("close")
@@ -2478,7 +3115,10 @@ const NODE_SRC: &str = r##"
     const r = stream[kRead]
     if (r.destroyed) return
     if (r.flowing) {
-      while (r.flowing && r.buffer.length && !r.destroyed) stream.emit("data", r.buffer.shift())
+      while (r.flowing && r.buffer.length && !r.destroyed) {
+        r.didRead = true
+        stream.emit("data", r.buffer.shift())
+      }
       if (r.flowing && !r.buffer.length && !r.ended && !r.destroyed) callRead(stream)
     } else if (r.buffer.length && stream.listenerCount("readable") > 0) {
       stream.emit("readable")
@@ -2584,6 +3224,7 @@ const NODE_SRC: &str = r##"
     },
     read(size) {
       const r = this[kRead]
+      r.didRead = true
       if (!r.buffer.length && !r.ended) callRead(this)
       if (!r.buffer.length) {
         maybeEndRead(this)
@@ -3092,7 +3733,33 @@ const NODE_SRC: &str = r##"
   }
   stream.isReadable = (s) => !!(s && s[kRead] && !s[kRead].destroyed && !s[kRead].endEmitted)
   stream.isWritable = (s) => !!(s && s[kWrite] && !s[kWrite].destroyed && !s[kWrite].ending)
-  stream.isErrored = () => false
+  const kWebDisturbed = Symbol.for("squirt.stream.disturbed")
+  const kWebErrored = Symbol.for("squirt.stream.errored")
+  stream.isDisturbed = (s) => !!(s && (s[kWebDisturbed] ?? (s[kRead] ? s[kRead].didRead || (s[kRead].destroyed && !s[kRead].endEmitted) : false)))
+  stream.isErrored = (s) => !!(s && (s[kWebErrored] ?? (s[kRead]?.errored ?? s[kWrite]?.errored ?? null)))
+  for (const [proto, key] of [[Readable.prototype, kRead], [Writable.prototype, kWrite]]) {
+    if (!Object.getOwnPropertyDescriptor(proto, "errored")) {
+      Object.defineProperty(proto, "errored", {
+        get() {
+          return this[key]?.errored ?? null
+        },
+        configurable: true,
+      })
+    }
+  }
+  Object.defineProperty(Readable.prototype, "readableDidRead", {
+    get() {
+      return !!this[kRead]?.didRead
+    },
+    configurable: true,
+  })
+  Object.defineProperty(Readable.prototype, "readableAborted", {
+    get() {
+      const r = this[kRead]
+      return !!r && (r.destroyed || !!r.errored) && !r.endEmitted
+    },
+    configurable: true,
+  })
   Readable.toWeb = (r) =>
     new ReadableStream({
       start(controller) {
@@ -6446,7 +7113,10 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
             }
             "assert" | "assert/strict" => {
                 let n = load(vm)?;
-                let a = vm.get_prop(&n, "assert")?;
+                let mut a = vm.get_prop(&n, "assert")?;
+                if name == "assert/strict" {
+                    a = vm.get_prop(&a, "strict")?;
+                }
                 if let Value::Object(f) = &a {
                     f.set_hidden("default", a.clone());
                 }
@@ -6955,6 +7625,19 @@ pub(crate) fn native_inspect(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             Value::Bool(false) => options.compact = 0,
             Value::Bool(true) => options.compact = 3,
             Value::Number(n) if n.is_finite() && n >= 0.0 => options.compact = n as usize,
+            _ => {}
+        }
+        options.sorted = vm.get_prop(&opts, "sorted")?.truthy();
+        match vm.get_prop(&opts, "maxArrayLength")? {
+            Value::Null => options.max_array_length = usize::MAX,
+            Value::Number(n) if n.is_nan() => {}
+            Value::Number(n) if n >= 0.0 => {
+                options.max_array_length = if n.is_finite() {
+                    n as usize
+                } else {
+                    usize::MAX
+                }
+            }
             _ => {}
         }
     }

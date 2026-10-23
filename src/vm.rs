@@ -356,6 +356,8 @@ pub struct Vm {
     pub exiting: bool,
     pub(crate) main_cjs_pending: bool,
     pub(crate) promise_intrinsic: Option<Rc<Obj>>,
+    pub(crate) wasm: Option<Box<builtins::wasm::WasmState>>,
+    pub(crate) kept_alive: FxHashMap<usize, Rc<Obj>>,
     pub symbol_seq: u64,
     pub symbol_registry: FxHashMap<Rc<str>, Value>,
     pub symbol_iterator: Value,
@@ -477,6 +479,8 @@ impl Vm {
             exiting: false,
             main_cjs_pending: false,
             promise_intrinsic: None,
+            wasm: None,
+            kept_alive: FxHashMap::default(),
         };
         crate::gc::configure_from_env();
         builtins::install(&mut vm);
@@ -960,6 +964,10 @@ impl Vm {
         }
         if builtins::intl::LAZY_GLOBALS.contains(&name) && self.globals.get(name).is_none() {
             builtins::intl::load(self)?;
+            return Ok(true);
+        }
+        if builtins::wasm::LAZY_GLOBALS.contains(&name) && self.globals.get(name).is_none() {
+            builtins::wasm::load(self)?;
             return Ok(true);
         }
         Ok(false)
@@ -1521,8 +1529,8 @@ impl Vm {
     fn require_path(&mut self, path: &PathBuf, spec: &str) -> Result<Value, Value> {
         let key: Rc<str> = path.display().to_string().into();
         let cache = self.require_cache_object();
-        if let Some(Value::Object(m)) = cache.get_own(&key) {
-            return Ok(m.get_own("exports").unwrap_or_default());
+        if let Some(m @ Value::Object(_)) = cache.get_own(&key) {
+            return self.get_prop(&m, "exports");
         }
         if let Some(ns) = self.modules.get(path) {
             return Ok(ns.clone());
@@ -1571,7 +1579,9 @@ impl Vm {
         let proto = match self.compile_unit(&wrapped, &key, dir.clone(), Mode::Repl, true) {
             Ok(p) => p,
             Err(e) => {
-                if ext == "js" && module::esm_only_error(&e.message) {
+                let detect = module::esm_only_error(&e.message)
+                    || (module::redeclares_wrapper(&e.message) && !module::explicit_commonjs(&dir));
+                if ext == "js" && detect {
                     module::mark_esm(path);
                     let from = Rc::new(ModuleInfo {
                         name: key.clone(),
@@ -1624,7 +1634,7 @@ impl Vm {
             return Err(e);
         }
         module.set_own("loaded", Value::Bool(true));
-        Ok(module.get_own("exports").unwrap_or_default())
+        self.get_prop(&Value::Object(module), "exports")
     }
 
     pub fn stack_trace(&self) -> String {
@@ -1660,8 +1670,8 @@ impl Vm {
         let o = Obj::new(ObjKind::Error, Some(proto));
         let msg: String = msg.into();
         let stack = format!("{}: {}{}", kind.name(), msg, self.stack_trace());
-        o.set_hidden("message", msg.into());
         o.set_hidden("stack", stack.into());
+        o.set_hidden("message", msg.into());
         Value::Object(o)
     }
 

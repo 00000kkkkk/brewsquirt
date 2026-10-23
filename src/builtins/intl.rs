@@ -50,16 +50,35 @@ const INTL_SRC: &str = r##"
     if (typeof tag !== "string") throw new TypeError("Incorrect locale information provided")
     const parts = tag.replace(/_/g, "-").split("-")
     if (!/^[A-Za-z]{2,8}$/.test(parts[0])) throw new RangeError(`Incorrect locale information provided`)
+    let extension = false
     return parts
-      .map((p, i) => (i === 0 ? p.toLowerCase() : p.length === 2 ? p.toUpperCase() : p.length === 4 ? p[0].toUpperCase() + p.slice(1).toLowerCase() : p.toLowerCase()))
+      .map((p, i) => {
+        if (i === 0) return p.toLowerCase()
+        if (p.length === 1) extension = true
+        if (extension) return p.toLowerCase()
+        return p.length === 2 ? p.toUpperCase() : p.length === 4 ? p[0].toUpperCase() + p.slice(1).toLowerCase() : p.toLowerCase()
+      })
       .join("-")
   }
   const localeList = (locales) => {
     if (locales === undefined) return []
-    const list = typeof locales === "string" ? [locales] : [...locales]
+    if (locales === null) throw new TypeError("Cannot convert undefined or null to object")
+    let list
+    if (typeof locales === "string" || (typeof locales === "object" && "baseName" in locales && typeof locales.maximize === "function")) list = [locales]
+    else {
+      const source = Object(locales)
+      const len = Math.min(Math.max(Math.trunc(Number(source.length)) || 0, 0), 2 ** 53 - 1)
+      list = []
+      for (let k = 0; k < len; k++) {
+        if (!(k in source)) continue
+        const item = source[k]
+        if (typeof item !== "string" && (item === null || typeof item !== "object")) throw new TypeError(`Language ID should be string or object.`)
+        list.push(item)
+      }
+    }
     const out = []
     for (const l of list) {
-      const c = canonical(typeof l === "object" && l !== null && "baseName" in l ? l.toString() : l)
+      const c = canonical(typeof l === "object" ? String(l) : l)
       if (!out.includes(c)) out.push(c)
     }
     return out
@@ -74,28 +93,6 @@ const INTL_SRC: &str = r##"
     return NUMBER_DATA[lang(locale)] ?? NUMBER_DATA.en
   }
 
-  const getOpt = (options, key, allowed, fallback) => {
-    const v = options[key]
-    if (v === undefined) return fallback
-    const s = typeof allowed === "boolean" ? Boolean(v) : String(v)
-    if (Array.isArray(allowed) && !allowed.includes(s)) {
-      throw new RangeError(`Value ${s} out of range for Intl.NumberFormat options property ${key}`)
-    }
-    return s
-  }
-  const getNum = (options, key, min, max, fallback) => {
-    const v = options[key]
-    if (v === undefined) return fallback
-    const n = Number(v)
-    if (!Number.isFinite(n) || n < min || n > max) throw new RangeError(`${key} value is out of range.`)
-    return Math.floor(n)
-  }
-
-  const roundTo = (x, digits) => {
-    const s = x.toFixed(Math.min(digits, 100))
-    return s
-  }
-
   const groupDigits = (int, sep, minGroup, indian = false) => {
     if (int.length < 4 + (minGroup - 1)) return int
     let out = ""
@@ -108,238 +105,666 @@ const INTL_SRC: &str = r##"
     return out
   }
 
-  const COMPACT = [
-    [1e12, "T", " trillion"],
-    [1e9, "B", " billion"],
-    [1e6, "M", " million"],
-    [1e3, "K", " thousand"],
-  ]
+  const getOption = (options, key, values, fallback) => {
+    const v = options[key]
+    if (v === undefined) return fallback
+    const s = String(v)
+    if (values !== undefined && !values.includes(s)) {
+      throw new RangeError(`Value ${s} out of range for Intl.NumberFormat options property ${key}`)
+    }
+    return s
+  }
+  const defaultNumberOption = (v, min, max, fallback, key) => {
+    if (v === undefined) return fallback
+    const n = Number(v)
+    if (Number.isNaN(n) || n < min || n > max) throw new RangeError(`${key} value is out of range.`)
+    return Math.floor(n)
+  }
+  const getNumberOption = (options, key, min, max, fallback) => defaultNumberOption(options[key], min, max, fallback, key)
+
+  const NU_ZERO = {
+    adlm: 0x1e950, ahom: 0x11730, arab: 0x660, arabext: 0x6f0, bali: 0x1b50, beng: 0x9e6, bhks: 0x11c50, brah: 0x11066,
+    cakm: 0x11136, cham: 0xaa50, deva: 0x966, diak: 0x11950, fullwide: 0xff10, gara: 0x10d40, gong: 0x11da0, gonm: 0x11d50,
+    gujr: 0xae6, gukh: 0x16130, guru: 0xa66, hmng: 0x16b50, hmnp: 0x1e140, java: 0xa9d0, kali: 0xa900, kawi: 0x11f50,
+    khmr: 0x17e0, knda: 0xce6, krai: 0x16d70, lana: 0x1a80, lanatham: 0x1a90, laoo: 0xed0, latn: 0x30, lepc: 0x1c40,
+    limb: 0x1946, mathbold: 0x1d7ce, mathdbl: 0x1d7d8, mathmono: 0x1d7f6, mathsanb: 0x1d7ec, mathsans: 0x1d7e2, mlym: 0xd66,
+    modi: 0x11650, mong: 0x1810, mroo: 0x16a60, mtei: 0xabf0, mymr: 0x1040, mymrepka: 0x116da, mymrpao: 0x116d0,
+    mymrshan: 0x1090, mymrtlng: 0xa9f0, nagm: 0x1e4f0, newa: 0x11450, nkoo: 0x7c0, olck: 0x1c50, onao: 0x1e5f1, orya: 0xb66,
+    osma: 0x104a0, outlined: 0x1ccf0, rohg: 0x10d30, saur: 0xa8d0, segment: 0x1fbf0, shrd: 0x111d0, sind: 0x112f0,
+    sinh: 0xde6, sora: 0x110f0, sund: 0x1bb0, sunu: 0x11bf0, takr: 0x116c0, talu: 0x19d0, tamldec: 0xbe6, telu: 0xc66,
+    thai: 0xe50, tibt: 0xf20, tirh: 0x114d0, tnsa: 0x16ac0, tols: 0x11de0, vaii: 0xa620, wara: 0x118e0, wcho: 0x1e2f0,
+  }
+  const nuSupported = (nu) => nu === "hanidec" || Object.hasOwn(NU_ZERO, nu)
+  const nuDigits = (nu) => {
+    if (nu === "latn") return null
+    if (nu === "hanidec") return [..."〇一二三四五六七八九"]
+    return Array.from({ length: 10 }, (_, i) => String.fromCodePoint(NU_ZERO[nu] + i))
+  }
+  const parseExtension = (tag) => {
+    const parts = tag.split("-")
+    let i = parts.findIndex((p, k) => k > 0 && p.length === 1)
+    if (i === -1) return { base: tag, keywords: {} }
+    const base = parts.slice(0, i).join("-")
+    const keywords = {}
+    while (i < parts.length) {
+      const singleton = parts[i]
+      i++
+      if (singleton === "x") break
+      if (singleton !== "u") {
+        while (i < parts.length && parts[i].length > 1) i++
+        continue
+      }
+      while (i < parts.length && parts[i].length > 2) i++
+      while (i < parts.length && parts[i].length === 2) {
+        const key = parts[i++]
+        const vals = []
+        while (i < parts.length && parts[i].length > 2) vals.push(parts[i++])
+        if (!Object.hasOwn(keywords, key)) keywords[key] = vals.length ? vals.join("-") : "true"
+      }
+    }
+    return { base, keywords }
+  }
+  const resolveNumberLocale = (list, optNu) => {
+    const requested = list.find((l) => KNOWN_LANGUAGES.has(l.split("-")[0].toLowerCase()))
+    if (requested === undefined) return { locale: "en-US", nu: optNu !== undefined && nuSupported(optNu) ? optNu : "latn" }
+    const { base, keywords } = parseExtension(requested)
+    let nu = "latn"
+    let locale = base
+    const extNu = keywords.nu
+    if (extNu !== undefined && nuSupported(extNu)) {
+      nu = extNu
+      locale = `${base}-u-nu-${extNu}`
+    }
+    if (optNu !== undefined && nuSupported(optNu) && optNu !== nu) {
+      nu = optNu
+      locale = base
+    }
+    return { locale, nu }
+  }
+
+  const decimalOf = (neg, digits, e) => {
+    let d = digits.replace(/^0+/, "")
+    if (d === "") return { kind: "finite", neg, d: "", e: 0 }
+    const stripped = d.replace(/0+$/, "")
+    e += d.length - stripped.length
+    return { kind: "finite", neg, d: stripped, e }
+  }
+  const toPrim = (v) => {
+    if (v === null || (typeof v !== "object" && typeof v !== "function")) return v
+    const exotic = v[Symbol.toPrimitive]
+    if (exotic !== undefined && exotic !== null) {
+      const r = exotic.call(v, "number")
+      if (r !== null && (typeof r === "object" || typeof r === "function")) throw new TypeError("Cannot convert object to primitive value")
+      return r
+    }
+    for (const k of ["valueOf", "toString"]) {
+      const f = v[k]
+      if (typeof f === "function") {
+        const r = f.call(v)
+        if (r === null || (typeof r !== "object" && typeof r !== "function")) return r
+      }
+    }
+    throw new TypeError("Cannot convert object to primitive value")
+  }
+  const NUMERIC_TEXT = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))(?:[eE]([+-]?\d+))?$/
+  const toIntlMV = (value) => {
+    const p = toPrim(value)
+    if (typeof p === "bigint") return decimalOf(p < 0n, (p < 0n ? -p : p).toString(), 0)
+    if (typeof p === "string") {
+      const s = p.trim()
+      if (s === "") return decimalOf(false, "", 0)
+      if (/^0[xX][0-9a-fA-F]+$|^0[oO][0-7]+$|^0[bB][01]+$/.test(s)) return decimalOf(false, BigInt(s).toString(), 0)
+      const inf = /^([+-]?)Infinity$/.exec(s)
+      if (inf) return { kind: "inf", neg: inf[1] === "-" }
+      const m = NUMERIC_TEXT.exec(s)
+      if (!m) return { kind: "nan", neg: false }
+      const frac = m[3] ?? m[4] ?? ""
+      return decimalOf(m[1] === "-", (m[2] ?? "") + frac, (m[5] ? Number(m[5]) : 0) - frac.length)
+    }
+    const x = Number(p)
+    if (Number.isNaN(x)) return { kind: "nan", neg: false }
+    if (!Number.isFinite(x)) return { kind: "inf", neg: x < 0 }
+    const neg = x < 0 || Object.is(x, -0)
+    if (x === 0) return decimalOf(neg, "", 0)
+    const m = NUMERIC_TEXT.exec(String(Math.abs(x)))
+    const frac = m[3] ?? ""
+    return decimalOf(neg, m[2] + frac, (m[5] ? Number(m[5]) : 0) - frac.length)
+  }
+  const decMagnitude = (x) => x.d.length - 1 + x.e
+  const pow10 = (n) => 10n ** BigInt(n)
+  const roundAt = (x, m, inc, mode) => {
+    const digits = x.d === "" ? 0n : BigInt(x.d)
+    const num = x.e >= m ? digits * pow10(x.e - m) : digits
+    const den = x.e >= m ? 1n : pow10(m - x.e)
+    const unit = den * BigInt(inc)
+    const q = num / unit
+    const r = num % unit
+    let up = false
+    if (r !== 0n) {
+      if (mode === "infinity") up = true
+      else if (mode !== "zero") {
+        const twice = r * 2n
+        if (twice > unit) up = true
+        else if (twice === unit) up = mode === "half-infinity" || (mode === "half-even" && q % 2n === 1n)
+      }
+    }
+    return (q + (up ? 1n : 0n)) * BigInt(inc)
+  }
+  const rawPrecision = (x, minP, maxP, mode) => {
+    const p = maxP
+    let m
+    let e
+    let rounded
+    if (x.d === "") {
+      m = "0".repeat(p)
+      e = 0
+      rounded = decimalOf(false, "", 0)
+    } else {
+      e = decMagnitude(x)
+      let n = roundAt(x, e - p + 1, 1, mode)
+      if (n === pow10(p)) {
+        n = pow10(p - 1)
+        e += 1
+      }
+      m = n.toString()
+      rounded = decimalOf(false, m, e - p + 1)
+    }
+    let int
+    if (e >= p - 1) {
+      m += "0".repeat(e - p + 1)
+      int = e + 1
+    } else if (e >= 0) {
+      m = `${m.slice(0, e + 1)}.${m.slice(e + 1)}`
+      int = e + 1
+    } else {
+      m = `0.${"0".repeat(-(e + 1))}${m}`
+      int = 1
+    }
+    if (m.includes(".") && maxP > minP) {
+      let cut = maxP - minP
+      while (cut > 0 && m.endsWith("0")) {
+        m = m.slice(0, -1)
+        cut--
+      }
+      if (m.endsWith(".")) m = m.slice(0, -1)
+    }
+    return { str: m, rounded, int, mag: e - p + 1 }
+  }
+  const rawFixed = (x, minF, maxF, inc, mode) => {
+    const f = maxF
+    const n = roundAt(x, -f, inc, mode)
+    let m = n === 0n ? "0" : n.toString()
+    let int
+    if (f !== 0) {
+      let k = m.length
+      if (k <= f) {
+        m = "0".repeat(f + 1 - k) + m
+        k = f + 1
+      }
+      const a = m.slice(0, k - f)
+      m = `${a}.${m.slice(k - f)}`
+      int = a.length
+    } else {
+      int = m.length
+    }
+    let cut = maxF - minF
+    while (cut > 0 && m.endsWith("0")) {
+      m = m.slice(0, -1)
+      cut--
+    }
+    if (m.endsWith(".")) m = m.slice(0, -1)
+    return { str: m, rounded: decimalOf(false, n.toString(), -f), int, mag: -f }
+  }
+  const UNSIGNED_MODES = {
+    ceil: ["infinity", "zero"], floor: ["zero", "infinity"], expand: ["infinity", "infinity"], trunc: ["zero", "zero"],
+    halfCeil: ["half-infinity", "half-zero"], halfFloor: ["half-zero", "half-infinity"], halfExpand: ["half-infinity", "half-infinity"],
+    halfTrunc: ["half-zero", "half-zero"], halfEven: ["half-even", "half-even"],
+  }
+  const formatNumeric = (o, x, negative) => {
+    const mode = UNSIGNED_MODES[o.roundingMode][negative ? 1 : 0]
+    let result
+    if (o.roundingType === "significantDigits") result = rawPrecision(x, o.minSD, o.maxSD, mode)
+    else if (o.roundingType === "fractionDigits") result = rawFixed(x, o.minFD, o.maxFD, o.roundingIncrement, mode)
+    else {
+      const s = rawPrecision(x, o.minSD, o.maxSD, mode)
+      const f = rawFixed(x, o.minFD, o.maxFD, o.roundingIncrement, mode)
+      if (o.roundingType === "morePrecision") result = s.mag <= f.mag ? s : f
+      else result = s.mag <= f.mag ? f : s
+    }
+    let str = result.str
+    if (o.trailingZeroDisplay === "stripIfInteger" && (result.rounded.d === "" || result.rounded.e >= 0)) {
+      const i = str.indexOf(".")
+      if (i !== -1) str = str.slice(0, i)
+    }
+    if (result.int < o.minimumIntegerDigits) str = "0".repeat(o.minimumIntegerDigits - result.int) + str
+    return { str, rounded: result.rounded }
+  }
+
+  const COMPACT_DATA = {
+    en: { short: [[3, "K"], [6, "M"], [9, "B"], [12, "T"]], long: [[3, " thousand"], [6, " million"], [9, " billion"], [12, " trillion"]] },
+    "en-IN": { short: [[3, "K"], [5, "L"], [7, "Cr"]], long: [[3, " thousand"], [5, " lakh"], [7, " crore"]] },
+    de: {
+      short: [[6, NBSP + "Mio."], [9, NBSP + "Mrd."], [12, NBSP + "Bio."]],
+      long: [[3, " Tausend"], [6, [" Million", " Millionen"]], [9, [" Milliarde", " Milliarden"]], [12, [" Billion", " Billionen"]]],
+    },
+    ja: { short: [[4, "万"], [8, "億"], [12, "兆"]] },
+    ko: { short: [[3, "천"], [4, "만"], [8, "억"], [12, "조"]] },
+    zh: { short: [[4, "万"], [8, "亿"], [12, "万亿"]] },
+    "zh-Hant": { short: [[4, "萬"], [8, "億"], [12, "兆"]] },
+  }
+  const compactTable = (locale, display) => {
+    const { base } = parseExtension(locale)
+    const parts = base.split("-")
+    const lg = parts[0]
+    let entry = COMPACT_DATA[`${lg}-${parts[parts.length - 1]}`]
+    if (lg === "zh" && (parts.includes("Hant") || parts.includes("TW") || parts.includes("HK") || parts.includes("MO"))) entry = COMPACT_DATA["zh-Hant"]
+    entry ??= COMPACT_DATA[lg] ?? COMPACT_DATA.en
+    return (display === "long" ? entry.long : undefined) ?? entry.short
+  }
+  const exponentForMagnitude = (o, mag) => {
+    if (o.notation === "scientific") return mag
+    if (o.notation === "engineering") return Math.floor(mag / 3) * 3
+    if (o.notation === "compact") {
+      let exp = 0
+      for (const [threshold] of compactTable(o.locale, o.compactDisplay)) if (mag >= threshold) exp = threshold
+      return exp
+    }
+    return 0
+  }
+  const computeExponent = (o, x) => {
+    if (x.d === "") return 0
+    const mag = decMagnitude(x)
+    const exponent = exponentForMagnitude(o, mag)
+    const r = formatNumeric(o, { ...x, e: x.e - exponent }, false)
+    if (r.rounded.d === "") return exponent
+    if (decMagnitude(r.rounded) === mag - exponent) return exponent
+    return exponentForMagnitude(o, mag + 1)
+  }
+  const compactSuffix = (o, exponent, shown) => {
+    const hit = compactTable(o.locale, o.compactDisplay).find(([threshold]) => threshold === exponent)
+    if (!hit) return ""
+    const word = hit[1]
+    return Array.isArray(word) ? word[shown === "1" ? 0 : 1] : word
+  }
+
+  const NUMBER_DATA_REGION = {
+    "pt-PT": { decimal: ",", group: NBSP, minGroup: 2, percent: "{n}%", currency: "{n}" + NBSP + "{s}" },
+    "de-CH": { decimal: ".", group: "’", minGroup: 1, percent: "{n}%", currency: "{s}" + NBSP + "{n}" },
+    "de-AT": { decimal: ",", group: NBSP, minGroup: 1, percent: "{n}" + NBSP + "%", currency: "{s}" + NBSP + "{n}" },
+  }
+  const localeData = (locale, nu) => {
+    const { base } = parseExtension(locale)
+    const parts = base.split("-")
+    const region = parts.find((p, i) => i > 0 && (p.length === 2 || /^\d{3}$/.test(p)))
+    let data = (region && NUMBER_DATA_REGION[`${parts[0]}-${region}`]) ?? numberData(base)
+    if (nu === "arab" || nu === "arabext") data = { ...data, decimal: "٫", group: "٬" }
+    return data
+  }
+  const LOCAL_SYMBOLS = {
+    ko: { USD: "US$" }, zh: { USD: "US$", CNY: "¥" }, ja: { JPY: "￥", CNY: "元" }, fr: { USD: "$US" }, es: { USD: "US$" },
+    pt: { USD: "US$" }, nl: { USD: "US$" }, sv: { USD: "US$" }, uk: { UAH: "₴", USD: "USD" }, ru: { RUB: "₽" },
+    pl: { PLN: "zł", USD: "USD" }, it: { USD: "USD" }, tr: { TRY: "₺" },
+  }
+  const ACCOUNTING_PARENS = new Set(["en", "ja", "ko", "zh"])
+  const currencySymbol = (o) => {
+    if (o.currencyDisplay === "code") return o.currency
+    const info = CURRENCY[o.currency]
+    const symbol = LOCAL_SYMBOLS[lang(o.locale)]?.[o.currency] ?? info?.[0] ?? o.currency
+    if (o.currencyDisplay === "narrowSymbol") return symbol.replace(/^[A-Z]+(?=[^A-Z])/, "").replace(/(?<=[^A-Z])[A-Z]+$/, "") || symbol
+    return symbol
+  }
+  const currencyDigits = (code) => CURRENCY[code]?.[1] ?? 2
+  const SANCTIONED_UNITS = new Set(
+    "acre bit byte celsius centimeter day degree fahrenheit fluid-ounce foot gallon gigabit gigabyte gram hectare hour inch kilobit kilobyte kilogram kilometer liter megabit megabyte meter microsecond mile mile-scandinavian milliliter millimeter millisecond minute month nanosecond ounce percent petabyte pound second stone terabit terabyte week yard year".split(" "),
+  )
+  const wellFormedUnit = (u) => {
+    if (SANCTIONED_UNITS.has(u)) return true
+    const i = u.indexOf("-per-")
+    return i !== -1 && SANCTIONED_UNITS.has(u.slice(0, i)) && SANCTIONED_UNITS.has(u.slice(i + 5))
+  }
+  const unitNames = (unit) => {
+    if (UNITS[unit]) return UNITS[unit]
+    const i = unit.indexOf("-per-")
+    if (i !== -1) {
+      const [ns, nl] = unitNames(unit.slice(0, i))
+      const [ds, dl] = unitNames(unit.slice(i + 5))
+      return [`${ns}/${ds}`, `${nl} per ${singularUnit(dl)}`]
+    }
+    return [unit, unit]
+  }
+  const singularUnit = (name) =>
+    name === "feet" ? "foot" : name === "inches" ? "inch" : name === "centuries" ? "century" : name.replace(/ies$/, "y").replace(/(?<=\w)s(?= |$)/, "")
+  const UNIT_TIGHT = { short: new Set(["ko"]), narrow: new Set(["en", "ja", "ko", "zh"]) }
+  const RANGE_SEPARATOR = { pt: " - ", es: "-", ja: "～", ko: "~", zh: "-" }
+  const kFallback = Symbol("IntlLegacyConstructedSymbol")
+  const ROUNDING_INCREMENTS = [1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000]
+  const ROUNDING_MODES = ["ceil", "floor", "expand", "trunc", "halfCeil", "halfFloor", "halfExpand", "halfTrunc", "halfEven"]
 
   class NumberFormat {
     #o
+    #data
+    #digits
+    #bound
     constructor(locales, options) {
-      const opts = options === undefined ? {} : Object(options)
-      const locale = resolve(locales)
-      const style = getOpt(opts, "style", ["decimal", "percent", "currency", "unit"], "decimal")
-      const currency = opts.currency === undefined ? undefined : String(opts.currency).toUpperCase()
+      const list = localeList(locales)
+      if (options === null) throw new TypeError("Cannot convert undefined or null to object")
+      const opts = options === undefined ? Object.create(null) : Object(options)
+      getOption(opts, "localeMatcher", ["lookup", "best fit"], "best fit")
+      const numberingSystem = getOption(opts, "numberingSystem", undefined, undefined)
+      if (numberingSystem !== undefined && !/^[a-zA-Z0-9]{3,8}(-[a-zA-Z0-9]{3,8})*$/.test(numberingSystem)) {
+        throw new RangeError(`Invalid numberingSystem : ${numberingSystem}`)
+      }
+      const { locale, nu } = resolveNumberLocale(list, numberingSystem)
+      const style = getOption(opts, "style", ["decimal", "percent", "currency", "unit"], "decimal")
+      const currency = getOption(opts, "currency", undefined, undefined)
+      if (currency !== undefined && !/^[A-Za-z]{3}$/.test(currency)) throw new RangeError(`Invalid currency code : ${currency}`)
+      const currencyDisplay = getOption(opts, "currencyDisplay", ["code", "symbol", "narrowSymbol", "name"], "symbol")
+      const currencySign = getOption(opts, "currencySign", ["standard", "accounting"], "standard")
+      const unit = getOption(opts, "unit", undefined, undefined)
+      if (unit !== undefined && !wellFormedUnit(unit)) throw new RangeError(`Invalid unit argument for Intl.NumberFormat() '${unit}'`)
+      const unitDisplay = getOption(opts, "unitDisplay", ["short", "narrow", "long"], "short")
       if (style === "currency" && currency === undefined) throw new TypeError("Currency code is required with currency style.")
-      const unit = opts.unit === undefined ? undefined : String(opts.unit)
       if (style === "unit" && unit === undefined) throw new TypeError("Unit is required with unit style.")
-      const notation = getOpt(opts, "notation", ["standard", "scientific", "engineering", "compact"], "standard")
-      const cdigits = style === "currency" ? (CURRENCY[currency]?.[1] ?? 2) : 0
-      const minFD = getNum(opts, "minimumFractionDigits", 0, 100, undefined)
-      const maxFD = getNum(opts, "maximumFractionDigits", 0, 100, undefined)
-      const defMin = style === "currency" && notation !== "compact" ? cdigits : 0
-      const defMax = style === "currency" && notation !== "compact" ? cdigits : style === "percent" ? 0 : notation === "compact" ? 0 : 3
-      let minimumFractionDigits = minFD ?? defMin
-      let maximumFractionDigits = maxFD ?? Math.max(defMax, minimumFractionDigits)
-      if (minFD !== undefined && maxFD === undefined) maximumFractionDigits = Math.max(defMax, minFD)
-      if (maxFD !== undefined && minFD === undefined) minimumFractionDigits = Math.min(defMin, maxFD)
-      if (minimumFractionDigits > maximumFractionDigits) throw new RangeError("maximumFractionDigits value is out of range.")
+      const notation = getOption(opts, "notation", ["standard", "scientific", "engineering", "compact"], "standard")
+      let mnfdDefault = 0
+      let mxfdDefault = style === "percent" ? 0 : 3
+      if (style === "currency" && notation === "standard") {
+        mnfdDefault = currencyDigits(currency.toUpperCase())
+        mxfdDefault = mnfdDefault
+      }
+      const mnid = getNumberOption(opts, "minimumIntegerDigits", 1, 21, 1)
+      const mnfd = opts.minimumFractionDigits
+      const mxfd = opts.maximumFractionDigits
+      const mnsd = opts.minimumSignificantDigits
+      const mxsd = opts.maximumSignificantDigits
+      const roundingIncrement = getNumberOption(opts, "roundingIncrement", 1, 5000, 1)
+      if (!ROUNDING_INCREMENTS.includes(roundingIncrement)) throw new RangeError("roundingIncrement value is out of range.")
+      const roundingMode = getOption(opts, "roundingMode", ROUNDING_MODES, "halfExpand")
+      const roundingPriority = getOption(opts, "roundingPriority", ["auto", "morePrecision", "lessPrecision"], "auto")
+      const trailingZeroDisplay = getOption(opts, "trailingZeroDisplay", ["auto", "stripIfInteger"], "auto")
+      if (roundingIncrement !== 1) mxfdDefault = mnfdDefault
+      const hasSd = mnsd !== undefined || mxsd !== undefined
+      const hasFd = mnfd !== undefined || mxfd !== undefined
+      let needSd = true
+      let needFd = true
+      if (roundingPriority === "auto") {
+        needSd = hasSd
+        if (needSd || (!hasFd && notation === "compact")) needFd = false
+      }
+      const digits = {}
+      if (needSd) {
+        if (hasSd) {
+          digits.minSD = defaultNumberOption(mnsd, 1, 21, 1, "minimumSignificantDigits")
+          digits.maxSD = defaultNumberOption(mxsd, digits.minSD, 21, 21, "maximumSignificantDigits")
+        } else {
+          digits.minSD = 1
+          digits.maxSD = 2
+        }
+      }
+      if (needFd) {
+        if (hasFd) {
+          let lo = defaultNumberOption(mnfd, 0, 100, undefined, "minimumFractionDigits")
+          let hi = defaultNumberOption(mxfd, 0, 100, undefined, "maximumFractionDigits")
+          if (lo === undefined) lo = Math.min(mnfdDefault, hi)
+          else if (hi === undefined) hi = Math.max(mxfdDefault, lo)
+          else if (lo > hi) throw new RangeError("maximumFractionDigits value is out of range.")
+          digits.minFD = lo
+          digits.maxFD = hi
+        } else {
+          digits.minFD = mnfdDefault
+          digits.maxFD = mxfdDefault
+        }
+      }
+      let roundingType
+      let computedPriority = roundingPriority
+      if (!needSd && !needFd) {
+        Object.assign(digits, { minFD: 0, maxFD: 0, minSD: 1, maxSD: 2 })
+        roundingType = "morePrecision"
+        computedPriority = "morePrecision"
+      } else if (roundingPriority === "auto") {
+        roundingType = hasSd ? "significantDigits" : "fractionDigits"
+      } else {
+        roundingType = roundingPriority
+      }
+      if (roundingIncrement !== 1) {
+        if (roundingType !== "fractionDigits") throw new TypeError("roundingIncrement is only allowed with fraction digits rounding")
+        if (digits.maxFD !== digits.minFD) throw new RangeError("maximumFractionDigits and minimumFractionDigits must be equal when roundingIncrement is used")
+      }
+      const compactDisplay = getOption(opts, "compactDisplay", ["short", "long"], "short")
+      const defaultGrouping = notation === "compact" ? "min2" : "auto"
+      let useGrouping = opts.useGrouping
+      if (useGrouping === undefined) useGrouping = defaultGrouping
+      else if (useGrouping === true) useGrouping = "always"
+      else if (!useGrouping) useGrouping = false
+      else {
+        useGrouping = String(useGrouping)
+        if (useGrouping === "true" || useGrouping === "false") useGrouping = defaultGrouping
+        else if (!["min2", "auto", "always"].includes(useGrouping)) {
+          throw new RangeError(`Value ${useGrouping} out of range for Intl.NumberFormat options property useGrouping`)
+        }
+      }
+      const signDisplay = getOption(opts, "signDisplay", ["auto", "never", "always", "exceptZero", "negative"], "auto")
       this.#o = {
         locale,
-        numberingSystem: "latn",
+        numberingSystem: nu,
         style,
-        currency,
-        currencyDisplay: getOpt(opts, "currencyDisplay", ["symbol", "narrowSymbol", "code", "name"], "symbol"),
-        currencySign: getOpt(opts, "currencySign", ["standard", "accounting"], "standard"),
+        currency: currency === undefined ? undefined : currency.toUpperCase(),
+        currencyDisplay,
+        currencySign,
         unit,
-        unitDisplay: getOpt(opts, "unitDisplay", ["short", "narrow", "long"], "short"),
-        minimumIntegerDigits: getNum(opts, "minimumIntegerDigits", 1, 21, 1),
-        minimumFractionDigits,
-        maximumFractionDigits,
-        minimumSignificantDigits: getNum(opts, "minimumSignificantDigits", 1, 21, undefined),
-        maximumSignificantDigits: getNum(opts, "maximumSignificantDigits", 1, 21, undefined),
-        useGrouping: opts.useGrouping === undefined ? (notation === "compact" ? "min2" : "auto") : opts.useGrouping === false ? false : String(opts.useGrouping) === "true" ? "always" : String(opts.useGrouping),
+        unitDisplay,
+        minimumIntegerDigits: mnid,
+        ...digits,
+        roundingType,
+        roundingIncrement,
+        roundingMode,
+        roundingPriority: computedPriority,
+        trailingZeroDisplay,
+        useGrouping,
         notation,
-        compactDisplay: getOpt(opts, "compactDisplay", ["short", "long"], "short"),
-        signDisplay: getOpt(opts, "signDisplay", ["auto", "never", "always", "exceptZero", "negative"], "auto"),
-        roundingMode: "halfExpand",
+        compactDisplay,
+        signDisplay,
       }
-      if (this.#o.maximumSignificantDigits !== undefined && this.#o.minimumSignificantDigits === undefined) this.#o.minimumSignificantDigits = 1
-      if (this.#o.minimumSignificantDigits !== undefined && this.#o.maximumSignificantDigits === undefined) this.#o.maximumSignificantDigits = 21
+      this.#data = localeData(locale, nu)
+      this.#digits = nuDigits(nu)
     }
-    #digits(x) {
-      const o = this.#o
-      if (o.maximumSignificantDigits !== undefined) {
-        if (x === 0) return "0"
-        let s = Number(x.toPrecision(o.maximumSignificantDigits)).toString()
-        if (s.includes("e")) s = Number(s).toLocaleString === undefined ? s : BigInt(Math.round(Number(s))).toString()
-        const [i, f = ""] = s.split(".")
-        let frac = f
-        const sig = (i.replace(/^0+/, "") + frac).length
-        if (sig < o.minimumSignificantDigits) frac = frac.padEnd(frac.length + (o.minimumSignificantDigits - sig), "0")
-        return frac ? `${i}.${frac}` : i
+    static #unwrap(x, method) {
+      if (x !== null && (typeof x === "object" || typeof x === "function") && !(#o in x) && Object.prototype.isPrototypeOf.call(NumberFormat.prototype, x)) {
+        x = x[kFallback]
       }
-      let s = roundTo(x, o.maximumFractionDigits)
-      if (s.includes("e")) s = BigInt(Math.round(x)).toString()
-      let [i, f = ""] = s.split(".")
-      while (f.length > o.minimumFractionDigits && f.endsWith("0")) f = f.slice(0, -1)
-      return f ? `${i}.${f}` : i
+      if (x === null || (typeof x !== "object" && typeof x !== "function") || !(#o in x)) {
+        throw new TypeError(`Method Intl.NumberFormat.prototype.${method} called on incompatible receiver ${typeof x === "object" && x !== null ? "#<Object>" : String(x)}`)
+      }
+      return x
     }
-    #parts(value) {
+    static legacy(nf, self) {
+      if (self !== undefined && self !== null && (typeof self === "object" || typeof self === "function") && Object.prototype.isPrototypeOf.call(NumberFormat.prototype, self)) {
+        Object.defineProperty(self, kFallback, { value: nf, writable: false, enumerable: false, configurable: false })
+        return self
+      }
+      return nf
+    }
+    #tr(s) {
+      const d = this.#digits
+      return d === null ? s : s.replace(/[0-9]/g, (c) => d[c.charCodeAt(0) - 48])
+    }
+    #layered(x) {
       const o = this.#o
-      const data = numberData(o.locale)
-      if (typeof value === "bigint" && o.notation === "standard" && o.style !== "percent") {
-        const negative = value < 0n
-        const digits = (negative ? -value : value).toString().padStart(o.minimumIntegerDigits, "0")
-        const parts = []
-        this.#withGroup(digits, data).split(data.group).forEach((chunk, idx) => {
-          if (idx > 0) parts.push({ type: "group", value: data.group })
-          parts.push({ type: "integer", value: chunk })
+      const data = this.#data
+      const nan = x.kind === "nan"
+      const body = []
+      const inner = []
+      let rounded = null
+      let shown = ""
+      if (nan) body.push({ type: "nan", value: "NaN", layer: "number" })
+      else if (x.kind === "inf") body.push({ type: "infinity", value: "∞", layer: "number" })
+      else {
+        const v = { kind: "finite", neg: false, d: x.d, e: x.e }
+        if (o.style === "percent" && v.d !== "") v.e += 2
+        let exponent = 0
+        if (o.notation !== "standard") {
+          exponent = computeExponent(o, v)
+          v.e -= exponent
+        }
+        const r = formatNumeric(o, v, x.neg)
+        rounded = r.rounded
+        shown = r.str
+        const dot = r.str.indexOf(".")
+        const int = dot === -1 ? r.str : r.str.slice(0, dot)
+        const g = o.useGrouping
+        const minGroup = g === "always" ? 1 : g === "min2" ? 2 : data.minGroup
+        const chunks = g === false || int.length < 3 + minGroup ? [int] : groupDigits(int, "\u0000", 1, data.indian === true).split("\u0000")
+        chunks.forEach((chunk, i) => {
+          if (i > 0) body.push({ type: "group", value: data.group, layer: "number" })
+          body.push({ type: "integer", value: this.#tr(chunk), layer: "number" })
         })
-        if (o.minimumFractionDigits > 0) parts.push({ type: "decimal", value: data.decimal }, { type: "fraction", value: "0".repeat(o.minimumFractionDigits) })
-        return this.#decorate(parts, "", negative, Number(value), data, null)
-      }
-      let x = typeof value === "bigint" ? Number(value) : Number(value)
-      const parts = []
-      const negative = x < 0 || Object.is(x, -0)
-      if (Number.isNaN(x)) return [{ type: "nan", value: "NaN" }]
-      let abs = Math.abs(x)
-      if (o.style === "percent") abs *= 100
-      let suffix = ""
-      let exponent = null
-      if (o.notation === "compact" && Number.isFinite(abs)) {
-        for (const [limit, short, long] of COMPACT) {
-          if (abs >= limit) {
-            abs /= limit
-            suffix = o.compactDisplay === "long" ? long : short
-            break
-          }
+        if (dot !== -1) {
+          body.push({ type: "decimal", value: data.decimal, layer: "number" })
+          body.push({ type: "fraction", value: this.#tr(r.str.slice(dot + 1)), layer: "number" })
         }
-        if (o.maximumSignificantDigits === undefined && o.maximumFractionDigits === 0 && abs < 100) {
-          abs = Number(abs.toPrecision(2))
-          const s = abs.toString()
-          if (s.includes(".")) {
-            const [i, f] = s.split(".")
-            const shown = this.#withGroup(i, data)
-            const res = [{ type: "integer", value: shown }, { type: "decimal", value: data.decimal }, { type: "fraction", value: f }]
-            return this.#decorate(res, suffix, negative, x, data, exponent)
-          }
+        if (o.notation === "scientific" || o.notation === "engineering") {
+          inner.push({ type: "exponentSeparator", value: "E", layer: "inner" })
+          if (exponent < 0) inner.push({ type: "exponentMinusSign", value: "-", layer: "inner" })
+          inner.push({ type: "exponentInteger", value: this.#tr(String(Math.abs(exponent))), layer: "inner" })
+        } else if (o.notation === "compact" && exponent > 0) {
+          const suffix = compactSuffix(o, exponent, r.str)
+          const lead = /^[\s ]*/.exec(suffix)[0]
+          if (lead) inner.push({ type: "literal", value: lead, layer: "inner" })
+          if (suffix.length > lead.length) inner.push({ type: "compact", value: suffix.slice(lead.length), layer: "inner" })
         }
-      } else if ((o.notation === "scientific" || o.notation === "engineering") && abs !== 0 && Number.isFinite(abs)) {
-        let e = Math.floor(Math.log10(abs))
-        if (o.notation === "engineering") e = Math.floor(e / 3) * 3
-        abs = abs / 10 ** e
-        if (abs >= 10 && o.notation === "scientific") {
-          abs /= 10
-          e += 1
-        }
-        exponent = e
       }
-      if (!Number.isFinite(abs)) {
-        return this.#decorate([{ type: "infinity", value: "∞" }], suffix, negative, x, data, exponent)
-      }
-      const text = exponent !== null && o.maximumSignificantDigits === undefined && o.maximumFractionDigits === 3 ? Number(abs.toFixed(3)).toString() : this.#digits(abs)
-      let [int, frac = ""] = text.split(".")
-      int = int.padStart(o.minimumIntegerDigits, "0")
-      const grouped = this.#withGroup(int, data)
-      grouped.split(data.group).forEach((chunk, idx) => {
-        if (idx > 0) parts.push({ type: "group", value: data.group })
-        parts.push({ type: "integer", value: chunk })
-      })
-      if (frac) {
-        parts.push({ type: "decimal", value: data.decimal })
-        parts.push({ type: "fraction", value: frac })
-      }
-      return this.#decorate(parts, suffix, negative, x, data, exponent)
-    }
-    #withGroup(int, data) {
-      const g = this.#o.useGrouping
-      if (g === false) return int
-      return groupDigits(int, data.group, g === "min2" ? 2 : g === "always" ? 1 : data.minGroup, data.indian === true)
-    }
-    #decorate(parts, suffix, negative, x, data, exponent) {
-      const o = this.#o
-      const out = []
-      const isZero = parts.every((p) => p.type !== "integer" || /^0*$/.test(p.value)) && parts.every((p) => p.type !== "fraction" || /^0*$/.test(p.value))
+      const zero = rounded !== null && rounded.d === ""
+      const neg = !nan && x.neg
       let sign = ""
-      if (o.signDisplay === "always") sign = negative ? "-" : "+"
-      else if (o.signDisplay === "exceptZero") sign = isZero ? "" : negative ? "-" : "+"
-      else if (o.signDisplay === "never") sign = ""
-      else if (o.signDisplay === "negative") sign = negative && !isZero ? "-" : ""
-      else sign = negative ? "-" : ""
-      if (sign) out.push({ type: sign === "-" ? "minusSign" : "plusSign", value: sign })
-      const body = [...parts]
-      if (exponent !== null) {
-        body.push({ type: "exponentSeparator", value: "E" })
-        if (exponent < 0) body.push({ type: "exponentMinusSign", value: "-" })
-        body.push({ type: "exponentInteger", value: String(Math.abs(exponent)) })
-      }
-      if (suffix) {
-        if (suffix.startsWith(" ")) body.push({ type: "literal", value: " " }, { type: "compact", value: suffix.trim() })
-        else body.push({ type: "compact", value: suffix })
-      }
+      if (o.signDisplay === "auto") sign = neg ? "-" : ""
+      else if (o.signDisplay === "always") sign = neg ? "-" : "+"
+      else if (o.signDisplay === "exceptZero") sign = nan || zero ? "" : neg ? "-" : "+"
+      else if (o.signDisplay === "negative") sign = neg && !zero ? "-" : ""
+      const signParts = sign ? [{ type: sign === "-" ? "minusSign" : "plusSign", value: sign, layer: "middle" }] : []
+      const core = [...body, ...inner]
+      const out = []
       if (o.style === "percent") {
         const [before, after] = data.percent.split("{n}")
-        if (before) out.push({ type: "percentSign", value: before })
-        out.push(...body)
+        out.push(...signParts)
+        if (before) out.push({ type: "percentSign", value: "%", layer: "middle" })
+        out.push(...core)
         if (after) {
           const lit = after.slice(0, -1)
-          if (lit) out.push({ type: "literal", value: lit })
-          out.push({ type: "percentSign", value: "%" })
+          if (lit) out.push({ type: "literal", value: lit, layer: "middle" })
+          out.push({ type: "percentSign", value: "%", layer: "middle" })
         }
         return out
       }
       if (o.style === "currency") {
-        const info = CURRENCY[o.currency] ?? [o.currency, 2, o.currency]
         if (o.currencyDisplay === "name") {
-          out.push(...body, { type: "literal", value: " " }, { type: "currency", value: info[2] })
+          const name = CURRENCY[o.currency]?.[2] ?? o.currency
+          const singular = shown === "1" && name.endsWith("s") ? name.replace(/(?<=[a-z])s$/, "") : name
+          out.push(...signParts, ...core, { type: "literal", value: " ", layer: "outer" }, { type: "currency", value: singular, layer: "outer" })
           return out
         }
-        const localSymbol = lang(o.locale) === "ja" && o.currency === "JPY" ? "￥" : lang(o.locale) === "zh" && o.currency === "CNY" ? "¥" : info[0]
-        const symbol = o.currencyDisplay === "code" ? o.currency : o.currencyDisplay === "narrowSymbol" ? localSymbol.replace(/^[A-Z]+(?=[^A-Z])/, "") : localSymbol
-        const accounting = o.currencySign === "accounting" && out.length > 0 && out[0].type === "minusSign"
-        if (accounting) {
-          out.length = 0
-          out.push({ type: "literal", value: "(" })
-        }
+        const symbol = currencySymbol(o)
+        const paren = o.currencySign === "accounting" && sign === "-" && ACCOUNTING_PARENS.has(lang(o.locale))
         const [before, after] = data.currency.split("{n}")
+        if (paren) out.push({ type: "literal", value: "(", layer: "middle" })
+        else out.push(...signParts)
         if (before) {
           const sym = before.replace("{s}", symbol)
-          out.push({ type: "currency", value: sym.trim() })
-          if (sym !== sym.trim() || (o.currencyDisplay === "code" && lang(o.locale) === "en")) out.push({ type: "literal", value: NBSP })
+          out.push({ type: "currency", value: sym.trim(), layer: "middle" })
+          if (sym !== sym.trim() || /\p{L}$/u.test(symbol)) out.push({ type: "literal", value: NBSP, layer: "middle" })
         }
-        out.push(...body)
+        out.push(...core)
         if (after) {
-          out.push({ type: "literal", value: after.slice(0, after.indexOf("{s}")) })
-          out.push({ type: "currency", value: symbol })
+          out.push({ type: "literal", value: after.slice(0, after.indexOf("{s}")), layer: "middle" })
+          out.push({ type: "currency", value: symbol, layer: "middle" })
         }
-        if (accounting) out.push({ type: "literal", value: ")" })
+        if (paren) out.push({ type: "literal", value: ")", layer: "middle" })
         return out
       }
       if (o.style === "unit") {
-        const info = UNITS[o.unit] ?? [o.unit, o.unit]
-        out.push(...body)
+        const [short, long] = unitNames(o.unit)
+        out.push(...signParts, ...core)
         if (o.unitDisplay === "long") {
-          const n = Math.abs(x)
-          let name = info[1]
-          if (n === 1 && name.endsWith("s")) name = name.replace(/ies$/, "y").replace(/s$/, "").replace(/^feet$/, "foot")
-          out.push({ type: "literal", value: " " }, { type: "unit", value: name })
-        } else if (o.unitDisplay === "narrow") {
-          out.push({ type: "unit", value: info[0] })
-        } else if (info[0] === "%" || info[0].startsWith("°")) {
-          out.push({ type: "unit", value: info[0] })
+          out.push({ type: "literal", value: " ", layer: "outer" }, { type: "unit", value: shown === "1" ? singularUnit(long) : long, layer: "outer" })
+        } else if (short === "%" || short.startsWith("°") || UNIT_TIGHT[o.unitDisplay].has(lang(o.locale))) {
+          out.push({ type: "unit", value: short, layer: "outer" })
         } else {
-          out.push({ type: "literal", value: " " }, { type: "unit", value: info[0] })
+          out.push({ type: "literal", value: " ", layer: "outer" }, { type: "unit", value: short, layer: "outer" })
         }
         return out
       }
-      out.push(...body)
+      out.push(...signParts, ...core)
       return out
     }
+    #range(start, end) {
+      if (start === undefined || end === undefined) throw new TypeError("start or end is undefined")
+      const x = toIntlMV(start)
+      const y = toIntlMV(end)
+      if (x.kind === "nan" || y.kind === "nan") throw new RangeError(`Invalid ${x.kind === "nan" ? "start" : "end"} : NaN`)
+      const a = this.#layered(x)
+      const b = this.#layered(y)
+      const text = (ps, layer) => ps.filter((p) => layer === undefined || p.layer === layer).map((p) => p.value).join("")
+      const tag = (ps, source) => ps.map(({ type, value }) => ({ type, value, source }))
+      if (text(a) === text(b)) return [{ type: "approximatelySign", value: "~", source: "shared" }, ...tag(a, "shared")]
+      const collapseOuter = text(a, "outer") === text(b, "outer")
+      const collapseMiddle = collapseOuter && text(a, "middle") === text(b, "middle") && [...text(a, "middle")].length > 1
+      const collapsed = (p) => (p.layer === "middle" && collapseMiddle) || (p.layer === "outer" && collapseOuter)
+      const edges = (ps) => {
+        let lead = 0
+        while (lead < ps.length && collapsed(ps[lead])) lead++
+        let trail = 0
+        while (trail < ps.length - lead && collapsed(ps[ps.length - 1 - trail])) trail++
+        return [lead, trail]
+      }
+      const [leadA, trailA] = edges(a)
+      const [leadB, trailB] = edges(b)
+      const repeated = (!collapseMiddle && text(a, "middle") !== "") || text(a, "inner") !== "" || (!collapseOuter && text(a, "outer") !== "")
+      const sep = RANGE_SEPARATOR[lang(this.#o.locale)] ?? "–"
+      const literal = repeated && !/^\s/.test(sep) ? ` ${sep} ` : sep
+      return [
+        ...tag(a.slice(0, leadA), "shared"),
+        ...tag(a.slice(leadA, a.length - trailA), "startRange"),
+        { type: "literal", value: literal, source: "shared" },
+        ...tag(b.slice(leadB, b.length - trailB), "endRange"),
+        ...tag(a.slice(a.length - trailA), "shared"),
+      ]
+    }
     get format() {
-      return (value) => this.#parts(value).map((p) => p.value).join("")
+      const nf = NumberFormat.#unwrap(this, "format")
+      if (nf.#bound === undefined) {
+        const bound = (value) => nf.#layered(toIntlMV(value)).map((p) => p.value).join("")
+        Object.defineProperty(bound, "name", { value: "", configurable: true })
+        nf.#bound = bound
+      }
+      return nf.#bound
     }
     formatToParts(value) {
-      return this.#parts(value)
+      const nf = NumberFormat.#unwrap(this, "formatToParts")
+      return nf.#layered(toIntlMV(value)).map(({ type, value: v }) => ({ type, value: v }))
     }
-    formatRange(a, b) {
-      return `${this.format(a)}–${this.format(b)}`
+    formatRange(start, end) {
+      const nf = NumberFormat.#unwrap(this, "formatRange")
+      return nf.#range(start, end).map((p) => p.value).join("")
+    }
+    formatRangeToParts(start, end) {
+      const nf = NumberFormat.#unwrap(this, "formatRangeToParts")
+      return nf.#range(start, end)
     }
     resolvedOptions() {
-      const out = {}
-      for (const [k, v] of Object.entries(this.#o)) if (v !== undefined) out[k] = v
+      const o = NumberFormat.#unwrap(this, "resolvedOptions").#o
+      const out = { locale: o.locale, numberingSystem: o.numberingSystem, style: o.style }
+      if (o.style === "currency") Object.assign(out, { currency: o.currency, currencyDisplay: o.currencyDisplay, currencySign: o.currencySign })
+      if (o.style === "unit") Object.assign(out, { unit: o.unit, unitDisplay: o.unitDisplay })
+      out.minimumIntegerDigits = o.minimumIntegerDigits
+      if (o.roundingType !== "significantDigits") Object.assign(out, { minimumFractionDigits: o.minFD, maximumFractionDigits: o.maxFD })
+      if (o.roundingType !== "fractionDigits") Object.assign(out, { minimumSignificantDigits: o.minSD, maximumSignificantDigits: o.maxSD })
+      out.useGrouping = o.useGrouping
+      out.notation = o.notation
+      if (o.notation === "compact") out.compactDisplay = o.compactDisplay
+      out.signDisplay = o.signDisplay
+      out.roundingIncrement = o.roundingIncrement
+      out.roundingMode = o.roundingMode
+      out.roundingPriority = o.roundingPriority
+      out.trailingZeroDisplay = o.trailingZeroDisplay
       return out
     }
     static supportedLocalesOf(locales) {
@@ -563,6 +988,9 @@ const INTL_SRC: &str = r##"
     constructor(locales, options) {
       const opts = options === undefined ? {} : Object(options)
       const locale = resolve(locales)
+      const nuOpt = opts.numberingSystem === undefined ? undefined : String(opts.numberingSystem)
+      if (nuOpt !== undefined && !/^[a-zA-Z0-9]{3,8}(-[a-zA-Z0-9]{3,8})*$/.test(nuOpt)) throw new RangeError(`Invalid numberingSystem : ${nuOpt}`)
+      const nu = resolveNumberLocale(localeList(locales), nuOpt).nu
       const pick = (k, allowed) => {
         const v = opts[k]
         if (v === undefined) return undefined
@@ -573,7 +1001,7 @@ const INTL_SRC: &str = r##"
       const o = {
         locale,
         calendar: "gregory",
-        numberingSystem: "latn",
+        numberingSystem: nu,
         timeZone: opts.timeZone === undefined ? undefined : canonicalTimeZone(String(opts.timeZone)),
         weekday: pick("weekday", ["long", "short", "narrow"]),
         era: pick("era", ["long", "short", "narrow"]),
@@ -759,7 +1187,9 @@ const INTL_SRC: &str = r##"
         parts.push({ type: "timeZoneName", value: tzName() })
       }
       trimParts()
-      return parts
+      const digits = nuDigits(o.numberingSystem)
+      if (digits === null) return parts
+      return parts.map((p) => ({ type: p.type, value: p.value.replace(/[0-9]/g, (c) => digits[c.charCodeAt(0) - 48]) }))
     }
     get format() {
       return (date) => this.#parts(date).map((p) => p.value).join("")
@@ -801,73 +1231,123 @@ const INTL_SRC: &str = r##"
   const NORDIC_SV = tailoring(["å", "ä", "ö"])
   const NORDIC_DA = tailoring(["æ", "ø", "å"])
   const COLLATION_TAILORING = { sv: NORDIC_SV, fi: NORDIC_SV, da: NORDIC_DA, nb: NORDIC_DA, nn: NORDIC_DA, no: NORDIC_DA }
+  const COLLATIONS = { de: ["phonebk"], es: ["trad"], zh: ["big5han", "gb2312", "pinyin", "stroke", "unihan", "zhuyin"], ja: ["unihan"], ko: ["searchjl", "unihan"] }
+  const collationSupported = (base, co) => co === "emoji" || co === "eor" || (COLLATIONS[lang(base)] ?? []).includes(co)
+  const PHONEBOOK = { "ä": "a\u0308e", "ö": "o\u0308e", "ü": "u\u0308e", "Ä": "A\u0308e", "Ö": "O\u0308e", "Ü": "U\u0308e" }
   class Collator {
     #o
+    #bound
     constructor(locales, options) {
-      const opts = options === undefined ? {} : Object(options)
-      this.#o = {
-        locale: resolve(locales),
-        usage: opts.usage === undefined ? "sort" : String(opts.usage),
-        sensitivity: opts.sensitivity === undefined ? "variant" : String(opts.sensitivity),
-        ignorePunctuation: Boolean(opts.ignorePunctuation),
-        collation: "default",
-        numeric: Boolean(opts.numeric),
-        caseFirst: opts.caseFirst === undefined ? "false" : String(opts.caseFirst),
+      const list = localeList(locales)
+      if (options === null) throw new TypeError("Cannot convert undefined or null to object")
+      const opts = options === undefined ? Object.create(null) : Object(options)
+      const usage = getOption(opts, "usage", ["sort", "search"], "sort")
+      getOption(opts, "localeMatcher", ["lookup", "best fit"], "best fit")
+      const collationOpt = getOption(opts, "collation", undefined, undefined)
+      if (collationOpt !== undefined && !/^[a-zA-Z0-9]{3,8}(-[a-zA-Z0-9]{3,8})*$/.test(collationOpt)) throw new RangeError(`Invalid collation : ${collationOpt}`)
+      const numericOpt = opts.numeric === undefined ? undefined : String(Boolean(opts.numeric))
+      const caseFirstOpt = getOption(opts, "caseFirst", ["upper", "lower", "false"], undefined)
+      const requested = list.find((l) => KNOWN_LANGUAGES.has(l.split("-")[0].toLowerCase())) ?? "en-US"
+      const { base, keywords } = parseExtension(requested)
+      const additions = {}
+      let collation = "default"
+      if (keywords.co !== undefined && collationSupported(base, keywords.co)) {
+        collation = keywords.co
+        additions.co = `-co-${keywords.co}`
       }
+      if (collationOpt !== undefined && collationSupported(base, collationOpt) && collationOpt !== collation) {
+        collation = collationOpt
+        delete additions.co
+      }
+      let caseFirst = "false"
+      if (keywords.kf !== undefined && ["upper", "lower", "false"].includes(keywords.kf)) {
+        caseFirst = keywords.kf
+        additions.kf = `-kf-${keywords.kf}`
+      }
+      if (caseFirstOpt !== undefined && caseFirstOpt !== caseFirst) {
+        caseFirst = caseFirstOpt
+        delete additions.kf
+      }
+      let numeric = "false"
+      if (keywords.kn === "true" || keywords.kn === "false") {
+        numeric = keywords.kn
+        additions.kn = keywords.kn === "true" ? "-kn" : "-kn-false"
+      }
+      if (numericOpt !== undefined && numericOpt !== numeric) {
+        numeric = numericOpt
+        delete additions.kn
+      }
+      const ext = ["co", "kf", "kn"].map((k) => additions[k] ?? "").join("")
+      const locale = ext ? `${base}-u${ext}` : base
+      const sensitivity = getOption(opts, "sensitivity", ["base", "accent", "case", "variant"], undefined) ?? "variant"
+      const ignorePunctuation = opts.ignorePunctuation === undefined ? lang(base) === "th" : Boolean(opts.ignorePunctuation)
+      this.#o = { locale, usage, sensitivity, ignorePunctuation, collation, numeric: numeric === "true", caseFirst }
+    }
+    static #unwrap(x, method) {
+      if (x === null || (typeof x !== "object" && typeof x !== "function") || !(#o in x)) {
+        throw new TypeError(`Method Intl.Collator.prototype.${method} called on incompatible receiver ${typeof x === "object" && x !== null ? "#<Object>" : String(x)}`)
+      }
+      return x
+    }
+    #compare(a, b) {
+      const o = this.#o
+      const prepare = (v) => {
+        let t = v.normalize("NFC")
+        if (o.ignorePunctuation) t = t.replace(/[\p{P}\s]/gu, "")
+        const tailor = COLLATION_TAILORING[lang(o.locale)]
+        if (tailor) t = t.replace(tailor.re, (c) => tailor.map[c])
+        if (o.collation === "phonebk" || (o.usage === "search" && lang(o.locale) === "de")) t = t.replace(/[äöüÄÖÜ]/g, (c) => PHONEBOOK[c])
+        return t.normalize("NFD")
+      }
+      const x = prepare(a)
+      const y = prepare(b)
+      const unmarked = (t) => t.replace(/\p{M}/gu, "")
+      const cmp = (p, q) => {
+        if (o.numeric) {
+          const re = /(\d+)|(\D+)/g
+          const ps = p.match(re) ?? []
+          const qs = q.match(re) ?? []
+          for (let i = 0; i < Math.min(ps.length, qs.length); i++) {
+            const pa = ps[i]
+            const qa = qs[i]
+            if (/^\d/.test(pa) && /^\d/.test(qa)) {
+              const d = BigInt(pa) - BigInt(qa)
+              if (d !== 0n) return d < 0n ? -1 : 1
+            } else if (pa !== qa) return pa < qa ? -1 : 1
+          }
+          return ps.length === qs.length ? 0 : ps.length < qs.length ? -1 : 1
+        }
+        return p === q ? 0 : p < q ? -1 : 1
+      }
+      const r1 = cmp(unmarked(x).toLowerCase(), unmarked(y).toLowerCase())
+      if (r1 !== 0 || o.sensitivity === "base") return r1
+      if (o.sensitivity !== "case") {
+        const r2 = cmp(x.toLowerCase(), y.toLowerCase())
+        if (r2 !== 0) return r2
+        if (o.sensitivity === "accent") return 0
+      }
+      const p = unmarked(x)
+      const q = unmarked(y)
+      for (let i = 0; i < Math.min(p.length, q.length); i++) {
+        if (p[i] !== q[i]) {
+          const lower = p[i] === p[i].toLowerCase()
+          if (o.caseFirst === "upper") return lower ? 1 : -1
+          return lower ? -1 : 1
+        }
+      }
+      return p.length === q.length ? 0 : p.length < q.length ? -1 : 1
     }
     get compare() {
-      return (a, b) => {
-        const o = this.#o
-        let x = String(a)
-        let y = String(b)
-        if (o.ignorePunctuation) {
-          x = x.replace(/[\p{P}\s]/gu, "")
-          y = y.replace(/[\p{P}\s]/gu, "")
-        }
-        const tailor = COLLATION_TAILORING[lang(o.locale)]
-        const base = (s) => fold(tailor ? s.replace(tailor.re, (c) => tailor.map[c]) : s).toLowerCase()
-        if (tailor) {
-          x = x.replace(tailor.re, (c) => tailor.map[c])
-          y = y.replace(tailor.re, (c) => tailor.map[c])
-        }
-        const cmpStr = (p, q) => {
-          if (o.numeric) {
-            const re = /(\d+)|(\D+)/g
-            const ps = p.match(re) ?? []
-            const qs = q.match(re) ?? []
-            for (let i = 0; i < Math.min(ps.length, qs.length); i++) {
-              const pa = ps[i]
-              const qa = qs[i]
-              if (/^\d/.test(pa) && /^\d/.test(qa)) {
-                const d = BigInt(pa) - BigInt(qa)
-                if (d !== 0n) return d < 0n ? -1 : 1
-              } else if (pa !== qa) return pa < qa ? -1 : 1
-            }
-            return ps.length === qs.length ? 0 : ps.length < qs.length ? -1 : 1
-          }
-          return p === q ? 0 : p < q ? -1 : 1
-        }
-        const r1 = cmpStr(base(x), base(y))
-        if (r1 !== 0 || o.sensitivity === "base") return r1
-        const r2 = cmpStr(x.toLowerCase(), y.toLowerCase())
-        if (r2 !== 0) {
-          if (o.sensitivity === "case") return 0
-          return r2
-        }
-        if (o.sensitivity === "accent") return 0
-        if (x === y) return 0
-        for (let i = 0; i < Math.min(x.length, y.length); i++) {
-          if (x[i] !== y[i]) {
-            const xl = x[i] === x[i].toLowerCase()
-            if (o.caseFirst === "upper") return xl ? 1 : -1
-            return xl ? -1 : 1
-          }
-        }
-        return x.length - y.length < 0 ? -1 : 1
+      const c = Collator.#unwrap(this, "compare")
+      if (c.#bound === undefined) {
+        const bound = (x, y) => c.#compare(String(x), String(y))
+        Object.defineProperty(bound, "name", { value: "", configurable: true })
+        c.#bound = bound
       }
+      return c.#bound
     }
     resolvedOptions() {
-      return { ...this.#o }
+      return { ...Collator.#unwrap(this, "resolvedOptions").#o }
     }
     static supportedLocalesOf(locales) {
       return supportedList(locales)
@@ -1025,11 +1505,13 @@ const INTL_SRC: &str = r##"
     #o
     constructor(locales, options) {
       const opts = options === undefined ? {} : Object(options)
+      const nuOpt = opts.numberingSystem === undefined ? undefined : String(opts.numberingSystem)
+      if (nuOpt !== undefined && !/^[a-zA-Z0-9]{3,8}(-[a-zA-Z0-9]{3,8})*$/.test(nuOpt)) throw new RangeError(`Invalid numberingSystem : ${nuOpt}`)
       this.#o = {
         locale: resolve(locales),
         style: opts.style === undefined ? "long" : String(opts.style),
         numeric: opts.numeric === undefined ? "always" : String(opts.numeric),
-        numberingSystem: "latn",
+        numberingSystem: resolveNumberLocale(localeList(locales), nuOpt).nu,
       }
     }
     format(value, unit) {
@@ -1044,7 +1526,7 @@ const INTL_SRC: &str = r##"
         if (t) return t
       }
       const abs = Math.abs(n)
-      const num = new NumberFormat(this.#o.locale).format(abs)
+      const num = new NumberFormat(this.#o.locale, { numberingSystem: this.#o.numberingSystem }).format(abs)
       const past = n < 0 || Object.is(n, -0)
       if (data) {
         const forms = data.units[u]
@@ -1218,9 +1700,15 @@ const INTL_SRC: &str = r##"
     }
   }
 
-  const callable = (C) => {
+  const callable = (C, chain = false) => {
     const f = function (...args) {
-      return new.target && new.target !== f ? Reflect.construct(C, args, new.target) : new C(...args)
+      if (new.target) return new.target !== f ? Reflect.construct(C, args, new.target) : new C(...args)
+      const instance = new C(...args)
+      if (chain && this !== undefined && this !== null && (typeof this === "object" || typeof this === "function") && Object.prototype.isPrototypeOf.call(C.prototype, this)) {
+        Object.defineProperty(this, kFallback, { value: instance, writable: false, enumerable: false, configurable: false })
+        return this
+      }
+      return instance
     }
     Object.defineProperty(f, "name", { value: C.name, configurable: true })
     Object.defineProperty(f, "length", { value: 0, configurable: true })
@@ -1230,7 +1718,7 @@ const INTL_SRC: &str = r##"
     return f
   }
   const Intl = {}
-  for (const [name, value] of Object.entries({ NumberFormat: callable(NumberFormat), DateTimeFormat: callable(DateTimeFormat), Collator: callable(Collator), PluralRules, RelativeTimeFormat, ListFormat, Segmenter, DisplayNames, Locale })) {
+  for (const [name, value] of Object.entries({ NumberFormat: callable(NumberFormat, true), DateTimeFormat: callable(DateTimeFormat, true), Collator: callable(Collator), PluralRules, RelativeTimeFormat, ListFormat, Segmenter, DisplayNames, Locale })) {
     Object.defineProperty(Intl, name, { value, writable: true, configurable: true, enumerable: false })
     Object.defineProperty(value.prototype, Symbol.toStringTag, { value: `Intl.${name}`, configurable: true })
   }
@@ -1241,9 +1729,9 @@ const INTL_SRC: &str = r##"
       if (k === "currency") return Object.keys(CURRENCY).sort()
       if (k === "unit") return Object.keys(UNITS).sort()
       if (k === "calendar") return ["gregory"]
-      if (k === "numberingSystem") return ["latn"]
+      if (k === "numberingSystem") return [...Object.keys(NU_ZERO), "hanidec"].sort()
       if (k === "timeZone") return tzList()
-      if (k === "collation") return ["default"]
+      if (k === "collation") return ["big5han", "emoji", "eor", "gb2312", "phonebk", "pinyin", "searchjl", "stroke", "trad", "unihan", "zhuyin"]
       throw new RangeError(`Invalid key : ${k}`)
     },
     writable: true,

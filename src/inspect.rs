@@ -13,6 +13,8 @@ struct Ctx<'a> {
     max_depth: usize,
     break_length: usize,
     compact: usize,
+    sorted: bool,
+    max_items: usize,
     indent: usize,
     current_depth: usize,
     seen: Vec<*const Obj>,
@@ -40,6 +42,8 @@ pub struct InspectOptions {
     pub depth: usize,
     pub break_length: usize,
     pub compact: usize,
+    pub sorted: bool,
+    pub max_array_length: usize,
 }
 
 impl Default for InspectOptions {
@@ -48,6 +52,8 @@ impl Default for InspectOptions {
             depth: MAX_DEPTH,
             break_length: BREAK_LENGTH,
             compact: COMPACT,
+            sorted: false,
+            max_array_length: MAX_ITEMS,
         }
     }
 }
@@ -58,6 +64,8 @@ pub fn inspect_with(vm: &mut crate::vm::Vm, v: &Value, options: InspectOptions) 
     ctx.max_depth = options.depth;
     ctx.break_length = options.break_length;
     ctx.compact = options.compact;
+    ctx.sorted = options.sorted;
+    ctx.max_items = options.max_array_length;
     format_value(&mut ctx, v, 0, false)
 }
 
@@ -99,6 +107,8 @@ impl Ctx<'_> {
             max_depth: MAX_DEPTH,
             break_length: BREAK_LENGTH,
             compact: COMPACT,
+            sorted: false,
+            max_items: MAX_ITEMS,
             indent: 0,
             current_depth: 0,
             seen: Vec::new(),
@@ -330,7 +340,7 @@ fn format_value(ctx: &mut Ctx, v: &Value, rt: usize, top: bool) -> String {
                 format_string(ctx, s)
             }
         }
-        Value::Object(o) => format_object(ctx, o, rt, top),
+        Value::Object(o) => format_object(ctx, o, rt),
         Value::Symbol(sym) => crate::builtins::symbol_text(sym),
         Value::BigInt(b) => format!("{b}n"),
     }
@@ -492,9 +502,12 @@ struct Shape<'a> {
 }
 
 fn reduce(ctx: &Ctx, mut output: Vec<String>, shape: Shape<'_>, rt: usize) -> String {
+    if ctx.sorted && shape.array.is_none() {
+        output.sort();
+    }
     let entries = output.len();
     if let Some((has_more, numeric)) = shape.array {
-        if entries > 6 {
+        if entries > 6 && ctx.compact >= 1 {
             output = group_array_elements(ctx, output, has_more, numeric);
         }
     }
@@ -555,7 +568,80 @@ fn leave(ctx: &mut Ctx, ptr: *const Obj, base: &mut String) {
     }
 }
 
-fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
+fn format_error(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, ptr: *const Obj) -> String {
+    let mut base = match o.get_own("stack") {
+        Some(Value::Str(st)) if !st.is_empty() => st.to_string(),
+        _ => error_full(o),
+    };
+    if !base.contains("\n    at ") {
+        base = format!("[{base}]");
+    }
+    if ctx.indent > 0 {
+        let pad = " ".repeat(ctx.indent);
+        base = base.replace('\n', &format!("\n{pad}"));
+    }
+    let props = own_props(o, false);
+    let cause = o
+        .get_own("cause")
+        .filter(|_| !o.props.borrow().is_enumerable("cause"));
+    let errors = o
+        .get_own("errors")
+        .filter(|_| !o.props.borrow().is_enumerable("errors"));
+    if props.is_empty() && cause.is_none() && errors.is_none() {
+        return base;
+    }
+    if rt > ctx.max_depth {
+        return format!("[{}]", error_header(o));
+    }
+    let inner = enter(ctx, ptr, rt);
+    let mut output: Vec<String> = props
+        .iter()
+        .map(|(k, v)| format_prop(ctx, k, v, inner))
+        .collect();
+    if let Some(c) = cause {
+        output.push(format!("[cause]: {}", child(ctx, &c, inner)));
+    }
+    if let Some(e) = errors {
+        output.push(format!("[errors]: {}", child(ctx, &e, inner)));
+    }
+    leave(ctx, ptr, &mut base);
+    reduce(
+        ctx,
+        output,
+        Shape {
+            base,
+            open: "{".to_string(),
+            close: "}",
+            array: None,
+        },
+        inner,
+    )
+}
+
+fn error_like(ctx: &Ctx, o: &Rc<Obj>) -> bool {
+    let Some(vm) = ctx.vm.as_deref() else {
+        return false;
+    };
+    if vm.realm.error_protos.iter().any(|p| Rc::ptr_eq(p, o)) {
+        return false;
+    }
+    let base = &vm.realm.error_protos[0];
+    let mut cur = o.proto.borrow().clone();
+    let mut steps = 0;
+    while let Some(p) = cur {
+        if Rc::ptr_eq(&p, base) {
+            return true;
+        }
+        steps += 1;
+        if steps > 64 {
+            return false;
+        }
+        cur = p.proto.borrow().clone();
+    }
+    false
+}
+
+fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize) -> String {
     let ptr = Rc::as_ptr(o);
     if ctx.seen.contains(&ptr) {
         if !ctx.circular.contains(&ptr) {
@@ -565,6 +651,9 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
     }
     if let Some(custom) = custom_inspect(ctx, o, rt) {
         return custom;
+    }
+    if matches!(o.kind, ObjKind::Ordinary) && error_like(ctx, o) {
+        return format_error(ctx, o, rt, ptr);
     }
     match &o.kind {
         ObjKind::Function(_) | ObjKind::Native(_) | ObjKind::Bound(_) => {
@@ -595,58 +684,9 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
                 inner,
             )
         }
-        ObjKind::Error => {
-            let _ = top;
-            let mut base = match o.get_own("stack") {
-                Some(Value::Str(st)) if !st.is_empty() => st.to_string(),
-                _ => error_full(o),
-            };
-            if !base.contains("\n    at ") {
-                base = format!("[{base}]");
-            }
-            if ctx.indent > 0 {
-                let pad = " ".repeat(ctx.indent);
-                base = base.replace('\n', &format!("\n{pad}"));
-            }
-            let props = own_props(o, false);
-            let cause = o
-                .get_own("cause")
-                .filter(|_| !o.props.borrow().is_enumerable("cause"));
-            let errors = o
-                .get_own("errors")
-                .filter(|_| !o.props.borrow().is_enumerable("errors"));
-            if props.is_empty() && cause.is_none() && errors.is_none() {
-                return base;
-            }
-            if rt > ctx.max_depth {
-                return format!("[{}]", error_header(o));
-            }
-            let inner = enter(ctx, ptr, rt);
-            let mut output: Vec<String> = props
-                .iter()
-                .map(|(k, v)| format_prop(ctx, k, v, inner))
-                .collect();
-            if let Some(c) = cause {
-                output.push(format!("[cause]: {}", child(ctx, &c, inner)));
-            }
-            if let Some(e) = errors {
-                output.push(format!("[errors]: {}", child(ctx, &e, inner)));
-            }
-            leave(ctx, ptr, &mut base);
-            reduce(
-                ctx,
-                output,
-                Shape {
-                    base,
-                    open: "{".to_string(),
-                    close: "}",
-                    array: None,
-                },
-                inner,
-            )
-        }
+        ObjKind::Error => format_error(ctx, o, rt, ptr),
         ObjKind::Array(a) => {
-            let items: Vec<Value> = a.borrow().iter().take(MAX_ITEMS).cloned().collect();
+            let items: Vec<Value> = a.borrow().iter().take(ctx.max_items).cloned().collect();
             let total = a.borrow().len();
             let props = own_props(o, false);
             if total == 0 && props.is_empty() {
@@ -661,7 +701,7 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
                 let all = a.borrow().clone();
                 let mut out = Vec::new();
                 let mut i = 0;
-                while i < all.len() && out.len() < MAX_ITEMS {
+                while i < all.len() && out.len() < ctx.max_items {
                     if o.is_hole(i) {
                         let start = i;
                         while i < all.len() && o.is_hole(i) {
@@ -678,17 +718,22 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             } else {
                 items.iter().map(|v| child(ctx, v, inner)).collect()
             };
-            let has_more = total > MAX_ITEMS;
+            let has_more = total > ctx.max_items;
             if has_more {
-                let more = total - MAX_ITEMS;
+                let more = total - ctx.max_items;
                 output.push(format!(
                     "... {more} more item{}",
                     if more == 1 { "" } else { "s" }
                 ));
             }
-            for (k, v) in &props {
-                output.push(format_prop(ctx, k, v, inner));
+            let mut extra: Vec<String> = props
+                .iter()
+                .map(|(k, v)| format_prop(ctx, k, v, inner))
+                .collect();
+            if ctx.sorted {
+                extra.sort();
             }
+            output.extend(extra);
             let all = a.borrow();
             let numeric =
                 !holey && (0..output.len()).all(|i| matches!(all.get(i), Some(Value::Number(_))));
@@ -848,7 +893,7 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
         ObjKind::Proxy(p) => {
             let t = p.target.borrow().clone();
             match t {
-                Some(t) => format_object(ctx, &t, rt, top),
+                Some(t) => format_object(ctx, &t, rt),
                 None => "<Revoked Proxy>".to_string(),
             }
         }
@@ -887,16 +932,16 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             let inner = enter(ctx, ptr, rt);
             let mut output: Vec<String> = values
                 .iter()
-                .take(MAX_ITEMS)
+                .take(ctx.max_items)
                 .map(|v| match v {
                     Value::Number(n) if !big => format_number(*n),
                     Value::BigInt(b) => format!("{b}n"),
                     _ => "undefined".to_string(),
                 })
                 .collect();
-            let has_more = total > MAX_ITEMS;
+            let has_more = total > ctx.max_items;
             if has_more {
-                let more = total - MAX_ITEMS;
+                let more = total - ctx.max_items;
                 output.push(format!(
                     "... {more} more item{}",
                     if more == 1 { "" } else { "s" }
@@ -928,12 +973,12 @@ fn format_object(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize, top: bool) -> String {
             let bytes = b.borrow();
             let shown: Vec<String> = bytes
                 .iter()
-                .take(MAX_ITEMS)
+                .take(ctx.max_items)
                 .map(|x| format!("{x:02x}"))
                 .collect();
             let mut contents = shown.join(" ");
-            if bytes.len() > MAX_ITEMS {
-                let more = bytes.len() - MAX_ITEMS;
+            if bytes.len() > ctx.max_items {
+                let more = bytes.len() - ctx.max_items;
                 contents.push_str(&format!(
                     " ... {more} more byte{}",
                     if more == 1 { "" } else { "s" }

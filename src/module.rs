@@ -304,6 +304,22 @@ pub fn esm_only_error(message: &str) -> bool {
         || message.contains("Unexpected token 'export'")
 }
 
+pub fn redeclares_wrapper(message: &str) -> bool {
+    message
+        .strip_prefix("Identifier '")
+        .and_then(|m| m.strip_suffix("' has already been declared"))
+        .is_some_and(|name| {
+            matches!(
+                name,
+                "exports" | "require" | "module" | "__filename" | "__dirname"
+            )
+        })
+}
+
+pub fn explicit_commonjs(dir: &Path) -> bool {
+    matches!(package_type(dir).as_deref(), Some("commonjs"))
+}
+
 pub fn is_commonjs(path: &Path) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {

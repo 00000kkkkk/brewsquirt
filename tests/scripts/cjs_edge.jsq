@@ -1,0 +1,11 @@
+import { createRequire } from "node:module"
+const require = createRequire(import.meta.url)
+const shadow = require("./fixtures/cjs_shadow.js")
+console.log(Object.keys(shadow), globalThis.shadowResult)
+const lazy = require("./fixtures/cjs_getter.js")
+console.log(lazy, require("./fixtures/cjs_getter.js") === lazy)
+const ref = new WeakRef({ alive: true })
+console.log(ref.deref())
+const make = () => new WeakRef(new Map([[1, 2]]))
+const second = make()
+console.log(second.deref())

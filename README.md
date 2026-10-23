@@ -215,7 +215,8 @@ JavaSquirt 1.3.0 implements modern JavaScript as specified, passing 97% of test2
 - **Modules**: ES module `import` and `export` (named, default, namespace, renamed), live bindings, cycles, `import()`, `import.meta`, relative and bare-name resolution
 - **Standard library**: `squirt:fs`, `squirt:path`, `squirt:os`, `squirt:child_process`, `squirt:util`
 - **Binary data**: `ArrayBuffer`, typed arrays, `DataView`, `TextEncoder`, `TextDecoder`, `Buffer`, base64 and hex, `structuredClone`, `crypto.randomUUID`
-- **Node.js compatibility**: `node:fs` with file descriptors, `FileHandle` and `fs.watch`, `node:path`, `node:events`, `node:assert`, `node:readline`, `node:util`, `node:url`, `node:test`, WebCrypto `crypto.subtle` keys, Node-style timers with `ref`/`unref`, real TCP and TLS sockets in `node:net` and `node:tls`, HTTP servers with `upgrade` for WebSocket libraries, asynchronous `child_process` with `fork` IPC, process-backed `worker_threads` and more, so many Node scripts run unchanged; `process.stdin`, `process.stdout.write`, `process.exitCode`, `process.on("exit")`
+- **WebAssembly**: `WebAssembly.instantiate`, modules, instances, memories, tables, globals and JavaScript imports on the bundled `wasmi` interpreter
+- **Node.js compatibility**: `node:fs` with file descriptors, `FileHandle` and `fs.watch`, `node:path`, `node:events`, `node:assert`, `node:readline`, `node:util`, `node:url`, `node:test`, WebCrypto `crypto.subtle` keys, Node-style timers with `ref`/`unref`, real TCP and TLS sockets and servers in `node:net` and `node:tls`, HTTP and HTTPS servers with `upgrade` for WebSocket libraries, asynchronous `child_process` with `fork` IPC, process-backed `worker_threads` and more, so many Node scripts run unchanged; `process.stdin`, `process.stdout.write`, `process.exitCode`, `process.on("exit")`
 - **Cancellation**: `AbortController`, `AbortSignal.timeout`, `EventTarget` and `DOMException`
 - **Networking**: `fetch` over HTTP and HTTPS, `WebSocket`, TCP and TLS sockets, `URL`, `URLSearchParams`, `Headers`, `Request`, `Response`, and HTTP servers with `squirt:http` (`serve` and Node-style `createServer`)
 - **Testing**: `jsq test` with `squirt:test` (`describe`, `test`, `expect`, `assert`, hooks, async tests)
@@ -329,6 +330,7 @@ typos
 - [x] Install without Rust: one-liners, Scoop and Homebrew
 - [x] Node compatibility: streams, crypto, zlib, http client, CommonJS `require`
 - [x] Web streams, Blob, File and FormData
+- [x] WebAssembly
 - [ ] 98% of test262
 - [ ] Own regular expression engine with lookbehind back-references and the `v` flag
 - [ ] WebSockets

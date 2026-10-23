@@ -1,0 +1,4 @@
+[] undefined detected as module
+{ lazy: 42, at: 'getter' } true
+{ alive: true }
+Map(1) { 1 => 2 }

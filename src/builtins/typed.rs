@@ -26,9 +26,31 @@ fn new_buffer_with_max(vm: &Vm, bytes: Vec<u8>, max: Option<usize>) -> Rc<Obj> {
             bytes: RefCell::new(bytes),
             max,
             shared: false,
+            external: false,
         })),
         Some(vm.realm.array_buffer_proto.clone()),
     )
+}
+
+pub(crate) unsafe fn new_external_buffer(vm: &Vm, ptr: *mut u8, len: usize) -> Rc<Obj> {
+    let bytes = if len == 0 || ptr.is_null() {
+        Vec::new()
+    } else {
+        unsafe { Vec::from_raw_parts(ptr, len, len) }
+    };
+    Obj::new(
+        ObjKind::ArrayBuffer(Box::new(BufferData {
+            bytes: RefCell::new(bytes),
+            max: None,
+            shared: false,
+            external: true,
+        })),
+        Some(vm.realm.array_buffer_proto.clone()),
+    )
+}
+
+pub fn is_external(o: &Obj) -> bool {
+    matches!(&o.kind, ObjKind::ArrayBuffer(b) if b.external)
 }
 
 fn new_shared_buffer(vm: &Vm, bytes: Vec<u8>, max: Option<usize>) -> Rc<Obj> {
@@ -37,6 +59,7 @@ fn new_shared_buffer(vm: &Vm, bytes: Vec<u8>, max: Option<usize>) -> Rc<Obj> {
             bytes: RefCell::new(bytes),
             max,
             shared: true,
+            external: false,
         })),
         Some(vm.realm.shared_buffer_proto.clone()),
     )
@@ -60,7 +83,10 @@ pub fn is_detached(buffer: &Obj) -> bool {
 pub fn detach(buffer: &Obj) {
     if let ObjKind::ArrayBuffer(b) = &buffer.kind {
         buffer.flags.set(buffer.flags.get() | DETACHED);
-        *b.borrow_mut() = Vec::new();
+        let old = std::mem::take(&mut *b.borrow_mut());
+        if b.external {
+            std::mem::forget(old);
+        }
     }
 }
 
@@ -731,6 +757,11 @@ fn ab_transfer<const FIXED: bool>(vm: &mut Vm, this: Value, args: &[Value]) -> R
     if is_detached(&o) {
         return Err(vm.type_error(format!(
             "Cannot perform ArrayBuffer.prototype.{name} on a detached ArrayBuffer"
+        )));
+    }
+    if is_external(&o) {
+        return Err(vm.type_error(format!(
+            "Cannot perform ArrayBuffer.prototype.{name} on a WebAssembly.Memory buffer"
         )));
     }
     let max = if FIXED { None } else { buffer_max(&o) };

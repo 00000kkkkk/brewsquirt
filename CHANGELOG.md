@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `WebAssembly` on the `wasmi` interpreter: `validate`, `compile`, `instantiate`, the streaming
+  variants, `Module` reflection (`imports`, `exports`, `customSections`), `Instance`, `Memory`
+  with a zero-copy `buffer` that detaches on growth, `Table`, `Global`, JavaScript imports,
+  `BigInt` for `i64`, and `CompileError`, `LinkError` and `RuntimeError` with V8's trap
+  messages. SIMD is enabled, so `undici` runs its `llhttp` parser and its `fetch`, `request`,
+  `Pool` and `Agent` work unchanged.
+- `node:assert` was rebuilt after Node 24: failure messages show `+ actual - expected` Myers
+  diffs of the inspected values, `assert(expr)` quotes the failing expression from the source,
+  `deepStrictEqual` compares symbol keys, boxed primitives, errors, typed arrays, `ArrayBuffer`s
+  and object keys of `Map`s and `Set`s and handles cycles, `assert/strict` and `assert.strict`
+  map `equal` to `strictEqual`, and `partialDeepStrictEqual`, `CallTracker` and `Assert` exist.
+- `Intl.NumberFormat` follows ECMA-402: exact decimal formatting of strings and `BigInt`s,
+  `roundingMode`, `roundingIncrement`, `roundingPriority`, `trailingZeroDisplay`, all digit
+  options with their defaults and errors, eighty numbering systems through `numberingSystem` or
+  `-u-nu-`, compact notation for German, Japanese, Korean, Chinese and Indian English,
+  `formatRange` and `formatRangeToParts` with ICU's collapsing and approximately sign,
+  locale-specific currency symbols, and the legacy `Intl.NumberFormat.call(obj)` fallback.
+- `Intl.Collator` resolves `collation`, `numeric` and `caseFirst` from options and `-u-co`,
+  `-u-kn` and `-u-kf`, compares canonically equivalent strings as equal, honours the `base`,
+  `accent`, `case` and `variant` sensitivities, and sorts German phonebook order.
+- `util.inspect` accepts `sorted` and `maxArrayLength`, and prints objects that inherit from
+  `Error.prototype` as errors.
+- `stream.isDisturbed`, `stream.isErrored`, `readable.readableDidRead`, `readableAborted` and
+  `errored` on readable and writable streams.
+
 - TLS servers: `https.createServer({ key, cert })`, `tls.createServer` with `secureConnection`
   events and `ALPNProtocols`, and `serve({ tls: { key, cert } })`, all from PEM keys and
   certificates on top of rustls. TLS clients accept `ca` and `rejectUnauthorized: false` in
@@ -66,6 +91,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `WeakRef.prototype.deref()` returned `undefined` as soon as the creating expression finished
+  because nothing kept the target alive; targets now survive until the current job and its
+  microtasks complete, as the specification requires.
+- `require` reads `module.exports` through accessors, so modules that define it with a getter
+  (such as `undici`'s embedded WebAssembly) export the right value.
+- A `.js` file of unknown type that declares `module`, `exports`, `require`, `__filename` or
+  `__dirname` at the top level is loaded as an ES module, as Node's syntax detection does,
+  instead of failing with a redeclaration error.
+- Errors list `stack` before `message` among their own properties, as in V8.
 - `http.request` no longer follows redirects itself: like Node it hands `3xx` responses to the
   caller, and redirect-following libraries such as `axios` and `got` report the right final URL.
   Request failures carry Node's error codes (`ECONNREFUSED`, `ENOTFOUND`,

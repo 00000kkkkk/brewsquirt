@@ -10,6 +10,7 @@ pub mod netio;
 pub mod node;
 pub mod reflect;
 pub mod typed;
+pub mod wasm;
 pub use reflect::{array_like, key_value};
 mod number;
 mod object;
