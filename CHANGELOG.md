@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-23
+
 ### Added
 
 - `WebAssembly` on the `wasmi` interpreter: `validate`, `compile`, `instantiate`, the streaming
@@ -885,7 +887,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Continuous integration on Linux, macOS and Windows, MSRV check, cargo-deny, CodeQL, coverage,
   benchmarks, and release archives for five targets.
 
-[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/00000kkkkk/javasquirt/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/00000kkkkk/javasquirt/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/00000kkkkk/javasquirt/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/00000kkkkk/javasquirt/compare/v1.0.0...v1.1.0
