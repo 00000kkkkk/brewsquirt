@@ -339,9 +339,9 @@ typos
 - [x] Explicit resource management with `using`
 - [x] TypeScript without a build step
 - [x] Native Node-API addons
+- [x] WebSockets
 - [ ] 99% of test262
 - [ ] Own regular expression engine with lookbehind back-references and the `v` flag
-- [ ] WebSockets
 - [ ] Rope strings for fast `+=` in loops
 - [ ] Shapes and inline caches for property access
 - [ ] JIT compiler

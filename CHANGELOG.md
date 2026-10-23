@@ -51,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `nude_modules`, so projects installed with npm, pnpm or yarn run unchanged.
 - `module.createRequire(filename)` returned the caller's `require`; it now resolves relative to the
   given path or `file:` URL and has its own `resolve`.
+- `http.Server.listen` lost its callback when it was called with a backlog or an explicit
+  `undefined` host, which is how `ws` starts `new WebSocketServer({ port })`; every Node form of
+  the call works now.
 - On glibc Linux `vrotdaem` also installed the musl builds of platform packages, because the
   registry metadata leaves out `libc`; the `package.json` of each optional package is now checked.
 

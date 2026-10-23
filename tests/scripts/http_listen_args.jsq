@@ -1,0 +1,23 @@
+import http from "node:http"
+
+const guard = setTimeout(() => {
+  console.log("stalled")
+  process.exit(1)
+}, 10000)
+
+const forms = [
+  (s, cb) => s.listen(0, undefined, undefined, cb),
+  (s, cb) => s.listen("0", cb),
+  (s, cb) => s.listen({ port: 0, host: "127.0.0.1" }, cb),
+  (s, cb) => s.listen(0, "127.0.0.1", 511, cb),
+]
+
+for (const [i, listen] of forms.entries()) {
+  const server = http.createServer((req, res) => res.end(`form ${i}`))
+  await new Promise((resolve) => listen(server, resolve))
+  const { port } = server.address()
+  const body = await (await fetch(`http://127.0.0.1:${port}/`)).text()
+  console.log(body, port > 0)
+  await new Promise((resolve) => server.close(resolve))
+}
+clearTimeout(guard)

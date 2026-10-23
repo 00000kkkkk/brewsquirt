@@ -2826,9 +2826,18 @@ const WEB_SRC: &str = r##"
       getConnections(cb) {
         if (typeof cb === "function") queueMicrotask(() => cb(null, 0))
       },
-      listen(port = 0, host, cb) {
-        if (typeof port === "object" && port !== null) [port, host, cb] = [port.port ?? 0, port.host, host]
-        if (typeof host === "function") [host, cb] = [undefined, host]
+      listen(...args) {
+        const cb = typeof args[args.length - 1] === "function" ? args.pop() : undefined
+        let port = 0
+        let host
+        if (typeof args[0] === "object" && args[0] !== null) {
+          port = args[0].port ?? 0
+          host = args[0].host
+        } else {
+          if (args[0] != null) port = args[0]
+          if (typeof args[1] === "string") host = args[1]
+        }
+        if (typeof port === "string" && /^\d+$/.test(port)) port = Number(port)
         const onUpgrade = (raw, id, localAddress, localPort, remoteAddress, remotePort, head) => {
           const socket = require("node:net")[Symbol.for("jsq.socketFromId")]({ id, localAddress, localPort, remoteAddress, remotePort })
           if ((handlers.upgrade?.length ?? 0) === 0) {
