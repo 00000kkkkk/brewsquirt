@@ -28,8 +28,7 @@ fn starts_expression(tok: &Tok) -> bool {
 
 fn identifier_name(s: &str) -> bool {
     let mut chars = s.chars();
-    chars.next().is_some_and(crate::lexer::is_id_start)
-        && chars.all(crate::lexer::is_id_continue)
+    chars.next().is_some_and(crate::lexer::is_id_start) && chars.all(crate::lexer::is_id_continue)
 }
 
 fn num(n: f64, line: u32) -> Expr {
