@@ -43,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   value from 24 to 16 bytes; programs holding large arrays and objects use about a quarter less
   memory. The cycle collector tracks objects with an intrusive index instead of weak references,
   so freed objects return their memory immediately.
+- The lexer matches punctuators by their first character, interns identifiers and only checks
+  for a regular expression when it sees a `/`, and the parser no longer rescans parenthesized
+  code to look for `=>`; lexing is about twice as fast and `require("typescript")` takes about
+  a third less time.
 
 ### Fixed
 

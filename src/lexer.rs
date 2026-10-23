@@ -1,5 +1,5 @@
 use crate::jsstr::JsStr;
-use crate::token::{P, PUNCTUATORS, SyntaxError, TemplatePart, Tok, Token};
+use crate::token::{P, SyntaxError, TemplatePart, Tok, Token};
 
 pub fn tokenize(src: &str) -> Result<Vec<Token>, SyntaxError> {
     tokenize_goal(src, false)
@@ -26,6 +26,8 @@ pub fn tokenize_from(
         .position(|&o| o == byte_start)
         .unwrap_or(chars.len());
     let mut lexer = Lexer {
+        src,
+        names: rustc_hash::FxHashMap::default(),
         html,
         chars,
         offsets,
@@ -52,6 +54,8 @@ pub fn tokenize_goal(src: &str, html: bool) -> Result<Vec<Token>, SyntaxError> {
     }
     offsets.push(b);
     let mut lexer = Lexer {
+        src,
+        names: rustc_hash::FxHashMap::default(),
         html,
         chars,
         offsets,
@@ -137,7 +141,9 @@ pub fn is_id_continue(c: char) -> bool {
     unicode_ident::is_xid_continue(c) || nfkc_gap(c) || c == '\u{200c}' || c == '\u{200d}'
 }
 
-struct Lexer {
+struct Lexer<'a> {
+    src: &'a str,
+    names: rustc_hash::FxHashMap<&'a str, JsStr>,
     html: bool,
     chars: Vec<char>,
     offsets: Vec<u32>,
@@ -150,7 +156,121 @@ struct Lexer {
     force_regex: Option<bool>,
 }
 
-impl Lexer {
+fn ascii_ident(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '$'
+}
+
+impl<'a> Lexer<'a> {
+    fn punct(&self, c: char) -> Option<(P, usize)> {
+        let at = |i: usize| self.chars.get(self.pos + i).copied();
+        let next = at(1);
+        Some(match c {
+            '{' => (P::LBrace, 1),
+            '}' => (P::RBrace, 1),
+            '(' => (P::LParen, 1),
+            ')' => (P::RParen, 1),
+            '[' => (P::LBracket, 1),
+            ']' => (P::RBracket, 1),
+            ';' => (P::Semi, 1),
+            ',' => (P::Comma, 1),
+            '~' => (P::Tilde, 1),
+            ':' => (P::Colon, 1),
+            '#' => (P::Hash, 1),
+            '@' => (P::At, 1),
+            '.' => {
+                if next == Some('.') && at(2) == Some('.') {
+                    (P::Ellipsis, 3)
+                } else {
+                    (P::Dot, 1)
+                }
+            }
+            '=' => match next {
+                Some('=') if at(2) == Some('=') => (P::EqEqEq, 3),
+                Some('=') => (P::EqEq, 2),
+                Some('>') => (P::Arrow, 2),
+                _ => (P::Eq, 1),
+            },
+            '!' => match next {
+                Some('=') if at(2) == Some('=') => (P::NotEqEq, 3),
+                Some('=') => (P::NotEq, 2),
+                _ => (P::Bang, 1),
+            },
+            '<' => match next {
+                Some('<') if at(2) == Some('=') => (P::ShlEq, 3),
+                Some('<') => (P::Shl, 2),
+                Some('=') => (P::Le, 2),
+                _ => (P::Lt, 1),
+            },
+            '>' => match next {
+                Some('>') => match at(2) {
+                    Some('>') if at(3) == Some('=') => (P::UShrEq, 4),
+                    Some('>') => (P::UShr, 3),
+                    Some('=') => (P::ShrEq, 3),
+                    _ => (P::Shr, 2),
+                },
+                Some('=') => (P::Ge, 2),
+                _ => (P::Gt, 1),
+            },
+            '&' => match next {
+                Some('&') if at(2) == Some('=') => (P::AmpAmpEq, 3),
+                Some('&') => (P::AmpAmp, 2),
+                Some('=') => (P::AmpEq, 2),
+                _ => (P::Amp, 1),
+            },
+            '|' => match next {
+                Some('|') if at(2) == Some('=') => (P::PipePipeEq, 3),
+                Some('|') => (P::PipePipe, 2),
+                Some('=') => (P::PipeEq, 2),
+                _ => (P::Pipe, 1),
+            },
+            '?' => match next {
+                Some('?') if at(2) == Some('=') => (P::NullishEq, 3),
+                Some('?') => (P::Nullish, 2),
+                Some('.') if !at(2).is_some_and(|d| d.is_ascii_digit()) => (P::QuestionDot, 2),
+                _ => (P::Question, 1),
+            },
+            '+' => match next {
+                Some('+') => (P::PlusPlus, 2),
+                Some('=') => (P::PlusEq, 2),
+                _ => (P::Plus, 1),
+            },
+            '-' => match next {
+                Some('-') => (P::MinusMinus, 2),
+                Some('=') => (P::MinusEq, 2),
+                _ => (P::Minus, 1),
+            },
+            '*' => match next {
+                Some('*') if at(2) == Some('=') => (P::StarStarEq, 3),
+                Some('*') => (P::StarStar, 2),
+                Some('=') => (P::StarEq, 2),
+                _ => (P::Star, 1),
+            },
+            '/' => match next {
+                Some('=') => (P::SlashEq, 2),
+                _ => (P::Slash, 1),
+            },
+            '%' => match next {
+                Some('=') => (P::PercentEq, 2),
+                _ => (P::Percent, 1),
+            },
+            '^' => match next {
+                Some('=') => (P::CaretEq, 2),
+                _ => (P::Caret, 1),
+            },
+            _ => return None,
+        })
+    }
+
+    fn intern(&mut self, begin: usize, end: usize) -> JsStr {
+        let text = &self.src[self.offsets[begin] as usize..self.offsets[end] as usize];
+        if let Some(s) = self.names.get(text) {
+            return s.clone();
+        }
+        let s = JsStr::from(text);
+        self.names.insert(text, s.clone());
+        s
+    }
+
     fn peek(&self) -> Option<char> {
         self.chars.get(self.pos).copied()
     }
@@ -218,11 +338,13 @@ impl Lexer {
                 }
             }
             let begin = self.pos;
-            let regex_ok = match self.force_regex.take() {
-                Some(f) => f,
-                None => regex_allowed(out.last().map(|t| &t.tok)),
-            };
-            let tok = if c == '/' && regex_ok {
+            let forced = self.force_regex.take();
+            let regex_ok = c == '/'
+                && match forced {
+                    Some(f) => f,
+                    None => regex_allowed(out.last().map(|t| &t.tok)),
+                };
+            let tok = if regex_ok {
                 let save = (self.pos, self.line, self.col);
                 match self.regex() {
                     Ok(t) => t,
@@ -325,6 +447,23 @@ impl Lexer {
         if c == '`' {
             return self.template();
         }
+        if c.is_ascii() && ascii_ident(c) && !c.is_ascii_digit() {
+            let begin = self.pos;
+            let mut end = begin + 1;
+            while self.chars.get(end).is_some_and(|&ch| ascii_ident(ch)) {
+                end += 1;
+            }
+            if self
+                .chars
+                .get(end)
+                .is_none_or(|&ch| ch.is_ascii() && ch != '\\')
+            {
+                let name = self.intern(begin, end);
+                self.col += (end - begin) as u32;
+                self.pos = end;
+                return Ok(Tok::Ident(name));
+            }
+        }
         if is_id_start(c) || c == '\\' {
             let mut s = String::new();
             while let Some(c) = self.peek() {
@@ -353,25 +492,12 @@ impl Lexer {
             }
             return Ok(Tok::Ident(s.into()));
         }
-        for (text, p) in PUNCTUATORS {
-            if self.matches(text) {
-                if *p == P::QuestionDot && self.peek_at(2).is_some_and(|d| d.is_ascii_digit()) {
-                    self.bump();
-                    return Ok(Tok::Punct(P::Question));
-                }
-                for _ in 0..text.len() {
-                    self.bump();
-                }
-                return Ok(Tok::Punct(*p));
-            }
+        if let Some((p, len)) = self.punct(c) {
+            self.pos += len;
+            self.col += len as u32;
+            return Ok(Tok::Punct(p));
         }
         Err(self.err(format!("Invalid or unexpected token '{c}'")))
-    }
-
-    fn matches(&self, text: &str) -> bool {
-        text.chars()
-            .enumerate()
-            .all(|(i, ch)| self.peek_at(i) == Some(ch))
     }
 
     fn number(&mut self) -> Result<Tok, SyntaxError> {

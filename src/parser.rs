@@ -83,6 +83,7 @@ pub fn parse_script(src: &str) -> R<Vec<Stmt>> {
 fn parse_goal(src: &str, script: bool) -> R<Vec<Stmt>> {
     let toks = crate::lexer::tokenize_goal(src, script)?;
     let mut parser = Parser {
+        pairs: bracket_pairs(&toks),
         script,
         src: src.into(),
         toks,
@@ -118,6 +119,7 @@ fn parse_goal(src: &str, script: bool) -> R<Vec<Stmt>> {
 pub fn parse_eval(src: &str, ctx: &EvalCtx) -> R<Vec<Stmt>> {
     let toks = crate::lexer::tokenize_goal(src, true)?;
     let mut parser = Parser {
+        pairs: bracket_pairs(&toks),
         script: true,
         src: src.into(),
         toks,
@@ -167,7 +169,25 @@ enum BinKind {
     Logical(LogicalOp),
 }
 
+fn bracket_pairs(toks: &[Token]) -> Vec<u32> {
+    let mut pairs = vec![u32::MAX; toks.len()];
+    let mut open = Vec::new();
+    for (i, t) in toks.iter().enumerate() {
+        match t.tok {
+            Tok::Punct(P::LParen) | Tok::Punct(P::LBracket) | Tok::Punct(P::LBrace) => open.push(i),
+            Tok::Punct(P::RParen) | Tok::Punct(P::RBracket) | Tok::Punct(P::RBrace) => {
+                if let Some(o) = open.pop() {
+                    pairs[o] = i as u32;
+                }
+            }
+            _ => {}
+        }
+    }
+    pairs
+}
+
 struct Parser {
+    pairs: Vec<u32>,
     toks: Vec<Token>,
     pos: usize,
     no_in: bool,
@@ -213,6 +233,7 @@ impl Parser {
         }
         self.toks.truncate(self.pos);
         self.toks.append(&mut new);
+        self.pairs = bracket_pairs(&self.toks);
         Ok(())
     }
 
@@ -261,11 +282,15 @@ impl Parser {
         &self.toks[(self.pos + n).min(self.toks.len() - 1)]
     }
 
-    fn advance(&mut self) -> Token {
-        let t = self.toks[self.pos].clone();
+    fn advance(&mut self) {
         if self.pos < self.toks.len() - 1 {
             self.pos += 1;
         }
+    }
+
+    fn advance_token(&mut self) -> Token {
+        let t = self.toks[self.pos].clone();
+        self.advance();
         t
     }
 
@@ -2143,6 +2168,11 @@ impl Parser {
                 self.is_at(1, P::Arrow) && !self.peek_at(1).nl_before
             }
             Tok::Punct(P::LParen) => {
+                let paired = self.pairs.get(self.pos).copied().unwrap_or(u32::MAX);
+                if paired != u32::MAX {
+                    let t = self.toks.get(paired as usize + 1);
+                    return matches!(t, Some(t) if matches!(t.tok, Tok::Punct(P::Arrow)) && !t.nl_before);
+                }
                 let mut depth = 0i32;
                 let mut i = self.pos;
                 loop {
@@ -2870,7 +2900,7 @@ impl Parser {
                 if chain {
                     return Err(self.error("Invalid tagged template on optional chain"));
                 }
-                let Tok::Template(parts) = self.advance().tok else {
+                let Tok::Template(parts) = self.advance_token().tok else {
                     unreachable!()
                 };
                 let (quasis, exprs) = self.template_parts(parts)?;
@@ -2951,7 +2981,7 @@ impl Parser {
                     line: mline,
                 };
             } else if matches!(self.peek().tok, Tok::Template(_)) {
-                let Tok::Template(parts) = self.advance().tok else {
+                let Tok::Template(parts) = self.advance_token().tok else {
                     unreachable!()
                 };
                 let (quasis, exprs) = self.template_parts(parts)?;
@@ -3011,6 +3041,7 @@ impl Parser {
                 TemplatePart::Str(s, raw) => quasis.push((s, raw)),
                 TemplatePart::Expr(toks) => {
                     let mut sub = Parser {
+                        pairs: bracket_pairs(&toks),
                         src: self.src.clone(),
                         toks,
                         pos: 0,
@@ -3094,7 +3125,7 @@ impl Parser {
                 ExprKind::Regex(p, f)
             }
             Tok::Template(_) => {
-                let Tok::Template(parts) = self.advance().tok else {
+                let Tok::Template(parts) = self.advance_token().tok else {
                     unreachable!()
                 };
                 return self.template(parts, line);
