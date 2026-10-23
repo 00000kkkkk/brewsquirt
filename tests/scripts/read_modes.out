@@ -1,0 +1,10 @@
+abc def null null
+null 3
+xyz
+true
+client got ack:hello
+server got hello
+function function ENOTFOUND ENODATA string
+[ 'ENODATA', 'queryA', '127.0.0.1' ]
+[ 'ENODATA', 'queryA' ]
+string

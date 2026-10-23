@@ -1,0 +1,89 @@
+import http2 from "node:http2"
+import fs from "node:fs"
+import { fileURLToPath } from "node:url"
+
+const fixtures = fileURLToPath(new URL("./fixtures/", import.meta.url))
+const settings = http2.getUnpackedSettings(http2.getPackedSettings({ initialWindowSize: 1000, enablePush: false, maxFrameSize: 20000 }))
+console.log(settings, http2.getDefaultSettings().initialWindowSize, http2.sensitiveHeaders.toString())
+
+const core = http2.createServer()
+core.on("stream", (stream, headers) => {
+  const chunks = []
+  stream.on("data", (c) => chunks.push(c))
+  stream.on("end", () => {
+    const body = Buffer.concat(chunks)
+    if (headers[":path"] === "/big") {
+      stream.respond({ ":status": 200 })
+      stream.end(Buffer.alloc(300000, 97))
+      return
+    }
+    stream.respond({ ":status": 201, "set-cookie": ["a=1", "b=2"], "content-type": "text/plain" }, { waitForTrailers: true })
+    stream.on("wantTrailers", () => stream.sendTrailers({ "grpc-status": "0", "x-len": String(body.length) }))
+    stream.end(`${headers[":method"]} ${headers[":path"]} ${body.length} ${headers["user-agent"]} ${headers.cookie}`)
+  })
+})
+const handler = (req, res) => {
+  let body = ""
+  req.on("data", (c) => (body += c))
+  req.on("end", () => {
+    res.setHeader("x-method", req.method)
+    res.statusCode = req.url === "/missing" ? 404 : 200
+    res.addTrailers({ "x-trailer": "t" })
+    res.end(JSON.stringify({ url: req.url, version: req.httpVersion, scheme: req.scheme, body }))
+  })
+}
+const compat = http2.createServer(handler)
+const secure = http2.createSecureServer({ key: fs.readFileSync(fixtures + "tls_key.pem"), cert: fs.readFileSync(fixtures + "tls_cert.pem") }, handler)
+for (const server of [core, compat, secure]) await new Promise((r) => server.listen(0, "127.0.0.1", r))
+
+const request = (client, headers, body) =>
+  new Promise((resolve, reject) => {
+    const req = client.request(headers)
+    const out = {}
+    req.on("response", (h) => {
+      out.status = h[":status"]
+      out.cookie = h["set-cookie"]
+      out.method = h["x-method"]
+    })
+    req.on("trailers", (t) => (out.trailers = { ...t }))
+    const chunks = []
+    req.on("data", (d) => chunks.push(d))
+    req.on("end", () => resolve({ ...out, body: Buffer.concat(chunks) }))
+    req.on("error", reject)
+    req.end(body)
+  })
+
+const client = http2.connect(`http://127.0.0.1:${core.address().port}`)
+const a = await request(client, { ":path": "/hello?x=1", "user-agent": "jsq-test/1.0 (long agent string for huffman)", cookie: ["k=1", "j=2"] })
+console.log(a.status, a.cookie, a.body.toString(), a.trailers)
+const b = await request(client, { ":method": "POST", ":path": "/post" }, Buffer.alloc(200000, 98))
+console.log(b.status, b.body.toString(), b.trailers)
+const many = await Promise.all([1, 2, 3].map((i) => request(client, { ":path": "/p" + i })))
+console.log(many.map((x) => x.body.toString()))
+const big = await request(client, { ":path": "/big" })
+console.log(big.status, big.body.length, big.body[299999])
+const [pingError, , payload] = await new Promise((resolve) => client.ping(Buffer.from("12345678"), (...args) => resolve(args)))
+console.log("ping", pingError, String(payload), client.alpnProtocol, client.encrypted)
+client.close()
+
+const plain = http2.connect(`http://127.0.0.1:${compat.address().port}`)
+const c = await request(plain, { ":method": "POST", ":path": "/a?b=1" }, "payload")
+console.log(c.status, c.method, JSON.parse(c.body), c.trailers?.["x-trailer"])
+const d = await request(plain, { ":path": "/missing" })
+console.log(d.status, JSON.parse(d.body).url)
+const cancelled = plain.request({ ":path": "/cancel" })
+cancelled.on("error", (e) => console.log("unexpected", e.code))
+await new Promise((resolve) => {
+  cancelled.on("close", resolve)
+  cancelled.close(http2.constants.NGHTTP2_CANCEL)
+})
+console.log("cancelled", cancelled.rstCode, cancelled.destroyed)
+plain.close()
+
+const tlsClient = http2.connect(`https://localhost:${secure.address().port}`, { rejectUnauthorized: false })
+const e = await request(tlsClient, { ":path": "/tls" })
+console.log(e.status, JSON.parse(e.body), tlsClient.alpnProtocol, tlsClient.encrypted)
+tlsClient.close(() => {
+  for (const server of [core, compat, secure]) server.close()
+  console.log("done")
+})

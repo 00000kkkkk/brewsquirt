@@ -1,0 +1,15 @@
+{ enablePush: false, initialWindowSize: 1000, maxFrameSize: 20000 } 65535 Symbol(sensitiveHeaders)
+201 [ 'a=1', 'b=2' ] GET /hello?x=1 0 jsq-test/1.0 (long agent string for huffman) k=1; j=2 { 'grpc-status': '0', 'x-len': '0', Symbol(sensitiveHeaders): [] }
+201 POST /post 200000 undefined undefined { 'grpc-status': '0', 'x-len': '200000', Symbol(sensitiveHeaders): [] }
+[
+  'GET /p1 0 undefined undefined',
+  'GET /p2 0 undefined undefined',
+  'GET /p3 0 undefined undefined'
+]
+200 300000 97
+ping null 12345678 h2c false
+200 POST { url: '/a?b=1', version: '2.0', scheme: 'http', body: 'payload' } t
+404 /missing
+cancelled 8 true
+200 { url: '/tls', version: '2.0', scheme: 'https', body: '' } h2 true
+done

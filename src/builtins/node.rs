@@ -11,6 +11,8 @@ type R = Result<Value, Value>;
 
 pub const LAZY_GLOBALS: [&str; 3] = ["Buffer", "WebSocket", "CryptoKey"];
 
+const HTTP2_SRC: &str = include_str!("http2.js");
+
 const NODE_SRC: &str = r##"
 (native) => {
   const encoder = new TextEncoder()
@@ -3681,19 +3683,26 @@ const NODE_SRC: &str = r##"
         maybeEndRead(this)
         return null
       }
-      if (r.objectMode || size === undefined) {
+      const n = size === undefined || size === null ? NaN : Number.isInteger(size) ? size : Number.parseInt(size, 10)
+      if (r.objectMode || (Number.isNaN(n) && r.flowing)) {
         const c = r.buffer.shift()
         maybeEndRead(this)
         if (!r.buffer.length && !r.ended) queueMicrotask(() => callRead(this))
         return c
       }
-      let out = typeof r.buffer[0] === "string" ? r.buffer.join("") : Buffer.concat(r.buffer)
+      if (n === 0) return null
+      if (!Number.isNaN(n) && n > this.readableLength && !r.ended) {
+        queueMicrotask(() => callRead(this))
+        return null
+      }
+      let out = r.buffer.length === 1 ? r.buffer[0] : typeof r.buffer[0] === "string" ? r.buffer.join("") : Buffer.concat(r.buffer)
       r.buffer = []
-      if (out.length > size) {
-        r.buffer.push(out.slice(size))
-        out = out.slice(0, size)
+      if (!Number.isNaN(n) && out.length > n) {
+        r.buffer.push(out.slice(n))
+        out = out.slice(0, n)
       }
       maybeEndRead(this)
+      if (!r.buffer.length && !r.ended) queueMicrotask(() => callRead(this))
       return out
     },
     setEncoding(encoding) {
@@ -6131,15 +6140,31 @@ const NODE_SRC: &str = r##"
     isIP: (s) => (isIPv4(s) ? 4 : isIPv6(s) ? 6 : 0),
   }
   const kSock = Symbol("socket")
+  const kAlpn = Symbol("alpn")
+  const alpnList = (protocols) => {
+    if (protocols == null) return null
+    if (ArrayBuffer.isView(protocols) && !Array.isArray(protocols)) {
+      const bytes = Buffer.from(protocols.buffer, protocols.byteOffset, protocols.byteLength)
+      const out = []
+      for (let i = 0; i < bytes.length; ) {
+        const len = bytes[i]
+        out.push(bytes.subarray(i + 1, i + 1 + len).toString("latin1"))
+        i += 1 + len
+      }
+      return out
+    }
+    return Array.from(protocols, (p) => (typeof p === "string" ? p : Buffer.from(p).toString("latin1")))
+  }
   const attachSocket = (sock, id) => {
     const st = sock[kSock]
     st.id = id
-    const handler = (kind, a, b, c, d) => {
+    const handler = (kind, a, b, c, d, e) => {
       switch (kind) {
         case "connect": {
           st.connected = true
           sock.connecting = false
           sock.pending = false
+          if (st.tls) sock.alpnProtocol = e ?? false
           sock.localAddress = a
           sock.localPort = b
           sock.remoteAddress = c
@@ -6205,7 +6230,7 @@ const NODE_SRC: &str = r##"
   class Socket extends Duplex {
     constructor(options = {}) {
       super({ ...options, allowHalfOpen: options.allowHalfOpen ?? false, objectMode: false })
-      this[kSock] = { id: null, connected: false, queued: [], pendingEnd: false, closed: false, hadError: false, timeout: 0, timer: null, host: undefined, port: undefined, tls: !!options[kTls], servername: options.servername, rejectUnauthorized: options.rejectUnauthorized, ca: options.ca }
+      this[kSock] = { id: null, connected: false, queued: [], pendingEnd: false, closed: false, hadError: false, timeout: 0, timer: null, host: undefined, port: undefined, tls: !!options[kTls], servername: options.servername, rejectUnauthorized: options.rejectUnauthorized, ca: options.ca, alpn: options.ALPNProtocols }
       this.connecting = false
       this.pending = true
       this.readyState = "closed"
@@ -6254,7 +6279,7 @@ const NODE_SRC: &str = r##"
       this.readyState = "opening"
       if (cb) this.once("connect", cb)
       const servername = st.servername ?? options.servername ?? host
-      const tlsOptions = st.tls ? { rejectUnauthorized: st.rejectUnauthorized ?? options.rejectUnauthorized, ca: st.ca ?? options.ca } : false
+      const tlsOptions = st.tls ? { rejectUnauthorized: st.rejectUnauthorized ?? options.rejectUnauthorized, ca: st.ca ?? options.ca, ALPNProtocols: alpnList(st.alpn ?? options.ALPNProtocols) } : false
       const id = native.netConnect(host, port, tlsOptions, servername, null)
       attachSocket(this, id)
       if (options.timeout) this.setTimeout(options.timeout)
@@ -6377,13 +6402,14 @@ const NODE_SRC: &str = r##"
       let result
       try {
         const material = this instanceof TLSServer ? tlsMaterial(st.options) : [null, null]
-        result = native.netListen(host, port, (id, localAddress, localPort, remoteAddress, remotePort) => {
+        result = native.netListen(host, port, (id, localAddress, localPort, remoteAddress, remotePort, alpn) => {
           if (this.maxConnections !== undefined && st.connections.size >= this.maxConnections) {
             native.netDestroy(id)
             this.emit("drop", { localAddress, localPort, remoteAddress, remotePort })
             return
           }
           const sock = new Socket({ [kSocketId]: id, localAddress, localPort, remoteAddress, remotePort, allowHalfOpen: st.options.allowHalfOpen })
+          sock[kAlpn] = alpn ?? false
           sock.server = this
           st.connections.add(sock)
           sock.once("close", () => {
@@ -6391,7 +6417,7 @@ const NODE_SRC: &str = r##"
             if (st.closing && st.connections.size === 0) this.emit("close")
           })
           this.emit("connection", sock)
-        }, material[0], material[1], st.options.ALPNProtocols ?? null)
+        }, material[0], material[1], alpnList(st.options.ALPNProtocols))
       } catch (e) {
         queueMicrotask(() => this.emit("error", e))
         return this
@@ -6522,7 +6548,7 @@ const NODE_SRC: &str = r##"
       this.on("connection", (sock) => {
         sock.encrypted = true
         sock.authorized = false
-        sock.alpnProtocol = false
+        sock.alpnProtocol = sock[kAlpn] ?? false
         Object.setPrototypeOf(sock, TLSSocket.prototype)
         this.emit("secureConnection", sock)
       })
@@ -6965,68 +6991,115 @@ const NODE_SRC: &str = r##"
       }
       return opts.all ? list : list[0]
     },
-    async resolve4(host) {
-      return dnsLookupAll(String(host)).filter((e) => e.family === 4).map((e) => e.address)
+    async resolve4(host, options) {
+      return dnsAddresses(host, 4, "queryA", options)
     },
-    async resolve6(host) {
-      return dnsLookupAll(String(host)).filter((e) => e.family === 6).map((e) => e.address)
+    async resolve6(host, options) {
+      return dnsAddresses(host, 6, "queryAaaa", options)
     },
-    async resolve(host) {
-      return dnsLookupAll(String(host)).map((e) => e.address)
+    async resolve(host, rrtype = "A") {
+      const method = dnsRecordMethods[String(rrtype).toUpperCase()]
+      if (!method) throw Object.assign(new TypeError(`The argument 'rrtype' is invalid. Received '${rrtype}'`), { code: "ERR_INVALID_ARG_VALUE" })
+      return dnsPromises[method](host)
     },
-    getServers: () => [],
-    setServers() {},
+    async resolveAny(host) {
+      return (await dnsAddresses(host, 0, "queryAny", { ttl: true })).map((e) => ({ ...e, type: e.address.includes(":") ? "AAAA" : "A" }))
+    },
+    async reverse(ip) {
+      const address = String(ip)
+      if (address === "127.0.0.1" || address === "::1") return ["localhost"]
+      throw dnsError("ENOTFOUND", "getHostByAddr", address)
+    },
+    async lookupService(address, port) {
+      const loopback = address === "127.0.0.1" || address === "::1"
+      return { hostname: loopback ? "localhost" : String(address), service: String(port) }
+    },
+    getServers: () => [...dnsServers],
+    setServers(servers) {
+      dnsServers = [...servers].map(String)
+    },
+    setDefaultResultOrder(order) {
+      dnsResultOrder = String(order)
+    },
+    getDefaultResultOrder: () => dnsResultOrder,
   }
+  let dnsServers = ["127.0.0.1"]
+  let dnsResultOrder = "verbatim"
+  const dnsError = (code, syscall, hostname) => Object.assign(new Error(`${syscall} ${code} ${hostname}`), { errno: undefined, code, syscall, hostname })
+  const dnsQuery = (name) => {
+    if (net.isIP(name)) return []
+    try {
+      return dnsLookupAll(name)
+    } catch {
+      return null
+    }
+  }
+  const dnsAddresses = async (host, family, syscall, options) => {
+    const name = String(host)
+    const all = dnsQuery(name)
+    const list = (all ?? []).filter((e) => family === 0 || e.family === family)
+    if (!list.length) throw dnsError(all ? "ENODATA" : "ENOTFOUND", syscall, name)
+    return options?.ttl ? list.map((e) => ({ address: e.address, ttl: 0 })) : list.map((e) => e.address)
+  }
+  const dnsRecordMethods = { A: "resolve4", AAAA: "resolve6", ANY: "resolveAny", CAA: "resolveCaa", CNAME: "resolveCname", MX: "resolveMx", NAPTR: "resolveNaptr", NS: "resolveNs", PTR: "resolvePtr", SOA: "resolveSoa", SRV: "resolveSrv", TLSA: "resolveTlsa", TXT: "resolveTxt" }
+  for (const [type, method] of Object.entries(dnsRecordMethods)) {
+    if (dnsPromises[method]) continue
+    const syscall = "query" + type[0] + type.slice(1).toLowerCase()
+    dnsPromises[method] = async (host) => {
+      const name = String(host)
+      throw dnsError(dnsQuery(name) ? "ENODATA" : "ENOTFOUND", syscall, name)
+    }
+  }
+  const dnsCodes = { NODATA: "ENODATA", FORMERR: "EFORMERR", SERVFAIL: "ESERVFAIL", NOTFOUND: "ENOTFOUND", NOTIMP: "ENOTIMP", REFUSED: "EREFUSED", BADQUERY: "EBADQUERY", BADNAME: "EBADNAME", BADFAMILY: "EBADFAMILY", BADRESP: "EBADRESP", CONNREFUSED: "ECONNREFUSED", TIMEOUT: "ETIMEOUT", EOF: "EOF", FILE: "EFILE", NOMEM: "ENOMEM", DESTRUCTION: "EDESTRUCTION", BADSTR: "EBADSTR", BADFLAGS: "EBADFLAGS", NONAME: "ENONAME", BADHINTS: "EBADHINTS", NOTINITIALIZED: "ENOTINITIALIZED", LOADIPHLPAPI: "ELOADIPHLPAPI", ADDRGETNETWORKPARAMS: "EADDRGETNETWORKPARAMS", CANCELLED: "ECANCELLED" }
+  const dnsMethodNames = ["resolve", "resolve4", "resolve6", "resolveAny", "reverse", ...Object.values(dnsRecordMethods).filter((m) => !["resolve4", "resolve6", "resolveAny"].includes(m))]
+  class DnsPromisesResolver {
+    #servers = [...dnsServers]
+    constructor(options) {}
+    cancel() {}
+    getServers() {
+      return [...this.#servers]
+    }
+    setServers(servers) {
+      this.#servers = [...servers].map(String)
+    }
+    setLocalAddress() {}
+  }
+  for (const m of dnsMethodNames) {
+    DnsPromisesResolver.prototype[m] = function (...args) {
+      return dnsPromises[m](...args)
+    }
+  }
+  Object.assign(dnsPromises, dnsCodes, { Resolver: DnsPromisesResolver })
   const callbackify2 = (fn) => (...args) => {
     const cb = args.pop()
     fn(...args).then(
-      (v) => (Array.isArray(v) || typeof v !== "object" ? cb(null, v) : cb(null, v.address, v.family)),
+      (v) => (Array.isArray(v) || typeof v !== "object" ? cb(null, v) : "hostname" in v && "service" in v ? cb(null, v.hostname, v.service) : cb(null, v.address, v.family)),
       (e) => cb(e),
     )
   }
+  class DnsResolver extends DnsPromisesResolver {}
+  for (const m of dnsMethodNames) DnsResolver.prototype[m] = callbackify2((...args) => dnsPromises[m](...args))
   const dns = {
     lookup: callbackify2(dnsPromises.lookup),
-    resolve4: callbackify2(dnsPromises.resolve4),
-    resolve6: callbackify2(dnsPromises.resolve6),
-    resolve: callbackify2(dnsPromises.resolve),
-    getServers: () => [],
-    setServers() {},
+    lookupService: callbackify2(dnsPromises.lookupService),
+    getServers: () => dnsPromises.getServers(),
+    setServers: (servers) => dnsPromises.setServers(servers),
+    setDefaultResultOrder: (order) => dnsPromises.setDefaultResultOrder(order),
+    getDefaultResultOrder: () => dnsPromises.getDefaultResultOrder(),
     promises: dnsPromises,
+    Resolver: DnsResolver,
     ADDRCONFIG: 1024,
     V4MAPPED: 2048,
     ALL: 256,
+    ...dnsCodes,
   }
+  for (const m of dnsMethodNames) dns[m] = callbackify2((...args) => dnsPromises[m](...args))
 
   const notSupported = (what) => () => {
     const e = new Error(`${what} is not supported yet`)
     e.code = "ENOTSUP"
     throw e
   }
-  const http2 = {
-    connect: notSupported("http2.connect"),
-    createServer: notSupported("http2.createServer"),
-    createSecureServer: notSupported("http2.createSecureServer"),
-    getDefaultSettings: () => ({ headerTableSize: 4096, enablePush: true, initialWindowSize: 65535, maxFrameSize: 16384, maxConcurrentStreams: 4294967295, maxHeaderListSize: 65535 }),
-    getPackedSettings: () => Buffer.alloc(0),
-    getUnpackedSettings: () => ({}),
-    sensitiveHeaders: Symbol("nodejs.http2.sensitiveHeaders"),
-    Http2ServerRequest: class Http2ServerRequest extends EventEmitter {},
-    Http2ServerResponse: class Http2ServerResponse extends EventEmitter {},
-    Http2Session: class Http2Session extends EventEmitter {},
-    ServerHttp2Session: class ServerHttp2Session extends EventEmitter {},
-    ClientHttp2Session: class ClientHttp2Session extends EventEmitter {},
-    Http2Stream: class Http2Stream extends EventEmitter {},
-    ServerHttp2Stream: class ServerHttp2Stream extends EventEmitter {},
-    ClientHttp2Stream: class ClientHttp2Stream extends EventEmitter {},
-    constants: {
-      HTTP2_HEADER_STATUS: ":status", HTTP2_HEADER_METHOD: ":method", HTTP2_HEADER_AUTHORITY: ":authority", HTTP2_HEADER_SCHEME: ":scheme", HTTP2_HEADER_PATH: ":path",
-      HTTP2_HEADER_CONTENT_TYPE: "content-type", HTTP2_HEADER_CONTENT_LENGTH: "content-length", HTTP2_HEADER_ACCEPT: "accept", HTTP2_HEADER_USER_AGENT: "user-agent", HTTP2_HEADER_COOKIE: "cookie", HTTP2_HEADER_SET_COOKIE: "set-cookie",
-      HTTP2_METHOD_GET: "GET", HTTP2_METHOD_POST: "POST", HTTP2_METHOD_PUT: "PUT", HTTP2_METHOD_DELETE: "DELETE", HTTP2_METHOD_HEAD: "HEAD", HTTP2_METHOD_PATCH: "PATCH", HTTP2_METHOD_OPTIONS: "OPTIONS",
-      NGHTTP2_NO_ERROR: 0, NGHTTP2_PROTOCOL_ERROR: 1, NGHTTP2_INTERNAL_ERROR: 2, NGHTTP2_CANCEL: 8, NGHTTP2_REFUSED_STREAM: 7,
-      HTTP_STATUS_OK: 200, HTTP_STATUS_CREATED: 201, HTTP_STATUS_NO_CONTENT: 204, HTTP_STATUS_BAD_REQUEST: 400, HTTP_STATUS_NOT_FOUND: 404, HTTP_STATUS_INTERNAL_SERVER_ERROR: 500,
-    },
-  }
-
   const environmentData = new Map()
   const SHARE_ENV = Symbol.for("nodejs.worker_threads.SHARE_ENV")
   const kPortId = Symbol.for("squirt.portId")
@@ -8218,7 +8291,6 @@ const NODE_SRC: &str = r##"
     zlib,
     stream,
     utilExtras,
-    http2,
     workerThreads,
     v8,
     vmModule,
@@ -8498,8 +8570,22 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 let z = vm.get_prop(&n, "zlib")?;
                 with_default(vm, z)?
             }
-            "net" | "tls" | "http2" | "v8" | "cluster" | "inspector" | "punycode" | "domain"
-            | "repl" | "sea" | "wasi" => {
+            "http2" => {
+                let proto = match vm.compile(
+                    HTTP2_SRC,
+                    "<squirt:http2>",
+                    std::env::current_dir().unwrap_or_default(),
+                    Mode::Repl,
+                ) {
+                    Ok(p) => p,
+                    Err(e) => return Err(vm.syntax_error_value(&e, "<squirt:http2>")),
+                };
+                let factory = vm.run_proto(proto)?;
+                let m = vm.call_value(&factory, Value::Undefined, &[])?;
+                with_default(vm, m)?
+            }
+            "net" | "tls" | "v8" | "cluster" | "inspector" | "punycode" | "domain" | "repl"
+            | "sea" | "wasi" => {
                 let n = load(vm)?;
                 let m = vm.get_prop(&n, name)?;
                 with_default(vm, m)?

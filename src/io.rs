@@ -137,6 +137,7 @@ pub enum IoEvent {
         local: SocketAddr,
         remote: SocketAddr,
         cmd: Sender<SocketCmd>,
+        alpn: Option<String>,
     },
     Child {
         id: u64,
@@ -276,6 +277,7 @@ pub enum SocketEvent {
     Connected {
         local: SocketAddr,
         remote: SocketAddr,
+        alpn: Option<String>,
     },
     Data(Vec<u8>),
     End,
@@ -396,6 +398,7 @@ pub struct TlsClientOptions {
     pub servername: String,
     pub insecure: bool,
     pub ca: Option<Vec<u8>>,
+    pub alpn: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -460,6 +463,16 @@ pub fn pem_certificates(
 }
 
 fn client_config_for(opts: &TlsClientOptions) -> Result<Arc<rustls::ClientConfig>, String> {
+    if !opts.alpn.is_empty() {
+        let base = client_config_base(opts)?;
+        let mut config = (*base).clone();
+        config.alpn_protocols = opts.alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
+        return Ok(Arc::new(config));
+    }
+    client_config_base(opts)
+}
+
+fn client_config_base(opts: &TlsClientOptions) -> Result<Arc<rustls::ClientConfig>, String> {
     if !opts.insecure && opts.ca.is_none() {
         return Ok(tls_config());
     }
@@ -880,15 +893,27 @@ pub fn socket_connect(
             None => {
                 let _ = tx.send(IoEvent::Socket {
                     id,
-                    event: SocketEvent::Connected { local, remote },
+                    event: SocketEvent::Connected {
+                        local,
+                        remote,
+                        alpn: None,
+                    },
                 });
                 socket_loop(stream, id, own, crx, tx);
             }
             Some(opts) => match tls_wrap(stream, &opts) {
                 Ok(secure) => {
+                    let alpn = secure
+                        .conn
+                        .alpn_protocol()
+                        .map(|p| String::from_utf8_lossy(p).into_owned());
                     let _ = tx.send(IoEvent::Socket {
                         id,
-                        event: SocketEvent::Connected { local, remote },
+                        event: SocketEvent::Connected {
+                            local,
+                            remote,
+                            alpn,
+                        },
                     });
                     socket_loop(secure, id, own, crx, tx);
                 }
@@ -933,6 +958,7 @@ pub fn socket_listen(
                         local,
                         remote,
                         cmd: ctx,
+                        alpn: None,
                     });
                     std::thread::spawn(move || socket_loop(stream, id, own, crx, tx2));
                 }
@@ -949,6 +975,10 @@ pub fn socket_listen(
                                 return;
                             }
                         }
+                        let alpn = secure
+                            .conn
+                            .alpn_protocol()
+                            .map(|p| String::from_utf8_lossy(p).into_owned());
                         if tx2
                             .send(IoEvent::Accept {
                                 server,
@@ -956,6 +986,7 @@ pub fn socket_listen(
                                 local,
                                 remote,
                                 cmd: ctx,
+                                alpn,
                             })
                             .is_err()
                         {

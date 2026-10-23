@@ -1,0 +1,53 @@
+import { Readable } from "node:stream"
+import net from "node:net"
+import dns from "node:dns"
+
+const r = new Readable({ read() {} })
+r.push("ab")
+r.push("cd")
+r.push("ef")
+console.log(r.read(3)?.toString(), r.read(null)?.toString(), r.read(), r.read(0))
+r.push("xyz")
+console.log(r.read(5), r.readableLength)
+r.push(null)
+console.log(r.read(5)?.toString())
+
+const flowing = new Readable({ read() {} })
+flowing.push("one")
+flowing.push("two")
+flowing.on("data", () => {})
+flowing.pause()
+flowing.resume()
+console.log(flowing.readableFlowing)
+
+let serverDone
+const finished = new Promise((resolve) => (serverDone = resolve))
+const server = net.createServer((conn) => {
+  const got = []
+  conn.on("readable", () => {
+    let chunk
+    while ((chunk = conn.read(null)) !== null) {
+      got.push(chunk.toString())
+      conn.write("ack:" + chunk.toString())
+    }
+  })
+  conn.on("end", () => {
+    console.log("server got", got.join(""))
+    server.close()
+    serverDone()
+  })
+})
+await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve))
+const client = net.connect(server.address().port, "127.0.0.1", () => client.write("hello"))
+await new Promise((resolve) => client.once("data", (d) => {
+  console.log("client got", d.toString())
+  client.end()
+  resolve()
+}))
+await finished
+
+const resolver = new dns.promises.Resolver()
+console.log(typeof dns.Resolver, typeof resolver.resolveTxt, dns.NOTFOUND, dns.promises.NODATA, typeof dns.getDefaultResultOrder())
+console.log(await dns.promises.resolve("127.0.0.1").catch((e) => [e.code, e.syscall, e.hostname]))
+console.log(await resolver.resolve4("10.0.0.1").catch((e) => [e.code, e.syscall]))
+console.log(await dns.promises.lookupService("127.0.0.1", 80).then((s) => typeof s.hostname))

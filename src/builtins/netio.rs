@@ -181,6 +181,7 @@ pub fn tls_client_options(
         servername,
         insecure: insecure_env(),
         ca: None,
+        alpn: Vec::new(),
     };
     if options.is_object() {
         if let Value::Bool(false) = vm.get_prop(options, "rejectUnauthorized")? {
@@ -188,6 +189,12 @@ pub fn tls_client_options(
         }
         let ca = vm.get_prop(options, "ca")?;
         opts.ca = pem_bytes(vm, &ca)?;
+        let alpn = vm.get_prop(options, "ALPNProtocols")?;
+        if alpn.is_object() {
+            for p in vm.iterate(&alpn)? {
+                opts.alpn.push(vm.to_string(&p)?.to_string());
+            }
+        }
     }
     Ok(opts)
 }
@@ -534,10 +541,15 @@ pub fn handle_socket(vm: &mut Vm, id: u64, event: SocketEvent) -> Result<(), Val
     };
     let handler = entry.handler.clone();
     match event {
-        SocketEvent::Connected { local, remote } => {
+        SocketEvent::Connected {
+            local,
+            remote,
+            alpn,
+        } => {
             let [la, lp] = addr_values(&local);
             let [ra, rp] = addr_values(&remote);
-            call_handler(vm, &handler, &["connect".into(), la, lp, ra, rp])
+            let alpn = alpn.map(Value::from).unwrap_or(Value::Bool(false));
+            call_handler(vm, &handler, &["connect".into(), la, lp, ra, rp, alpn])
         }
         SocketEvent::Data(bytes) => {
             let chunk = super::typed::new_uint8(vm, bytes);
@@ -565,6 +577,7 @@ pub fn handle_accept(
     local: SocketAddr,
     remote: SocketAddr,
     cmd: Sender<SocketCmd>,
+    alpn: Option<String>,
 ) -> Result<(), Value> {
     let Some(entry) = vm.io_net_servers.get(&server) else {
         let _ = cmd.send(SocketCmd::Destroy);
@@ -582,7 +595,12 @@ pub fn handle_accept(
     vm.io.pending += 1;
     let [la, lp] = addr_values(&local);
     let [ra, rp] = addr_values(&remote);
-    call_handler(vm, &handler, &[Value::Number(id as f64), la, lp, ra, rp])
+    let alpn = alpn.map(Value::from).unwrap_or(Value::Bool(false));
+    call_handler(
+        vm,
+        &handler,
+        &[Value::Number(id as f64), la, lp, ra, rp, alpn],
+    )
 }
 
 pub fn handle_child(vm: &mut Vm, id: u64, event: ChildEvent) -> Result<(), Value> {

@@ -7,11 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Security
+### Added
 
-- WebAssembly runs on wasmi 0.47.2, which fixes a use-after-free in linear memory
-  ([GHSA-g4v2-cjqp-rfmq](https://github.com/advisories/GHSA-g4v2-cjqp-rfmq), CVE-2025-66627).
-  Building from source now needs Rust 1.86.
+- `node:http2` is implemented: HPACK with Huffman decoding, flow control, trailers, pings,
+  GOAWAY and stream resets, `http2.connect` over plain TCP or TLS, `createServer` and
+  `createSecureServer` with `stream` events and the `Http2ServerRequest`/`Http2ServerResponse`
+  compatibility API, `getPackedSettings` and `getUnpackedSettings`. It interoperates with Node in
+  both directions, and `@grpc/grpc-js` clients and servers work over it.
+- TLS sockets negotiate ALPN: `ALPNProtocols` works on `tls.connect` and TLS servers, and
+  `socket.alpnProtocol` reports the result.
+- `dns.Resolver` and `dns.promises.Resolver`, every `resolve*` method, `lookupService`,
+  `get/setDefaultResultOrder` and the DNS error code constants exist. Address records come from
+  the system resolver; other record types report `ENODATA` or `ENOTFOUND`.
 
 ### Changed
 
@@ -47,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rejects a `stdio` without `"ipc"`, and `subprocess.channel` and `process.channel` have
   `ref`, `unref`, `refCounted` and `unrefCounted`, so `execaNode` and execa's IPC helpers work.
 - `Readable.prototype._destroy` and `Writable.prototype._destroy` exist, which `execa` wraps.
+- `readable.read()` and `read(null)` return the whole buffer in paused mode like Node, `read(0)`
+  returns `null`, and `read(n)` waits for more data when fewer than `n` bytes are buffered.
+  `aedes` brokers stalled on `read(null)` returning an empty buffer.
 - `stream.pipeline` and `stream/promises` `pipeline` accept generator functions and async
   functions as stages, and the promise version takes a trailing options object with `end` and
   `signal`; `graphql-yoga` and `@whatwg-node/server` call it that way.
@@ -75,6 +85,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - File system calls on Windows report `ENOENT` for paths with characters such as `*` instead of
   `EIO`, which broke `globby`, and `EBUSY`, `EXDEV`, `ENOSPC`, `ENAMETOOLONG` and `ELOOP` get their
   Node codes on every platform.
+
+### Security
+
+- WebAssembly runs on wasmi 0.47.2, which fixes a use-after-free in linear memory
+  ([GHSA-g4v2-cjqp-rfmq](https://github.com/advisories/GHSA-g4v2-cjqp-rfmq), CVE-2025-66627).
+  Building from source now needs Rust 1.86.
 
 ## [1.7.0] - 2026-10-23
 
