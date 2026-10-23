@@ -247,13 +247,16 @@ pub fn parse_int(s: &str, radix: Option<u32>) -> f64 {
 }
 
 pub fn to_int32(n: f64) -> i32 {
-    if n.is_finite() && n.abs() < 2147483648.0 {
-        return n as i32;
+    if n.abs() < 9.0e18 {
+        return (n as i64) as i32;
     }
     to_uint32(n) as i32
 }
 
 pub fn to_uint32(n: f64) -> u32 {
+    if n.abs() < 9.0e18 {
+        return (n as i64) as u32;
+    }
     if !n.is_finite() {
         return 0;
     }

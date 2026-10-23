@@ -4203,16 +4203,45 @@ impl Vm {
                 }
             };
         }
+        macro_rules! numbers_on_top {
+            () => {{
+                let n = self.stack.len();
+                match (
+                    self.stack.get(n.wrapping_sub(2)),
+                    self.stack.get(n.wrapping_sub(1)),
+                ) {
+                    (Some(Value::Number(x)), Some(Value::Number(y))) => Some((*x, *y)),
+                    _ => None,
+                }
+            }};
+        }
+        macro_rules! number_result {
+            ($r:expr) => {{
+                let n = self.stack.len();
+                let r = $r;
+                if let Some(Value::Number(slot)) = self.stack.get_mut(n - 2) {
+                    *slot = r;
+                }
+                unsafe { self.stack.set_len(n - 1) };
+            }};
+        }
+        macro_rules! bool_result {
+            ($r:expr) => {{
+                let n = self.stack.len();
+                let r = $r;
+                unsafe {
+                    self.stack.set_len(n - 1);
+                    std::ptr::write(self.stack.as_mut_ptr().add(n - 2), Value::Bool(r));
+                }
+            }};
+        }
         macro_rules! num_op {
             ($f:expr, $big:expr) => {{
-                let b = pop!();
-                if let (Some(Value::Number(x)), Value::Number(y)) = (self.stack.last(), &b) {
-                    let r = $f(*x, *y);
-                    if let Some(top) = self.stack.last_mut() {
-                        *top = Value::Number(r);
-                    }
+                if let Some((x, y)) = numbers_on_top!() {
+                    number_result!($f(x, y));
                     continue;
                 }
+                let b = pop!();
                 let a = pop!();
                 let (a, b) = tri!(self.numeric_pair(&a, &b));
                 if let (Value::Number(x), Value::Number(y)) = (&a, &b) {
@@ -4225,6 +4254,10 @@ impl Vm {
         }
         macro_rules! int_op {
             ($f:expr, $big:expr) => {{
+                if let Some((x, y)) = numbers_on_top!() {
+                    number_result!($f(x, y));
+                    continue;
+                }
                 let b = pop!();
                 let a = pop!();
                 let (a, b) = match (&a, &b) {
@@ -4241,14 +4274,11 @@ impl Vm {
         }
         macro_rules! cmp_op {
             ($num:expr, $ord:expr) => {{
-                let b = pop!();
-                if let (Some(Value::Number(x)), Value::Number(y)) = (self.stack.last(), &b) {
-                    let r = $num(*x, *y);
-                    if let Some(top) = self.stack.last_mut() {
-                        *top = Value::Bool(r);
-                    }
+                if let Some((x, y)) = numbers_on_top!() {
+                    bool_result!($num(x, y));
                     continue;
                 }
+                let b = pop!();
                 let a = pop!();
                 let r = match tri!(self.compare(&a, &b)) {
                     Some(o) => $ord(o),
@@ -4258,11 +4288,30 @@ impl Vm {
             }};
         }
 
+        macro_rules! push_number {
+            ($x:expr) => {{
+                let x = $x;
+                self.stack.reserve(1);
+                unsafe {
+                    let n = self.stack.len();
+                    std::ptr::write(self.stack.as_mut_ptr().add(n), Value::Number(x));
+                    self.stack.set_len(n + 1);
+                }
+            }};
+        }
+
         loop {
             let op = proto.code[ip];
             ip += 1;
             match op {
-                Op::Const(i) => self.stack.push(proto.consts[i as usize].clone()),
+                Op::Const(i) => {
+                    let i = i as usize;
+                    if let Value::Number(x) = proto.consts[i] {
+                        push_number!(x);
+                    } else {
+                        self.stack.extend_from_slice(&proto.consts[i..=i]);
+                    }
+                }
                 Op::Undefined => self.stack.push(Value::Undefined),
                 Op::Null => self.stack.push(Value::Null),
                 Op::True => self.stack.push(Value::Bool(true)),
@@ -4296,9 +4345,13 @@ impl Vm {
                     self.stack.insert(n - 3, v);
                 }
                 Op::GetLocal(s) => {
-                    self.flush_builder(base + s as usize);
-                    let v = self.stack[base + s as usize].clone();
-                    self.stack.push(v);
+                    let at = base + s as usize;
+                    self.flush_builder(at);
+                    if let Value::Number(x) = self.stack[at] {
+                        push_number!(x);
+                    } else {
+                        self.stack.extend_from_within(at..=at);
+                    }
                 }
                 Op::Uninit => self.stack.push(Value::Uninit),
                 Op::GetLocalChecked(s, k) => {
@@ -4318,14 +4371,17 @@ impl Vm {
                     self.stack[base + s as usize] = v;
                 }
                 Op::GetUpvalChecked(i, k) => {
-                    let v = match &*cl.upvalues[i as usize].borrow() {
-                        Upvalue::Open(idx) => self.stack[*idx].clone(),
-                        Upvalue::Closed(v) => v.clone(),
-                    };
-                    if matches!(v, Value::Uninit) {
+                    match &*cl.upvalues[i as usize].borrow() {
+                        Upvalue::Open(idx) => {
+                            let idx = *idx;
+                            self.stack.extend_from_within(idx..=idx);
+                        }
+                        Upvalue::Closed(v) => self.stack.push(v.clone()),
+                    }
+                    if matches!(self.stack.last(), Some(Value::Uninit)) {
+                        self.stack.pop();
                         throw!(self.tdz_error(&proto, k));
                     }
-                    self.stack.push(v);
                 }
                 Op::SetUpvalChecked(i, k) => {
                     let uninit = match &*cl.upvalues[i as usize].borrow() {
@@ -4348,8 +4404,18 @@ impl Vm {
                     self.stack[base + s as usize] = v;
                 }
                 Op::AppendLocal(s) => {
+                    let abs = base + s as usize;
+                    let n = self.stack.len();
+                    if let Some(Value::Number(y)) = self.stack.get(n.wrapping_sub(1)) {
+                        let y = *y;
+                        if let Value::Number(x) = &mut self.stack[abs] {
+                            *x += y;
+                            unsafe { self.stack.set_len(n - 1) };
+                            continue;
+                        }
+                    }
                     let rhs = pop!();
-                    tri!(self.append_local(base + s as usize, rhs));
+                    tri!(self.append_local(abs, rhs));
                 }
                 Op::GetLocalProp(s, k) => {
                     let abs = base + s as usize;
@@ -4444,13 +4510,13 @@ impl Vm {
                         }
                     }
                 }
-                Op::GetUpval(i) => {
-                    let v = match &*cl.upvalues[i as usize].borrow() {
-                        Upvalue::Open(idx) => self.stack[*idx].clone(),
-                        Upvalue::Closed(v) => v.clone(),
-                    };
-                    self.stack.push(v);
-                }
+                Op::GetUpval(i) => match &*cl.upvalues[i as usize].borrow() {
+                    Upvalue::Open(idx) => {
+                        let idx = *idx;
+                        self.stack.extend_from_within(idx..=idx);
+                    }
+                    Upvalue::Closed(v) => self.stack.push(v.clone()),
+                },
                 Op::SetUpval(i) => {
                     let v = peek!();
                     let mut u = cl.upvalues[i as usize].borrow_mut();
@@ -4679,6 +4745,43 @@ impl Vm {
                     self.stack.push(val);
                 }
                 Op::GetIndex => {
+                    let n = self.stack.len();
+                    if let (Some(Value::Object(o)), Some(Value::Number(k))) = (
+                        self.stack.get(n.wrapping_sub(2)),
+                        self.stack.get(n.wrapping_sub(1)),
+                    ) {
+                        let i = *k as usize;
+                        let element = if i as f64 != *k {
+                            None
+                        } else {
+                            match &o.kind {
+                                ObjKind::Array(a)
+                                    if o.flags.get() & crate::object::SLOW_ELEMENTS == 0
+                                        && i < 4294967295 =>
+                                {
+                                    match a.borrow().get(i) {
+                                        Some(Value::Number(x)) if !o.is_hole(i) => Some(*x),
+                                        _ => None,
+                                    }
+                                }
+                                ObjKind::Typed(t) => match t.get(i) {
+                                    Some(Value::Number(x)) => Some(x),
+                                    _ => None,
+                                },
+                                _ => None,
+                            }
+                        };
+                        if let Some(x) = element {
+                            unsafe {
+                                let slots = self.stack.as_mut_ptr();
+                                self.stack.set_len(n - 2);
+                                std::ptr::drop_in_place(slots.add(n - 2));
+                                std::ptr::write(slots.add(n - 2), Value::Number(x));
+                                self.stack.set_len(n - 1);
+                            }
+                            continue;
+                        }
+                    }
                     let key = pop!();
                     let obj = pop!();
                     let v = tri!(self.get_index(&obj, &key));
@@ -5991,9 +6094,19 @@ impl Vm {
                     }
                 }
                 Op::StoreLocal(s) => {
+                    let dst = base + s as usize;
+                    self.drop_builder(dst);
+                    let n = self.stack.len();
+                    if let Some(Value::Number(x)) = self.stack.get(n.wrapping_sub(1)) {
+                        let x = *x;
+                        if let Value::Number(d) = &mut self.stack[dst] {
+                            *d = x;
+                            unsafe { self.stack.set_len(n - 1) };
+                            continue;
+                        }
+                    }
                     let v = pop!();
-                    self.drop_builder(base + s as usize);
-                    self.stack[base + s as usize] = v;
+                    self.stack[dst] = v;
                 }
                 Op::StoreUpval(i) => {
                     let v = pop!();

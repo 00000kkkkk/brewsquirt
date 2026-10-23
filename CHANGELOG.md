@@ -53,6 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   V8-specific build next to a Node-API one, the Node-API build is loaded, and addons that only
   exist for the V8 C++ API fail with `ERR_DLOPEN_FAILED` and an explanation.
 
+### Changed
+
+- Number-heavy code runs about twice as fast: arithmetic, bitwise and comparison operators, local
+  and upvalue reads and writes, constants and numeric array and typed array reads update the
+  value stack in place instead of copying values through temporaries, and `ToInt32`/`ToUint32`
+  avoid floating-point remainders. `bcryptjs` hashes 2.3 times faster.
+
 ### Fixed
 
 - Packages in `node_modules` were not found; bare specifiers now look in `node_modules` as well as
