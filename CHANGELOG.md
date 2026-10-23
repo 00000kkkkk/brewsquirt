@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- WebAssembly runs on wasmi 0.47.2, which fixes a use-after-free in linear memory
+  ([GHSA-g4v2-cjqp-rfmq](https://github.com/advisories/GHSA-g4v2-cjqp-rfmq), CVE-2025-66627).
+  Building from source now needs Rust 1.86.
+
 ### Changed
 
 - `vrotdaem gluboko` fetches registry metadata and tarballs in parallel, with a per-run metadata

@@ -2,7 +2,7 @@
 name = "javasquirt"
 version = "1.7.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.86"
 description = "High-performance language with JS semantics and Rust speed"
 license = "Apache-2.0"
 repository = "https://github.com/00000kkkkk/javasquirt"
@@ -67,7 +67,7 @@ pem-rfc7468 = { version = "0.7", features = ["alloc"] }
 spki = { version = "0.7", features = ["pem", "std"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 scrypt = { version = "0.11", default-features = false }
-wasmi = { version = "0.46", default-features = false, features = ["std", "simd"] }
+wasmi = { version = "0.47.1", default-features = false, features = ["std", "simd"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -2511,17 +2511,15 @@ impl Vm {
     }
 
     pub(crate) fn unwind(&mut self, err: Value, stop: usize) -> Result<(), Value> {
-        if let Some(h) = self.handlers.last() {
-            if h.frame >= stop && !self.threads.terminating {
-                let h = self.handlers.pop().expect("handler");
-                self.frames.truncate(h.frame + 1);
-                self.close_upvalues(h.stack_len);
-                self.prune_builders(h.stack_len);
-                self.stack.truncate(h.stack_len);
-                self.stack.push(err);
-                self.frames[h.frame].ip = h.catch_ip;
-                return Ok(());
-            }
+        let terminating = self.threads.terminating;
+        if let Some(h) = self.handlers.pop_if(|h| h.frame >= stop && !terminating) {
+            self.frames.truncate(h.frame + 1);
+            self.close_upvalues(h.stack_len);
+            self.prune_builders(h.stack_len);
+            self.stack.truncate(h.stack_len);
+            self.stack.push(err);
+            self.frames[h.frame].ip = h.catch_ip;
+            return Ok(());
         }
         let base = self.frames[stop].base;
         self.close_upvalues(base);
