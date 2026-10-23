@@ -10,6 +10,7 @@ pub(crate) mod json;
 pub mod netio;
 pub mod node;
 pub mod reflect;
+pub mod sqlite;
 pub mod threads;
 pub mod typed;
 pub mod wasm;

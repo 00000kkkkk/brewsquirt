@@ -1,0 +1,50 @@
+{ changes: 1, lastInsertRowid: 1 }
+{ changes: 1, lastInsertRowid: 2 }
+all err ERR_OUT_OF_RANGE Value is too large to be represented as a JavaScript number: 9007199254740993
+[
+  [Object: null prototype] {
+    id: 1,
+    name: 'a',
+    score: 1.5,
+    data: Uint8Array(2) [ 1, 2 ]
+  },
+  [Object: null prototype] { id: 2, name: 'b', score: 2, data: null }
+]
+null
+[ 'bigint:5', 'bigint:9007199254740993' ]
+[Object: null prototype] { a: 1, b: 2.5 } [Object: null prototype] { t: 'real' }
+bool ERR_INVALID_ARG_TYPE Provided value cannot be bound to SQLite parameter 1.
+undef ERR_INVALID_ARG_TYPE Provided value cannot be bound to SQLite parameter 1.
+[Object: null prototype] { x: 1, y: 2, z: 3 }
+unknown ERR_INVALID_STATE Unknown named parameter 'w'
+[Object: null prototype] { x: null }
+ERR_SQLITE_ERROR 1 SQL logic error no such table: nope
+[
+  [Object: null prototype] {
+    column: 'name',
+    database: 'main',
+    name: 'name',
+    table: 't',
+    type: 'TEXT'
+  },
+  [Object: null prototype] {
+    column: 'score',
+    database: 'main',
+    name: 'score',
+    table: 't',
+    type: 'REAL'
+  }
+]
+function [
+  [Object: null prototype] { id: 1 },
+  [Object: null prototype] { id: 2 }
+]
+true false object [
+  'SQLITE_CHANGESET_OMIT',
+  'SQLITE_CHANGESET_REPLACE',
+  'SQLITE_CHANGESET_ABORT'
+]
+[Object: null prototype] { v: 42 }
+select ? as v select NULL as v
+ERR_INVALID_STATE database is not open
+[object Object] function

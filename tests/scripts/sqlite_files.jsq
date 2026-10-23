@@ -1,0 +1,52 @@
+import { DatabaseSync } from "node:sqlite"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "jsq-sqlite-")), "sq2.db")
+fs.rmSync(file, { force: true })
+{
+  const db = new DatabaseSync(file)
+  db.exec("create table parent (id integer primary key); create table child (id integer primary key, p integer references parent(id), name text unique)")
+  db.exec("insert into parent values (1)")
+  const ins = db.prepare("insert into child (p, name) values (?, ?)")
+  ins.run(1, "a")
+  try { ins.run(2, "b") } catch (e) { console.log("fk", e.code, e.errcode, e.errstr, e.message) }
+  try { ins.run(1, "a") } catch (e) { console.log("unique", e.code, e.errcode, e.message) }
+  db.exec("begin")
+  console.log("tx", db.isTransaction)
+  const t0 = Date.now()
+  const many = db.prepare("insert into parent (id) values (?)")
+  for (let i = 2; i < 10002; i++) many.run(i)
+  db.exec("commit")
+  console.log("bulk ok", db.prepare("select count(*) as n from parent").get().n, Date.now() - t0 < 5000, db.isTransaction)
+  db.function("boom", () => { throw new Error("from js") })
+  try { db.prepare("select boom()").get() } catch (e) { console.log("fn error", e.message) }
+  db.function("sum3", { varargs: true, deterministic: true }, (...xs) => xs.reduce((a, b) => a + b, 0))
+  console.log(db.prepare("select sum3(1, 2, 3, 4) as s").get())
+  db.function("blobber", (b) => b.length)
+  console.log(db.prepare("select blobber(x'0102ff') as n, hex(?) as h").get(new Uint8Array([10, 11])))
+  const arr = db.prepare("select id, p, name from child")
+  arr.setReturnArrays(true)
+  console.log(arr.all())
+  for (const row of db.prepare("select id from parent order by id").iterate()) { if (row.id > 2) break }
+  console.log("after break", db.prepare("select max(id) as m from parent").get())
+  console.log(db.location() === fs.realpathSync(file) || db.location().endsWith("sq2.db"))
+  db.close()
+}
+{
+  const ro = new DatabaseSync(file, { readOnly: true })
+  console.log("persisted", ro.prepare("select count(*) as n from child").get())
+  try { ro.exec("insert into parent values (99999)") } catch (e) { console.log("readonly", e.code, e.errcode, e.message) }
+  ro.close()
+}
+{
+  using db = new DatabaseSync(":memory:", { readBigInts: true, timeout: 100 })
+  console.log(db.prepare("select 1 as one, 2.5 as f").get())
+  const lazy = new DatabaseSync(":memory:", { open: false })
+  console.log(lazy.isOpen)
+  lazy.open()
+  console.log(lazy.isOpen)
+  try { lazy.open() } catch (e) { console.log(e.code, e.message) }
+  lazy.close()
+}
+fs.rmSync(file, { force: true })

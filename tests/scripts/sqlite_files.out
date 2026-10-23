@@ -1,0 +1,16 @@
+fk ERR_SQLITE_ERROR 787 constraint failed FOREIGN KEY constraint failed
+unique ERR_SQLITE_ERROR 2067 UNIQUE constraint failed: child.name
+tx true
+bulk ok 10001 true false
+fn error from js
+[Object: null prototype] { s: 10 }
+[Object: null prototype] { n: 3, h: '0A0B' }
+[ [ 1, 1, 'a' ] ]
+after break [Object: null prototype] { m: 10001 }
+true
+persisted [Object: null prototype] { n: 1 }
+readonly ERR_SQLITE_ERROR 8 attempt to write a readonly database
+[Object: null prototype] { one: 1n, f: 2.5 }
+false
+true
+ERR_INVALID_STATE database is already open

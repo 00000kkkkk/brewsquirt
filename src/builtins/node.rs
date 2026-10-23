@@ -7761,6 +7761,7 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                 }
                 console
             }
+            "sqlite" => super::sqlite::load(vm)?,
             "test" => {
                 let n = load(vm)?;
                 let make = vm.get_prop(&n, "makeNodeTest")?;
@@ -8224,7 +8225,7 @@ fn zlib_crc32(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(Value::Number(h.finalize() as f64))
 }
 
-pub const BUILTIN_MODULES: [&str; 55] = [
+pub const BUILTIN_MODULES: [&str; 56] = [
     "assert",
     "assert/strict",
     "async_hooks",
@@ -8260,6 +8261,7 @@ pub const BUILTIN_MODULES: [&str; 55] = [
     "readline/promises",
     "repl",
     "sea",
+    "sqlite",
     "stream",
     "stream/consumers",
     "stream/promises",
@@ -8282,7 +8284,7 @@ pub const BUILTIN_MODULES: [&str; 55] = [
     "zlib",
 ];
 
-pub const PREFIX_ONLY: [&str; 2] = ["sea", "test"];
+pub const PREFIX_ONLY: [&str; 3] = ["sea", "sqlite", "test"];
 
 fn module_create_require(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let base = arg(args, 0);

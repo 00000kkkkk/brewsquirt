@@ -1,0 +1,31 @@
+import { DatabaseSync, StatementSync, constants } from "node:sqlite"
+const db = new DatabaseSync(":memory:")
+db.exec("create table t (id integer primary key, name text, score real, data blob, big integer)")
+const ins = db.prepare("insert into t (name, score, data, big) values (?, ?, ?, ?)")
+console.log(ins.run("a", 1.5, new Uint8Array([1, 2]), 5n))
+console.log(ins.run("b", 2, null, 9007199254740993n))
+const sel = db.prepare("select * from t")
+try { sel.all() } catch (e) { console.log("all err", e.code, e.message) }
+console.log(db.prepare("select id, name, score, data from t").all())
+try { sel.get() } catch (e) { console.log("get err", e.code, e.message) }
+console.log(Object.getPrototypeOf(db.prepare("select 1 as x").get()))
+sel.setReadBigInts(true)
+console.log(sel.all().map(r => typeof r.big + ":" + r.big))
+console.log(db.prepare("select ? as a, ? as b").get(1, 2.5), db.prepare("select typeof(?) as t").get(3))
+try { db.prepare("select ?").get(true) } catch (e) { console.log("bool", e.code, e.message) }
+try { db.prepare("select ?").get(undefined) } catch (e) { console.log("undef", e.code, e.message) }
+console.log(db.prepare("select :x as x, $y as y, @z as z").get({ x: 1, $y: 2, z: 3 }))
+try { db.prepare("select :x as x").get({ x: 1, w: 2 }) } catch (e) { console.log("unknown", e.code, e.message) }
+console.log(db.prepare("select :x as x").get({}))
+try { db.exec("select * from nope") } catch (e) { console.log(e.code, e.errcode, e.errstr, e.message) }
+console.log(db.prepare("select name, score from t where id = ?").columns())
+const it = db.prepare("select id from t").iterate()
+console.log(typeof it.next, [...it])
+console.log(db.isOpen, db.isTransaction, typeof constants, Object.keys(constants).slice(0, 3))
+db.function("twice", (x) => x * 2)
+console.log(db.prepare("select twice(21) as v").get())
+const s2 = db.prepare("select ? as v")
+console.log(s2.sourceSQL, s2.expandedSQL)
+db.close()
+try { db.exec("select 1") } catch (e) { console.log(e.code, e.message) }
+console.log(String(new DatabaseSync(":memory:").prepare("select 1")), typeof StatementSync)

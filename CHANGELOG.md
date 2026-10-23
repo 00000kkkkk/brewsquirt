@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `node:sqlite` with `DatabaseSync` and `StatementSync` over a bundled SQLite 3: file and
+  in-memory databases, prepared statements with positional and named parameters, `run`, `get`,
+  `all`, `iterate`, `columns`, user-defined functions, `readBigInts`, `returnArrays` and Node's
+  error codes, so programs get an embedded database without native addons or install scripts.
+
 ## [1.6.0] - 2026-10-23
 
 ### Added

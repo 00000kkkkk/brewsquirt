@@ -202,6 +202,7 @@ JavaSquirt 1.6.0 implements modern JavaScript as specified, passing 98% of test2
 - **Errors**: `try`/`catch`/`finally`, `throw`, `Error`, `TypeError`, `RangeError`, `ReferenceError`, `SyntaxError`, `URIError`, `EvalError`, with stack traces
 - **TypeScript and JSX**: `.ts`, `.mts`, `.cts`, `.tsx` and `.jsx` files run directly with types stripped, plus `enum`, `namespace`, parameter properties, `tsconfig` path aliases and JSX for React, Preact and custom runtimes
 - **Native addons**: `.node` files built on Node-API load with `require`, so `@swc/core`, `lightningcss`, `rollup`, `sharp` and other napi-rs and node-addon-api packages run
+- **SQLite**: `node:sqlite` with `DatabaseSync` and prepared statements over a bundled SQLite, no addon needed
 - **Resource management**: `using` and `await using` declarations, `DisposableStack`, `AsyncDisposableStack` and `SuppressedError`
 - **Classes**: constructors, methods, static methods, instance and static fields, `extends`, `super()`, `super.method()`, `new`, `instanceof`, private `#members`, `accessor` fields and standard decorators
 - **Operators**: arithmetic, `**`, bitwise and shifts including `>>>`, loose and strict equality, `&&`, `||`, `??`, optional chaining `?.`, ternary, `typeof`, `void`, `delete`, `in`, compound assignment including `&&=`, `||=`, `??=`, `++` and `--`
