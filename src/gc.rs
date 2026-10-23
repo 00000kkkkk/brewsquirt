@@ -3,7 +3,7 @@ use crate::object::{
 };
 use crate::value::Value;
 use std::cell::{Cell, RefCell};
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -11,13 +11,35 @@ static MIN_THRESHOLD: AtomicUsize = AtomicUsize::new(200_000);
 static THRESHOLD: AtomicUsize = AtomicUsize::new(200_000);
 
 thread_local! {
-    static HEAP: RefCell<Vec<Weak<Obj>>> = const { RefCell::new(Vec::new()) };
+    static HEAP: RefCell<Vec<*const Obj>> = const { RefCell::new(Vec::new()) };
     static ENABLED: Cell<bool> = const { Cell::new(true) };
 }
 
 pub(crate) fn register(o: &Rc<Obj>) {
-    HEAP.with(|h| h.borrow_mut().push(Rc::downgrade(o)));
+    HEAP.with(|h| {
+        let mut h = h.borrow_mut();
+        o.heap_slot.set(h.len() as u32);
+        h.push(Rc::as_ptr(o));
+    });
     ALLOCS.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn unregister(o: &Obj) {
+    let slot = o.heap_slot.get();
+    if slot == u32::MAX {
+        return;
+    }
+    let _ = HEAP.try_with(|h| {
+        if let Ok(mut h) = h.try_borrow_mut() {
+            let slot = slot as usize;
+            if slot < h.len() && std::ptr::eq(h[slot], o) {
+                h.swap_remove(slot);
+                if let Some(&moved) = h.get(slot) {
+                    unsafe { (*moved).heap_slot.set(slot as u32) };
+                }
+            }
+        }
+    });
 }
 
 #[inline]
@@ -41,7 +63,7 @@ pub fn set_enabled(on: bool) {
 }
 
 pub fn live_objects() -> usize {
-    HEAP.with(|h| h.borrow().iter().filter(|w| w.strong_count() > 0).count())
+    HEAP.with(|h| h.borrow().len())
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -420,9 +442,13 @@ pub fn collect() -> Stats {
         return Stats::default();
     }
     let objs: Vec<Rc<Obj>> = HEAP.with(|h| {
-        let mut h = h.borrow_mut();
-        h.retain(|w| w.strong_count() > 0);
-        h.iter().filter_map(Weak::upgrade).collect()
+        h.borrow()
+            .iter()
+            .map(|&p| unsafe {
+                Rc::increment_strong_count(p);
+                Rc::from_raw(p)
+            })
+            .collect()
     });
     let obj_count = objs.len();
     let mut nodes: Vec<Node> = Vec::with_capacity(obj_count + obj_count / 2);

@@ -384,6 +384,13 @@ pub struct Obj {
     pub proto: RefCell<Option<Rc<Obj>>>,
     pub flags: Cell<u8>,
     pub(crate) gc_slot: Cell<u32>,
+    pub(crate) heap_slot: Cell<u32>,
+}
+
+impl Drop for Obj {
+    fn drop(&mut self) {
+        crate::gc::unregister(self);
+    }
 }
 
 pub enum ObjKind {
@@ -1151,6 +1158,7 @@ impl Obj {
             proto: RefCell::new(proto),
             flags: Cell::new(0),
             gc_slot: Cell::new(u32::MAX),
+            heap_slot: Cell::new(u32::MAX),
         });
         crate::gc::register(&o);
         o
