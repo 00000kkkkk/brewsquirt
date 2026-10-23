@@ -1,4 +1,5 @@
 use crate::inspect::inspect_plain;
+use crate::jsstr::JsStr;
 use crate::number::number_to_string;
 use crate::object::{Obj, ObjKind, Symbol};
 use std::fmt;
@@ -11,12 +12,14 @@ pub enum Value {
     Null,
     Bool(bool),
     Number(f64),
-    Str(Rc<str>),
+    Str(JsStr),
     Object(Rc<Obj>),
     Symbol(Rc<Symbol>),
     BigInt(Rc<num_bigint::BigInt>),
     Uninit,
 }
+
+const _: () = assert!(std::mem::size_of::<Value>() == 16);
 
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -48,8 +51,8 @@ impl From<String> for Value {
     }
 }
 
-impl From<Rc<str>> for Value {
-    fn from(s: Rc<str>) -> Self {
+impl From<JsStr> for Value {
+    fn from(s: JsStr) -> Self {
         Value::Str(s)
     }
 }
@@ -144,7 +147,7 @@ impl Value {
         }
     }
 
-    pub fn to_primitive_string(&self) -> Option<Rc<str>> {
+    pub fn to_primitive_string(&self) -> Option<JsStr> {
         Some(match self {
             Value::Undefined | Value::Uninit => "undefined".into(),
             Value::Null => "null".into(),
@@ -262,7 +265,7 @@ pub struct StrIndex {
 }
 
 thread_local! {
-    static STR_CACHE: std::cell::RefCell<Vec<(Rc<str>, Rc<StrIndex>)>> =
+    static STR_CACHE: std::cell::RefCell<Vec<(JsStr, Rc<StrIndex>)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -291,10 +294,10 @@ fn build_index(s: &str) -> StrIndex {
     }
 }
 
-pub fn str_index(s: &Rc<str>) -> Rc<StrIndex> {
+pub fn str_index(s: &JsStr) -> Rc<StrIndex> {
     STR_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if let Some(pos) = cache.iter().position(|(k, _)| Rc::ptr_eq(k, s)) {
+        if let Some(pos) = cache.iter().position(|(k, _)| JsStr::ptr_eq(k, s)) {
             let entry = cache.remove(pos);
             let idx = entry.1.clone();
             cache.insert(0, entry);
@@ -441,7 +444,7 @@ impl StrIndex {
     }
 }
 
-pub fn len16_rc(s: &Rc<str>) -> usize {
+pub fn len16_rc(s: &JsStr) -> usize {
     if s.len() < INDEX_MIN {
         len16(s)
     } else {
@@ -449,7 +452,7 @@ pub fn len16_rc(s: &Rc<str>) -> usize {
     }
 }
 
-pub fn code_unit_at_rc(s: &Rc<str>, i: usize) -> Option<u16> {
+pub fn code_unit_at_rc(s: &JsStr, i: usize) -> Option<u16> {
     if s.len() < INDEX_MIN {
         code_unit_at(s, i)
     } else {
@@ -457,7 +460,7 @@ pub fn code_unit_at_rc(s: &Rc<str>, i: usize) -> Option<u16> {
     }
 }
 
-pub fn char_at16_rc(s: &Rc<str>, i: usize) -> Option<String> {
+pub fn char_at16_rc(s: &JsStr, i: usize) -> Option<String> {
     if s.len() < INDEX_MIN {
         char_at16(s, i)
     } else {
@@ -465,7 +468,7 @@ pub fn char_at16_rc(s: &Rc<str>, i: usize) -> Option<String> {
     }
 }
 
-pub fn slice16_rc(s: &Rc<str>, start: usize, end: usize) -> String {
+pub fn slice16_rc(s: &JsStr, start: usize, end: usize) -> String {
     if s.len() < INDEX_MIN {
         slice16(s, start, end)
     } else {
@@ -473,7 +476,7 @@ pub fn slice16_rc(s: &Rc<str>, start: usize, end: usize) -> String {
     }
 }
 
-pub fn index_of16_rc(s: &Rc<str>, needle: &str, from: usize) -> Option<usize> {
+pub fn index_of16_rc(s: &JsStr, needle: &str, from: usize) -> Option<usize> {
     if s.len() < INDEX_MIN || needle.chars().any(is_lone) {
         index_of16(s, needle, from)
     } else {

@@ -1,5 +1,5 @@
+use crate::jsstr::JsStr;
 use crate::token::{P, PUNCTUATORS, SyntaxError, TemplatePart, Tok, Token};
-use std::rc::Rc;
 
 pub fn tokenize(src: &str) -> Result<Vec<Token>, SyntaxError> {
     tokenize_goal(src, false)
@@ -730,10 +730,10 @@ impl Lexer {
                 }
                 Some('$') if self.peek() == Some('{') => {
                     self.bump();
-                    let cooked = Rc::from(std::mem::take(&mut cur));
+                    let cooked = JsStr::from(std::mem::take(&mut cur));
                     parts.push(TemplatePart::Str(
                         bad.take().map_or(Ok(cooked), Err),
-                        Rc::from(std::mem::take(&mut raw)),
+                        JsStr::from(std::mem::take(&mut raw)),
                     ));
                     let mut toks = Vec::new();
                     self.lex_into(&mut toks, true)?;

@@ -1,6 +1,7 @@
 use super::{arg, make_ctor, method};
 use crate::event_loop::{ResumeMode, Step};
 use crate::inspect::inspect_plain;
+use crate::jsstr::JsStr;
 use crate::object::{ASYNC_ITER_KEY, ITER_KEY, IterState, Obj, ObjKind, Symbol};
 use crate::value::Value;
 use crate::vm::Vm;
@@ -202,7 +203,7 @@ fn async_from_sync_next(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     }
 }
 
-fn new_symbol(vm: &mut Vm, description: Option<Rc<str>>) -> Value {
+fn new_symbol(vm: &mut Vm, description: Option<JsStr>) -> Value {
     vm.symbol_seq += 1;
     let key = format!(
         "\u{0}@@{}:{}",

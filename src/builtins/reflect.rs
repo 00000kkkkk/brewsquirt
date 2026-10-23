@@ -1,5 +1,6 @@
 use super::{arg, make_ctor, method, native_fn};
 use crate::inspect::inspect_plain;
+use crate::jsstr::JsStr;
 use crate::object::{Obj, ObjKind, ProxyData, is_private_key, is_symbol_key};
 use crate::props::{PropDesc, accessor_parts};
 use crate::value::Value;
@@ -267,7 +268,7 @@ impl Vm {
     pub fn op_define_own_property(
         &mut self,
         o: &Rc<Obj>,
-        key: Rc<str>,
+        key: JsStr,
         d: PropDesc,
         throw: bool,
     ) -> Result<bool, Value> {
@@ -465,7 +466,7 @@ impl Vm {
     pub fn op_set(
         &mut self,
         o: &Rc<Obj>,
-        key: Rc<str>,
+        key: JsStr,
         val: Value,
         receiver: &Value,
     ) -> Result<bool, Value> {
@@ -638,7 +639,7 @@ impl Vm {
         Ok(self.try_delete(o, key))
     }
 
-    pub fn op_own_keys(&mut self, o: &Rc<Obj>) -> Result<Vec<Rc<str>>, Value> {
+    pub fn op_own_keys(&mut self, o: &Rc<Obj>) -> Result<Vec<JsStr>, Value> {
         if is_proxy(o) {
             let (t, h) = proxy_parts(self, o, "ownKeys")?;
             return match trap(self, &h, "ownKeys")? {
@@ -648,7 +649,7 @@ impl Vm {
                         return Err(self.type_error("CreateListFromArrayLike called on non-object"));
                     }
                     let items = array_like(self, &r)?;
-                    let mut out: Vec<Rc<str>> = Vec::with_capacity(items.len());
+                    let mut out: Vec<JsStr> = Vec::with_capacity(items.len());
                     let mut seen = std::collections::HashSet::new();
                     for v in items {
                         let k = match &v {
@@ -714,7 +715,7 @@ impl Vm {
                 None => self.op_own_keys(&t),
             };
         }
-        let mut out: Vec<Rc<str>> = Vec::new();
+        let mut out: Vec<JsStr> = Vec::new();
         if let ObjKind::Global = o.kind {
             out.extend(self.globals.names());
             return Ok(out);
@@ -734,7 +735,7 @@ impl Vm {
         Ok(out)
     }
 
-    pub fn op_own_enumerable_keys(&mut self, o: &Rc<Obj>) -> Result<Vec<Rc<str>>, Value> {
+    pub fn op_own_enumerable_keys(&mut self, o: &Rc<Obj>) -> Result<Vec<JsStr>, Value> {
         if !is_exotic(o) {
             return Ok(self
                 .own_keys(&Value::Object(o.clone()))

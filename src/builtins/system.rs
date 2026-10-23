@@ -571,10 +571,47 @@ fn uptime(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
     Ok(Value::Number(vm.start.elapsed().as_secs_f64()))
 }
 
+fn process_memory() -> (usize, usize) {
+    unsafe extern "C" {
+        fn mi_process_info(
+            elapsed_msecs: *mut usize,
+            user_msecs: *mut usize,
+            system_msecs: *mut usize,
+            current_rss: *mut usize,
+            peak_rss: *mut usize,
+            current_commit: *mut usize,
+            peak_commit: *mut usize,
+            page_faults: *mut usize,
+        );
+    }
+    let mut rss = 0usize;
+    let mut commit = 0usize;
+    let null = std::ptr::null_mut();
+    unsafe { mi_process_info(null, null, null, &mut rss, null, &mut commit, null, null) };
+    if cfg!(target_os = "linux") {
+        if let Some(pages) = std::fs::read_to_string("/proc/self/statm")
+            .ok()
+            .and_then(|s| s.split_whitespace().nth(1)?.parse::<usize>().ok())
+        {
+            rss = pages * 4096;
+        }
+    }
+    (rss, commit.max(1))
+}
+
 fn memory_usage(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    let (rss, commit) = process_memory();
     let o = vm.new_object();
-    for key in ["rss", "heapTotal", "heapUsed", "external", "arrayBuffers"] {
-        o.set_own(key, Value::Number(0.0));
+    let live = crate::gc::live_objects() * std::mem::size_of::<crate::object::Obj>();
+    let used = live.max(commit / 2).min(commit);
+    for (key, n) in [
+        ("rss", rss.max(commit)),
+        ("heapTotal", commit),
+        ("heapUsed", used),
+        ("external", 0),
+        ("arrayBuffers", 0),
+    ] {
+        o.set_own(key, Value::Number(n as f64));
     }
     Ok(Value::Object(o))
 }

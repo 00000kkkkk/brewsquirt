@@ -1,6 +1,7 @@
 use super::intrinsics::raw_accessor;
 use super::{arg, constructing, make_ctor, method, native_fn, relative_index, to_integer};
 use crate::inspect::inspect_plain;
+use crate::jsstr::JsStr;
 use crate::object::{
     BufferData, DETACHED, ITER_KEY, IterState, NON_CONFIG, NON_ENUM, NativeFn, Obj, ObjKind,
     READ_ONLY, SPECIES_KEY, TO_STRING_TAG_KEY, TypedKind, View,
@@ -1263,7 +1264,7 @@ fn ta_join(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let o = validate(vm, &this, "join")?;
     let len = view_of(&o).len();
     let sep = match arg(args, 0) {
-        Value::Undefined => Rc::from(","),
+        Value::Undefined => JsStr::from(","),
         v => vm.to_string(&v)?,
     };
     let mut out = String::new();

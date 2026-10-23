@@ -1,3 +1,4 @@
+use crate::jsstr::JsStr;
 use crate::number::number_to_string;
 use crate::object::{Obj, ObjKind};
 use crate::value::Value;
@@ -239,7 +240,7 @@ fn format_key(k: &str) -> String {
     }
 }
 
-pub fn class_name(o: &Obj) -> Option<Rc<str>> {
+pub fn class_name(o: &Obj) -> Option<JsStr> {
     let proto = o.proto.borrow().clone()?;
     let ctor = proto.get_own("constructor")?;
     let ctor = ctor.as_object()?;
@@ -370,8 +371,8 @@ fn format_prop(ctx: &mut Ctx, k: &str, v: &Value, rt: usize) -> String {
     format!("{key}: {}", child(ctx, v, rt))
 }
 
-fn own_props(o: &Obj, skip_function_keys: bool) -> Vec<(Rc<str>, Value)> {
-    let mut props: Vec<(Rc<str>, Value)> = o
+fn own_props(o: &Obj, skip_function_keys: bool) -> Vec<(JsStr, Value)> {
+    let mut props: Vec<(JsStr, Value)> = o
         .props
         .borrow()
         .enumerable()

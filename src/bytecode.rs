@@ -1,4 +1,5 @@
 use crate::inspect::inspect_plain;
+use crate::jsstr::JsStr;
 use crate::value::Value;
 use std::fmt::Write;
 use std::path::PathBuf;
@@ -224,15 +225,15 @@ pub const DG_LEXICAL: u8 = 16;
 
 #[derive(Debug)]
 pub struct ModuleInfo {
-    pub name: Rc<str>,
+    pub name: JsStr,
     pub dir: PathBuf,
-    pub source: Rc<str>,
+    pub source: JsStr,
     pub sloppy: bool,
 }
 
 #[derive(Debug)]
 pub struct FunctionProto {
-    pub name: Rc<str>,
+    pub name: JsStr,
     pub kind: ProtoKind,
     pub num_params: u32,
     pub arity: u32,
@@ -259,22 +260,22 @@ pub struct FunctionProto {
 #[derive(Debug, Default)]
 pub struct ModuleLink {
     pub esm: bool,
-    pub imports: Vec<(Rc<str>, Vec<Rc<str>>)>,
-    pub local_exports: Vec<Rc<str>>,
-    pub indirect: Vec<(Rc<str>, Rc<str>, Rc<str>)>,
-    pub stars: Vec<Rc<str>>,
+    pub imports: Vec<(JsStr, Vec<JsStr>)>,
+    pub local_exports: Vec<JsStr>,
+    pub indirect: Vec<(JsStr, JsStr, JsStr)>,
+    pub stars: Vec<JsStr>,
 }
 
-pub type EvalUpvals = Rc<Vec<(Rc<str>, u32, bool)>>;
+pub type EvalUpvals = Rc<Vec<(JsStr, u32, bool)>>;
 
 #[derive(Debug)]
 pub struct EvalScope {
-    pub locals: Vec<(Rc<str>, bool, bool)>,
+    pub locals: Vec<(JsStr, bool, bool)>,
     pub upvals: EvalUpvals,
     pub kind: ProtoKind,
     pub is_static: bool,
     pub in_arrow: bool,
-    pub self_names: Vec<Rc<str>>,
+    pub self_names: Vec<JsStr>,
     pub ctx: Rc<crate::ast::EvalCtx>,
 }
 

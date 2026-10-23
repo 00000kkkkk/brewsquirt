@@ -1,4 +1,5 @@
 use crate::ast::*;
+use crate::jsstr::JsStr;
 
 use crate::number::number_to_string;
 use crate::token::{P, SyntaxError, TemplatePart, Tok, Token};
@@ -69,7 +70,7 @@ const STRICT_RESERVED: &[&str] = &[
     "static",
 ];
 
-type ExportList = Vec<(Rc<str>, Rc<str>)>;
+type ExportList = Vec<(JsStr, JsStr)>;
 
 pub fn parse(src: &str) -> R<Vec<Stmt>> {
     parse_goal(src, false)
@@ -167,7 +168,7 @@ struct Parser {
     fn_depth: u32,
     in_async: bool,
     in_generator: bool,
-    class_ids: Vec<(u32, Rc<Vec<Rc<str>>>)>,
+    class_ids: Vec<(u32, Rc<Vec<JsStr>>)>,
     field_init: u32,
     script: bool,
     nt_ok: bool,
@@ -177,7 +178,7 @@ struct Parser {
     single: bool,
     labeled_fn: bool,
     saw_eval: bool,
-    src: Rc<str>,
+    src: JsStr,
     last_paren: (usize, usize),
     at_top: bool,
     args_used: Vec<bool>,
@@ -336,14 +337,14 @@ impl Parser {
         self.peek().line
     }
 
-    fn word(&self) -> Option<Rc<str>> {
+    fn word(&self) -> Option<JsStr> {
         match &self.peek().tok {
             Tok::Ident(s) => Some(s.clone()),
             _ => None,
         }
     }
 
-    fn private_name(&mut self) -> R<Rc<str>> {
+    fn private_name(&mut self) -> R<JsStr> {
         if self.class_ids.is_empty() {
             return Err(self.error("Private field must be declared in an enclosing class"));
         }
@@ -365,8 +366,8 @@ impl Parser {
         )))
     }
 
-    fn prescan_private(&self) -> Vec<Rc<str>> {
-        let mut out: Vec<Rc<str>> = Vec::new();
+    fn prescan_private(&self) -> Vec<JsStr> {
+        let mut out: Vec<JsStr> = Vec::new();
         let mut depth = 0i32;
         let mut i = self.pos;
         while let Some(t) = self.toks.get(i) {
@@ -406,7 +407,7 @@ impl Parser {
         out
     }
 
-    fn ident_name(&mut self) -> R<Rc<str>> {
+    fn ident_name(&mut self) -> R<JsStr> {
         match self.word() {
             Some(s) => {
                 self.advance();
@@ -446,7 +447,7 @@ impl Parser {
         Ok(())
     }
 
-    fn binding_ident(&mut self) -> R<Rc<str>> {
+    fn binding_ident(&mut self) -> R<JsStr> {
         match self.word() {
             Some(s)
                 if self.reserved(&s)
@@ -486,7 +487,7 @@ impl Parser {
         Ok(())
     }
 
-    fn string_lit(&mut self) -> R<Rc<str>> {
+    fn string_lit(&mut self) -> R<JsStr> {
         match &self.peek().tok {
             Tok::Str(s) => {
                 let s = s.clone();
@@ -497,7 +498,7 @@ impl Parser {
         }
     }
 
-    fn module_name(&mut self) -> R<Rc<str>> {
+    fn module_name(&mut self) -> R<JsStr> {
         match &self.peek().tok {
             Tok::Str(s) => {
                 let s = s.clone();
@@ -785,7 +786,7 @@ impl Parser {
                             && !self.in_async
                             && !self.static_block)) =>
             {
-                let label: Rc<str> = w.into();
+                let label: JsStr = w.into();
                 self.advance();
                 self.advance();
                 let body = self.sub_statement()?;
@@ -1121,7 +1122,7 @@ impl Parser {
         let source = self.string_lit()?;
         self.import_attributes()?;
         self.semicolon()?;
-        let mut bound: Vec<&Rc<str>> = default.iter().chain(namespace.iter()).collect();
+        let mut bound: Vec<&JsStr> = default.iter().chain(namespace.iter()).collect();
         bound.extend(named.iter().map(|(_, local)| local));
         for (i, n) in bound.iter().enumerate() {
             if bound[..i].contains(n) {
@@ -1265,7 +1266,7 @@ impl Parser {
         }
     }
 
-    fn jump_label(&mut self) -> R<Option<Rc<str>>> {
+    fn jump_label(&mut self) -> R<Option<JsStr>> {
         match self.word() {
             Some(w) if !self.peek().nl_before && !self.reserved(&w) => {
                 self.advance();
@@ -1275,18 +1276,13 @@ impl Parser {
         }
     }
 
-    fn function_rest(
-        &mut self,
-        name: Option<Rc<str>>,
-        kind: FuncKind,
-        line: u32,
-    ) -> R<Rc<FuncDef>> {
+    fn function_rest(&mut self, name: Option<JsStr>, kind: FuncKind, line: u32) -> R<Rc<FuncDef>> {
         self.function_full(name, kind, line, false, false)
     }
 
     fn function_full(
         &mut self,
-        name: Option<Rc<str>>,
+        name: Option<JsStr>,
         kind: FuncKind,
         line: u32,
         is_async: bool,
@@ -1432,7 +1428,7 @@ impl Parser {
         Ok(())
     }
 
-    fn fn_expr_name(&mut self) -> R<Option<Rc<str>>> {
+    fn fn_expr_name(&mut self) -> R<Option<JsStr>> {
         if !matches!(self.peek().tok, Tok::Ident(_)) {
             return Ok(None);
         }
@@ -1448,7 +1444,7 @@ impl Parser {
 
     fn check_fn_expr_name(
         &self,
-        name: &Option<Rc<str>>,
+        name: &Option<JsStr>,
         is_async: bool,
         is_generator: bool,
     ) -> R<()> {
@@ -1529,14 +1525,14 @@ impl Parser {
                 if self.strict && self.peek().escaped {
                     return Err(self.error("Octal literals are not allowed in strict mode."));
                 }
-                let s: Rc<str> = number_to_string(*n).into();
+                let s: JsStr = number_to_string(*n).into();
                 self.advance();
                 Ok((PropKey::Named(s), false))
             }
             Tok::BigInt(s) => {
                 let s = s.clone();
                 self.advance();
-                let text: Rc<str> = match crate::bigint::from_string(&s) {
+                let text: JsStr = match crate::bigint::from_string(&s) {
                     Some(b) => b.to_string().into(),
                     None => s,
                 };
@@ -2715,7 +2711,7 @@ impl Parser {
     fn template_parts(
         &mut self,
         parts: Vec<TemplatePart>,
-    ) -> R<(Vec<(Result<Rc<str>, SyntaxError>, Rc<str>)>, Vec<Expr>)> {
+    ) -> R<(Vec<(Result<JsStr, SyntaxError>, JsStr)>, Vec<Expr>)> {
         let mut quasis = Vec::new();
         let mut exprs = Vec::new();
         for part in parts {
@@ -3250,7 +3246,7 @@ fn check_strict_params(
     Ok(())
 }
 
-fn display_name(n: &Rc<str>) -> Rc<str> {
+fn display_name(n: &JsStr) -> JsStr {
     match n.strip_prefix('\u{0}') {
         Some(body) if body.starts_with('#') => {
             body.rsplit_once('@').map_or(body, |(a, _)| a).into()

@@ -1,5 +1,6 @@
 use super::{arg, make_ctor, method};
 use crate::inspect::inspect_plain;
+use crate::jsstr::JsStr;
 use crate::object::{Obj, ObjKind, RegExpObj};
 use crate::regexp::{Match, RegexData, byte_index, compile, next_char_boundary, utf16_index};
 use crate::value::{Value, len16};
@@ -137,7 +138,7 @@ pub fn exec_raw(vm: &mut Vm, obj: &Obj, data: &RegexData, s: &str) -> Result<Opt
     Ok(found)
 }
 
-pub fn match_array(vm: &mut Vm, data: &RegexData, s: &Rc<str>, m: &Match) -> Value {
+pub fn match_array(vm: &mut Vm, data: &RegexData, s: &JsStr, m: &Match) -> Value {
     let mut items = Vec::with_capacity(m.groups.len());
     for g in &m.groups {
         items.push(match g {
@@ -199,24 +200,24 @@ fn regexp_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         }
         _ => false,
     };
-    let (source, default_flags): (Rc<str>, Rc<str>) = match as_regexp(&pattern) {
+    let (source, default_flags): (JsStr, JsStr) = match as_regexp(&pattern) {
         Some((_, d)) => (d.source.clone(), d.flags.clone()),
         None if pattern_is_regexp => {
             let p = vm.get_prop(&pattern, "source")?;
             let p = if p.is_undefined() {
-                Rc::from("")
+                JsStr::from("")
             } else {
                 vm.to_string(&p)?
             };
             let f = if flags_arg.is_undefined() {
                 let f = vm.get_prop(&pattern, "flags")?;
                 if f.is_undefined() {
-                    Rc::from("")
+                    JsStr::from("")
                 } else {
                     vm.to_string(&f)?
                 }
             } else {
-                Rc::from("")
+                JsStr::from("")
             };
             (p, f)
         }
@@ -270,7 +271,7 @@ fn regexp_compile(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let (o, _) = this_regexp(vm, &this)?;
     let pattern = arg(args, 0);
     let flags = arg(args, 1);
-    let (source, flags): (Rc<str>, Rc<str>) = match as_regexp(&pattern) {
+    let (source, flags): (JsStr, JsStr) = match as_regexp(&pattern) {
         Some((_, d)) => {
             if !flags.is_undefined() {
                 return Err(
@@ -281,11 +282,11 @@ fn regexp_compile(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         }
         None => {
             let s = match pattern {
-                Value::Undefined => Rc::from(""),
+                Value::Undefined => JsStr::from(""),
                 p => vm.to_string(&p)?,
             };
             let f = match flags {
-                Value::Undefined => Rc::from(""),
+                Value::Undefined => JsStr::from(""),
                 f => vm.to_string(&f)?,
             };
             (s, f)
@@ -319,7 +320,7 @@ pub fn coerce_regexp(
         return Ok(r);
     }
     let source = match v {
-        Value::Undefined => Rc::from("(?:)"),
+        Value::Undefined => JsStr::from("(?:)"),
         other => vm.to_string(other)?,
     };
     let re = make_regexp(vm, &source, flags)?;
@@ -343,7 +344,7 @@ fn all_matches(vm: &mut Vm, data: &RegexData, s: &str) -> Result<Vec<Match>, Val
     Ok(out)
 }
 
-pub fn string_match(vm: &mut Vm, s: Rc<str>, pattern: &Value) -> R {
+pub fn string_match(vm: &mut Vm, s: JsStr, pattern: &Value) -> R {
     let (o, data) = coerce_regexp(vm, pattern, "")?;
     if !data.global {
         return match exec_raw(vm, &o, &data, &s)? {
@@ -363,7 +364,7 @@ pub fn string_match(vm: &mut Vm, s: Rc<str>, pattern: &Value) -> R {
     Ok(vm.new_array(list))
 }
 
-pub fn string_search(vm: &mut Vm, s: Rc<str>, pattern: &Value) -> R {
+pub fn string_search(vm: &mut Vm, s: JsStr, pattern: &Value) -> R {
     let (_, data) = coerce_regexp(vm, pattern, "")?;
     let found = data.find_from(&s, 0, false).map_err(|e| run_error(vm, e))?;
     Ok(Value::Number(match found {
@@ -454,7 +455,7 @@ pub fn expand_template(
 
 pub fn string_replace_regexp(
     vm: &mut Vm,
-    s: Rc<str>,
+    s: JsStr,
     obj: &Rc<Obj>,
     data: &RegexData,
     replacement: &Value,
@@ -509,7 +510,7 @@ pub fn string_replace_regexp(
     Ok(out.into())
 }
 
-pub fn string_split_regexp(vm: &mut Vm, s: Rc<str>, data: &RegexData, limit: usize) -> R {
+pub fn string_split_regexp(vm: &mut Vm, s: JsStr, data: &RegexData, limit: usize) -> R {
     if limit == 0 {
         return Ok(vm.new_array(Vec::new()));
     }

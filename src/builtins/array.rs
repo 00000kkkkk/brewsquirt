@@ -1,5 +1,6 @@
 use super::{arg, expect_fn, make_ctor, method, relative_index, to_integer};
 use crate::inspect::inspect_plain;
+use crate::jsstr::JsStr;
 use crate::object::{IterState, Obj, ObjKind};
 use crate::value::Value;
 use crate::vm::Vm;
@@ -456,7 +457,7 @@ pub fn join_values(vm: &mut Vm, list: &[Value], sep: &str) -> Result<String, Val
 fn join(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let o = this_array(vm, &this, "join")?;
     let sep = match arg(args, 0) {
-        Value::Undefined => Rc::from(","),
+        Value::Undefined => JsStr::from(","),
         v => vm.to_string(&v)?,
     };
     let list = items(&o).clone();

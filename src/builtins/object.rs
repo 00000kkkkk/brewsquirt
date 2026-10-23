@@ -1,5 +1,6 @@
 use super::{arg, make_ctor, method, native_fn};
 use crate::inspect::error_header;
+use crate::jsstr::JsStr;
 use crate::object::{Bound, Obj, ObjKind};
 use crate::value::Value;
 use crate::vm::{ErrorKind, Vm};
@@ -359,7 +360,7 @@ fn keys(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(vm.new_array(k))
 }
 
-fn entries_of(vm: &mut Vm, v: &Value, symbols: bool) -> Result<Vec<(Rc<str>, Value)>, Value> {
+fn entries_of(vm: &mut Vm, v: &Value, symbols: bool) -> Result<Vec<(JsStr, Value)>, Value> {
     let o = vm.to_object(v)?;
     if matches!(o.kind, ObjKind::Ordinary) && !vm.accessors_used {
         return vm.own_entries_resolved(&Value::Object(o), symbols);
@@ -621,7 +622,7 @@ fn set_prototype_of(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(target)
 }
 
-fn define_one(vm: &mut Vm, target: &Value, k: Rc<str>, desc: &Value) -> Result<(), Value> {
+fn define_one(vm: &mut Vm, target: &Value, k: JsStr, desc: &Value) -> Result<(), Value> {
     let Value::Object(o) = target else {
         return Ok(());
     };
@@ -774,7 +775,7 @@ fn fn_bind(vm: &mut Vm, this: Value, args: &[Value]) -> R {
             };
         }
     }
-    let name: Rc<str> = match vm.get_prop(&this, "name")? {
+    let name: JsStr = match vm.get_prop(&this, "name")? {
         Value::Str(s) => s,
         _ => "".into(),
     };
@@ -798,7 +799,7 @@ fn fn_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
         return Err(vm.type_error("Function.prototype.toString requires that 'this' be a Function"));
     }
     let name = o.function_name().unwrap_or_else(|| "".into());
-    let name: Rc<str> = if matches!(o.kind, ObjKind::Bound(_)) {
+    let name: JsStr = if matches!(o.kind, ObjKind::Bound(_)) {
         "".into()
     } else {
         name
@@ -925,7 +926,7 @@ fn stack_limit(vm: &Vm) -> usize {
         .unwrap_or(10)
 }
 
-type FrameInfo = (Rc<str>, f64, Rc<str>, bool, bool, bool);
+type FrameInfo = (JsStr, f64, JsStr, bool, bool, bool);
 
 fn error_stack(
     vm: &mut Vm,
@@ -1096,11 +1097,11 @@ fn error_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
         return Err(vm.type_error("Error.prototype.toString called on non-object"));
     }
     let name = match vm.get_prop(&this, "name")? {
-        Value::Undefined => Rc::from("Error"),
+        Value::Undefined => JsStr::from("Error"),
         v => vm.to_string(&v)?,
     };
     let msg = match vm.get_prop(&this, "message")? {
-        Value::Undefined => Rc::from(""),
+        Value::Undefined => JsStr::from(""),
         v => vm.to_string(&v)?,
     };
     if name.is_empty() {

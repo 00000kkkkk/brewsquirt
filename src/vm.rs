@@ -4,6 +4,7 @@ use crate::bytecode::{Cmp, FunctionProto, ModuleInfo, NO_NAME, Op, ProtoKind};
 use crate::compiler::{Mode, compile_eval, compile_indirect_eval, compile_module};
 use crate::event_loop::{Job, ResumeMode, Signal, Step, Timer};
 use crate::inspect::{inspect_plain, inspect_top};
+use crate::jsstr::JsStr;
 use crate::module;
 use crate::number::{js_pow, to_int32, to_uint32};
 use crate::object::{
@@ -189,11 +190,11 @@ impl Realm {
 
 #[derive(Default)]
 pub struct Globals {
-    index: FxHashMap<Rc<str>, u32>,
-    lex: FxHashMap<Rc<str>, u32>,
+    index: FxHashMap<JsStr, u32>,
+    lex: FxHashMap<JsStr, u32>,
     values: Vec<Value>,
     kinds: Vec<u8>,
-    pub(crate) attrs: FxHashMap<Rc<str>, u8>,
+    pub(crate) attrs: FxHashMap<JsStr, u8>,
     pub(crate) readonly: bool,
 }
 
@@ -226,7 +227,7 @@ impl Globals {
         self.kinds[slot as usize] & SLOT_CONST != 0
     }
 
-    pub fn declare_lex(&mut self, name: Rc<str>, v: Value, is_const: bool) -> u32 {
+    pub fn declare_lex(&mut self, name: JsStr, v: Value, is_const: bool) -> u32 {
         let kind = SLOT_LEX | if is_const { SLOT_CONST } else { 0 };
         if let Some(&i) = self.lex.get(&name) {
             self.values[i as usize] = v;
@@ -240,8 +241,8 @@ impl Globals {
         i
     }
 
-    pub fn names(&self) -> Vec<Rc<str>> {
-        let mut v: Vec<(u32, Rc<str>)> = self.index.iter().map(|(k, &i)| (i, k.clone())).collect();
+    pub fn names(&self) -> Vec<JsStr> {
+        let mut v: Vec<(u32, JsStr)> = self.index.iter().map(|(k, &i)| (i, k.clone())).collect();
         v.sort_unstable_by_key(|(i, _)| *i);
         v.into_iter().map(|(_, k)| k).collect()
     }
@@ -274,7 +275,7 @@ impl Globals {
         self.index.get(name).copied()
     }
 
-    pub fn insert(&mut self, name: Rc<str>, v: Value) -> u32 {
+    pub fn insert(&mut self, name: JsStr, v: Value) -> u32 {
         if let Some(&i) = self.index.get(&name) {
             self.values[i as usize] = v;
             return i;
@@ -351,7 +352,7 @@ pub struct Vm {
     pub(crate) gen_return_pending: bool,
     pub(crate) silent_fail: bool,
     pub(crate) pending_ns: Option<Value>,
-    pub(crate) import_metas: FxHashMap<Rc<str>, Value>,
+    pub(crate) import_metas: FxHashMap<JsStr, Value>,
     pub rejection: bool,
     pub exiting: bool,
     pub(crate) main_cjs_pending: bool,
@@ -359,7 +360,7 @@ pub struct Vm {
     pub(crate) wasm: Option<Box<builtins::wasm::WasmState>>,
     pub(crate) kept_alive: FxHashMap<usize, Rc<Obj>>,
     pub symbol_seq: u64,
-    pub symbol_registry: FxHashMap<Rc<str>, Value>,
+    pub symbol_registry: FxHashMap<JsStr, Value>,
     pub symbol_iterator: Value,
     pub symbol_async_iterator: Value,
     pub promise_resolve_fn: Value,
@@ -646,7 +647,7 @@ impl Vm {
                         Upvalue::Open(idx) => self.stack[*idx].clone(),
                         Upvalue::Closed(v) => v.clone(),
                     };
-                    let k: Rc<str> = i.to_string().into();
+                    let k: JsStr = i.to_string().into();
                     o.props.borrow_mut().insert(k, v);
                 }
             }
@@ -1145,9 +1146,9 @@ impl Vm {
         &mut self,
         path: &PathBuf,
         name: &str,
-        seen: &mut Vec<(PathBuf, Rc<str>)>,
+        seen: &mut Vec<(PathBuf, JsStr)>,
     ) -> Result<Resolution, Value> {
-        let key = (path.clone(), Rc::from(name));
+        let key = (path.clone(), JsStr::from(name));
         if seen.contains(&key) {
             return Ok(Resolution::NotFound);
         }
@@ -1170,7 +1171,7 @@ impl Vm {
                         .strip_prefix("node:")
                         .or_else(|| source.strip_prefix("squirt:"))
                         .unwrap_or(source);
-                    return Ok(Resolution::Builtin(Rc::from(bare), imported.clone()));
+                    return Ok(Resolution::Builtin(JsStr::from(bare), imported.clone()));
                 };
                 if &**imported == "*" {
                     return Ok(Resolution::Namespace(dep));
@@ -1229,7 +1230,7 @@ impl Vm {
         &mut self,
         path: &PathBuf,
         visited: &mut Vec<PathBuf>,
-    ) -> Result<Vec<Rc<str>>, Value> {
+    ) -> Result<Vec<JsStr>, Value> {
         if visited.contains(path) {
             return Ok(Vec::new());
         }
@@ -1240,7 +1241,7 @@ impl Vm {
                 .own_entries(&ns)
                 .into_iter()
                 .filter(|(k, _)| &**k != "default")
-                .map(|(k, _)| Rc::from(&*k))
+                .map(|(k, _)| JsStr::from(&*k))
                 .collect());
         }
         let spec = path.display().to_string();
@@ -1248,7 +1249,7 @@ impl Vm {
         let Some(link) = proto.link.clone() else {
             return Ok(Vec::new());
         };
-        let mut names: Vec<Rc<str>> = Vec::new();
+        let mut names: Vec<JsStr> = Vec::new();
         for n in &link.local_exports {
             if !names.contains(n) {
                 names.push(n.clone());
@@ -1527,7 +1528,7 @@ impl Vm {
     }
 
     fn require_path(&mut self, path: &PathBuf, spec: &str) -> Result<Value, Value> {
-        let key: Rc<str> = path.display().to_string().into();
+        let key: JsStr = path.display().to_string().into();
         let cache = self.require_cache_object();
         if let Some(m @ Value::Object(_)) = cache.get_own(&key) {
             return self.get_prop(&m, "exports");
@@ -2165,7 +2166,7 @@ impl Vm {
         Ok(r)
     }
 
-    pub fn set_global_prop(&mut self, key: Rc<str>, val: Value) -> Result<(), Value> {
+    pub fn set_global_prop(&mut self, key: JsStr, val: Value) -> Result<(), Value> {
         if let Some(raw) = self.globals.get(&key).cloned() {
             if let Some((_, setter)) = crate::props::accessor_parts(&raw) {
                 if setter.is_callable() {
@@ -2203,7 +2204,7 @@ impl Vm {
 
     pub fn define_global_prop(
         &mut self,
-        key: Rc<str>,
+        key: JsStr,
         d: crate::props::PropDesc,
         throw: bool,
     ) -> Result<bool, Value> {
@@ -2526,7 +2527,7 @@ impl Vm {
         None
     }
 
-    pub fn define_accessor(&mut self, target: &Rc<Obj>, key: Rc<str>, f: Value, setter: bool) {
+    pub fn define_accessor(&mut self, target: &Rc<Obj>, key: JsStr, f: Value, setter: bool) {
         self.accessors_used = true;
         let existing = target.props.borrow().get(&key).cloned();
         let acc_obj = match existing {
@@ -2649,7 +2650,7 @@ impl Vm {
         }
     }
 
-    pub fn set_prop(&mut self, target: &Value, key: Rc<str>, val: Value) -> Result<(), Value> {
+    pub fn set_prop(&mut self, target: &Value, key: JsStr, val: Value) -> Result<(), Value> {
         if let Value::Object(o) = target {
             if matches!(o.kind, ObjKind::Error) && matches!(&*key, "name" | "message") {
                 let old = crate::inspect::error_header(o);
@@ -2668,7 +2669,7 @@ impl Vm {
         self.set_prop_inner(target, key, val)
     }
 
-    fn set_prop_inner(&mut self, target: &Value, key: Rc<str>, val: Value) -> Result<(), Value> {
+    fn set_prop_inner(&mut self, target: &Value, key: JsStr, val: Value) -> Result<(), Value> {
         match target {
             Value::Object(o) => {
                 self.note_proto_index(o, &key);
@@ -2891,7 +2892,7 @@ impl Vm {
     }
 
     #[inline(never)]
-    fn set_on_primitive(&mut self, target: &Value, key: Rc<str>, val: Value) -> Result<(), Value> {
+    fn set_on_primitive(&mut self, target: &Value, key: JsStr, val: Value) -> Result<(), Value> {
         let proto = match target {
             Value::Number(_) => self.realm.number_proto.clone(),
             Value::Str(s) => {
@@ -3066,7 +3067,7 @@ impl Vm {
         Err(self.type_error("Cannot convert object to primitive value"))
     }
 
-    pub fn to_string(&mut self, v: &Value) -> Result<Rc<str>, Value> {
+    pub fn to_string(&mut self, v: &Value) -> Result<JsStr, Value> {
         if let Some(s) = v.to_primitive_string() {
             return Ok(s);
         }
@@ -3091,7 +3092,7 @@ impl Vm {
         Ok(p.to_primitive_number().unwrap_or(f64::NAN))
     }
 
-    pub fn to_property_key(&mut self, v: &Value) -> Result<Rc<str>, Value> {
+    pub fn to_property_key(&mut self, v: &Value) -> Result<JsStr, Value> {
         match v {
             Value::Str(s) => Ok(s.clone()),
             Value::Symbol(s) => Ok(s.key.clone()),
@@ -3806,7 +3807,7 @@ impl Vm {
         let Value::Object(o) = v else {
             return keys;
         };
-        let mut seen: rustc_hash::FxHashSet<Rc<str>> = o.props.borrow().keys().cloned().collect();
+        let mut seen: rustc_hash::FxHashSet<JsStr> = o.props.borrow().keys().cloned().collect();
         let mut cur = o.proto.borrow().clone();
         while let Some(p) = cur {
             for (k, _) in p.props.borrow().iter() {
@@ -3850,7 +3851,7 @@ impl Vm {
                         let _ = self.get_obj(o, "prototype");
                     }
                 }
-                let mut indices: Vec<(usize, Rc<str>)> = o
+                let mut indices: Vec<(usize, JsStr)> = o
                     .props
                     .borrow()
                     .keys()
@@ -3901,7 +3902,7 @@ impl Vm {
                         if o.is_hole(i) {
                             continue;
                         }
-                        let k: Rc<str> = i.to_string().into();
+                        let k: JsStr = i.to_string().into();
                         if slow && o.props.borrow().attrs(&k) & crate::object::NON_ENUM != 0 {
                             continue;
                         }
@@ -4014,7 +4015,7 @@ impl Vm {
     fn super_set_to(
         &mut self,
         base: Option<Rc<Obj>>,
-        key: Rc<str>,
+        key: JsStr,
         this: &Value,
         val: Value,
     ) -> Result<(), Value> {
@@ -4039,7 +4040,7 @@ impl Vm {
     fn super_store(
         &mut self,
         cl: &Closure,
-        key: Rc<str>,
+        key: JsStr,
         is_static: bool,
         this: &Value,
         val: Value,
@@ -4101,7 +4102,7 @@ impl Vm {
             ($k:expr) => {
                 match &proto.consts[$k as usize] {
                     Value::Str(s) => s.clone(),
-                    _ => Rc::from(""),
+                    _ => JsStr::from(""),
                 }
             };
         }
@@ -4820,7 +4821,7 @@ impl Vm {
                     if let (Value::Object(c), Value::Object(t)) = (&callee, &this) {
                         let proto = self.get_obj(c, "prototype");
                         if let Value::Object(p) = proto {
-                            let entries: Vec<(Rc<str>, Value)> = p
+                            let entries: Vec<(JsStr, Value)> = p
                                 .props
                                 .borrow()
                                 .iter()
@@ -5996,7 +5997,7 @@ impl Vm {
         self.make_error(kind, msg)
     }
 
-    pub fn own_entries(&self, v: &Value) -> Vec<(Rc<str>, Value)> {
+    pub fn own_entries(&self, v: &Value) -> Vec<(JsStr, Value)> {
         self.own_entries_raw(v, false)
     }
 
@@ -6048,7 +6049,7 @@ impl Vm {
     }
 
     #[inline(never)]
-    fn with_set(&mut self, obj: &Value, n: Rc<str>, v: Value, sloppy: bool) -> Result<(), Value> {
+    fn with_set(&mut self, obj: &Value, n: JsStr, v: Value, sloppy: bool) -> Result<(), Value> {
         let Value::Object(o) = obj else {
             return Ok(());
         };
@@ -6140,7 +6141,7 @@ impl Vm {
     }
 
     #[inline(never)]
-    fn define_global_binding(&mut self, n: Rc<str>, v: Value, flags: u8) -> Result<(), Value> {
+    fn define_global_binding(&mut self, n: JsStr, v: Value, flags: u8) -> Result<(), Value> {
         if flags & crate::bytecode::DG_LEXICAL != 0 {
             let is_const = flags & crate::bytecode::DG_CONST != 0;
             if self.globals.slot(&n).is_some() {
@@ -6190,7 +6191,7 @@ impl Vm {
 
     #[inline(never)]
     fn obj_rest(&mut self, src: &Value, keys: &[Value]) -> Result<Value, Value> {
-        let excluded: Vec<Rc<str>> = keys
+        let excluded: Vec<JsStr> = keys
             .iter()
             .filter_map(|k| match k {
                 Value::Str(s) => Some(s.clone()),
@@ -6210,8 +6211,8 @@ impl Vm {
     pub fn copy_data_entries(
         &mut self,
         src: &Value,
-        excluded: &[Rc<str>],
-    ) -> Result<Vec<(Rc<str>, Value)>, Value> {
+        excluded: &[JsStr],
+    ) -> Result<Vec<(JsStr, Value)>, Value> {
         let Value::Object(o) = src else {
             return self.own_entries_resolved(src, true);
         };
@@ -6240,7 +6241,7 @@ impl Vm {
         &mut self,
         v: &Value,
         include_symbols: bool,
-    ) -> Result<Vec<(Rc<str>, Value)>, Value> {
+    ) -> Result<Vec<(JsStr, Value)>, Value> {
         let raw = self.own_entries_raw(v, include_symbols);
         let mut out = Vec::with_capacity(raw.len());
         for (k, x) in raw {
@@ -6250,7 +6251,7 @@ impl Vm {
         Ok(out)
     }
 
-    pub fn own_entries_raw(&self, v: &Value, include_symbols: bool) -> Vec<(Rc<str>, Value)> {
+    pub fn own_entries_raw(&self, v: &Value, include_symbols: bool) -> Vec<(JsStr, Value)> {
         let mut out = Vec::new();
         if let Value::Object(o) = v {
             self.sync_arguments(o);
@@ -6278,19 +6279,19 @@ impl Vm {
                 if let ObjKind::Array(a) = &o.kind {
                     for (i, x) in a.borrow().iter().enumerate() {
                         if !o.is_hole(i) {
-                            out.push((Rc::from(i.to_string()), x.clone()));
+                            out.push((JsStr::from(i.to_string()), x.clone()));
                         }
                     }
                 }
                 if let ObjKind::Primitive(Value::Str(s)) = &o.kind {
                     for i in 0..len16(s) {
                         let c = char_at16(s, i).unwrap_or_default();
-                        out.push((Rc::from(i.to_string()), Value::from(c)));
+                        out.push((JsStr::from(i.to_string()), Value::from(c)));
                     }
                 }
                 if let ObjKind::Typed(t) = &o.kind {
                     for (i, x) in t.values().into_iter().enumerate() {
-                        out.push((Rc::from(i.to_string()), x));
+                        out.push((JsStr::from(i.to_string()), x));
                     }
                 }
                 for (k, x) in o.props.borrow().enumerable() {
@@ -6301,7 +6302,7 @@ impl Vm {
             }
             Value::Str(s) => {
                 for (i, c) in s.chars().enumerate() {
-                    out.push((Rc::from(i.to_string()), Value::Str(c.to_string().into())));
+                    out.push((JsStr::from(i.to_string()), Value::Str(c.to_string().into())));
                 }
             }
             _ => {}
@@ -6340,7 +6341,7 @@ impl Vm {
         }
     }
 
-    fn make_class(&mut self, ctor: &Value, sup: Option<Value>, name: Rc<str>) -> Result<(), Value> {
+    fn make_class(&mut self, ctor: &Value, sup: Option<Value>, name: JsStr) -> Result<(), Value> {
         let Value::Object(ctor_obj) = ctor else {
             return Ok(());
         };
@@ -6394,7 +6395,7 @@ impl Vm {
     fn define_method(
         &mut self,
         class: &Value,
-        key: Rc<str>,
+        key: JsStr,
         method: Value,
         is_static: bool,
     ) -> Result<(), Value> {
@@ -6432,7 +6433,7 @@ impl Vm {
     fn define_class_accessor(
         &mut self,
         class: &Value,
-        key: Rc<str>,
+        key: JsStr,
         f: Value,
         setter: bool,
         is_static: bool,
@@ -6543,9 +6544,9 @@ fn function_proto_call(_vm: &mut Vm, _this: Value, _args: &[Value]) -> Result<Va
 
 #[derive(Clone, PartialEq)]
 enum Resolution {
-    Found(PathBuf, Rc<str>),
+    Found(PathBuf, JsStr),
     Namespace(PathBuf),
-    Builtin(Rc<str>, Rc<str>),
+    Builtin(JsStr, JsStr),
     Ambiguous,
     NotFound,
 }

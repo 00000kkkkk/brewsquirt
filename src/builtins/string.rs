@@ -1,4 +1,5 @@
 use super::{arg, make_ctor, method, relative_index, to_integer};
+use crate::jsstr::JsStr;
 use crate::value::{
     Value, char_at16_rc, code_unit_at_rc, index_of16_rc, last_index_of16, len16, len16_rc,
     slice16_rc, units16,
@@ -61,7 +62,7 @@ pub fn install(vm: &mut Vm) {
     vm.define_global("String", Value::Object(string));
 }
 
-fn this_str(vm: &mut Vm, this: &Value) -> Result<Rc<str>, Value> {
+fn this_str(vm: &mut Vm, this: &Value) -> Result<JsStr, Value> {
     if let Some(Value::Str(s)) = crate::object::unwrap_primitive(this) {
         return Ok(s);
     }
@@ -71,7 +72,7 @@ fn this_str(vm: &mut Vm, this: &Value) -> Result<Rc<str>, Value> {
     vm.to_string(this)
 }
 
-fn str_arg(vm: &mut Vm, args: &[Value], i: usize) -> Result<Rc<str>, Value> {
+fn str_arg(vm: &mut Vm, args: &[Value], i: usize) -> Result<JsStr, Value> {
     vm.to_string(&arg(args, i))
 }
 
@@ -465,7 +466,7 @@ fn require_global(vm: &mut Vm, v: &Value, name: &str) -> Result<(), Value> {
 
 fn regexp_create(vm: &mut Vm, pattern: &Value, flags: &str) -> R {
     let source = match pattern {
-        Value::Undefined => Rc::from(""),
+        Value::Undefined => JsStr::from(""),
         p => vm.to_string(p)?,
     };
     super::regexp::make_regexp(vm, &source, flags)
@@ -542,7 +543,7 @@ fn replacement(
     rep: &Value,
     matched: &str,
     offset: usize,
-    whole: &Rc<str>,
+    whole: &JsStr,
 ) -> Result<String, Value> {
     if rep.is_callable() {
         let r = vm.call_value(
@@ -718,7 +719,7 @@ fn pad(vm: &mut Vm, this: Value, args: &[Value], start: bool) -> R {
     let s = this_str(vm, &this)?;
     let target = to_integer(vm, &arg(args, 0))?.max(0.0) as usize;
     let fill = match arg(args, 1) {
-        Value::Undefined => Rc::from(" "),
+        Value::Undefined => JsStr::from(" "),
         v => vm.to_string(&v)?,
     };
     let n = len16_rc(&s);

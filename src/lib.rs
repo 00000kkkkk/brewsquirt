@@ -7,6 +7,7 @@ pub mod event_loop;
 pub mod gc;
 pub mod inspect;
 pub mod io;
+pub mod jsstr;
 pub mod lexer;
 pub mod module;
 pub mod number;
@@ -25,3 +26,5 @@ pub use value::Value;
 pub use vm::Vm;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+use mimalloc as _;

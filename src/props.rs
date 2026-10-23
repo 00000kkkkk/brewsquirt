@@ -1,4 +1,5 @@
 use crate::inspect::inspect_plain;
+use crate::jsstr::JsStr;
 use crate::object::{
     Accessor, ELEMENTS_FROZEN, ELEMENTS_SEALED, LENGTH_DELETED, NAME_DELETED, NON_CONFIG, NON_ENUM,
     NOT_EXTENSIBLE, Obj, ObjKind, READ_ONLY, array_index,
@@ -319,13 +320,7 @@ impl Vm {
         })
     }
 
-    fn store_raw(
-        &mut self,
-        o: &Rc<Obj>,
-        key: &Rc<str>,
-        raw: Value,
-        attrs: u8,
-    ) -> Result<(), Value> {
+    fn store_raw(&mut self, o: &Rc<Obj>, key: &JsStr, raw: Value, attrs: u8) -> Result<(), Value> {
         match &o.kind {
             ObjKind::Array(a) => {
                 if let Some(i) = array_index(key) {
@@ -437,7 +432,7 @@ impl Vm {
     pub fn define_own(
         &mut self,
         o: &Rc<Obj>,
-        key: Rc<str>,
+        key: JsStr,
         d: PropDesc,
         throw: bool,
     ) -> Result<bool, Value> {
@@ -477,7 +472,7 @@ impl Vm {
     fn define_own_ordinary(
         &mut self,
         o: &Rc<Obj>,
-        key: Rc<str>,
+        key: JsStr,
         d: PropDesc,
         throw: bool,
     ) -> Result<bool, Value> {
@@ -646,7 +641,7 @@ impl Vm {
                         if o.props.borrow().attrs(key) & NON_CONFIG != 0 && !o.is_hole(i) {
                             return false;
                         }
-                        let k: Rc<str> = key.into();
+                        let k: JsStr = key.into();
                         o.props.borrow_mut().set_index_attrs(&k, 0);
                     }
                     let len = a.borrow().len();

@@ -1,5 +1,6 @@
 use super::{arg, make_ctor, method, native_fn};
 use crate::inspect::inspect_plain;
+use crate::jsstr::JsStr;
 use crate::object::{MapKey, Obj, ObjKind, TypedKind, View};
 use crate::value::Value;
 use crate::vm::{ErrorKind, Vm};
@@ -281,7 +282,7 @@ fn te_ctor(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 
 fn te_encode(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let s = match arg(args, 0) {
-        Value::Undefined => Rc::from(""),
+        Value::Undefined => JsStr::from(""),
         v => vm.to_string(&v)?,
     };
     Ok(new_uint8(
@@ -324,7 +325,7 @@ fn td_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         return Err(vm.type_error("Constructor TextDecoder requires 'new'"));
     };
     let label = match arg(args, 0) {
-        Value::Undefined => Rc::from("utf-8"),
+        Value::Undefined => JsStr::from("utf-8"),
         v => vm.to_string(&v)?,
     };
     let norm = label.trim().to_ascii_lowercase();

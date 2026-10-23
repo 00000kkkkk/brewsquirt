@@ -24,6 +24,7 @@ mod testing;
 pub mod web;
 
 use crate::inspect::inspect_plain;
+use crate::jsstr::JsStr;
 use crate::object::{Native, NativeFn, Obj, ObjKind};
 use crate::value::Value;
 use crate::vm::Vm;
@@ -55,7 +56,7 @@ pub fn arg(args: &[Value], i: usize) -> Value {
 }
 
 pub fn native_fn(vm: &Vm, name: &str, arity: u32, func: NativeFn) -> Value {
-    let label: Rc<str> = match name.strip_prefix('\u{0}').and_then(|k| k.split_once(':')) {
+    let label: JsStr = match name.strip_prefix('\u{0}').and_then(|k| k.split_once(':')) {
         Some((_, desc)) => format!("[{desc}]").into(),
         None => name.into(),
     };

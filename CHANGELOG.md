@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Strings are reference-counted through a thin 8-byte handle, which shrinks every JavaScript
+  value from 24 to 16 bytes; programs holding large arrays and objects use about a quarter less
+  memory. The cycle collector tracks objects with an intrusive index instead of weak references,
+  so freed objects return their memory immediately.
+
+### Fixed
+
+- `process.memoryUsage()` reported zero for every field; it now returns the resident set size
+  and the allocator's committed memory.
+
 ## [1.4.0] - 2026-10-23
 
 ### Added

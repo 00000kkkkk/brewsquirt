@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::bytecode::Cmp;
 use crate::bytecode::*;
+use crate::jsstr::JsStr;
 use crate::token::SyntaxError;
 use crate::value::Value;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -16,7 +17,7 @@ pub enum Mode {
 
 enum TargetRef {
     None,
-    Member(Rc<str>),
+    Member(JsStr),
     Index,
 }
 
@@ -45,13 +46,13 @@ enum Var {
 }
 
 enum ExportEntry {
-    Local(Rc<str>, Rc<str>),
-    All(Rc<str>),
-    Named(Rc<str>, Rc<str>, Rc<str>),
+    Local(JsStr, JsStr),
+    All(JsStr),
+    Named(JsStr, JsStr, JsStr),
 }
 
 struct Local {
-    name: Rc<str>,
+    name: JsStr,
     depth: u32,
     captured: bool,
     is_const: bool,
@@ -68,7 +69,7 @@ struct LoopCtx {
     try_depth: usize,
     is_switch: bool,
     is_block: bool,
-    labels: Vec<Rc<str>>,
+    labels: Vec<JsStr>,
     iter_slot: Option<u32>,
     async_iter: Option<u32>,
 }
@@ -80,18 +81,18 @@ struct TryCtx {
 }
 
 struct FnState {
-    name: Rc<str>,
+    name: JsStr,
     kind: ProtoKind,
     is_static: bool,
     line: u32,
     code: Vec<Op>,
     lines: Vec<u32>,
     consts: Vec<Value>,
-    const_strs: FxHashMap<Rc<str>, u32>,
+    const_strs: FxHashMap<JsStr, u32>,
     functions: Vec<Rc<FunctionProto>>,
     upvalues: Vec<UpvalDesc>,
     locals: Vec<Local>,
-    index: FxHashMap<Rc<str>, Vec<u32>>,
+    index: FxHashMap<JsStr, Vec<u32>>,
     depth: u32,
     loops: Vec<LoopCtx>,
     tries: Vec<TryCtx>,
@@ -101,11 +102,11 @@ struct FnState {
     uses_arguments: bool,
     mapped: Vec<bool>,
     param_exprs: bool,
-    param_names: Vec<Rc<str>>,
+    param_names: Vec<JsStr>,
     is_async: bool,
     is_generator: bool,
     fields: Option<Rc<Vec<ClassMember>>>,
-    vars: FxHashSet<Rc<str>>,
+    vars: FxHashSet<JsStr>,
     span: (u32, u32),
     template_sites: u32,
     eval_upvals: Option<EvalUpvals>,
@@ -116,7 +117,7 @@ struct FnState {
 }
 
 impl FnState {
-    fn new(name: Rc<str>, kind: ProtoKind, line: u32, is_static: bool) -> Self {
+    fn new(name: JsStr, kind: ProtoKind, line: u32, is_static: bool) -> Self {
         FnState {
             name,
             kind,
@@ -165,28 +166,28 @@ pub struct Compiler {
     hidden: u32,
     next_with: u32,
     dynamic_locals: u32,
-    self_bind: Option<Rc<str>>,
-    repl_consts: Vec<Rc<str>>,
-    repl_lex: Vec<Rc<str>>,
-    eval_silent: Vec<Rc<str>>,
+    self_bind: Option<JsStr>,
+    repl_consts: Vec<JsStr>,
+    repl_lex: Vec<JsStr>,
+    eval_silent: Vec<JsStr>,
     eval_at_global: bool,
     var_scope_next: bool,
-    pending_labels: Vec<Rc<str>>,
-    import_aliases: Vec<(Rc<str>, Rc<str>, Rc<str>)>,
-    export_names: Vec<(Rc<str>, Rc<str>)>,
+    pending_labels: Vec<JsStr>,
+    import_aliases: Vec<(JsStr, JsStr, JsStr)>,
+    export_names: Vec<(JsStr, JsStr)>,
     completion: Option<(usize, u32)>,
     script_eval: u8,
     in_eval: bool,
     eval_leak_vars: bool,
     defining_fn: bool,
-    link_imports: Vec<(Rc<str>, Vec<Rc<str>>)>,
-    reexport_sources: Vec<(Rc<str>, Rc<str>)>,
-    ns_imports: Vec<(Rc<str>, Rc<str>)>,
+    link_imports: Vec<(JsStr, Vec<JsStr>)>,
+    reexport_sources: Vec<(JsStr, JsStr)>,
+    ns_imports: Vec<(JsStr, JsStr)>,
 }
 
-type AnnexB = Vec<(Rc<str>, *const FuncDef)>;
+type AnnexB = Vec<(JsStr, *const FuncDef)>;
 
-fn annexb_list(list: &[&Stmt], enclosing: &mut Vec<Rc<str>>, nested: bool, out: &mut AnnexB) {
+fn annexb_list(list: &[&Stmt], enclosing: &mut Vec<JsStr>, nested: bool, out: &mut AnnexB) {
     let mut lex = Vec::new();
     let mut fns = Vec::new();
     for s in list {
@@ -232,12 +233,12 @@ fn annexb_list(list: &[&Stmt], enclosing: &mut Vec<Rc<str>>, nested: bool, out: 
     enclosing.truncate(mark);
 }
 
-fn annexb_block(list: &[Stmt], enclosing: &mut Vec<Rc<str>>, out: &mut AnnexB) {
+fn annexb_block(list: &[Stmt], enclosing: &mut Vec<JsStr>, out: &mut AnnexB) {
     let refs: Vec<&Stmt> = list.iter().collect();
     annexb_list(&refs, enclosing, true, out);
 }
 
-fn annexb_stmt(s: &Stmt, enclosing: &mut Vec<Rc<str>>, out: &mut AnnexB) {
+fn annexb_stmt(s: &Stmt, enclosing: &mut Vec<JsStr>, out: &mut AnnexB) {
     match &s.kind {
         StmtKind::Block(list) => annexb_block(list, enclosing, out),
         StmtKind::If(_, a, b) => {
@@ -311,8 +312,8 @@ fn annexb_stmt(s: &Stmt, enclosing: &mut Vec<Rc<str>>, out: &mut AnnexB) {
         _ => {}
     }
 }
-fn collect_var_names(s: &Stmt, out: &mut Vec<Rc<str>>) {
-    let push = |p: &Pattern, out: &mut Vec<Rc<str>>| {
+fn collect_var_names(s: &Stmt, out: &mut Vec<JsStr>) {
+    let push = |p: &Pattern, out: &mut Vec<JsStr>| {
         p.bound_names(out);
     };
     match &s.kind {
@@ -604,7 +605,7 @@ fn compile_unit(
         return Ok(Rc::new(c.finish(st)));
     }
     let exports = std::mem::take(&mut c.exports);
-    let mut exported: Vec<&Rc<str>> = Vec::new();
+    let mut exported: Vec<&JsStr> = Vec::new();
     for entry in &exports {
         let name = match entry {
             ExportEntry::Local(local, x) => {
@@ -636,7 +637,7 @@ fn compile_unit(
         }
     }
     c.emit(Op::Return);
-    let source_of = |c: &Compiler, hidden: &Rc<str>| {
+    let source_of = |c: &Compiler, hidden: &JsStr| {
         c.reexport_sources
             .iter()
             .find(|(h, _)| h == hidden)
@@ -883,7 +884,7 @@ impl Compiler {
         (st.consts.len() - 1) as u32
     }
 
-    fn str_const(&mut self, s: &Rc<str>) -> u32 {
+    fn str_const(&mut self, s: &JsStr) -> u32 {
         if let Some(&i) = self.st_ref().const_strs.get(s) {
             return i;
         }
@@ -892,7 +893,7 @@ impl Compiler {
         i
     }
 
-    fn hidden_name(&mut self, prefix: &str) -> Rc<str> {
+    fn hidden_name(&mut self, prefix: &str) -> JsStr {
         self.hidden += 1;
         format!("%{prefix}{}", self.hidden).into()
     }
@@ -901,7 +902,7 @@ impl Compiler {
         self.st_ref().locals.len()
     }
 
-    fn add_local(&mut self, name: Rc<str>, is_const: bool) -> u32 {
+    fn add_local(&mut self, name: JsStr, is_const: bool) -> u32 {
         let st = self.st();
         let depth = st.depth;
         let slot = st.locals.len() as u32;
@@ -942,7 +943,7 @@ impl Compiler {
             .any(|&i| st.locals[i as usize].depth == depth)
     }
 
-    fn add_lexical(&mut self, name: Rc<str>, is_const: bool) -> u32 {
+    fn add_lexical(&mut self, name: JsStr, is_const: bool) -> u32 {
         let slot = self.add_local(name, is_const);
         self.st().locals[slot as usize].tdz = true;
         self.st().locals[slot as usize].lexical = true;
@@ -1005,7 +1006,7 @@ impl Compiler {
 
     fn eval_scope(&mut self, ctx: Rc<EvalCtx>) -> u32 {
         let si = self.states.len() - 1;
-        let mut outer: Vec<Rc<str>> = Vec::new();
+        let mut outer: Vec<JsStr> = Vec::new();
         for i in (0..si).rev() {
             let st = &self.states[i];
             let names = st.locals.iter().rev().map(|l| l.name.clone()).chain(
@@ -1048,7 +1049,7 @@ impl Compiler {
             .map(|l| (l.name.clone(), l.is_const, l.lexical))
             .collect();
         let in_arrow = st.kind == ProtoKind::Arrow;
-        let self_names: Vec<Rc<str>> = self
+        let self_names: Vec<JsStr> = self
             .states
             .iter()
             .filter(|s| !s.strict)
@@ -1152,7 +1153,7 @@ impl Compiler {
         Var::Global
     }
 
-    fn dynamic_scopes(&self, name: &str) -> Vec<Rc<str>> {
+    fn dynamic_scopes(&self, name: &str) -> Vec<JsStr> {
         if self.dynamic_locals == 0 || name.starts_with('%') || name == "this" {
             return Vec::new();
         }
@@ -1197,7 +1198,7 @@ impl Compiler {
         !self.dynamic_scopes(name).is_empty()
     }
 
-    fn load_var(&mut self, name: &Rc<str>) {
+    fn load_var(&mut self, name: &JsStr) {
         let scopes = self.dynamic_scopes(name);
         if scopes.is_empty() {
             self.load_var_static(name);
@@ -1220,7 +1221,7 @@ impl Compiler {
         }
     }
 
-    fn load_var_static(&mut self, name: &Rc<str>) {
+    fn load_var_static(&mut self, name: &JsStr) {
         match self.resolve(name) {
             Var::Local(s, _) => {
                 self.emit(Op::GetLocal(s));
@@ -1267,7 +1268,7 @@ impl Compiler {
         }
     }
 
-    fn store_var(&mut self, name: &Rc<str>, init: bool) {
+    fn store_var(&mut self, name: &JsStr, init: bool) {
         let scopes = self.dynamic_scopes(name);
         if scopes.is_empty() {
             self.store_var_static(name, init);
@@ -1290,7 +1291,7 @@ impl Compiler {
         }
     }
 
-    fn store_var_static(&mut self, name: &Rc<str>, init: bool) {
+    fn store_var_static(&mut self, name: &JsStr, init: bool) {
         match self.resolve(name) {
             Var::Local(s, c) => {
                 let silent =
@@ -1384,7 +1385,7 @@ impl Compiler {
         &mut self,
         s: &'a Stmt,
         top: bool,
-        names: &mut Vec<(Rc<str>, bool)>,
+        names: &mut Vec<(JsStr, bool)>,
         fn_idx: &mut Vec<(usize, bool)>,
         funcs: &mut Vec<&'a Rc<FuncDef>>,
         imports: &mut Vec<&'a ImportDecl>,
@@ -1420,7 +1421,7 @@ impl Compiler {
                         1,
                     ));
                 }
-                let hidden: Rc<str> = format!("%import{}", imports.len()).into();
+                let hidden: JsStr = format!("%import{}", imports.len()).into();
                 names.push((hidden.clone(), true));
                 if let Some(n) = &i.default {
                     self.import_aliases
@@ -1628,8 +1629,8 @@ impl Compiler {
         for s in stmts {
             collect_var_names(s, &mut var_names);
         }
-        let var_set: FxHashSet<Rc<str>> = var_names.iter().cloned().collect();
-        let fn_names: FxHashSet<Rc<str>> = funcs.iter().filter_map(|f| f.name.clone()).collect();
+        let var_set: FxHashSet<JsStr> = var_names.iter().cloned().collect();
+        let fn_names: FxHashSet<JsStr> = funcs.iter().filter_map(|f| f.name.clone()).collect();
         let fn_map: FxHashMap<usize, bool> = fn_idx.iter().copied().collect();
         for (n, _) in &names {
             let is_fn = fn_names.contains(n);
@@ -1642,7 +1643,7 @@ impl Compiler {
         }
         let depth = self.st_ref().depth;
         let mut fresh = Vec::new();
-        let mut positions: FxHashMap<Rc<str>, Vec<usize>> = FxHashMap::default();
+        let mut positions: FxHashMap<JsStr, Vec<usize>> = FxHashMap::default();
         for (i, (n, c)) in names.iter().enumerate() {
             let is_fn = fn_names.contains(n);
             let earlier: Vec<usize> = positions.get(n).cloned().unwrap_or_default();
@@ -1690,8 +1691,7 @@ impl Compiler {
         }
         let names = fresh;
         let repl = self.is_repl_top() && self.script_eval != 2;
-        let import_names: Vec<Rc<str>> =
-            imports.iter().filter_map(|i| i.namespace.clone()).collect();
+        let import_names: Vec<JsStr> = imports.iter().filter_map(|i| i.namespace.clone()).collect();
         for (n, c) in &names {
             let lexical_kind =
                 !fn_names.contains(n) && !n.starts_with("%import") && !import_names.contains(n);
@@ -1737,7 +1737,7 @@ impl Compiler {
             }
         }
         if top && self.mode == Mode::Module {
-            let mut pre: Vec<(Rc<str>, Rc<str>)> = self
+            let mut pre: Vec<(JsStr, JsStr)> = self
                 .exports
                 .iter()
                 .filter_map(|e| match e {
@@ -1775,7 +1775,7 @@ impl Compiler {
             }
         }
         for (n, imp) in imports.iter().enumerate() {
-            let mut requested: Vec<Rc<str>> = Vec::new();
+            let mut requested: Vec<JsStr> = Vec::new();
             if imp.default.is_some() {
                 requested.push("default".into());
             }
@@ -1791,7 +1791,7 @@ impl Compiler {
             if let Some(ns) = &imp.namespace {
                 self.store_var(ns, true);
             }
-            let hidden: Rc<str> = format!("%import{n}").into();
+            let hidden: JsStr = format!("%import{n}").into();
             self.store_var(&hidden, true);
             self.emit(Op::Pop);
         }
@@ -1829,7 +1829,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn delete_ident_static(&mut self, n: &Rc<str>) {
+    fn delete_ident_static(&mut self, n: &JsStr) {
         match self.resolve(n) {
             Var::Global if self.alias(n).is_none() => {
                 let k = self.str_const(n);
@@ -1841,7 +1841,7 @@ impl Compiler {
         }
     }
 
-    fn annexb_copy(&mut self, n: &Rc<str>) {
+    fn annexb_copy(&mut self, n: &JsStr) {
         let st = self.st_ref();
         let inner = st.index.get(n).and_then(|v| v.last()).map(|&i| i as usize);
         let outer = st
@@ -1857,7 +1857,7 @@ impl Compiler {
             }
             None => {
                 let k = self.str_const(n);
-                let ev: Rc<str> = "%evalvars".into();
+                let ev: JsStr = "%evalvars".into();
                 if matches!(self.resolve(&ev), Var::Global) {
                     self.emit(Op::SetGlobal(k));
                 } else {
@@ -1869,7 +1869,7 @@ impl Compiler {
         }
     }
 
-    fn import_binding(&self, local: &str) -> Option<(Rc<str>, Rc<str>)> {
+    fn import_binding(&self, local: &str) -> Option<(JsStr, JsStr)> {
         if let Some((_, hidden, key)) = self.import_aliases.iter().find(|(l, _, _)| &**l == local) {
             let n: usize = hidden.strip_prefix("%import")?.parse().ok()?;
             let (source, _) = self.link_imports.get(n)?;
@@ -1881,7 +1881,7 @@ impl Compiler {
             .map(|(_, source)| (source.clone(), "*".into()))
     }
 
-    fn alias(&self, name: &str) -> Option<(Rc<str>, Rc<str>)> {
+    fn alias(&self, name: &str) -> Option<(JsStr, JsStr)> {
         self.import_aliases
             .iter()
             .find(|(l, _, _)| &**l == name)
@@ -1904,11 +1904,11 @@ impl Compiler {
         }
     }
 
-    fn export_hook(&mut self, name: &Rc<str>) {
+    fn export_hook(&mut self, name: &JsStr) {
         if !self.is_export_binding(name) {
             return;
         }
-        let targets: Vec<Rc<str>> = self
+        let targets: Vec<JsStr> = self
             .export_names
             .iter()
             .filter(|(l, _)| l == name)
@@ -2457,7 +2457,7 @@ impl Compiler {
     }
 
     fn emit_async_next(&mut self) {
-        let next: Rc<str> = "next".into();
+        let next: JsStr = "next".into();
         let k = self.str_const(&next);
         self.emit(Op::GetMethod(k));
         self.emit(Op::Call(0, NO_NAME));
@@ -2492,11 +2492,11 @@ impl Compiler {
         self.emit(Op::GetLocal(iter_slot));
         self.emit_async_next();
         self.emit(Op::Dup);
-        let done: Rc<str> = "done".into();
+        let done: JsStr = "done".into();
         let k = self.str_const(&done);
         self.emit(Op::GetProp(k));
         let exit = self.emit(Op::JumpIfTrue(0));
-        let value: Rc<str> = "value".into();
+        let value: JsStr = "value".into();
         let k = self.str_const(&value);
         self.emit(Op::GetProp(k));
         let try_depth = self.st_ref().tries.len();
@@ -2830,7 +2830,7 @@ impl Compiler {
     fn invalid_target(&mut self, e: &Expr) -> R<()> {
         self.expr(e)?;
         self.emit(Op::Pop);
-        let msg: Rc<str> = "Invalid left-hand side in assignment".into();
+        let msg: JsStr = "Invalid left-hand side in assignment".into();
         let k = self.str_const(&msg);
         self.emit(Op::ThrowRef(k));
         Ok(())
@@ -2991,7 +2991,7 @@ impl Compiler {
     fn function(
         &mut self,
         f: &FuncDef,
-        name_hint: Option<Rc<str>>,
+        name_hint: Option<JsStr>,
         fields: Option<Rc<Vec<ClassMember>>>,
     ) -> R<u32> {
         let kind = match f.kind {
@@ -3002,7 +3002,7 @@ impl Compiler {
             FuncKind::DerivedConstructor => ProtoKind::DerivedConstructor,
         };
         let name = f.name.clone().or(name_hint).unwrap_or_else(|| "".into());
-        let name: Rc<str> = if &*name == "%default" {
+        let name: JsStr = if &*name == "%default" {
             "default".into()
         } else if let Some(rest) = name.strip_prefix("\u{0}#") {
             format!("#{}", rest.split('@').next().unwrap_or(rest)).into()
@@ -3103,7 +3103,7 @@ impl Compiler {
             && f.rest.is_none()
         {
             let mut mapped = vec![false; f.params.len()];
-            let mut seen: Vec<&Rc<str>> = Vec::new();
+            let mut seen: Vec<&JsStr> = Vec::new();
             for (i, p) in f.params.iter().enumerate().rev() {
                 if let Pattern::Ident(n) = &p.pattern {
                     if !seen.contains(&n) {
@@ -3117,7 +3117,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn complex_params(&mut self, f: &FuncDef, self_name: Option<Rc<str>>) -> R<()> {
+    fn complex_params(&mut self, f: &FuncDef, self_name: Option<JsStr>) -> R<()> {
         let mut raw = Vec::with_capacity(f.params.len());
         for _ in &f.params {
             let h = self.hidden_name("param");
@@ -3182,7 +3182,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn function_body(&mut self, f: &FuncDef, kind: ProtoKind, self_name: Option<Rc<str>>) -> R<()> {
+    fn function_body(&mut self, f: &FuncDef, kind: ProtoKind, self_name: Option<JsStr>) -> R<()> {
         self.begin_scope();
         if kind == ProtoKind::Arrow {
             self.add_local("".into(), true);
@@ -3279,7 +3279,7 @@ impl Compiler {
                         }
                     }
                     PropKey::Computed(_) => {
-                        let hidden: Rc<str> = format!("\u{0}#%ik{instance_done}@0").into();
+                        let hidden: JsStr = format!("\u{0}#%ik{instance_done}@0").into();
                         instance_done += 1;
                         self.emit(Op::GetCallee);
                         let k = self.str_const(&hidden);
@@ -3299,10 +3299,10 @@ impl Compiler {
         Ok(())
     }
 
-    fn class(&mut self, c: &ClassDef, name_hint: Option<&Rc<str>>) -> R<()> {
+    fn class(&mut self, c: &ClassDef, name_hint: Option<&JsStr>) -> R<()> {
         let saved_line = self.line;
         self.line = c.line;
-        let name: Rc<str> = c
+        let name: JsStr = c
             .name
             .clone()
             .or_else(|| name_hint.cloned())
@@ -3406,7 +3406,7 @@ impl Compiler {
                 ..
             } = m
             {
-                let hidden: Rc<str> = if *is_static {
+                let hidden: JsStr = if *is_static {
                     static_keys += 1;
                     format!("\u{0}#%sk{}@0", static_keys - 1).into()
                 } else {
@@ -3496,7 +3496,7 @@ impl Compiler {
                         self.emit(Op::Pop);
                     }
                     PropKey::Computed(_) => {
-                        let hidden: Rc<str> = format!("\u{0}#%sk{static_done}@0").into();
+                        let hidden: JsStr = format!("\u{0}#%sk{static_done}@0").into();
                         static_done += 1;
                         self.emit(Op::Dup);
                         self.emit(Op::Dup);
@@ -3550,7 +3550,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn static_init_value(&mut self, v: &Expr, name: Option<&Rc<str>>, line: u32) -> R<()> {
+    fn static_init_value(&mut self, v: &Expr, name: Option<&JsStr>, line: u32) -> R<()> {
         let f = FuncDef {
             name: Some("static".into()),
             params: Vec::new(),
@@ -3609,7 +3609,7 @@ impl Compiler {
     fn name_const(&mut self, e: &Expr) -> u32 {
         match expr_text(e) {
             Some(t) => {
-                let t: Rc<str> = t.into();
+                let t: JsStr = t.into();
                 self.str_const(&t)
             }
             None => NO_NAME,
@@ -3787,7 +3787,7 @@ impl Compiler {
         }
     }
 
-    fn store_discard(&mut self, name: &Rc<str>) {
+    fn store_discard(&mut self, name: &JsStr) {
         if self.is_export_binding(name) || self.has_dynamic(name) {
             self.store_var(name, false);
             self.emit(Op::Pop);
@@ -3893,7 +3893,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn expr_named(&mut self, e: &Expr, name: Option<&Rc<str>>) -> R<()> {
+    fn expr_named(&mut self, e: &Expr, name: Option<&JsStr>) -> R<()> {
         let saved_line = self.line;
         self.line = e.line;
         let r = self.expr_inner(e, name);
@@ -3901,7 +3901,7 @@ impl Compiler {
         r
     }
 
-    fn expr_inner(&mut self, e: &Expr, name: Option<&Rc<str>>) -> R<()> {
+    fn expr_inner(&mut self, e: &Expr, name: Option<&JsStr>) -> R<()> {
         match &e.kind {
             ExprKind::Number(n) => {
                 let k = self.constant(Value::Number(*n));
@@ -4194,7 +4194,7 @@ impl Compiler {
                         self.super_info(false)?;
                         self.load_var(&"this".into());
                         self.emit(Op::Pop);
-                        let msg: Rc<str> = "Unsupported reference to 'super'".into();
+                        let msg: JsStr = "Unsupported reference to 'super'".into();
                         let k = self.str_const(&msg);
                         self.emit(Op::ThrowRef(k));
                         self.emit(Op::Undefined);
@@ -4205,7 +4205,7 @@ impl Compiler {
                         self.emit(Op::Pop);
                         self.expr(key)?;
                         self.emit(Op::Pop);
-                        let msg: Rc<str> = "Unsupported reference to 'super'".into();
+                        let msg: JsStr = "Unsupported reference to 'super'".into();
                         let k = self.str_const(&msg);
                         self.emit(Op::ThrowRef(k));
                         self.emit(Op::Undefined);

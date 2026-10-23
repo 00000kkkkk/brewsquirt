@@ -1,3 +1,4 @@
+use crate::jsstr::JsStr;
 use std::rc::Rc;
 
 #[derive(Clone, Debug)]
@@ -9,17 +10,17 @@ pub struct Expr {
 #[derive(Clone, Debug)]
 pub enum ExprKind {
     NewTarget,
-    BigInt(Rc<str>),
+    BigInt(JsStr),
     ImportMeta,
     DynImport(Box<Expr>),
     Number(f64),
-    Str(Rc<str>),
-    Regex(Rc<str>, Rc<str>),
-    Template(Vec<Rc<str>>, Vec<Expr>),
-    TemplateStrings(Vec<Option<Rc<str>>>, Vec<Rc<str>>),
+    Str(JsStr),
+    Regex(JsStr, JsStr),
+    Template(Vec<JsStr>, Vec<Expr>),
+    TemplateStrings(Vec<Option<JsStr>>, Vec<JsStr>),
     Bool(bool),
     Null,
-    Ident(Rc<str>),
+    Ident(JsStr),
     This,
     Array(Vec<ArrayElem>),
     Object(Vec<PropDef>),
@@ -41,7 +42,7 @@ pub enum ExprKind {
     Cond(Box<Expr>, Box<Expr>, Box<Expr>),
     Member {
         obj: Box<Expr>,
-        name: Rc<str>,
+        name: JsStr,
         optional: bool,
     },
     Index {
@@ -60,7 +61,7 @@ pub enum ExprKind {
         args: Vec<Arg>,
     },
     SuperCall(Vec<Arg>),
-    SuperMember(Rc<str>),
+    SuperMember(JsStr),
     SuperIndex(Box<Expr>),
     OptChain(Box<Expr>),
     Seq(Vec<Expr>),
@@ -86,15 +87,15 @@ pub enum Arg {
 
 #[derive(Clone, Debug)]
 pub enum PropKey {
-    Named(Rc<str>),
+    Named(JsStr),
     Computed(Expr),
 }
 
 #[derive(Clone, Debug)]
 pub enum PropDef {
     KeyValue(PropKey, Expr),
-    Shorthand(Rc<str>),
-    ShorthandDefault(Rc<str>, Expr),
+    Shorthand(JsStr),
+    ShorthandDefault(JsStr, Expr),
     Spread(Expr),
     Method(PropKey, Rc<FuncDef>),
     Getter(PropKey, Rc<FuncDef>),
@@ -159,7 +160,7 @@ pub enum AssignTarget {
 
 #[derive(Clone, Debug)]
 pub enum Pattern {
-    Ident(Rc<str>),
+    Ident(JsStr),
     Target(Box<Expr>),
     Object {
         props: Vec<ObjPatProp>,
@@ -185,7 +186,7 @@ pub struct PatElem {
 }
 
 impl Pattern {
-    pub fn bound_names(&self, out: &mut Vec<Rc<str>>) {
+    pub fn bound_names(&self, out: &mut Vec<JsStr>) {
         match self {
             Pattern::Ident(n) => out.push(n.clone()),
             Pattern::Target(_) => {}
@@ -233,7 +234,7 @@ pub enum FuncKind {
 
 #[derive(Debug)]
 pub struct EvalCtx {
-    pub privates: Vec<(u32, Rc<Vec<Rc<str>>>)>,
+    pub privates: Vec<(u32, Rc<Vec<JsStr>>)>,
     pub in_function: bool,
     pub field_init: bool,
     pub strict: bool,
@@ -242,7 +243,7 @@ pub struct EvalCtx {
 
 #[derive(Clone, Debug)]
 pub struct FuncDef {
-    pub name: Option<Rc<str>>,
+    pub name: Option<JsStr>,
     pub params: Vec<Param>,
     pub rest: Option<Pattern>,
     pub body: FuncBody,
@@ -258,7 +259,7 @@ pub struct FuncDef {
 
 #[derive(Clone, Debug)]
 pub struct ClassDef {
-    pub name: Option<Rc<str>>,
+    pub name: Option<JsStr>,
     pub superclass: Option<Expr>,
     pub constructor: Option<Rc<FuncDef>>,
     pub members: Vec<ClassMember>,
@@ -330,9 +331,9 @@ pub enum StmtKind {
         obj: Expr,
         body: Box<Stmt>,
     },
-    Break(Option<Rc<str>>),
-    Continue(Option<Rc<str>>),
-    Labeled(Rc<str>, Box<Stmt>),
+    Break(Option<JsStr>),
+    Continue(Option<JsStr>),
+    Labeled(JsStr, Box<Stmt>),
     With(Expr, Box<Stmt>),
     Throw(Expr),
     Try {
@@ -355,19 +356,19 @@ pub struct SwitchCase {
 
 #[derive(Clone, Debug)]
 pub struct ImportDecl {
-    pub source: Rc<str>,
-    pub default: Option<Rc<str>>,
-    pub namespace: Option<Rc<str>>,
-    pub named: Vec<(Rc<str>, Rc<str>)>,
+    pub source: JsStr,
+    pub default: Option<JsStr>,
+    pub namespace: Option<JsStr>,
+    pub named: Vec<(JsStr, JsStr)>,
 }
 
 #[derive(Clone, Debug)]
 pub enum ExportDecl {
     Decl(Box<Stmt>),
-    Names(Vec<(Rc<str>, Rc<str>)>),
+    Names(Vec<(JsStr, JsStr)>),
     From {
-        source: Rc<str>,
-        names: Option<Vec<(Rc<str>, Rc<str>)>>,
+        source: JsStr,
+        names: Option<Vec<(JsStr, JsStr)>>,
     },
     Default(Expr),
     DefaultDecl(Box<Stmt>),

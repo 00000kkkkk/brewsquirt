@@ -1,5 +1,5 @@
+use crate::jsstr::JsStr;
 use std::fmt;
-use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum P {
@@ -138,18 +138,18 @@ impl P {
 
 #[derive(Clone, Debug)]
 pub enum TemplatePart {
-    Str(Result<Rc<str>, SyntaxError>, Rc<str>),
+    Str(Result<JsStr, SyntaxError>, JsStr),
     Expr(Vec<Token>),
 }
 
 #[derive(Clone, Debug)]
 pub enum Tok {
     Num(f64),
-    Str(Rc<str>),
+    Str(JsStr),
     Template(Vec<TemplatePart>),
-    BigInt(Rc<str>),
-    Regex(Rc<str>, Rc<str>),
-    Ident(Rc<str>),
+    BigInt(JsStr),
+    Regex(JsStr, JsStr),
+    Ident(JsStr),
     Punct(P),
     Eof,
 }

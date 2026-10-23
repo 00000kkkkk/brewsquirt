@@ -1,14 +1,15 @@
+use crate::jsstr::JsStr;
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 use std::rc::Rc;
 
 pub struct RegexData {
-    pub source: Rc<str>,
-    pub flags: Rc<str>,
+    pub source: JsStr,
+    pub flags: JsStr,
     pub re: fancy_regex::Regex,
     pub global: bool,
     pub sticky: bool,
-    pub names: Vec<Option<Rc<str>>>,
+    pub names: Vec<Option<JsStr>>,
 }
 
 pub struct Match {
@@ -17,7 +18,7 @@ pub struct Match {
     pub groups: Vec<Option<(usize, usize)>>,
 }
 
-type Cache = FxHashMap<(Rc<str>, Rc<str>), Rc<RegexData>>;
+type Cache = FxHashMap<(JsStr, JsStr), Rc<RegexData>>;
 
 thread_local! {
     static CACHE: RefCell<Cache> = RefCell::new(FxHashMap::default());
@@ -465,7 +466,7 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
 }
 
 pub fn compile(source: &str, flags: &str) -> Result<Rc<RegexData>, String> {
-    let key: (Rc<str>, Rc<str>) = (source.into(), flags.into());
+    let key: (JsStr, JsStr) = (source.into(), flags.into());
     if let Some(hit) = CACHE.with(|c| c.borrow().get(&key).cloned()) {
         return Ok(hit);
     }
@@ -477,7 +478,7 @@ pub fn compile(source: &str, flags: &str) -> Result<Rc<RegexData>, String> {
         .backtrack_limit(10_000_000)
         .build()
         .map_err(|e| format!("Invalid regular expression: /{source}/{flags}: {e}"))?;
-    let names = re.capture_names().map(|n| n.map(Rc::from)).collect();
+    let names = re.capture_names().map(|n| n.map(JsStr::from)).collect();
     let data = Rc::new(RegexData {
         source: key.0.clone(),
         flags: key.1.clone(),

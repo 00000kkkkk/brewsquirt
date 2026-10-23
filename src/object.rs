@@ -1,4 +1,5 @@
 use crate::bytecode::FunctionProto;
+use crate::jsstr::JsStr;
 use crate::value::Value;
 use crate::vm::Vm;
 use indexmap::{IndexMap, IndexSet};
@@ -27,8 +28,8 @@ pub const SLOW_ELEMENTS: u8 = 64;
 
 #[derive(Default)]
 struct PropExtra {
-    index: rustc_hash::FxHashMap<Rc<str>, u32>,
-    attrs: rustc_hash::FxHashMap<Rc<str>, u8>,
+    index: rustc_hash::FxHashMap<JsStr, u32>,
+    attrs: rustc_hash::FxHashMap<JsStr, u8>,
     holes: Vec<u64>,
 }
 
@@ -40,12 +41,12 @@ impl PropExtra {
 
 #[derive(Default)]
 pub struct PropMap {
-    entries: Vec<(Rc<str>, Value)>,
+    entries: Vec<(JsStr, Value)>,
     extra: Option<Box<PropExtra>>,
 }
 
 impl PropMap {
-    fn index(&self) -> Option<&rustc_hash::FxHashMap<Rc<str>, u32>> {
+    fn index(&self) -> Option<&rustc_hash::FxHashMap<JsStr, u32>> {
         self.extra
             .as_ref()
             .map(|x| &x.index)
@@ -105,13 +106,13 @@ impl PropMap {
         }
     }
 
-    pub fn attr_entries(&self) -> impl Iterator<Item = (&Rc<str>, u8)> {
+    pub fn attr_entries(&self) -> impl Iterator<Item = (&JsStr, u8)> {
         self.extra
             .iter()
             .flat_map(|x| x.attrs.iter().map(|(k, b)| (k, *b)))
     }
 
-    pub fn set_index_attrs(&mut self, key: &Rc<str>, bits: u8) {
+    pub fn set_index_attrs(&mut self, key: &JsStr, bits: u8) {
         if bits == 0 {
             if let Some(x) = &mut self.extra {
                 x.attrs.remove(&**key);
@@ -147,7 +148,7 @@ impl PropMap {
         if self.entries.is_empty() {
             return;
         }
-        let keys: Vec<(Rc<str>, bool)> = self
+        let keys: Vec<(JsStr, bool)> = self
             .entries
             .iter()
             .map(|(k, v)| (k.clone(), matches!(v, Value::Object(o) if o.is_accessor())))
@@ -184,7 +185,7 @@ impl PropMap {
             })
     }
 
-    pub fn insert_fast(&mut self, key: Rc<str>, v: Value, adding_ok: bool) -> bool {
+    pub fn insert_fast(&mut self, key: JsStr, v: Value, adding_ok: bool) -> bool {
         if key.len() == 9 && &*key == "__proto__" {
             return false;
         }
@@ -247,7 +248,7 @@ impl PropMap {
         self.find(key).is_some()
     }
 
-    pub fn insert(&mut self, key: Rc<str>, v: Value) -> Option<Value> {
+    pub fn insert(&mut self, key: JsStr, v: Value) -> Option<Value> {
         if let Some(i) = self.find(&key) {
             return Some(std::mem::replace(&mut self.entries[i].1, v));
         }
@@ -339,11 +340,11 @@ impl PropMap {
         }
     }
 
-    pub fn enumerable(&self) -> impl Iterator<Item = (&Rc<str>, &Value)> {
+    pub fn enumerable(&self) -> impl Iterator<Item = (&JsStr, &Value)> {
         self.iter().filter(|(k, _)| self.is_enumerable(k))
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&Rc<str>, &Value)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&JsStr, &Value)> {
         let order = self.order();
         (0..self.entries.len()).map(move |i| {
             let j = order.as_ref().map_or(i, |o| o[i]);
@@ -352,7 +353,7 @@ impl PropMap {
         })
     }
 
-    pub fn keys(&self) -> impl Iterator<Item = &Rc<str>> {
+    pub fn keys(&self) -> impl Iterator<Item = &JsStr> {
         self.iter().map(|(k, _)| k)
     }
 
@@ -875,8 +876,8 @@ pub struct RegExpObj {
 }
 
 pub struct Symbol {
-    pub description: Option<Rc<str>>,
-    pub key: Rc<str>,
+    pub description: Option<JsStr>,
+    pub key: JsStr,
 }
 
 pub const SYMBOL_PREFIX: char = '\u{0}';
@@ -1014,7 +1015,7 @@ pub enum Upvalue {
 }
 
 pub struct Native {
-    pub name: Rc<str>,
+    pub name: JsStr,
     pub arity: u32,
     pub func: NativeFn,
     pub ctor: Option<fn() -> ObjKind>,
@@ -1028,7 +1029,7 @@ pub struct Bound {
 
 pub enum IterState {
     Array(Rc<Obj>, usize, u8),
-    Str(Rc<str>, usize),
+    Str(JsStr, usize),
     MapEntries(Rc<Obj>, usize),
     MapKeys(Rc<Obj>, usize),
     MapValues(Rc<Obj>, usize),
@@ -1057,7 +1058,7 @@ pub enum MapKey {
     Null,
     Bool(bool),
     Num(u64),
-    Str(Rc<str>),
+    Str(JsStr),
     Obj(Rc<Obj>),
     Sym(Rc<Symbol>),
     Big(Rc<num_bigint::BigInt>),
@@ -1176,18 +1177,18 @@ impl Obj {
         self.props.borrow().get(key).cloned()
     }
 
-    pub fn set_own(&self, key: impl Into<Rc<str>>, v: Value) {
+    pub fn set_own(&self, key: impl Into<JsStr>, v: Value) {
         self.props.borrow_mut().insert(key.into(), v);
     }
 
-    pub fn set_hidden(&self, key: impl Into<Rc<str>>, v: Value) {
+    pub fn set_hidden(&self, key: impl Into<JsStr>, v: Value) {
         let key = key.into();
         let mut props = self.props.borrow_mut();
         props.insert(key.clone(), v);
         props.set_enumerable(&key, false);
     }
 
-    pub fn set_with_attrs(&self, key: impl Into<Rc<str>>, v: Value, bits: u8) {
+    pub fn set_with_attrs(&self, key: impl Into<JsStr>, v: Value, bits: u8) {
         let key = key.into();
         let mut props = self.props.borrow_mut();
         props.insert(key.clone(), v);
@@ -1267,7 +1268,7 @@ impl Obj {
         None
     }
 
-    pub fn function_name(&self) -> Option<Rc<str>> {
+    pub fn function_name(&self) -> Option<JsStr> {
         match &self.kind {
             ObjKind::Function(c) => Some(
                 self.get_own("name")

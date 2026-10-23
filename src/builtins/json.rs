@@ -1,4 +1,5 @@
 use super::{arg, method, to_integer};
+use crate::jsstr::JsStr;
 use crate::number::number_to_string;
 use crate::object::{Obj, ObjKind};
 use crate::value::Value;
@@ -39,7 +40,7 @@ struct Ser<'a> {
     indent: &'a str,
     stack: Vec<*const Obj>,
     replacer: Option<Value>,
-    allow: Option<Vec<Rc<str>>>,
+    allow: Option<Vec<JsStr>>,
 }
 
 impl Ser<'_> {
@@ -175,7 +176,7 @@ impl Ser<'_> {
             out.push(']');
             return Ok(());
         }
-        let keys: Vec<Rc<str>> = match &self.allow {
+        let keys: Vec<JsStr> = match &self.allow {
             Some(list) => list.clone(),
             None => match &o.kind {
                 ObjKind::Map(_) | ObjKind::Set(_) | ObjKind::Iter(_) => Vec::new(),
@@ -252,7 +253,7 @@ fn stringify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         ser.replacer = Some(replacer.clone());
     } else if let Value::Object(r) = &replacer {
         if Ser::is_array(r) {
-            let mut list: Vec<Rc<str>> = Vec::new();
+            let mut list: Vec<JsStr> = Vec::new();
             let len = vm.get_prop(&replacer, "length")?;
             let len = to_integer(vm, &len)?.clamp(0.0, 9007199254740991.0) as usize;
             for i in 0..len {
@@ -503,10 +504,10 @@ fn array_like_value(vm: &mut Vm, o: &Rc<Obj>) -> Result<bool, Value> {
     }
 }
 
-fn revive(vm: &mut Vm, f: &Value, holder: &Value, key: Rc<str>) -> R {
+fn revive(vm: &mut Vm, f: &Value, holder: &Value, key: JsStr) -> R {
     let v = vm.get_prop(holder, &key)?;
     if let Value::Object(o) = &v {
-        let keys: Vec<Rc<str>> = if array_like_value(vm, o)? {
+        let keys: Vec<JsStr> = if array_like_value(vm, o)? {
             let len = vm.get_prop(&v, "length")?;
             let n = super::to_integer(vm, &len)?.clamp(0.0, 9007199254740991.0) as usize;
             (0..n).map(|i| i.to_string().into()).collect()

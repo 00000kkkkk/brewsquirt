@@ -1,4 +1,5 @@
 use super::{arg, method, native_fn, to_integer};
+use crate::jsstr::JsStr;
 use crate::object::{Accessor, NON_ENUM, Obj, ObjKind};
 use crate::value::Value;
 use crate::vm::Vm;
@@ -475,7 +476,7 @@ fn error_is_error(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     )))
 }
 
-fn this_string(vm: &mut Vm, this: &Value, name: &str) -> Result<Rc<str>, Value> {
+fn this_string(vm: &mut Vm, this: &Value, name: &str) -> Result<JsStr, Value> {
     if this.is_nullish() {
         return Err(vm.type_error(format!(
             "String.prototype.{name} called on null or undefined"
@@ -488,7 +489,7 @@ fn string_normalize(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     use unicode_normalization::UnicodeNormalization;
     let s = this_string(vm, &this, "normalize")?;
     let form = match arg(args, 0) {
-        Value::Undefined => Rc::from("NFC"),
+        Value::Undefined => JsStr::from("NFC"),
         v => vm.to_string(&v)?,
     };
     let out: String = match &*form {
