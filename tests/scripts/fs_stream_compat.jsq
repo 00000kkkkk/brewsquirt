@@ -1,0 +1,79 @@
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import util from "node:util"
+import crypto from "node:crypto"
+import { Readable, Writable, PassThrough, pipeline } from "node:stream"
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jsq-fsstream-"))
+const file = path.join(dir, "a.txt")
+fs.writeFileSync(file, "0123456789".repeat(10000))
+const read = (stream) => new Promise((resolve, reject) => {
+  let text = ""
+  stream.on("data", (d) => (text += d))
+  stream.on("end", () => resolve(text))
+  stream.on("error", reject)
+})
+const ranged = fs.createReadStream(file, { start: 5, end: 24, encoding: "utf8" })
+console.log(ranged instanceof Readable, ranged instanceof fs.ReadStream, ranged.pending, await read(ranged), ranged.bytesRead)
+await new Promise((resolve) => ranged.on("close", resolve))
+console.log("closed", ranged.closed, ranged.destroyed)
+
+const out = fs.createWriteStream(path.join(dir, "out.txt"))
+console.log(out instanceof Writable, out.pending)
+await new Promise((resolve, reject) => pipeline(fs.createReadStream(file), out, (err) => (err ? reject(err) : resolve())))
+console.log("piped", fs.statSync(path.join(dir, "out.txt")).size, out.bytesWritten, out.closed)
+
+const missing = fs.createReadStream(path.join(dir, "missing.txt"))
+console.log("missing", await read(missing).catch((e) => e.code))
+
+const append = fs.createWriteStream(path.join(dir, "out.txt"), { flags: "a" })
+append.end("tail")
+await new Promise((resolve) => append.on("close", resolve))
+console.log("appended", fs.statSync(path.join(dir, "out.txt")).size)
+
+function Legacy(p, options) {
+  return fs.ReadStream.apply(this, arguments), this
+}
+Legacy.prototype = Object.create(fs.ReadStream.prototype)
+Legacy.prototype.open = function () {
+  fs.open(this.path, "r", (err, fd) => {
+    this.fd = fd
+    this.emit("open", fd)
+    this.read()
+  })
+}
+const legacy = new Legacy(file, { end: 3 })
+legacy.setEncoding("utf8")
+console.log("legacy", await read(legacy))
+
+const holder = { make: PassThrough }
+const viaMethod = holder.make()
+console.log(viaMethod instanceof PassThrough, typeof Readable.call(holder))
+
+const pair = await util.promisify(crypto.generateKeyPair)("ec", { namedCurve: "P-256" })
+console.log(Object.keys(pair), util.types.isKeyObject(pair.privateKey), util.types.isKeyObject({}))
+const fd = fs.openSync(file, "r")
+const result = await util.promisify(fs.read)(fd, Buffer.alloc(4), 0, 4, 2)
+fs.closeSync(fd)
+console.log(Object.keys(result), result.bytesRead, String(result.buffer))
+console.log(await util.promisify((cb) => cb(null, 1, 2))())
+
+const key = Buffer.alloc(16, 9)
+const iv = Buffer.alloc(12, 8)
+const cipher = crypto.createCipheriv("aes-128-gcm", key, iv)
+const parts = [cipher.update(Buffer.alloc(40, 1)), cipher.update(Buffer.alloc(30, 2)), cipher.final()]
+const tag = cipher.getAuthTag()
+console.log(parts.map((p) => p.length), Buffer.concat(parts).toString("hex").slice(0, 24), tag.toString("hex"))
+const decipher = crypto.createDecipheriv("aes-128-gcm", key, iv)
+decipher.setAuthTag(tag)
+console.log(decipher.update(Buffer.concat(parts)).length, decipher.final().length)
+const forged = crypto.createDecipheriv("aes-128-gcm", key, iv)
+forged.setAuthTag(Buffer.alloc(16))
+forged.update(Buffer.concat(parts))
+try {
+  forged.final()
+} catch (e) {
+  console.log("forged", e.message)
+}
+fs.rmSync(dir, { recursive: true, force: true })

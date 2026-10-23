@@ -256,6 +256,11 @@ const NODE_SRC: &str = r##"
     writeDoubleLE(v, o = 0) { this.#view(o, 8).setFloat64(o, v, true); return o + 8 }
     writeDoubleBE(v, o = 0) { this.#view(o, 8).setFloat64(o, v); return o + 8 }
   }
+  const kCustomPromisifyArgs = Symbol("customPromisifyArgs")
+  const promisifyArgs = (fn, names) => {
+    Object.defineProperty(fn, kCustomPromisifyArgs, { value: names })
+    return fn
+  }
   const describeReceived = (v) => {
     if (v === null) return "null"
     if (v === undefined) return "undefined"
@@ -1099,7 +1104,7 @@ const NODE_SRC: &str = r##"
       }
     }
   }
-  fs.read = (fd, buffer, offset, length, position, cb) => {
+  fs.read = function read(fd, buffer, offset, length, position, cb) {
     if (typeof buffer === "function") [buffer, offset, length, position, cb] = [Buffer.alloc(16384), 0, 16384, null, buffer]
     else if (typeof offset === "function") [offset, length, position, cb] = [0, buffer.byteLength, null, offset]
     else if (typeof offset === "object" && offset !== null && typeof length === "function") [cb, length, position, offset] = [length, offset.length, offset.position, offset.offset]
@@ -1114,7 +1119,8 @@ const NODE_SRC: &str = r##"
     }
     queueMicrotask(() => (error ? cb(error) : cb(null, n, buffer)))
   }
-  fs.write = (fd, data, ...rest) => {
+  promisifyArgs(fs.read, ["bytesRead", "buffer"])
+  fs.write = function write(fd, data, ...rest) {
     const cb = typeof rest[rest.length - 1] === "function" ? rest.pop() : null
     let n
     let error = null
@@ -1125,6 +1131,7 @@ const NODE_SRC: &str = r##"
     }
     if (cb) queueMicrotask(() => (error ? cb(error) : cb(null, n, data)))
   }
+  promisifyArgs(fs.write, ["bytesWritten", "buffer"])
   class FileHandle extends EventEmitter {
     #fd
     constructor(fd) {
@@ -2200,16 +2207,25 @@ const NODE_SRC: &str = r##"
 
   const kPromisifyCustom = Symbol.for("nodejs.util.promisify.custom")
   function promisify(fn) {
-    if (typeof fn !== "function") throw new TypeError('The "original" argument must be of type function')
+    if (typeof fn !== "function") throw nodeTypeError("ERR_INVALID_ARG_TYPE", `The "original" argument must be of type function. Received ${describeReceived(fn)}`)
     if (typeof fn[kPromisifyCustom] === "function") return fn[kPromisifyCustom]
-    return function (...args) {
+    const names = fn[kCustomPromisifyArgs]
+    const promisified = function (...args) {
       return new Promise((resolve, reject) => {
         fn.call(this, ...args, (err, ...values) => {
-          if (err) reject(err)
-          else resolve(values.length > 1 ? values : values[0])
+          if (err) return reject(err)
+          if (!names) return resolve(values[0])
+          const out = {}
+          names.forEach((name, i) => (out[name] = values[i]))
+          resolve(out)
         })
       })
     }
+    Object.setPrototypeOf(promisified, Object.getPrototypeOf(fn))
+    Object.defineProperty(promisified, kPromisifyCustom, { value: promisified, configurable: true })
+    const descriptors = Object.getOwnPropertyDescriptors(fn)
+    delete descriptors.prototype
+    return Object.defineProperties(promisified, descriptors)
   }
 
   promisify.custom = kPromisifyCustom
@@ -2261,7 +2277,7 @@ const NODE_SRC: &str = r##"
     isModuleNamespaceObject: (v) => Object.prototype.toString.call(v) === "[object Module]",
     isProxy: (v) => native.isProxy(v),
     isExternal: () => false,
-    isKeyObject: () => false,
+    isKeyObject: (v) => v instanceof KeyObject,
     isCryptoKey: (v) => typeof CryptoKey === "function" && v instanceof CryptoKey,
     isUint8ClampedArray: (v) => v instanceof Uint8ClampedArray,
     isUint16Array: (v) => v instanceof Uint16Array,
@@ -2343,248 +2359,6 @@ const NODE_SRC: &str = r##"
     }
   }
 
-  class ReadStream extends EventEmitter {
-    #encoding = null
-    #destroyed = false
-    #paused = false
-    #started = false
-    #flowing = false
-    #chunks = []
-    constructor(path, options = {}) {
-      super()
-      if (typeof options === "string") options = { encoding: options }
-      this.path = path
-      this.bytesRead = 0
-      this.readable = true
-      this.readableEnded = false
-      this.closed = false
-      this.highWaterMark = options.highWaterMark ?? 65536
-      if (options.encoding) this.#encoding = options.encoding
-      queueMicrotask(() => this.#open(options))
-    }
-    #open(options) {
-      if (this.#destroyed) return
-      let bytes
-      try {
-        bytes = native.read(pathOf(this.path))
-      } catch (e) {
-        this.destroy(e)
-        return
-      }
-      const start = options.start ?? 0
-      const end = options.end === undefined ? bytes.length : Math.min(bytes.length, options.end + 1)
-      bytes = bytes.subarray(start, end)
-      if (this.#encoding) {
-        if (bytes.length) this.#chunks.push(stringFromBytes(bytes, this.#encoding))
-      } else {
-        for (let i = 0; i < bytes.length; i += this.highWaterMark) {
-          const c = bytes.subarray(i, i + this.highWaterMark)
-          this.#chunks.push(Buffer.from(c.buffer, c.byteOffset, c.byteLength))
-        }
-      }
-      this.#started = true
-      this.emit("open", 0)
-      this.emit("ready")
-      this.#flow()
-    }
-    #flow() {
-      if (!this.#started || this.#paused || this.#destroyed || this.#flowing) return
-      if (this.listenerCount("data") === 0) return
-      this.#flowing = true
-      queueMicrotask(() => {
-        this.#flowing = false
-        while (this.#chunks.length && !this.#paused && !this.#destroyed) {
-          const c = this.#chunks.shift()
-          this.bytesRead += typeof c === "string" ? Buffer.byteLength(c, this.#encoding) : c.length
-          this.emit("data", c)
-        }
-        if (!this.#chunks.length && !this.#destroyed) {
-          this.readable = false
-          this.readableEnded = true
-          this.emit("end")
-          this.destroy()
-        }
-      })
-    }
-    on(event, fn) {
-      super.on(event, fn)
-      if (event === "data") this.#flow()
-      return this
-    }
-    setEncoding(encoding) {
-      this.#encoding = encoding ?? "utf8"
-      this.#chunks = this.#chunks.map((c) => (typeof c === "string" ? c : c.toString(this.#encoding)))
-      return this
-    }
-    pause() {
-      this.#paused = true
-      return this
-    }
-    resume() {
-      this.#paused = false
-      this.#flow()
-      return this
-    }
-    isPaused() {
-      return this.#paused
-    }
-    get destroyed() {
-      return this.#destroyed
-    }
-    destroy(err) {
-      if (this.#destroyed) return this
-      this.#destroyed = true
-      this.readable = false
-      this.#chunks = []
-      queueMicrotask(() => {
-        if (err) this.emit("error", err)
-        this.closed = true
-        this.emit("close")
-      })
-      return this
-    }
-    close(cb) {
-      if (typeof cb === "function") this.once("close", cb)
-      this.destroy()
-    }
-    pipe(dest, options) {
-      this.on("data", (chunk) => {
-        if (dest.write(chunk) === false && typeof dest.once === "function") {
-          this.pause()
-          dest.once("drain", () => this.resume())
-        }
-      })
-      if (options?.end !== false) this.on("end", () => dest.end())
-      return dest
-    }
-    async *[Symbol.asyncIterator]() {
-      const queue = []
-      let done = false
-      let error = null
-      let wake = null
-      this.on("data", (c) => {
-        queue.push(c)
-        if (wake) wake()
-      })
-      this.on("end", () => {
-        done = true
-        if (wake) wake()
-      })
-      this.on("error", (e) => {
-        error = e
-        if (wake) wake()
-      })
-      while (true) {
-        if (queue.length) {
-          yield queue.shift()
-          continue
-        }
-        if (error) throw error
-        if (done) return
-        await new Promise((r) => (wake = r))
-        wake = null
-      }
-    }
-  }
-
-  class WriteStream extends EventEmitter {
-    #ended = false
-    #destroyed = false
-    constructor(path, options = {}) {
-      super()
-      if (typeof options === "string") options = { encoding: options }
-      this.path = path
-      this.bytesWritten = 0
-      this.writable = true
-      this.writableEnded = false
-      this.writableFinished = false
-      this.closed = false
-      this.pending = false
-      this.encoding = options.encoding ?? "utf8"
-      const append = String(options.flags ?? "w").startsWith("a")
-      try {
-        if (!append) native.write(pathOf(path), new Uint8Array(0), false)
-        else if (!fs.existsSync(path)) native.write(pathOf(path), new Uint8Array(0), false)
-      } catch (e) {
-        queueMicrotask(() => this.destroy(e))
-        return
-      }
-      queueMicrotask(() => {
-        this.emit("open", 1)
-        this.emit("ready")
-      })
-    }
-    write(chunk, encoding, cb) {
-      if (typeof encoding === "function") [encoding, cb] = [undefined, encoding]
-      if (this.#ended || this.#destroyed) {
-        const e = new Error("write after end")
-        e.code = "ERR_STREAM_WRITE_AFTER_END"
-        queueMicrotask(() => {
-          if (typeof cb === "function") cb(e)
-          this.emit("error", e)
-        })
-        return false
-      }
-      const data = toData(chunk, { encoding: encoding ?? this.encoding })
-      try {
-        native.write(pathOf(this.path), data, true)
-      } catch (e) {
-        queueMicrotask(() => {
-          if (typeof cb === "function") cb(e)
-          this.destroy(e)
-        })
-        return false
-      }
-      this.bytesWritten += typeof data === "string" ? Buffer.byteLength(data) : data.byteLength
-      if (typeof cb === "function") queueMicrotask(() => cb(null))
-      return true
-    }
-    end(chunk, encoding, cb) {
-      if (typeof chunk === "function") [chunk, encoding, cb] = [undefined, undefined, chunk]
-      if (typeof encoding === "function") [encoding, cb] = [undefined, encoding]
-      if (chunk != null) this.write(chunk, encoding)
-      if (typeof cb === "function") this.once("finish", cb)
-      if (!this.#ended) {
-        this.#ended = true
-        this.writable = false
-        this.writableEnded = true
-        queueMicrotask(() => {
-          this.writableFinished = true
-          this.emit("finish")
-          this.destroy()
-        })
-      }
-      return this
-    }
-    get destroyed() {
-      return this.#destroyed
-    }
-    destroy(err) {
-      if (this.#destroyed) return this
-      this.#destroyed = true
-      this.writable = false
-      queueMicrotask(() => {
-        if (err) this.emit("error", err)
-        this.closed = true
-        this.emit("close")
-      })
-      return this
-    }
-    close(cb) {
-      return this.end(cb)
-    }
-    cork() {}
-    uncork() {}
-    setDefaultEncoding(encoding) {
-      this.encoding = encoding
-      return this
-    }
-  }
-
-  fs.createReadStream = (path, options) => new ReadStream(path, options)
-  fs.createWriteStream = (path, options) => new WriteStream(path, options)
-  fs.ReadStream = ReadStream
-  fs.WriteStream = WriteStream
 
   class Interface extends EventEmitter {
     #input
@@ -3216,7 +2990,7 @@ const NODE_SRC: &str = r##"
     privateEncrypt: (key, buffer) => rsaOp("privateEncrypt", key, buffer),
     publicDecrypt: (key, buffer) => rsaOp("publicDecrypt", key, buffer),
     generateKeyPairSync,
-    generateKeyPair(type, options, cb) {
+    generateKeyPair: promisifyArgs(function generateKeyPair(type, options, cb) {
       if (typeof options === "function") [options, cb] = [undefined, options]
       let out
       let err = null
@@ -3226,7 +3000,7 @@ const NODE_SRC: &str = r##"
         err = e
       }
       queueMicrotask(() => (err ? cb(err) : cb(null, out.publicKey, out.privateKey)))
-    },
+    }, ["publicKey", "privateKey"]),
     createECDH,
     diffieHellman({ privateKey, publicKey } = {}) {
       if (!(privateKey instanceof KeyObject) || !(publicKey instanceof KeyObject)) throw cryptoErr("ERR_INVALID_ARG_TYPE", 'The "options.privateKey" property must be of type KeyObject.', TypeError)
@@ -3483,6 +3257,8 @@ const NODE_SRC: &str = r##"
         if (r) r.errored = error
         if (w) w.errored = error
       }
+      if (r) r.closed = true
+      if (w) w.closed = true
       queueMicrotask(() => {
         if (error) stream.emit("error", error)
         stream.emit("close")
@@ -3603,7 +3379,7 @@ const NODE_SRC: &str = r##"
 
   function Readable(options) {
     options = options ?? {}
-    if (this === undefined || this === globalThis) return new Readable(options)
+    if (!(this instanceof Readable)) return new Readable(options)
     Stream.call(this, options)
     initReadable(this, options)
   }
@@ -3616,6 +3392,7 @@ const NODE_SRC: &str = r##"
     readableLength: { get() { return this[kRead].buffer.reduce((n, c) => n + (this[kRead].objectMode ? 1 : c.length), 0) }, configurable: true },
     readableFlowing: { get() { return this[kRead].flowing }, configurable: true },
     readableEncoding: { get() { return this[kRead].encoding }, configurable: true },
+    closed: { get() { return !!this[kRead]?.closed }, configurable: true },
   })
   Object.assign(Readable.prototype, {
     _read() {},
@@ -3875,6 +3652,7 @@ const NODE_SRC: &str = r##"
       decodeStrings: options.decodeStrings !== false,
       defaultEncoding: options.defaultEncoding ?? "utf8",
       autoDestroy: options.autoDestroy !== false,
+      emitClose: options.emitClose !== false,
     }
     stream.writable = true
     stream.writableEnded = false
@@ -4010,7 +3788,7 @@ const NODE_SRC: &str = r##"
 
   function Writable(options) {
     options = options ?? {}
-    if (this === undefined || this === globalThis) return new Writable(options)
+    if (!(this instanceof Duplex) && !Function.prototype[Symbol.hasInstance].call(Writable, this)) return new Writable(options)
     Stream.call(this, options)
     initWritable(this, options)
     if (typeof options.construct === "function") queueMicrotask(() => options.construct.call(this, (e) => e && this.destroy(e)))
@@ -4024,9 +3802,186 @@ const NODE_SRC: &str = r##"
     writableLength: { get() { return this[kWrite].queue.length }, configurable: true },
     writableNeedDrain: { get() { return this[kWrite].needDrain }, configurable: true },
     writableCorked: { get() { return this[kWrite].corked }, configurable: true },
+    closed: { get() { return !!(this[kWrite]?.closed || this[kRead]?.closed) }, configurable: true },
   }
   Object.defineProperties(Writable.prototype, writableGetters)
   Object.assign(Writable.prototype, writableMethods)
+  const kFsImpl = Symbol("kFs")
+  const kFsPendingOpen = Symbol("kFsPendingOpen")
+  const kFsReading = Symbol("kFsReading")
+  const openReadFs = function open() {}
+  const openWriteFs = function open() {}
+  const fsStreamPath = (path) => (path instanceof URL ? fileURLToPath(path) : path)
+  const fsStreamOptions = (options) => {
+    if (typeof options === "string") return { encoding: options }
+    return { ...(options ?? {}) }
+  }
+  const fsStreamOpen = (stream, defaultOpen) => {
+    const impl = stream[kFsImpl]
+    const ready = () => {
+      const waiting = stream[kFsPendingOpen]
+      stream[kFsPendingOpen] = null
+      for (const fn of waiting ?? []) fn()
+    }
+    if (stream.fd !== null && typeof stream.fd === "object" && typeof stream.fd.fd === "number") stream.fd = stream.fd.fd
+    if (typeof stream.fd === "number") {
+      ready()
+      return
+    }
+    if (stream.open !== defaultOpen) {
+      const emit = stream.emit
+      stream.emit = function (event, ...args) {
+        if (event === "open") {
+          this.emit = emit
+          ready()
+        } else if (event === "error") this.emit = emit
+        return emit.call(this, event, ...args)
+      }
+      stream.open()
+      return
+    }
+    impl.open(stream.path, stream.flags, stream.mode, (err, fd) => {
+      if (err) {
+        stream.destroy(err)
+        return
+      }
+      stream.fd = fd
+      stream.emit("open", fd)
+      stream.emit("ready")
+      ready()
+    })
+  }
+  const fsWhenOpen = (stream, fn) => {
+    if (typeof stream.fd === "number") return fn()
+    ;(stream[kFsPendingOpen] ??= []).push(fn)
+  }
+  const fsCloseFd = (stream, err, cb) => {
+    const fd = stream.fd
+    if (typeof fd !== "number" || !stream.autoClose) return cb(err)
+    stream.fd = null
+    stream[kFsImpl].close(fd, (closeErr) => cb(err || closeErr || null))
+  }
+  function ReadStream(path, options) {
+    if (!(this instanceof ReadStream)) return new ReadStream(path, options)
+    options = fsStreamOptions(options)
+    Readable.call(this, { highWaterMark: options.highWaterMark ?? 65536, encoding: options.encoding, objectMode: false, signal: options.signal, autoDestroy: options.autoClose !== false, emitClose: options.emitClose !== false })
+    this[kFsImpl] = options.fs ? { ...fs, ...options.fs } : fs
+    this[kFsPendingOpen] = []
+    this.fd = options.fd ?? null
+    this.path = options.fd !== undefined && path == null ? undefined : fsStreamPath(path)
+    this.flags = options.flags ?? "r"
+    this.mode = options.mode ?? 0o666
+    this.start = options.start
+    this.end = options.end ?? Infinity
+    this.pos = options.start
+    this.bytesRead = 0
+    this.autoClose = options.autoClose !== false
+    queueMicrotask(() => {
+      if (!this.destroyed) fsStreamOpen(this, openReadFs)
+    })
+  }
+  Object.setPrototypeOf(ReadStream.prototype, Readable.prototype)
+  Object.setPrototypeOf(ReadStream, Readable)
+  Object.defineProperty(ReadStream.prototype, "pending", {
+    get() {
+      return this.fd === null
+    },
+    configurable: true,
+  })
+  ReadStream.prototype.open = openReadFs
+  ReadStream.prototype._read = function (n) {
+    if (this[kFsReading]) return
+    this[kFsReading] = true
+    fsWhenOpen(this, () => {
+      if (this.destroyed) return
+      const remaining = this.end === Infinity ? n : this.end - (this.pos ?? this.bytesRead) + 1
+      const want = Math.max(0, Math.min(n, remaining))
+      if (want <= 0) {
+        this[kFsReading] = false
+        this.push(null)
+        return
+      }
+      const buf = Buffer.allocUnsafe(want)
+      this[kFsImpl].read(this.fd, buf, 0, want, this.pos ?? null, (err, bytes) => {
+        this[kFsReading] = false
+        if (err) return this.destroy(err)
+        if (!bytes) return this.push(null)
+        if (this.pos !== undefined) this.pos += bytes
+        this.bytesRead += bytes
+        this.push(bytes === want ? buf : buf.subarray(0, bytes))
+      })
+    })
+  }
+  ReadStream.prototype._destroy = function (err, cb) {
+    this[kFsPendingOpen] = null
+    fsCloseFd(this, err, cb)
+  }
+  ReadStream.prototype.close = function (cb) {
+    if (typeof cb === "function") {
+      if (this.closed) queueMicrotask(cb)
+      else this.once("close", cb)
+    }
+    this.destroy()
+  }
+  function WriteStream(path, options) {
+    if (!(this instanceof WriteStream)) return new WriteStream(path, options)
+    options = fsStreamOptions(options)
+    Writable.call(this, { highWaterMark: options.highWaterMark, decodeStrings: true, defaultEncoding: options.encoding, signal: options.signal, autoDestroy: options.autoClose !== false, emitClose: options.emitClose !== false })
+    this[kFsImpl] = options.fs ? { ...fs, ...options.fs } : fs
+    this[kFsPendingOpen] = []
+    this.fd = options.fd ?? null
+    this.path = options.fd !== undefined && path == null ? undefined : fsStreamPath(path)
+    this.flags = options.flags ?? "w"
+    this.mode = options.mode ?? 0o666
+    this.start = options.start
+    this.pos = options.start
+    this.bytesWritten = 0
+    this.autoClose = options.autoClose !== false
+    if (options.encoding) this.setDefaultEncoding(options.encoding)
+    queueMicrotask(() => {
+      if (!this.destroyed) fsStreamOpen(this, openWriteFs)
+    })
+  }
+  Object.setPrototypeOf(WriteStream.prototype, Writable.prototype)
+  Object.setPrototypeOf(WriteStream, Writable)
+  Object.defineProperty(WriteStream.prototype, "pending", {
+    get() {
+      return this.fd === null
+    },
+    configurable: true,
+  })
+  WriteStream.prototype.open = openWriteFs
+  WriteStream.prototype._write = function (chunk, encoding, cb) {
+    fsWhenOpen(this, () => {
+      const data = typeof chunk === "string" ? Buffer.from(chunk, encoding) : chunk
+      this[kFsImpl].write(this.fd, data, 0, data.length, this.pos ?? null, (err, written) => {
+        if (err) return cb(err)
+        this.bytesWritten += written
+        if (this.pos !== undefined) this.pos += written
+        cb()
+      })
+    })
+  }
+  WriteStream.prototype._destroy = function (err, cb) {
+    this[kFsPendingOpen] = null
+    fsCloseFd(this, err, cb)
+  }
+  WriteStream.prototype.close = function (cb) {
+    if (typeof cb === "function") {
+      if (this.closed) {
+        queueMicrotask(cb)
+        return
+      }
+      this.once("close", cb)
+    }
+    if (!this.autoClose) this.once("finish", () => this.destroy())
+    this.end()
+  }
+  WriteStream.prototype.destroySoon = WriteStream.prototype.end
+  fs.ReadStream = ReadStream
+  fs.WriteStream = WriteStream
+  fs.createReadStream = (path, options) => new fs.ReadStream(path, options)
+  fs.createWriteStream = (path, options) => new fs.WriteStream(path, options)
   for (const stdio of [globalThis.process?.stdout, globalThis.process?.stderr]) {
     if (!stdio || typeof stdio !== "object" || kWrite in stdio) continue
     const raw = stdio.write
@@ -4053,7 +4008,7 @@ const NODE_SRC: &str = r##"
 
   function Duplex(options) {
     options = options ?? {}
-    if (this === undefined || this === globalThis) return new Duplex(options)
+    if (!(this instanceof Duplex)) return new Duplex(options)
     Readable.call(this, { ...options, read: options.read, objectMode: options.objectMode || options.readableObjectMode, highWaterMark: options.readableHighWaterMark ?? options.highWaterMark })
     initWritable(this, options)
     this.allowHalfOpen = options.allowHalfOpen !== false
@@ -4065,7 +4020,7 @@ const NODE_SRC: &str = r##"
 
   function Transform(options) {
     options = options ?? {}
-    if (this === undefined || this === globalThis) return new Transform(options)
+    if (!(this instanceof Transform)) return new Transform(options)
     Duplex.call(this, options)
     if (typeof options.transform === "function") this._transform = options.transform
     if (typeof options.flush === "function") this._flush = options.flush
@@ -4114,7 +4069,7 @@ const NODE_SRC: &str = r##"
   })
 
   function PassThrough(options) {
-    if (this === undefined || this === globalThis) return new PassThrough(options)
+    if (!(this instanceof PassThrough)) return new PassThrough(options)
     Transform.call(this, options)
   }
   Object.setPrototypeOf(PassThrough.prototype, Transform.prototype)
@@ -4152,8 +4107,9 @@ const NODE_SRC: &str = r##"
     }
     const readable = stream[kRead] !== undefined || typeof stream.read === "function" || stream.readable === true
     const writable = stream[kWrite] !== undefined || typeof stream.write === "function"
+    const waitClose = writable && !readable && stream[kWrite]?.autoDestroy && stream[kWrite]?.emitClose && !stream[kWrite]?.destroyed
     if (readable && (!writable || options?.writable === false)) stream.on("end", onEnd)
-    else stream.on("finish", onEnd)
+    else if (!waitClose) stream.on("finish", onEnd)
     if (readable && writable && options?.writable !== false && options?.readable !== false) {
       let ended = false
       let finishedW = false
@@ -7080,8 +7036,8 @@ const NODE_SRC: &str = r##"
   class DnsResolver extends DnsPromisesResolver {}
   for (const m of dnsMethodNames) DnsResolver.prototype[m] = callbackify2((...args) => dnsPromises[m](...args))
   const dns = {
-    lookup: callbackify2(dnsPromises.lookup),
-    lookupService: callbackify2(dnsPromises.lookupService),
+    lookup: promisifyArgs(callbackify2(dnsPromises.lookup), ["address", "family"]),
+    lookupService: promisifyArgs(callbackify2(dnsPromises.lookupService), ["hostname", "service"]),
     getServers: () => dnsPromises.getServers(),
     setServers: (servers) => dnsPromises.setServers(servers),
     setDefaultResultOrder: (order) => dnsPromises.setDefaultResultOrder(order),
@@ -7921,6 +7877,374 @@ const NODE_SRC: &str = r##"
   }
   const wasi = { WASI }
 
+  const makeStandaloneTest = (mock) => {
+    const tty = !!process.stdout?.isTTY
+    const paint = (code, text) => (tty ? `\x1b[${code}m${text}\x1b[39m` : text)
+    const kSubtests = Symbol("subtests")
+    const kSkip = Symbol("skip")
+    const kTodo = Symbol("todo")
+    class TestNode {
+      constructor(name, options, fn, parent, kind, loc) {
+        this.name = name
+        this.options = options ?? {}
+        this.fn = fn
+        this.parent = parent
+        this.kind = kind
+        this.loc = loc
+        this.children = []
+        this.hooks = { before: [], after: [], beforeEach: [], afterEach: [] }
+        this.depth = parent ? parent.depth + 1 : -1
+        this.announced = false
+        this.failed = false
+        this.build = null
+        if (parent?.inheritedTodo || (kind === "suite" && this.options.todo)) this.inheritedTodo = parent?.inheritedTodo ?? this.options.todo
+      }
+    }
+    const root = new TestNode("<root>", {}, null, null, "suite", null)
+    let defining = root
+    let current = null
+    const stats = { tests: 0, suites: 0, pass: 0, fail: 0, cancelled: 0, skipped: 0, todo: 0 }
+    const failures = []
+    const diagnostics = []
+    const started = performance.now()
+    let draining = null
+    let index = 0
+    let rootBeforeDone = false
+    let exitHooked = false
+    let finished = false
+    const write = (line) => process.stdout.write(line + "\n")
+    const fmt = (ms) => String(Number(ms.toFixed(4)))
+    const indent = (depth) => "  ".repeat(Math.max(0, depth))
+    const location = () => {
+      for (const line of String(new Error().stack).split("\n").slice(1)) {
+        const m = line.match(/\(?([^()\s]+):(\d+):(\d+)\)?\s*$/)
+        if (!m || m[1].startsWith("<") || m[1].startsWith("node:")) continue
+        let file = m[1]
+        if (file.startsWith("file:")) file = fileURLToPath(file)
+        return `${modulePath().relative(process.cwd(), file).replace(/\\/g, "/")}:${m[2]}:${m[3]}`
+      }
+      return null
+    }
+    const normalize = (name, options, fn) => {
+      if (typeof name === "function") return [name.name || "<anonymous>", {}, name]
+      if (typeof name === "object" && name !== null) return [fn?.name || options?.name || "<anonymous>", name, typeof options === "function" ? options : fn]
+      if (typeof options === "function") return [String(name ?? "<anonymous>"), {}, options]
+      return [String(name ?? "<anonymous>"), options ?? {}, fn]
+    }
+    const announce = (node) => {
+      const chain = []
+      for (let p = node.parent; p && p !== root; p = p.parent) if (!p.announced) chain.unshift(p)
+      for (const p of chain) {
+        p.announced = true
+        write(`${indent(p.depth)}▶ ${p.name}`)
+      }
+    }
+    const report = (node, status, duration, directive) => {
+      announce(node)
+      const symbol = status === "pass" ? "✔" : status === "fail" ? "✖" : status === "skip" ? "﹣" : "⚠"
+      const color = status === "pass" ? 32 : status === "fail" ? 31 : status === "skip" ? 90 : 33
+      write(indent(node.depth) + paint(color, `${symbol} ${node.name} (${fmt(duration)}ms)${directive ? ` # ${directive}` : ""}`))
+    }
+    const callFn = (fn, ctx) => {
+      if (fn.length >= 2) {
+        return new Promise((resolve, reject) => {
+          let settled = false
+          const done = (err) => {
+            if (settled) return
+            settled = true
+            if (err) reject(err)
+            else resolve()
+          }
+          try {
+            const r = fn.call(ctx, ctx, done)
+            if (r && typeof r.then === "function") r.then(undefined, done)
+          } catch (e) {
+            done(e)
+          }
+        })
+      }
+      return fn.call(ctx, ctx)
+    }
+    const withTimeout = (promise, ms) => {
+      if (!(ms > 0) || ms === Infinity) return promise
+      let timer
+      return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Object.assign(new Error(`test timed out after ${ms}ms`), { code: "ERR_TEST_FAILURE", failureType: "testTimeoutFailure" })), ms)
+        }),
+      ]).finally(() => clearTimeout(timer))
+    }
+    const hooksFor = (node, key) => {
+      const out = []
+      for (let p = node.parent; p; p = p.parent) out.unshift(...p.hooks[key])
+      return key === "afterEach" ? out.reverse() : out
+    }
+    class SuiteContext {
+      #node
+      constructor(node) {
+        this.#node = node
+      }
+      get name() {
+        return this.#node.name
+      }
+      get fullName() {
+        return fullName(this.#node)
+      }
+      get filePath() {
+        return process.argv[1]
+      }
+      get signal() {
+        return new AbortController().signal
+      }
+    }
+    const fullName = (node) => {
+      const names = []
+      for (let p = node; p && p !== root; p = p.parent) names.unshift(p.name)
+      return names.join(" > ")
+    }
+    class TestContext {
+      #node
+      constructor(node) {
+        this.#node = node
+        this[kSubtests] = []
+        this.mock = mock
+        this.assert = assert
+        this.signal = new AbortController().signal
+      }
+      get name() {
+        return this.#node.name
+      }
+      get fullName() {
+        return fullName(this.#node)
+      }
+      get filePath() {
+        return process.argv[1]
+      }
+      diagnostic(message) {
+        diagnostics.push(String(message))
+      }
+      skip(message) {
+        this[kSkip] = message ?? ""
+      }
+      todo(message) {
+        this[kTodo] = message ?? true
+      }
+      plan() {}
+      runOnly() {}
+      before(fn) {
+        this.#node.hooks.before.push(fn)
+      }
+      after(fn) {
+        this.#node.hooks.after.push(fn)
+      }
+      beforeEach(fn) {
+        this.#node.hooks.beforeEach.push(fn)
+      }
+      afterEach(fn) {
+        this.#node.hooks.afterEach.push(fn)
+      }
+      test(name, options, fn) {
+        const [title, opts, body] = normalize(name, options, fn)
+        const node = new TestNode(title, opts, body, this.#node, "test", location())
+        this.#node.children.push(node)
+        const p = runNode(node)
+        this[kSubtests].push(p)
+        return p
+      }
+    }
+    const runTest = async (node) => {
+      stats.tests++
+      const opts = node.options
+      if (opts.skip) {
+        stats.skipped++
+        report(node, "skip", 0, typeof opts.skip === "string" ? opts.skip : "SKIP")
+        return
+      }
+      const ctx = new TestContext(node)
+      const t0 = performance.now()
+      let error = null
+      let fromSubtests = false
+      const previous = current
+      current = node
+      try {
+        for (const h of hooksFor(node, "beforeEach")) await callFn(h, ctx)
+        if (typeof node.fn === "function") await withTimeout(Promise.resolve(callFn(node.fn, ctx)), opts.timeout)
+        await Promise.allSettled(ctx[kSubtests])
+      } catch (e) {
+        error = e
+      }
+      try {
+        for (const h of hooksFor(node, "afterEach")) await callFn(h, ctx)
+      } catch (e) {
+        error ??= e
+      }
+      current = previous
+      const failedChildren = node.children.filter((c) => c.failed).length
+      if (!error && failedChildren) {
+        error = Object.assign(new Error(`${failedChildren} subtest${failedChildren > 1 ? "s" : ""} failed`), { code: "ERR_TEST_FAILURE", failureType: "subtestsFailed" })
+        fromSubtests = true
+      }
+      const duration = performance.now() - t0
+      if (ctx[kSkip] !== undefined) {
+        stats.skipped++
+        report(node, "skip", duration, ctx[kSkip] || "SKIP")
+        return
+      }
+      const todo = opts.todo || ctx[kTodo] || node.inheritedTodo
+      if (todo) {
+        stats.todo++
+        const message = typeof todo === "string" && todo ? todo : "TODO"
+        report(node, error ? "todo" : "pass", duration, message)
+        if (error && !fromSubtests) failures.push({ node, error, duration, status: "todo", message })
+        return
+      }
+      if (error) {
+        stats.fail++
+        node.failed = true
+        report(node, "fail", duration)
+        if (!fromSubtests) failures.push({ node, error, duration, status: "fail" })
+        return
+      }
+      stats.pass++
+      report(node, "pass", duration)
+    }
+    const runSuite = async (node) => {
+      stats.suites++
+      const t0 = performance.now()
+      if (node.options.skip) {
+        report(node, "skip", 0, typeof node.options.skip === "string" ? node.options.skip : "SKIP")
+        return
+      }
+      let error = null
+      try {
+        if (node.build) await node.build
+        const ctx = new SuiteContext(node)
+        for (const h of node.hooks.before) await callFn(h, ctx)
+        for (const child of node.children) await runNode(child)
+        for (const h of node.hooks.after) await callFn(h, ctx)
+      } catch (e) {
+        error = e
+      }
+      node.failed = !!error || node.children.some((c) => c.failed)
+      if (error) failures.push({ node, error, duration: performance.now() - t0, status: "fail" })
+      const todo = node.inheritedTodo
+      report(node, node.failed ? (todo ? "todo" : "fail") : "pass", performance.now() - t0, todo ? (typeof todo === "string" ? todo : "TODO") : undefined)
+    }
+    const runNode = (node) => (node.kind === "suite" ? runSuite(node) : runTest(node))
+    const failureLines = (f) => {
+      const symbol = f.status === "todo" ? "⚠" : "✖"
+      return [
+        `test at ${f.node.loc ?? process.argv[1]}`,
+        paint(f.status === "todo" ? 33 : 31, `${symbol} ${f.node.name} (${fmt(f.duration)}ms)${f.status === "todo" ? ` # ${f.message}` : ""}`),
+        ...process.getBuiltinModule("node:util").inspect(f.error).split("\n").map((line) => `  ${line}`),
+      ]
+    }
+    const finish = async () => {
+      if (draining) await draining
+      if (index < root.children.length) {
+        schedule()
+        process.once("beforeExit", finish)
+        return
+      }
+      if (finished) return
+      finished = true
+      try {
+        for (const h of root.hooks.after) await callFn(h, new SuiteContext(root))
+      } catch (e) {
+        failures.push({ node: { name: "after", loc: null }, error: e, duration: 0, status: "fail" })
+        stats.fail++
+      }
+      if (process.env.JSQ_TEST_CHILD === "1") {
+        write("\u0001jsq-test-report " + JSON.stringify({ stats, diagnostics, failures: failures.map(failureLines) }))
+        if (stats.fail > 0) process.exitCode = 1
+        return
+      }
+      for (const d of diagnostics) write(paint(34, `ℹ ${d}`))
+      for (const key of ["tests", "suites", "pass", "fail", "cancelled", "skipped", "todo"]) write(paint(34, `ℹ ${key} ${stats[key]}`))
+      write(paint(34, `ℹ duration_ms ${fmt(performance.now() - started)}`))
+      if (failures.length) {
+        write("")
+        write(paint(31, "✖ failing tests:"))
+        for (const f of failures) {
+          write("")
+          for (const line of failureLines(f)) write(line)
+        }
+      }
+      if (stats.fail > 0) process.exitCode = 1
+    }
+    const schedule = () => {
+      if (!exitHooked) {
+        exitHooked = true
+        process.once("beforeExit", finish)
+      }
+      if (draining || finished) return
+      draining = (async () => {
+        await new Promise((resolve) => setImmediate(resolve))
+        if (!rootBeforeDone) {
+          rootBeforeDone = true
+          for (const h of root.hooks.before) await callFn(h, new SuiteContext(root))
+        }
+        while (index < root.children.length) await runNode(root.children[index++])
+        draining = null
+      })()
+    }
+    const register = (kind, name, options, fn) => {
+      const [title, opts, body] = normalize(name, options, fn)
+      const loc = location()
+      if (kind === "test" && current) {
+        const node = new TestNode(title, opts, body, current, "test", loc)
+        current.children.push(node)
+        return runNode(node)
+      }
+      const parent = defining
+      const node = new TestNode(title, opts, body, parent, kind, loc)
+      parent.children.push(node)
+      if (kind === "suite" && typeof body === "function" && !opts.skip) {
+        defining = node
+        try {
+          const r = body(new SuiteContext(node))
+          if (r && typeof r.then === "function") node.build = r
+        } finally {
+          defining = parent
+        }
+      }
+      if (parent === root) schedule()
+      return Promise.resolve()
+    }
+    const variants = (kind) => {
+      const fn = (name, options, body) => register(kind, name, options, body)
+      const withOption = (key) => (name, options, body) => {
+        const [title, opts, b] = normalize(name, options, body)
+        return register(kind, title, { ...opts, [key]: opts[key] ?? true }, b)
+      }
+      fn.skip = withOption("skip")
+      fn.todo = withOption("todo")
+      fn.only = withOption("only")
+      return fn
+    }
+    const test = variants("test")
+    const describe = variants("suite")
+    const hook = (key) => (fn) => {
+      if (current) current.hooks[key].push(fn)
+      else defining.hooks[key].push(fn)
+    }
+    Object.assign(test, {
+      test,
+      it: test,
+      describe,
+      suite: describe,
+      before: hook("before"),
+      after: hook("after"),
+      beforeEach: hook("beforeEach"),
+      afterEach: hook("afterEach"),
+      mock,
+      run: () => new EventEmitter(),
+      snapshot: { setDefaultSnapshotSerializers() {}, setResolveSnapshotPath() {} },
+    })
+    Object.defineProperty(test, "default", { value: test, writable: true, enumerable: false, configurable: true })
+    return test
+  }
   const makeNodeTest = (base) => {
     const normalize = (name, options, fn) => {
       if (typeof name === "function") return [name.name || "<anonymous>", name]
@@ -8012,6 +8336,7 @@ const NODE_SRC: &str = r##"
       restoreAll() {},
       timers: { enable() {}, reset() {}, tick() {}, runAll() {}, setTime() {} },
     }
+    if (!native.testHarness()) return makeStandaloneTest(mock)
     const before = (fn) => {
       let done = false
       base.beforeEach(async () => {
@@ -8363,7 +8688,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let n = vm.new_object();
-    let natives: [(&str, u32, crate::object::NativeFn); 62] = [
+    let natives: [(&str, u32, crate::object::NativeFn); 63] = [
         ("isProxy", 1, is_proxy),
         ("watchStart", 4, super::netio::watch_start),
         ("watchClose", 1, super::netio::watch_close),
@@ -8423,6 +8748,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         ("vmRunScript", 4, vm_run_script),
         ("vmRunInContext", 5, vm_run_in_context),
         ("vmContextGlobals", 0, vm_context_globals),
+        ("testHarness", 0, native_test_harness),
         ("setModuleClass", 1, native_set_module_class),
         ("cjsCompile", 3, native_cjs_compile),
         ("dnsLookup", 1, dns_lookup),
@@ -9295,6 +9621,10 @@ fn vm_run_script(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         _ => 0,
     };
     vm.run_script_at(&code, &name, offset(arg(args, 2)), offset(arg(args, 3)))
+}
+
+fn native_test_harness(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    Ok(Value::Bool(vm.test_harness))
 }
 
 fn vm_context_globals(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {

@@ -414,6 +414,7 @@ fn caller_module(vm: &Vm) -> std::rc::Rc<crate::bytecode::ModuleInfo> {
         source: "".into(),
         sloppy: true,
         context: Default::default(),
+        esm: false,
     })
 }
 
@@ -469,6 +470,7 @@ fn base_module(vm: &mut Vm, v: &Value) -> Result<std::rc::Rc<crate::bytecode::Mo
         source: "".into(),
         sloppy: true,
         context: Default::default(),
+        esm: false,
     }))
 }
 

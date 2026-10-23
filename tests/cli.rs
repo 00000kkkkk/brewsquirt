@@ -270,3 +270,75 @@ fn node_flags_preload_and_env_file() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+fn mask_test_report(text: &str) -> String {
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        if line.trim_start().starts_with("at ") {
+            continue;
+        }
+        let mut out = String::new();
+        let mut rest = line;
+        while let Some(i) = rest.find('(') {
+            out.push_str(&rest[..i]);
+            let tail = &rest[i + 1..];
+            let digits = tail
+                .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+                .unwrap_or(tail.len());
+            if digits > 0 && tail[digits..].starts_with("ms)") {
+                out.push_str("(Xms)");
+                rest = &tail[digits + 3..];
+            } else {
+                out.push('(');
+                rest = tail;
+            }
+        }
+        out.push_str(rest);
+        if let Some(i) = out.find("duration_ms ") {
+            out.truncate(i + "duration_ms ".len());
+            out.push('X');
+        }
+        lines.push(out);
+    }
+    lines.join("\n")
+}
+
+#[test]
+fn node_test_runner_reports_like_node() {
+    let dir = std::env::temp_dir().join(format!("jsq-node-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("fail.test.mjs"), "import { test, describe, it, before, after, beforeEach, afterEach } from \"node:test\"\nimport assert from \"node:assert/strict\"\nconst log = []\nbefore(() => log.push(\"before\"))\ndescribe(\"outer\", () => {\n  beforeEach(() => log.push(\"each\"))\n  it(\"ok\", () => {})\n  it(\"bad\", () => {\n    assert.equal(1, 2)\n  })\n  describe(\"inner\", () => {\n    it(\"deep\", async () => {})\n  })\n})\ntest(\"with subtests\", async (t) => {\n  await t.test(\"child one\", () => {})\n  await t.test(\"child two\", () => {\n    throw new Error(\"boom\")\n  })\n})\ntest(\"done style\", (t, done) => {\n  setTimeout(done, 1)\n})\ntest(\"skip via ctx\", (t) => {\n  t.skip(\"not now\")\n})\ntest(\"todo option\", { todo: true }, () => {\n  throw new Error(\"ignored\")\n})\nafter(() => console.log(\"log\", log.join(\",\")))\n").unwrap();
+    let out = run_in(&dir, &["fail.test.mjs"]);
+    assert_eq!(out.status.code(), Some(1), "{}", normalize(&out.stderr));
+    assert_eq!(
+        mask_test_report(&normalize(&out.stdout)),
+        "▶ outer\n  ✔ ok (Xms)\n  ✖ bad (Xms)\n  ▶ inner\n    ✔ deep (Xms)\n  ✔ inner (Xms)\n✖ outer (Xms)\n▶ with subtests\n  ✔ child one (Xms)\n  ✖ child two (Xms)\n✖ with subtests (Xms)\n✔ done style (Xms)\n﹣ skip via ctx (Xms) # not now\n⚠ todo option (Xms) # TODO\nlog before,each,each,each\nℹ tests 9\nℹ suites 2\nℹ pass 4\nℹ fail 3\nℹ cancelled 0\nℹ skipped 1\nℹ todo 1\nℹ duration_ms X\n\n✖ failing tests:\n\ntest at fail.test.mjs:8:3\n✖ bad (Xms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  \n  1 !== 2\n  \n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 1,\n    expected: 2,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at fail.test.mjs:17:11\n✖ child two (Xms)\n  Error: boom\n\ntest at fail.test.mjs:27:1\n⚠ todo option (Xms) # TODO\n  Error: ignored"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn node_test_flag_discovers_and_aggregates() {
+    let dir = std::env::temp_dir().join(format!("jsq-node-test-flag-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.test.mjs"), "import { test } from \"node:test\"\nimport assert from \"node:assert\"\ntest(\"a passes\", () => {})\ntest(\"a fails\", () => assert.strictEqual(1, 2))\n").unwrap();
+    std::fs::create_dir_all(dir.join("test")).unwrap();
+    std::fs::write(dir.join("test/b.js"), "const { describe, it } = require(\"node:test\")\ndescribe(\"b suite\", () => {\n  it(\"b one\", () => {})\n  it.skip(\"b two\", () => {})\n})\n").unwrap();
+    std::fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+    std::fs::write(
+        dir.join("node_modules/pkg/c.test.js"),
+        "throw new Error(\"must not run\")\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("helper.js"), "module.exports = 1\n").unwrap();
+    let out = run_in(&dir, &["--test"]);
+    assert_eq!(out.status.code(), Some(1), "{}", normalize(&out.stderr));
+    assert_eq!(
+        mask_test_report(&normalize(&out.stdout)),
+        "✔ a passes (Xms)\n✖ a fails (Xms)\n▶ b suite\n  ✔ b one (Xms)\n  ﹣ b two (Xms) # SKIP\n✔ b suite (Xms)\nℹ tests 4\nℹ suites 1\nℹ pass 2\nℹ fail 1\nℹ cancelled 0\nℹ skipped 1\nℹ todo 0\nℹ duration_ms X\n\n✖ failing tests:\n\ntest at a.test.mjs:4:1\n✖ a fails (Xms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  \n  1 !== 2\n  \n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 1,\n    expected: 2,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

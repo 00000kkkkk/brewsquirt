@@ -232,6 +232,7 @@ pub struct ModuleInfo {
     pub source: JsStr,
     pub sloppy: bool,
     pub context: std::cell::RefCell<Option<std::rc::Weak<crate::object::Obj>>>,
+    pub esm: bool,
 }
 
 impl ModuleInfo {

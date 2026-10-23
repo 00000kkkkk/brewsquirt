@@ -1577,6 +1577,10 @@ fn native_cipher_new(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     if mode == Mode::Cbc || mode == Mode::Ctr {
         block.copy_from_slice(&iv);
     }
+    if mode == Mode::Gcm {
+        block[..12].copy_from_slice(&iv);
+        block[15] = 2;
+    }
     let ctx = CipherCtx {
         mode,
         encrypt,
@@ -1785,7 +1789,11 @@ fn native_cipher_update(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let r = with_ctx(id, |ctx| match ctx.mode {
         Mode::Cbc | Mode::Ecb => block_process(ctx, &data, false),
         Mode::Ctr => Ok(ctr_process(ctx, &data)),
-        Mode::Gcm | Mode::ChaCha => {
+        Mode::Gcm => {
+            ctx.buf.extend_from_slice(&data);
+            Ok(ctr_process(ctx, &data))
+        }
+        Mode::ChaCha => {
             ctx.buf.extend_from_slice(&data);
             Ok(Vec::new())
         }
@@ -1808,13 +1816,14 @@ fn native_cipher_final(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         Mode::Ctr => Ok(Vec::new()),
         Mode::Gcm | Mode::ChaCha => {
             let data = std::mem::take(&mut ctx.buf);
+            let streamed = ctx.mode == Mode::Gcm;
             if ctx.encrypt {
                 aead_seal(ctx, &data).map(|(out, tag)| {
                     ctx.tag = Some(tag[..ctx.tag_len.min(16)].to_vec());
-                    out
+                    if streamed { Vec::new() } else { out }
                 })
             } else {
-                aead_open(ctx, &data)
+                aead_open(ctx, &data).map(|out| if streamed { Vec::new() } else { out })
             }
         }
     });

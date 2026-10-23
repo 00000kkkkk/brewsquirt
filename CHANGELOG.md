@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `node:test` runs a file's tests when the file is executed, like Node: suites, subtests,
+  `before`/`after`/`beforeEach`/`afterEach` hooks, `skip`/`todo` options and context methods,
+  done callbacks, timeouts, diagnostics and `t.assert`, with Node's spec report, the failing
+  tests section and exit code 1 on failure. `jsq test` keeps its own runner for these files.
+- `jsq --test [files or directories]` works like `node --test`: it finds `*.test.*`, `*-test.*`,
+  `*_test.*`, `test-*.*`, `test.*` and files under `test` directories (JavaScript and
+  TypeScript, outside `node_modules` and `nude_modules`), runs each file in its own process and
+  prints one combined report, so `"test": "node --test"` scripts run under jsq.
+
+### Changed
+
+- Stack frames of ES modules show `file://` URLs, as in Node, instead of paths relative to the
+  working directory.
+
+### Fixed
+
+- `fs.ReadStream` and `fs.WriteStream` are real `Readable` and `Writable` streams built as
+  function constructors over file descriptors, with `fd`, `start`/`end`, `flags`, `pending`,
+  `bytesRead`/`bytesWritten`, `close()` and support for a patched `open()`. `graceful-fs`,
+  `archiver` and `log4js` file appenders work with them.
+- `util.promisify` resolves to the first callback value like Node and to named results for
+  `crypto.generateKeyPair`, `dns.lookup`, `dns.lookupService`, `fs.read` and `fs.write`; the
+  promisified function keeps the original's properties. `jose` key generation works.
+- `util.types.isKeyObject` recognizes `KeyObject`s.
+- AES-GCM ciphers return data from `update()` and authenticate in `final()`, as in Node, so
+  callers that use only the `update()` output, such as `jose` JWE decryption, get the plaintext.
+- `Readable`, `Duplex`, `Transform` and `PassThrough` called without `new` and with an unrelated
+  `this` return a new stream, and `Writable.call(this)` initializes objects that inherit from
+  `Duplex`. `unzipper` calls `Stream.PassThrough()` that way.
+- Streams have a `closed` property, and `stream.finished` and `pipeline` wait for `close` on
+  writable streams that auto-destroy, as Node does.
+
 ## [1.8.0] - 2026-10-24
 
 ### Added

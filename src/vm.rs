@@ -360,6 +360,7 @@ pub struct Vm {
     pub(crate) main_cjs_pending: bool,
     pub(crate) module_class: Option<Value>,
     pub(crate) cjs_stub_proto: Option<Rc<Obj>>,
+    pub test_harness: bool,
     pub(crate) promise_intrinsic: Option<Rc<Obj>>,
     pub(crate) wasm: Option<Box<builtins::wasm::WasmState>>,
     pub(crate) kept_alive: FxHashMap<usize, Rc<Obj>>,
@@ -898,6 +899,7 @@ impl Vm {
             main_cjs_pending: false,
             module_class: None,
             cjs_stub_proto: None,
+            test_harness: false,
             promise_intrinsic: None,
             wasm: None,
             kept_alive: FxHashMap::default(),
@@ -963,6 +965,7 @@ impl Vm {
         } else {
             parser::parse(src)?
         };
+        let esm = mode == Mode::Module;
         compile_module(
             &ast,
             Rc::new(ModuleInfo {
@@ -971,6 +974,7 @@ impl Vm {
                 source: src.into(),
                 sloppy,
                 context: Default::default(),
+                esm,
             }),
             mode,
         )
@@ -1003,6 +1007,7 @@ impl Vm {
                 source: src.into(),
                 sloppy,
                 context: Default::default(),
+                esm: false,
             }),
             Mode::Repl,
         )
@@ -1429,6 +1434,7 @@ impl Vm {
             source: src.into(),
             sloppy: false,
             context: Default::default(),
+            esm: false,
         });
         let proto = match compile_indirect_eval(&ast, module, strict) {
             Ok(p) => p,
@@ -1455,6 +1461,7 @@ impl Vm {
             source: src.into(),
             sloppy: false,
             context: std::cell::RefCell::new(cl.proto.module.context.borrow().clone()),
+            esm: false,
         });
         let proto = match compile_eval(&ast, module, scope) {
             Ok(p) => p,
@@ -2368,6 +2375,7 @@ impl Vm {
                 source: "".into(),
                 sloppy: false,
                 context: Default::default(),
+                esm: false,
             });
             let ns = self.import_module(&path.display().to_string(), &from)?;
             return self.require_esm_result(&ns);
@@ -2397,6 +2405,7 @@ impl Vm {
                         source: "".into(),
                         sloppy: false,
                         context: Default::default(),
+                        esm: false,
                     });
                     let ns = self.import_module(&path.display().to_string(), &from)?;
                     return self.require_esm_result(&ns);
@@ -2469,7 +2478,20 @@ impl Vm {
                 receiver_method_name(&receiver, &f.closure),
             )
         };
-        let file = p.module.name.clone();
+        let file = if p.module.esm && !p.module.name.starts_with('<') {
+            let raw = Path::new(&*p.module.name);
+            let path = if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                match raw.file_name() {
+                    Some(f) => p.module.dir.join(f),
+                    None => p.module.dir.clone(),
+                }
+            };
+            Self::module_file_url(&path).into()
+        } else {
+            p.module.name.clone()
+        };
         FrameSite {
             eval: file.starts_with("<eval"),
             file,

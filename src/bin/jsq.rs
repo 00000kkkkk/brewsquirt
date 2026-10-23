@@ -49,6 +49,7 @@ struct NodeFlags {
     require: Vec<String>,
     import: Vec<String>,
     env_files: Vec<(String, bool)>,
+    test: bool,
 }
 
 fn split_node_flags(raw: Vec<String>) -> (Vec<String>, NodeFlags) {
@@ -86,6 +87,12 @@ fn split_node_flags(raw: Vec<String>) -> (Vec<String>, NodeFlags) {
             }
             "-v" => {
                 out.push("--version".into());
+                i += 1;
+                continue;
+            }
+            "--test" => {
+                flags.test = true;
+                flags.exec_argv.push(rest[i].clone());
                 i += 1;
                 continue;
             }
@@ -200,6 +207,9 @@ fn main() -> ExitCode {
             eprintln!("jsq: {e}");
             return ExitCode::from(9);
         }
+    }
+    if flags.test {
+        return javasquirt::runner::node_test_command(&args[1..], &flags.exec_argv);
     }
     let cli = Cli::parse_from(args);
     let handle = std::thread::Builder::new()

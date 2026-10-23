@@ -1,0 +1,14 @@
+true true true 56789012345678901234 20
+closed true true
+true true
+piped 100000 100000 true
+missing ENOENT
+appended 100004
+legacy 0123
+true object
+[ 'publicKey', 'privateKey' ] true false
+[ 'bytesRead', 'buffer' ] 4 2345
+1
+[ 40, 30, 0 ] 38ab0c794d5fce44e7b1297e 783d05db384823d1a0f0e49e802605ea
+70 0
+forged Unsupported state or unable to authenticate data
