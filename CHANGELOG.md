@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-23
+
 ### Added
 
 - `node:sqlite` with `DatabaseSync` and `StatementSync` over a bundled SQLite 3: file and
@@ -56,7 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   path in the interpreter.
 - `http.createServer` hands requests from the native server straight to `IncomingMessage` and
   `ServerResponse` instead of going through `Request`, `Response` and a promise chain, and response
-  dates are cached per second, which doubles the throughput of Node-style servers such as Express.
+  dates are cached per second, which doubles the throughput of a plain `http.createServer` server.
   `req.url` is the raw request target and `req.headers` follows Node's rules for repeated headers:
   `set-cookie` becomes an array, `cookie` values are joined with `; ` and single-value headers keep
   their first value.
@@ -1131,7 +1133,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Continuous integration on Linux, macOS and Windows, MSRV check, cargo-deny, CodeQL, coverage,
   benchmarks, and release archives for five targets.
 
-[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/00000kkkkk/javasquirt/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/00000kkkkk/javasquirt/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/00000kkkkk/javasquirt/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/00000kkkkk/javasquirt/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/00000kkkkk/javasquirt/compare/v1.3.0...v1.4.0
