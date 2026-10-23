@@ -1,0 +1,8 @@
+fetch plain null true payload for plain
+fetch gzip gzip true payload for gzip
+fetch deflate deflate true payload for deflate
+fetch rawdeflate deflate true payload for rawdeflate
+fetch br br true payload for br
+http gzip true payload for gzip
+implicit 202 implicit
+/plain gzip, deflate /gzip -

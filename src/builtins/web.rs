@@ -2118,6 +2118,7 @@ const WEB_SRC: &str = r##"
       Number(init.timeout ?? 0),
       req.redirect !== "manual",
       init.tls ?? null,
+      init[Symbol.for("jsq.rawBody")] !== true,
     )
     const raw = await new Promise((resolve, reject) => {
       const onAbort = () => {
@@ -2645,6 +2646,9 @@ const WEB_SRC: &str = r##"
       sendHeaders(this)
       return this
     },
+    _implicitHeader() {
+      this.writeHead(this.statusCode)
+    },
     writeContinue() {},
     writeEarlyHints() {},
     addTrailers() {},
@@ -2999,7 +3003,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let natives = vm.new_object();
-    method(vm, &natives, "fetch", 6, native_fetch);
+    method(vm, &natives, "fetch", 8, native_fetch);
     method(vm, &natives, "fetchBody", 3, native_fetch_body);
     method(vm, &natives, "serve", 3, native_serve);
     method(vm, &natives, "reply", 4, native_reply);
@@ -3278,6 +3282,7 @@ fn native_fetch(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let timeout = (ms > 0.0).then(|| Duration::from_millis(ms as u64));
     let follow = arg(args, 5).truthy();
     let tls = super::netio::tls_client_options(vm, &arg(args, 6), String::new())?;
+    let decode = !matches!(arg(args, 7), Value::Bool(false));
     let p = vm.new_promise();
     let id = vm.io.next_id();
     vm.io.pending += 1;
@@ -3304,6 +3309,7 @@ fn native_fetch(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             follow,
             tls,
             cancel,
+            decode,
         },
     );
     Ok(pair)

@@ -16,6 +16,60 @@ pub struct FetchRequest {
     pub follow: bool,
     pub tls: TlsClientOptions,
     pub cancel: Arc<AtomicBool>,
+    pub decode: bool,
+}
+
+pub const ACCEPT_ENCODING: &str = "gzip, deflate";
+
+struct Inflate<R: Read> {
+    inner: Option<std::io::BufReader<R>>,
+    decoder: Option<Box<dyn Read + Send>>,
+}
+
+impl<R: Read + Send + 'static> Read for Inflate<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.decoder.is_none() {
+            let Some(mut inner) = self.inner.take() else {
+                return Ok(0);
+            };
+            let head = inner.fill_buf()?;
+            let zlib = head.len() >= 2
+                && head[0] & 0x0f == 8
+                && (u16::from(head[0]) << 8 | u16::from(head[1])) % 31 == 0;
+            self.decoder = Some(if zlib {
+                Box::new(flate2::read::ZlibDecoder::new(inner))
+            } else {
+                Box::new(flate2::read::DeflateDecoder::new(inner))
+            });
+        }
+        match self.decoder.as_mut() {
+            Some(d) => d.read(buf),
+            None => Ok(0),
+        }
+    }
+}
+
+pub fn content_decoder(
+    encoding: Option<&str>,
+    reader: Box<dyn Read + Send>,
+) -> Box<dyn Read + Send> {
+    let encoding = encoding.map(|e| e.trim().to_ascii_lowercase());
+    match encoding.as_deref() {
+        Some("gzip" | "x-gzip") => Box::new(flate2::read::MultiGzDecoder::new(reader)),
+        Some("deflate") => Box::new(Inflate {
+            inner: Some(std::io::BufReader::new(reader)),
+            decoder: None,
+        }),
+        Some("br") => Box::new(brotli_decompressor::Decompressor::new(reader, 65536)),
+        _ => reader,
+    }
+}
+
+fn header_value<'a>(headers: &'a Headers, name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
 }
 
 pub struct FetchResponse {
@@ -1445,20 +1499,25 @@ pub fn bind_listener(host: &str, port: u16) -> std::io::Result<TcpListener> {
 }
 
 pub fn http_get(url: &str, accept: Option<&str>) -> Result<Vec<u8>, String> {
-    let mut req = agent().get(url);
+    let mut req = agent().get(url).header("accept-encoding", ACCEPT_ENCODING);
     if let Some(a) = accept {
         req = req.header("accept", a);
     }
-    let mut resp = req.call().map_err(|e| e.to_string())?;
+    let resp = req.call().map_err(|e| e.to_string())?;
     let status = resp.status().as_u16();
     if status >= 400 {
         return Err(format!("HTTP {status} {}", status_text(status)));
     }
-    resp.body_mut()
-        .with_config()
-        .limit(512 * 1024 * 1024)
-        .read_to_vec()
-        .map_err(|e| e.to_string())
+    let encoding = resp
+        .headers()
+        .get("content-encoding")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let body = resp.into_body().into_with_config().limit(u64::MAX).reader();
+    let mut reader = content_decoder(encoding.as_deref(), Box::new(body)).take(512 * 1024 * 1024);
+    let mut out = Vec::new();
+    reader.read_to_end(&mut out).map_err(|e| e.to_string())?;
+    Ok(out)
 }
 
 pub fn status_text(status: u16) -> &'static str {
@@ -1521,6 +1580,9 @@ fn run_fetch(req: FetchRequest) -> Result<(FetchResponse, ureq::Body), String> {
     for (k, v) in &req.headers {
         builder = builder.header(k.as_str(), v.as_str());
     }
+    if req.decode && header_value(&req.headers, "accept-encoding").is_none() {
+        builder = builder.header("accept-encoding", ACCEPT_ENCODING);
+    }
     let redirects = if req.follow { 20 } else { 0 };
     let tls = fetch_tls_config(&req.tls)?;
     let resp = match req.body {
@@ -1577,8 +1639,13 @@ fn run_fetch(req: FetchRequest) -> Result<(FetchResponse, ureq::Body), String> {
 pub fn spawn_fetch(tx: Sender<IoEvent>, id: u64, req: FetchRequest) {
     std::thread::spawn(move || {
         let cancel = req.cancel.clone();
+        let decode = req.decode;
+        let mut encoding = None;
         let body = match run_fetch(req) {
             Ok((head, body)) => {
+                if decode {
+                    encoding = header_value(&head.headers, "content-encoding").map(str::to_string);
+                }
                 if tx
                     .send(IoEvent::Fetch {
                         id,
@@ -1595,7 +1662,8 @@ pub fn spawn_fetch(tx: Sender<IoEvent>, id: u64, req: FetchRequest) {
                 return;
             }
         };
-        let mut reader = body.into_reader();
+        let raw = body.into_with_config().limit(u64::MAX).reader();
+        let mut reader = content_decoder(encoding.as_deref(), Box::new(raw));
         let mut buf = vec![0u8; 65536];
         let error = loop {
             if cancel.load(Ordering::SeqCst) {

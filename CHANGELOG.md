@@ -62,6 +62,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `http.Server.listen` lost its callback when it was called with a backlog or an explicit
   `undefined` host, which is how `ws` starts `new WebSocketServer({ port })`; every Node form of
   the call works now.
+- `fetch` removed `content-encoding` and `content-length` from compressed responses, and
+  `http.request` decompressed bodies that Node hands over raw. `fetch` now asks for
+  `gzip, deflate` like Node, decodes gzip, deflate (zlib and raw) and brotli while keeping the
+  headers, and `node:http` clients receive the bytes the server sent.
+- `ServerResponse` has Node's `_implicitHeader()`, which `express-session` and `compression` call.
 - `TextDecoder` with `{ stream: true }` dropped characters split between chunks, turning them
   into replacement characters; streaming now keeps the partial sequence until the next call.
 - A CommonJS module imported from an ES module exposes a `"module.exports"` export like Node 24,

@@ -4476,7 +4476,7 @@ const NODE_SRC: &str = r##"
       if (this.#headers.has("upgrade") || this.#options.createConnection) return this.#rawRequest(body, cb)
       const agentOptions = this.#options.agent?.options ?? {}
       const tlsOptions = { rejectUnauthorized: this.#options.rejectUnauthorized ?? agentOptions.rejectUnauthorized, ca: this.#options.ca ?? agentOptions.ca }
-      fetch(this.#url, { method: this.method, headers: this.#headers, body, signal: this.#controller.signal, redirect: "manual", tls: tlsOptions }).then(
+      fetch(this.#url, { method: this.method, headers: this.#headers, body, signal: this.#controller.signal, redirect: "manual", tls: tlsOptions, [Symbol.for("jsq.rawBody")]: true }).then(
         (res) => {
           const incoming = new IncomingResponse(res)
           incoming.req = this
