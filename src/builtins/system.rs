@@ -413,6 +413,7 @@ fn caller_module(vm: &Vm) -> std::rc::Rc<crate::bytecode::ModuleInfo> {
         dir: std::env::current_dir().unwrap_or_default(),
         source: "".into(),
         sloppy: true,
+        context: Default::default(),
     })
 }
 
@@ -467,6 +468,7 @@ fn base_module(vm: &mut Vm, v: &Value) -> Result<std::rc::Rc<crate::bytecode::Mo
         dir,
         source: "".into(),
         sloppy: true,
+        context: Default::default(),
     }))
 }
 

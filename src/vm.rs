@@ -412,6 +412,76 @@ fn finish_cjs_wrapper(mut proto: Rc<FunctionProto>) -> Rc<FunctionProto> {
     proto
 }
 
+pub const CONTEXT_GLOBALS: &[&str] = &[
+    "AggregateError",
+    "Array",
+    "ArrayBuffer",
+    "AsyncDisposableStack",
+    "Atomics",
+    "BigInt",
+    "BigInt64Array",
+    "BigUint64Array",
+    "Boolean",
+    "DataView",
+    "Date",
+    "DisposableStack",
+    "Error",
+    "EvalError",
+    "FinalizationRegistry",
+    "Float16Array",
+    "Float32Array",
+    "Float64Array",
+    "Function",
+    "Infinity",
+    "Int16Array",
+    "Int32Array",
+    "Int8Array",
+    "Intl",
+    "Iterator",
+    "JSON",
+    "Map",
+    "Math",
+    "NaN",
+    "Number",
+    "Object",
+    "Promise",
+    "Proxy",
+    "RangeError",
+    "ReferenceError",
+    "Reflect",
+    "RegExp",
+    "Set",
+    "SharedArrayBuffer",
+    "String",
+    "SuppressedError",
+    "Symbol",
+    "SyntaxError",
+    "TypeError",
+    "URIError",
+    "Uint16Array",
+    "Uint32Array",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "WeakMap",
+    "WeakRef",
+    "WeakSet",
+    "WebAssembly",
+    "console",
+    "decodeURI",
+    "decodeURIComponent",
+    "encodeURI",
+    "encodeURIComponent",
+    "escape",
+    "eval",
+    "globalThis",
+    "isFinite",
+    "isNaN",
+    "parseFloat",
+    "parseInt",
+    "undefined",
+    "unescape",
+];
+
 pub(crate) fn offset_positions(proto: &mut Rc<FunctionProto>, lines: i64, cols: i64) {
     let Some(p) = Rc::get_mut(proto) else {
         return;
@@ -900,6 +970,7 @@ impl Vm {
                 dir,
                 source: src.into(),
                 sloppy,
+                context: Default::default(),
             }),
             mode,
         )
@@ -931,6 +1002,7 @@ impl Vm {
                 dir,
                 source: src.into(),
                 sloppy,
+                context: Default::default(),
             }),
             Mode::Repl,
         )
@@ -1152,6 +1224,171 @@ impl Vm {
         self.run_script_at(src, name, 0, 0)
     }
 
+    pub fn run_script_in_context(
+        &mut self,
+        src: &str,
+        name: &str,
+        line_offset: i64,
+        col_offset: i64,
+        record: &Rc<Obj>,
+    ) -> Result<Value, Value> {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let mut proto = match self.compile_script(src, name, cwd, false) {
+            Ok(p) => p,
+            Err(mut e) => {
+                if e.line == 1 {
+                    e.col = (e.col as i64 + col_offset).max(1) as u32;
+                }
+                e.line = (e.line as i64 + line_offset).max(1) as u32;
+                return Err(self.syntax_error_value(&e, name));
+            }
+        };
+        offset_positions(&mut proto, line_offset, col_offset);
+        *proto.module.context.borrow_mut() = Some(Rc::downgrade(record));
+        let closure = Rc::new(Closure {
+            gc_slot: std::cell::Cell::new(u32::MAX),
+            proto,
+            upvalues: Box::new([]),
+            home: RefCell::new(None),
+            new_target: RefCell::new(None),
+        });
+        let f = Value::Object(Obj::new(
+            ObjKind::Function(closure),
+            Some(self.realm.function_proto.clone()),
+        ));
+        let this = self.get_prop(&Value::Object(record.clone()), "global")?;
+        self.call_value(&f, this, &[])
+    }
+
+    fn ctx_part(&mut self, record: &Rc<Obj>, part: &str) -> Value {
+        record.get_own(part).unwrap_or_default()
+    }
+
+    fn ctx_lex(&mut self, record: &Rc<Obj>) -> Option<Rc<Obj>> {
+        match self.ctx_part(record, "lex") {
+            Value::Object(o) => Some(o),
+            _ => None,
+        }
+    }
+
+    fn ctx_main_global(&mut self, n: &JsStr) -> Result<Option<Value>, Value> {
+        if CONTEXT_GLOBALS.binary_search(&&**n).is_err() {
+            return Ok(self
+                .realm
+                .object_proto
+                .get_own(n)
+                .filter(|v| crate::props::accessor_parts(v).is_none()));
+        }
+        if self.globals.resolve(n).is_none() && !self.load_lazy_global(n)? {
+            return Ok(self
+                .realm
+                .object_proto
+                .get_own(n)
+                .filter(|v| crate::props::accessor_parts(v).is_none()));
+        }
+        let mut v = self.globals.lookup(n).cloned().unwrap_or_default();
+        if let Value::Object(a) = &v {
+            if a.is_accessor() {
+                v = self.resolve_accessor(v, &Value::Undefined)?;
+            }
+        }
+        Ok(Some(v))
+    }
+
+    #[inline(never)]
+    fn ctx_lookup(&mut self, record: &Rc<Obj>, n: &JsStr) -> Result<Option<Value>, Value> {
+        if let Some(lex) = self.ctx_lex(record) {
+            if let Some(v) = lex.get_own(n) {
+                if matches!(v, Value::Uninit) {
+                    return Err(self.make_error(
+                        ErrorKind::ReferenceError,
+                        format!("Cannot access '{n}' before initialization"),
+                    ));
+                }
+                return Ok(Some(v));
+            }
+        }
+        let sandbox = self.ctx_part(record, "sandbox");
+        if self.has_property(&sandbox, &Value::Str(n.clone()))? {
+            return self.get_prop(&sandbox, n).map(Some);
+        }
+        match &**n {
+            "globalThis" => Ok(Some(self.ctx_part(record, "global"))),
+            "eval" => Ok(Some(self.ctx_part(record, "eval"))),
+            _ => self.ctx_main_global(n),
+        }
+    }
+
+    #[inline(never)]
+    fn ctx_set(&mut self, record: &Rc<Obj>, n: &JsStr, v: Value) -> Result<(), Value> {
+        if let Some(lex) = self.ctx_lex(record) {
+            if let Some(old) = lex.get_own(n) {
+                if matches!(old, Value::Uninit) {
+                    return Err(self.make_error(
+                        ErrorKind::ReferenceError,
+                        format!("Cannot access '{n}' before initialization"),
+                    ));
+                }
+                if let Value::Object(consts) = self.ctx_part(record, "consts") {
+                    if matches!(consts.get_own(n), Some(Value::Bool(true))) {
+                        return Err(self.type_error("Assignment to constant variable."));
+                    }
+                }
+                lex.set_own(n.clone(), v);
+                return Ok(());
+            }
+        }
+        let sandbox = self.ctx_part(record, "sandbox");
+        self.set_prop(&sandbox, n.clone(), v)
+    }
+
+    #[inline(never)]
+    fn ctx_define(&mut self, record: &Rc<Obj>, n: JsStr, v: Value, flags: u8) -> Result<(), Value> {
+        if flags & crate::bytecode::DG_LEXICAL != 0 {
+            if let Some(lex) = self.ctx_lex(record) {
+                lex.set_own(n.clone(), v);
+            }
+            if let Value::Object(consts) = self.ctx_part(record, "consts") {
+                consts.set_own(n, Value::Bool(flags & crate::bytecode::DG_CONST != 0));
+            }
+            return Ok(());
+        }
+        let sandbox = self.ctx_part(record, "sandbox");
+        if flags & crate::bytecode::DG_KEEP != 0
+            && self.has_property(&sandbox, &Value::Str(n.clone()))?
+        {
+            return Ok(());
+        }
+        self.set_prop(&sandbox, n, v)
+    }
+
+    #[inline(never)]
+    fn ctx_redeclared(&mut self, record: &Rc<Obj>, n: &str) -> Result<(), Value> {
+        if self.ctx_lex(record).is_some_and(|lex| lex.has_own(n)) {
+            return Err(self.redeclaration_error(n));
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn ctx_has(&mut self, record: &Rc<Obj>, n: &JsStr) -> Result<bool, Value> {
+        if self.ctx_lex(record).is_some_and(|lex| lex.has_own(n)) {
+            return Ok(true);
+        }
+        let sandbox = self.ctx_part(record, "sandbox");
+        if self.has_property(&sandbox, &Value::Str(n.clone()))? {
+            return Ok(true);
+        }
+        Ok(self.ctx_main_global(n)?.is_some())
+    }
+
+    fn context_this(&mut self, proto: &FunctionProto) -> Value {
+        match proto.module.vm_context() {
+            Some(record) => self.ctx_part(&record, "global"),
+            None => self.global_this(),
+        }
+    }
+
     pub fn run_script_at(
         &mut self,
         src: &str,
@@ -1191,6 +1428,7 @@ impl Vm {
             dir: std::env::current_dir().unwrap_or_default(),
             source: src.into(),
             sloppy: false,
+            context: Default::default(),
         });
         let proto = match compile_indirect_eval(&ast, module, strict) {
             Ok(p) => p,
@@ -1216,6 +1454,7 @@ impl Vm {
             dir: cl.proto.module.dir.clone(),
             source: src.into(),
             sloppy: false,
+            context: std::cell::RefCell::new(cl.proto.module.context.borrow().clone()),
         });
         let proto = match compile_eval(&ast, module, scope) {
             Ok(p) => p,
@@ -2128,6 +2367,7 @@ impl Vm {
                 dir: dir.clone(),
                 source: "".into(),
                 sloppy: false,
+                context: Default::default(),
             });
             let ns = self.import_module(&path.display().to_string(), &from)?;
             return self.require_esm_result(&ns);
@@ -2156,6 +2396,7 @@ impl Vm {
                         dir: dir.clone(),
                         source: "".into(),
                         sloppy: false,
+                        context: Default::default(),
                     });
                     let ns = self.import_module(&path.display().to_string(), &from)?;
                     return self.require_esm_result(&ns);
@@ -2449,7 +2690,10 @@ impl Vm {
         let ci = self.stack.len() - argc - 2;
         if p.sloppy_this && p.kind != ProtoKind::Arrow && !construct {
             match &self.stack[ci + 1] {
-                Value::Undefined | Value::Null => self.stack[ci + 1] = self.global_this(),
+                Value::Undefined | Value::Null => {
+                    let p = c.proto.clone();
+                    self.stack[ci + 1] = self.context_this(&p)
+                }
                 Value::Object(_) => {}
                 v => {
                     let w = self.wrap_primitive(v.clone());
@@ -5028,6 +5272,19 @@ impl Vm {
                         continue;
                     }
                     let n = name!(k);
+                    if let Some(record) = proto.module.vm_context() {
+                        self.frames[fi].ip = ip;
+                        match tri!(self.ctx_lookup(&record, &n)) {
+                            Some(v) => self.stack.push(v),
+                            None => throw!(self.make_error_at(
+                                ErrorKind::ReferenceError,
+                                format!("{n} is not defined"),
+                                fi,
+                                ip
+                            )),
+                        }
+                        continue;
+                    }
                     let mut slot = self.globals.resolve(&n);
                     if slot.is_none() && tri!(self.load_lazy_global(&n)) {
                         slot = self.globals.resolve(&n);
@@ -5063,6 +5320,12 @@ impl Vm {
                 }
                 Op::GlobalRef(k) => {
                     let n = name!(k);
+                    if let Some(record) = proto.module.vm_context() {
+                        self.frames[fi].ip = ip;
+                        let found = tri!(self.ctx_has(&record, &n));
+                        self.stack.push(Value::Bool(found));
+                        continue;
+                    }
                     let found = self.globals.resolve(&n).is_some()
                         || tri!(self.load_lazy_global(&n))
                         || self.realm.object_proto.get_own(&n).is_some();
@@ -5084,6 +5347,11 @@ impl Vm {
                         }
                     }
                     let v = peek!();
+                    if let Some(record) = proto.module.vm_context() {
+                        self.frames[fi].ip = ip;
+                        tri!(self.ctx_set(&record, &n, v));
+                        continue;
+                    }
                     match self.globals.resolve(&n) {
                         Some(slot) => {
                             if matches!(self.globals.at(slot), Value::Uninit) {
@@ -5133,18 +5401,34 @@ impl Vm {
                 Op::DefineGlobal(k, flags) => {
                     let n = name!(k);
                     let v = peek!();
+                    if let Some(record) = proto.module.vm_context() {
+                        self.frames[fi].ip = ip;
+                        tri!(self.ctx_define(&record, n, v, flags));
+                        continue;
+                    }
                     tri!(self.define_global_binding(n, v, flags));
                 }
                 Op::CanDeclareGlobalFn(k) => {
+                    if proto.module.vm_context().is_some() {
+                        continue;
+                    }
                     let n = name!(k);
                     tri!(self.can_declare_global_fn(&n));
                 }
                 Op::CheckGlobalLex(k) => {
                     let n = name!(k);
+                    if let Some(record) = proto.module.vm_context() {
+                        tri!(self.ctx_redeclared(&record, &n));
+                        continue;
+                    }
                     tri!(self.check_global_lex(&n));
                 }
                 Op::CheckGlobalVar(k) => {
                     let n = name!(k);
+                    if let Some(record) = proto.module.vm_context() {
+                        tri!(self.ctx_redeclared(&record, &n));
+                        continue;
+                    }
                     tri!(self.check_global_var(&n));
                 }
                 Op::EvalVar(k) => {
@@ -5158,11 +5442,29 @@ impl Vm {
                 }
                 Op::DeleteGlobal(k) => {
                     let n = name!(k);
+                    if let Some(record) = proto.module.vm_context() {
+                        self.frames[fi].ip = ip;
+                        let r = if self.ctx_lex(&record).is_some_and(|lex| lex.has_own(&n)) {
+                            false
+                        } else {
+                            let sandbox = self.ctx_part(&record, "sandbox");
+                            tri!(self.delete_prop(&sandbox, &n))
+                        };
+                        self.stack.push(Value::Bool(r));
+                        continue;
+                    }
                     let r = self.delete_global_binding(&n);
                     self.stack.push(Value::Bool(r));
                 }
                 Op::TypeofGlobal(k) => {
                     let n = name!(k);
+                    if let Some(record) = proto.module.vm_context() {
+                        self.frames[fi].ip = ip;
+                        let found = tri!(self.ctx_lookup(&record, &n));
+                        let t = found.as_ref().map(|v| v.type_of()).unwrap_or("undefined");
+                        self.stack.push(Value::Str(t.into()));
+                        continue;
+                    }
                     if self.globals.resolve(&n).is_none() {
                         tri!(self.load_lazy_global(&n));
                     }
@@ -6263,7 +6565,14 @@ impl Vm {
                     };
                     pop!();
                     let callee = pop!();
-                    let intrinsic = matches!((&callee, &self.eval_fn), (Value::Object(a), Some(b)) if Rc::ptr_eq(a, b));
+                    let mut intrinsic = matches!((&callee, &self.eval_fn), (Value::Object(a), Some(b)) if Rc::ptr_eq(a, b));
+                    if !intrinsic {
+                        if let (Value::Object(a), Some(record)) =
+                            (&callee, proto.module.vm_context())
+                        {
+                            intrinsic = matches!(record.get_own("eval"), Some(Value::Object(b)) if Rc::ptr_eq(a, &b));
+                        }
+                    }
                     let v = if !intrinsic {
                         tri!(self.call_value(&callee, Value::Undefined, &args))
                     } else {

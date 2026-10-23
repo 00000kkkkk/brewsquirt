@@ -1,0 +1,9 @@
+object function function true
+{ echo: { n: 1 }, refCounted: 'function' }
+undefined
+true object
+{ echo: 'x', refCounted: 'function' }
+ERR_CHILD_PROCESS_IPC_REQUIRED
+function function
+spied null
+closed

@@ -3617,6 +3617,9 @@ const NODE_SRC: &str = r##"
   })
   Object.assign(Readable.prototype, {
     _read() {},
+    _destroy(err, cb) {
+      cb(err)
+    },
     push(chunk, encoding) {
       const r = this[kRead]
       if (r.destroyed) return false
@@ -3874,6 +3877,9 @@ const NODE_SRC: &str = r##"
     if (typeof options.destroy === "function") stream._destroy = options.destroy
   }
   const writableMethods = {
+    _destroy(err, cb) {
+      cb(err)
+    },
     _write(chunk, encoding, cb) {
       cb(streamError("ERR_METHOD_NOT_IMPLEMENTED", "The _write() method is not implemented"))
     },
@@ -6600,6 +6606,13 @@ const NODE_SRC: &str = r##"
   function spawn(file, args, options) {
     if (!Array.isArray(args)) [args, options] = [[], args]
     options = options ?? {}
+    let ipc = null
+    if (Array.isArray(options.stdio) && options.stdio.includes("ipc")) {
+      const server = ipcServer()
+      const advanced = options.serialization === "advanced"
+      ipc = { server, advanced }
+      options = { ...options, env: { ...(options.env ?? process.env), JSQ_IPC: String(server.address().port), JSQ_IPC_SERIALIZATION: advanced ? "advanced" : "json" } }
+    }
     const child = new ChildProcess()
     const st = child[kChild]
     child.spawnfile = String(file)
@@ -6672,6 +6685,7 @@ const NODE_SRC: &str = r##"
         maybeClose()
       })
     }
+    if (ipc) attachIpc(child, ipc.server, (message) => child.emit("message", message), ipc.advanced)
     return child
   }
   const collect = (child, options, cb, command) => {
@@ -6793,10 +6807,43 @@ const NODE_SRC: &str = r##"
     }
     return JSON.stringify(message === undefined ? null : message) + "\n"
   }
+  class IpcControl extends EventEmitter {
+    #sock
+    #refs = 0
+    #explicit = false
+    constructor(sock) {
+      super()
+      this.#sock = sock
+    }
+    attach(sock) {
+      this.#sock = sock
+    }
+    refCounted() {
+      if (++this.#refs === 1 && !this.#explicit) this.#sock()?.ref()
+    }
+    unrefCounted() {
+      if (--this.#refs === 0 && !this.#explicit) {
+        this.#sock()?.unref()
+        this.emit("unref")
+      }
+    }
+    ref() {
+      this.#explicit = true
+      this.#sock()?.ref()
+    }
+    unref() {
+      this.#explicit = true
+      this.#sock()?.unref()
+    }
+    get fd() {
+      return 3
+    }
+  }
   const attachIpc = (child, server, unwrap, advanced) => {
     child.connected = true
     let sock = null
     const pending = []
+    child.channel = new IpcControl(() => sock)
     server.once("connection", (s) => {
       sock = s
       if (child[kChild]?.unrefed) s.unref()
@@ -6850,14 +6897,16 @@ const NODE_SRC: &str = r##"
     if (!Array.isArray(args)) [args, options] = [[], args]
     options = options ?? {}
     const execArgv = options.execArgv ?? []
-    const server = ipcServer()
-    const advanced = options.serialization === "advanced"
-    const env = { ...(options.env ?? process.env), JSQ_IPC: String(server.address().port), JSQ_IPC_SERIALIZATION: advanced ? "advanced" : "json" }
+    let stdio = options.stdio ?? (options.silent ? ["pipe", "pipe", "pipe", "ipc"] : [0, 1, 2, "ipc"])
+    if (typeof stdio === "string") stdio = [stdio, stdio, stdio, "ipc"]
+    else if (!stdio.includes("ipc")) {
+      const e = new Error("Forked processes must have an IPC channel, missing value 'ipc' in options.stdio")
+      e.code = "ERR_CHILD_PROCESS_IPC_REQUIRED"
+      throw e
+    }
     let file = String(modulePath)
     if (file.startsWith("file:")) file = fileURLToPath(file)
-    const child = spawn(options.execPath ?? process.execPath, [...execArgv, file, ...args.map(String)], { ...options, env, stdio: options.stdio ?? "inherit" })
-    attachIpc(child, server, (message) => child.emit("message", message), advanced)
-    return child
+    return spawn(options.execPath ?? process.execPath, [...execArgv, file, ...args.map(String)], { ...options, stdio })
   }
   const childProcessAsync = { spawn, exec, execFile, fork, ChildProcess }
   const childProcessSync = (base) => {
@@ -7087,7 +7136,7 @@ const NODE_SRC: &str = r##"
     if (!port) return
     const sock = net.connect({ port, host: "127.0.0.1" })
     let connected = false
-    let listening = false
+    let listening = 0
     const queue = []
     sock.on("connect", () => {
       connected = true
@@ -7096,7 +7145,8 @@ const NODE_SRC: &str = r##"
       if (!listening) sock.unref()
     })
     process.connected = true
-    process.channel = { ref: () => sock.ref(), unref: () => sock.unref() }
+    const control = new IpcControl(() => sock)
+    process.channel = control
     process.send = (message, sendHandle, options, cb) => {
       if (typeof sendHandle === "function") cb = sendHandle
       else if (typeof options === "function") cb = options
@@ -7123,17 +7173,34 @@ const NODE_SRC: &str = r##"
       process.emit("message", message)
     }
     ipcWire(process, sock, [], deliver)
+    const counted = (name) => name === "message" || name === "disconnect"
     const refOn = (fn) =>
       function (name, listener) {
-        if (name === "message") {
-          listening = true
-          sock.ref()
+        const out = fn.call(this, name, listener)
+        if (counted(name)) {
+          listening++
+          control.refCounted()
         }
-        return fn.call(this, name, listener)
+        return out
+      }
+    const refOff = (fn) =>
+      function (name, listener) {
+        const before = counted(name) ? process.listenerCount(name) : 0
+        const out = fn.call(this, name, listener)
+        if (counted(name)) {
+          for (let n = process.listenerCount(name); n < before; n++) {
+            listening--
+            control.unrefCounted()
+          }
+        }
+        return out
       }
     process.on = refOn(process.on)
     process.addListener = refOn(process.addListener)
     process.once = refOn(process.once)
+    if (typeof process.prependListener === "function") process.prependListener = refOn(process.prependListener)
+    if (typeof process.off === "function") process.off = refOff(process.off)
+    if (typeof process.removeListener === "function") process.removeListener = refOff(process.removeListener)
   }
 
   const v8 = {
@@ -7170,30 +7237,45 @@ const NODE_SRC: &str = r##"
       return native.vmRunScript(this.#code, this.filename, ...this.#offsets)
     }
     runInContext(context) {
-      return vmRun(this.#code, context)
+      return vmRun(this.#code, context, this.filename, this.#offsets)
     }
     runInNewContext(context = {}) {
-      return vmRun(this.#code, context)
+      return vmRun(this.#code, vmModule.createContext(context), this.filename, this.#offsets)
     }
     createCachedData() {
       return Buffer.alloc(0)
     }
   }
   const contexts = new WeakSet()
-  const contextGlobal = (sandbox) =>
-    new Proxy(sandbox, {
-      get: (target, key) => (key in target ? target[key] : globalThis[key]),
-      has: (target, key) => key in target || key in globalThis,
-      set: (target, key, value) => {
+  const contextRecords = new WeakMap()
+  let contextGlobalNamesCache = null
+  const contextGlobalNames = { has: (key) => typeof key === "string" && (contextGlobalNamesCache ??= new Set(native.vmContextGlobals())).has(key) }
+  const contextRecord = (sandbox) => {
+    let record = contextRecords.get(sandbox)
+    if (record) return record
+    record = { sandbox, lex: Object.create(null), consts: Object.create(null), global: null, eval: null }
+    record.eval = { eval: (code) => (typeof code === "string" ? vmRun(code, sandbox) : code) }.eval
+    record.global = sandbox.globalThis === sandbox ? sandbox : new Proxy(sandbox, {
+      get(target, key, receiver) {
+        if (key in target) return Reflect.get(target, key, receiver === record.global ? target : receiver)
+        if (key === "globalThis") return record.global
+        if (key === "eval") return record.eval
+        return contextGlobalNames.has(key) ? globalThis[key] : undefined
+      },
+      has: (target, key) => key in target || contextGlobalNames.has(key),
+      set(target, key, value) {
         target[key] = value
         return true
       },
     })
-  const vmRun = (code, sandbox) => {
+    contextRecords.set(sandbox, record)
+    return record
+  }
+  const vmRun = (code, sandbox, filename = "evalmachine.<anonymous>", offsets = [0, 0]) => {
     if (sandbox === undefined || sandbox === null) return indirectEval(String(code))
-    const scope = "globalThis" in sandbox ? {} : { globalThis: contextGlobal(sandbox), global: contextGlobal(sandbox) }
-    const fn = new Function("__sandbox__", "__scope__", `with (__sandbox__) { with (__scope__) { return eval(${JSON.stringify(String(code))}) } }`)
-    return fn.call(sandbox, sandbox, scope)
+    const record = contextRecord(sandbox)
+    const result = native.vmRunInContext(String(code), filename, offsets[0], offsets[1], record)
+    return result === indirectEval ? record.eval : result
   }
   const vmConstants = { USE_MAIN_CONTEXT_DEFAULT_LOADER: Symbol("vm_dynamic_import_main_context_default"), DONT_CONTEXTIFY: Symbol("vm_context_no_contextify") }
   const vmModule = {
@@ -7206,8 +7288,8 @@ const NODE_SRC: &str = r##"
     },
     isContext: (o) => contexts.has(o),
     runInThisContext: (code, options) => native.vmRunScript(String(code), vmFilename(options), ...vmOffsets(options)),
-    runInContext: (code, context) => vmRun(code, context),
-    runInNewContext: (code, context = {}) => vmRun(code, context),
+    runInContext: (code, context, options) => vmRun(code, context, vmFilename(options), vmOffsets(options)),
+    runInNewContext: (code, context = {}, options) => vmRun(code, vmModule.createContext(context), vmFilename(options), vmOffsets(options)),
     compileFunction: (code, params = [], options = {}) => {
       const filename = options?.filename ?? "evalmachine.<anonymous>"
       const sandbox = options?.parsingContext
@@ -7217,10 +7299,8 @@ const NODE_SRC: &str = r##"
         const head = `(function (${list}) {`
         return native.vmRunScript(`${head}${String(code)}\n})`, filename, lineOffset, columnOffset - head.length)
       }
-      const scope = "globalThis" in sandbox ? {} : { globalThis: contextGlobal(sandbox), global: contextGlobal(sandbox) }
-      const head = `(function (__sandbox__, __scope__) { with (__sandbox__) { with (__scope__) { return function (${list}) {`
-      const maker = native.vmRunScript(`${head}${String(code)}\n} } } })`, filename, lineOffset, columnOffset - head.length)
-      return maker.call(sandbox, sandbox, scope)
+      const head = `(function (${list}) {`
+      return native.vmRunInContext(`${head}${String(code)}\n})`, filename, lineOffset, columnOffset - head.length, contextRecord(sandbox))
     },
     measureMemory: async () => ({ total: { jsMemoryEstimate: process.memoryUsage().heapUsed, jsMemoryRange: [0, 0] } }),
   }
@@ -8211,7 +8291,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let n = vm.new_object();
-    let natives: [(&str, u32, crate::object::NativeFn); 60] = [
+    let natives: [(&str, u32, crate::object::NativeFn); 62] = [
         ("isProxy", 1, is_proxy),
         ("watchStart", 4, super::netio::watch_start),
         ("watchClose", 1, super::netio::watch_close),
@@ -8269,6 +8349,8 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         ("format", 0, native_format),
         ("uvErrors", 0, native_uv_errors),
         ("vmRunScript", 4, vm_run_script),
+        ("vmRunInContext", 5, vm_run_in_context),
+        ("vmContextGlobals", 0, vm_context_globals),
         ("setModuleClass", 1, native_set_module_class),
         ("cjsCompile", 3, native_cjs_compile),
         ("dnsLookup", 1, dns_lookup),
@@ -9127,6 +9209,36 @@ fn vm_run_script(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         _ => 0,
     };
     vm.run_script_at(&code, &name, offset(arg(args, 2)), offset(arg(args, 3)))
+}
+
+fn vm_context_globals(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    let names = crate::vm::CONTEXT_GLOBALS
+        .iter()
+        .map(|n| Value::from(*n))
+        .collect();
+    Ok(vm.new_array(names))
+}
+
+fn vm_run_in_context(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let code = vm.to_string(&arg(args, 0))?.to_string();
+    let name = match arg(args, 1) {
+        Value::Str(s) => s.to_string(),
+        _ => "evalmachine.<anonymous>".to_string(),
+    };
+    let offset = |v: Value| match v {
+        Value::Number(n) if n.is_finite() => n as i64,
+        _ => 0,
+    };
+    let Value::Object(record) = arg(args, 4) else {
+        return Err(vm.type_error("context record expected"));
+    };
+    vm.run_script_in_context(
+        &code,
+        &name,
+        offset(arg(args, 2)),
+        offset(arg(args, 3)),
+        &record,
+    )
 }
 
 fn native_format(vm: &mut Vm, _this: Value, args: &[Value]) -> R {

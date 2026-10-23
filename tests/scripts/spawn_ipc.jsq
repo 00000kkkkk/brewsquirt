@@ -1,0 +1,36 @@
+import { spawn, fork } from "node:child_process"
+import { Writable, Readable } from "node:stream"
+import { fileURLToPath } from "node:url"
+
+const child = fileURLToPath(new URL("./fixtures/ipc_echo.js", import.meta.url))
+const viaSpawn = spawn(process.execPath, [child], { stdio: ["pipe", "inherit", "inherit", "ipc"] })
+console.log(typeof viaSpawn.channel, typeof viaSpawn.channel.refCounted, typeof viaSpawn.channel.unrefCounted, viaSpawn.connected)
+viaSpawn.channel.refCounted()
+viaSpawn.channel.unrefCounted()
+const got = await new Promise((resolve) => {
+  viaSpawn.on("message", resolve)
+  viaSpawn.send({ n: 1 })
+})
+console.log(got)
+await new Promise((resolve) => viaSpawn.on("exit", resolve))
+console.log(spawn(process.execPath, [child], { stdio: "ignore" }).channel)
+
+const silent = fork(child, [], { silent: true })
+console.log(silent.stdout !== null, typeof silent.channel)
+silent.send("x")
+console.log(await new Promise((resolve) => silent.on("message", resolve)))
+try {
+  fork(child, [], { stdio: ["pipe", "pipe", "pipe"] })
+} catch (e) {
+  console.log(e.code)
+}
+
+console.log(typeof Writable.prototype._destroy, typeof Readable.prototype._destroy)
+const w = new Writable({ write(chunk, encoding, cb) { cb() } })
+const original = w._destroy
+w._destroy = (err, cb) => {
+  console.log("spied", err)
+  original.call(w, err, cb)
+}
+w.on("close", () => console.log("closed"))
+w.destroy()

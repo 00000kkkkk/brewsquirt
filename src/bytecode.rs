@@ -231,6 +231,13 @@ pub struct ModuleInfo {
     pub dir: PathBuf,
     pub source: JsStr,
     pub sloppy: bool,
+    pub context: std::cell::RefCell<Option<std::rc::Weak<crate::object::Obj>>>,
+}
+
+impl ModuleInfo {
+    pub fn vm_context(&self) -> Option<Rc<crate::object::Obj>> {
+        self.context.borrow().as_ref().and_then(|w| w.upgrade())
+    }
 }
 
 #[derive(Debug)]

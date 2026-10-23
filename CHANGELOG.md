@@ -36,7 +36,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The socket of a request on an HTTP server has `end`, `write`, `ref`, `unref`, `pause`, `resume`
   and the other `net.Socket` methods that return the socket, which the `@apollo/server` drain
   plugin calls on shutdown.
-
+- `vm.runInContext` and the other `node:vm` entry points run code with the context object as the
+  global object. Top-level `var` and function declarations and assignments to undeclared names
+  become properties of the context, `let`, `const` and `class` declarations persist between runs
+  of the same context, `this` and `globalThis` are the context's global, and the context's `eval`
+  is a direct eval inside it. Code in a context sees only the ECMAScript built-ins, `console` and
+  `WebAssembly` from outside, as in Node, so `require` and `process` no longer leak in.
+  `jsdom` with `runScripts` and `window.eval` works.
+- `child_process.spawn` with `"ipc"` in `stdio` opens an IPC channel, `fork` honours `silent` and
+  rejects a `stdio` without `"ipc"`, and `subprocess.channel` and `process.channel` have
+  `ref`, `unref`, `refCounted` and `unrefCounted`, so `execaNode` and execa's IPC helpers work.
+- `Readable.prototype._destroy` and `Writable.prototype._destroy` exist, which `execa` wraps.
 - `stream.pipeline` and `stream/promises` `pipeline` accept generator functions and async
   functions as stages, and the promise version takes a trailing options object with `end` and
   `signal`; `graphql-yoga` and `@whatwg-node/server` call it that way.

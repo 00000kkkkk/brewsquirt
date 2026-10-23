@@ -1,0 +1,16 @@
+[ 'a', 'b', 'c', 'f', 'x' ] 10 function undefined 4 5 undefined
+[ 10, 11, 2, 3, 4, 5, 'number', 'undefined' ]
+11 12
+TypeError Assignment to constant variable.
+SyntaxError Identifier 'y' has already been declared
+ReferenceError missing is not defined
+ReferenceError undeclared is not defined
+ReferenceError Cannot access 'early' before initialization
+true false false
+true
+true false 12 7
+16
+1,2
+doc object
+101
+undefined 42
