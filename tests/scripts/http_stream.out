@@ -1,0 +1,8 @@
+:: IPv6
+200 text/event-stream chunked
+first "data: one\n\n"
+rest "data: two\n\n"
+6 null abcdef
+unpipe function isPaused false
+plain
+a,b,c

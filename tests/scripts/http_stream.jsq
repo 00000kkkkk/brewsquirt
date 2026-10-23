@@ -1,0 +1,76 @@
+import http from "node:http"
+import net from "node:net"
+
+const guard = setTimeout(() => {
+  console.log("stalled")
+  process.exit(1)
+}, 10000)
+
+let release
+const firstSeen = new Promise((resolve) => (release = resolve))
+const server = http.createServer(async (req, res) => {
+  if (req.url === "/sse") {
+    res.writeHead(200, { "content-type": "text/event-stream" })
+    res.write("data: one\n\n")
+    await firstSeen
+    res.write("data: two\n\n")
+    res.end()
+    return
+  }
+  if (req.url === "/length") {
+    res.setHeader("content-length", "6")
+    res.write("abc")
+    await new Promise((r) => setTimeout(r, 20))
+    res.end("def")
+    return
+  }
+  console.log("unpipe", typeof req.unpipe, "isPaused", req.isPaused())
+  res.end("plain")
+})
+await new Promise((resolve) => server.listen(0, resolve))
+const { address, family, port } = server.address()
+console.log(address, family)
+
+const decoder = new TextDecoder()
+const res = await fetch(`http://127.0.0.1:${port}/sse`)
+console.log(res.status, res.headers.get("content-type"), res.headers.get("transfer-encoding"))
+const reader = res.body.getReader()
+const first = await reader.read()
+console.log("first", JSON.stringify(decoder.decode(first.value)))
+release()
+let rest = ""
+for (;;) {
+  const { value, done } = await reader.read()
+  if (done) break
+  rest += decoder.decode(value)
+}
+console.log("rest", JSON.stringify(rest))
+
+const sized = await fetch(`http://localhost:${port}/length`)
+console.log(sized.headers.get("content-length"), sized.headers.get("transfer-encoding"), await sized.text())
+
+const chunks = []
+await new Promise((resolve) => {
+  http.get(`http://127.0.0.1:${port}/plain`, (r) => {
+    r.on("data", (c) => chunks.push(String(c)))
+    r.on("end", resolve)
+  })
+})
+console.log(chunks.join(""))
+
+const echo = net.createServer((s) => s.on("data", (d) => s.write(d)))
+await new Promise((resolve) => echo.listen(0, resolve))
+const sock = net.connect(echo.address().port, "localhost")
+await new Promise((resolve) => sock.on("connect", resolve))
+const replies = []
+for (const word of ["a", "b", "c"]) {
+  replies.push(await new Promise((resolve) => {
+    sock.once("data", (d) => resolve(String(d)))
+    sock.write(word)
+  }))
+}
+console.log(replies.join(","))
+sock.destroy()
+echo.close()
+server.close()
+clearTimeout(guard)

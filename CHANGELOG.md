@@ -60,6 +60,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code.
 - A rejected top-level `await` in the entry module is reported as an uncaught exception and
   exits with status 1 even when an `unhandledRejection` listener is installed, as in Node.
+- TCP sockets read and write on separate threads, so a write goes out immediately instead of
+  waiting up to 20 ms for the reader to time out; a request-response round trip over `node:net`
+  dropped from about 60 ms to under 0.1 ms and keep-alive `http.get` from 21 ms to about 1 ms.
+- `fetch` and `http.get` deliver response bodies as they arrive instead of after the whole body
+  is downloaded, and `node:http` servers stream responses that are written over time, so
+  server-sent events and streamed API responses work in both directions. A client disconnect
+  fires `close` on the request and response, and `request.signal` aborts in `serve()`.
+- `server.listen()` without a host binds to `::` with IPv4 accepted as well, like Node, instead
+  of `127.0.0.1` for `node:http` and `0.0.0.0` for `node:net`, so servers are reachable from
+  other machines and containers and through `localhost` on IPv6. Connecting to a host with both
+  IPv6 and IPv4 addresses tries them in parallel, which removes a two-second stall on Windows
+  when a server listens only on `127.0.0.1`.
+- Express's 404 handler crashed with `req.unpipe is not a function`; requests now have
+  `unpipe`, `isPaused`, `read`, `unshift` and `setTimeout`.
+- `ReadableStream` and `WritableStream` call `start()` synchronously from the constructor, as
+  the streams standard requires.
 
 ## [1.4.0] - 2026-10-23
 

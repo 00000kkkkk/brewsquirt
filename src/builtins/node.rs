@@ -4195,14 +4195,34 @@ const NODE_SRC: &str = r##"
       this.httpVersion = "1.1"
       this.url = ""
       this.complete = false
-      res.arrayBuffer().then(
-        (buf) => {
-          if (buf.byteLength) this.push(Buffer.from(buf))
-          this.complete = true
-          this.push(null)
-        },
-        (e) => this.destroy(e),
-      )
+      const reader = res.body?.getReader()
+      if (!reader) {
+        this.complete = true
+        this.push(null)
+        return
+      }
+      this.#reader = reader
+      const pump = () =>
+        reader.read().then(
+          ({ value, done }) => {
+            if (done) {
+              this.complete = true
+              this.push(null)
+              return
+            }
+            if (value.byteLength) this.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength))
+            pump()
+          },
+          (e) => {
+            if (!this.destroyed) this.destroy(e)
+          },
+        )
+      pump()
+    }
+    #reader = null
+    _destroy(err, cb) {
+      if (this.#reader && !this.complete) this.#reader.cancel().catch(() => {})
+      cb(err)
     }
     text() {
       return this.toArray().then((parts) => Buffer.concat(parts.map((p) => (typeof p === "string" ? Buffer.from(p) : p))).toString("utf8"))
@@ -5689,7 +5709,7 @@ const NODE_SRC: &str = r##"
         return this
       }
       const port = options.port === undefined ? 0 : Number(options.port)
-      const host = options.host ?? (options.ipv6Only ? "::" : "0.0.0.0")
+      const host = options.host ?? "::"
       if (cb) this.once("listening", cb)
       let result
       try {

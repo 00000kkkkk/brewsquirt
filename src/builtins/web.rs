@@ -1,6 +1,6 @@
 use super::{arg, method, native_fn};
 use crate::compiler::Mode;
-use crate::io::{self, FetchRequest, FetchResponse, HttpReply, HttpRequest, IoEvent};
+use crate::io::{self, FetchRequest, FetchResponse, HttpReply, HttpRequest, IoEvent, ReplyMsg};
 use crate::value::Value;
 use crate::vm::{ErrorKind, Vm};
 use std::time::Duration;
@@ -1103,8 +1103,8 @@ const WEB_SRC: &str = r##"
       }
       st.controller = new ReadableStreamDefaultController(st, kStream)
       this[kStream] = st
-      Promise.resolve()
-        .then(() => underlyingSource.start?.(st.controller))
+      const startResult = underlyingSource.start?.(st.controller)
+      Promise.resolve(startResult)
         .then(
           () => {
             st.started = true
@@ -1452,8 +1452,8 @@ const WEB_SRC: &str = r##"
       st.ready.resolve()
       st.controller = new WritableStreamDefaultController(st, kStream)
       this[kStream] = st
-      Promise.resolve()
-        .then(() => underlyingSink.start?.(st.controller))
+      const startResult = underlyingSink.start?.(st.controller)
+      Promise.resolve(startResult)
         .then(
           () => {
             st.started = true
@@ -2137,12 +2137,52 @@ const WEB_SRC: &str = r##"
       )
     })
     if (req.redirect === "error" && raw.status >= 300 && raw.status < 400) {
+      native.abort(id)
       throw new TypeError("fetch failed", { cause: new Error("unexpected redirect") })
+    }
+    const empty = raw.status === 204 || raw.status === 304 || req.method === "HEAD"
+    let body = null
+    if (empty) {
+      native.abort(id)
+    } else {
+      let controller
+      let finished = false
+      const onAbort = () => {
+        if (finished) return
+        finished = true
+        native.abort(id)
+        try {
+          controller.error(signal.reason)
+        } catch {}
+      }
+      body = new ReadableStream({
+        start(c) {
+          controller = c
+        },
+        cancel() {
+          finished = true
+          signal.removeEventListener("abort", onAbort)
+          native.abort(id)
+        },
+      })
+      signal.addEventListener("abort", onAbort, { once: true })
+      native.fetchBody(
+        id,
+        (chunk) => {
+          if (!finished) controller.enqueue(chunk)
+        },
+        (error) => {
+          if (finished) return
+          finished = true
+          signal.removeEventListener("abort", onAbort)
+          if (error === undefined) controller.close()
+          else controller.error(new TypeError("terminated", { cause: new Error(error) }))
+        },
+      )
     }
     internal = true
     try {
-      const empty = raw.status === 204 || raw.status === 304 || req.method === "HEAD"
-      return new Response(empty ? null : raw.body, {
+      return new Response(body, {
         status: raw.status,
         statusText: raw.statusText,
         headers: new Headers(raw.headers),
@@ -2156,9 +2196,7 @@ const WEB_SRC: &str = r##"
 
   async function toReply(res) {
     if (res instanceof Response) {
-      let raw = res[kRaw]
-      if (raw instanceof ReadableStream) raw = await collectStream(raw)
-      return [res.status, [...res.headers], raw ?? ""]
+      return [res.status, [...res.headers], res[kRaw] ?? ""]
     }
     if (res === undefined || res === null) return [204, [], ""]
     if (typeof res === "string") return [200, [["content-type", "text/plain;charset=UTF-8"]], res]
@@ -2189,13 +2227,39 @@ const WEB_SRC: &str = r##"
         server.stop()
       },
     }
+    const closers = new Map()
+    const chunkBytes = (c) => (typeof c === "string" ? encoder.encode(c) : c instanceof Uint8Array ? c : c instanceof ArrayBuffer ? new Uint8Array(c) : ArrayBuffer.isView(c) ? viewBytes(c) : encoder.encode(String(c)))
+    async function pump(replyId, status, headers, stream) {
+      native.replyHead(replyId, status, headers)
+      let reader
+      try {
+        reader = stream.getReader()
+        for (;;) {
+          const { value, done } = await reader.read()
+          if (done) break
+          if (!native.replyChunk(replyId, chunkBytes(value))) {
+            reader.cancel().catch(() => {})
+            break
+          }
+        }
+        native.replyEnd(replyId, false)
+      } catch (err) {
+        native.replyEnd(replyId, true)
+      }
+    }
     function dispatch(raw, replyId) {
+      if (raw === null) {
+        closers.get(replyId)?.()
+        return
+      }
       server.pendingRequests++
+      const aborter = new AbortController()
+      closers.set(replyId, () => aborter.abort())
       internal = true
       let req
       try {
         const hasBody = raw.body.length > 0 && raw.method !== "GET" && raw.method !== "HEAD"
-        req = new Request(raw.url, { method: raw.method, headers: raw.headers, body: hasBody ? raw.body : null })
+        req = new Request(raw.url, { method: raw.method, headers: raw.headers, body: hasBody ? raw.body : null, signal: aborter.signal })
         req.remoteAddress = raw.remote
       } finally {
         internal = false
@@ -2211,9 +2275,11 @@ const WEB_SRC: &str = r##"
           console.error(err)
           return [500, [["content-type", "text/plain;charset=UTF-8"]], "Internal Server Error"]
         })
-        .then(([status, headers, body]) => {
+        .then(async ([status, headers, body]) => {
+          if (body instanceof ReadableStream) await pump(replyId, status, headers, body)
+          else native.reply(replyId, status, headers, typeof body === "string" ? body : toBytes(body))
           server.pendingRequests--
-          native.reply(replyId, status, headers, typeof body === "string" ? body : toBytes(body))
+          closers.delete(replyId)
         })
     }
     return server
@@ -2325,8 +2391,17 @@ const WEB_SRC: &str = r##"
   })
 
   const kMessage = Symbol("messageState")
+  const closeMessage = (msg) => {
+    const state = msg[kMessage]
+    if (!state || state.closed) return
+    state.closed = true
+    queueMicrotask(() => {
+      msg.destroyed = true
+      msg.emit("close")
+    })
+  }
   function IncomingMessage(req) {
-    const state = { bytes: new Uint8Array(0), encoding: null }
+    const state = { bytes: new Uint8Array(0), encoding: null, closed: false }
     Object.defineProperty(this, kMessage, { value: state, configurable: true })
     this.method = "GET"
     this.url = "/"
@@ -2384,9 +2459,10 @@ const WEB_SRC: &str = r##"
             this.complete = true
             this.readable = false
             fn.call(this)
+            closeMessage(this)
           }),
         )
-      if (event === "close") queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => fn.call(this))))
+      if (event === "close" && state.closed && this.destroyed) queueMicrotask(() => fn.call(this))
       return this
     },
     addListener(event, fn) {
@@ -2398,7 +2474,23 @@ const WEB_SRC: &str = r##"
     resume() {
       return this
     },
-    destroy() {
+    isPaused() {
+      return false
+    },
+    unpipe() {
+      return this
+    },
+    unshift() {},
+    read() {
+      return null
+    },
+    setTimeout(ms, cb) {
+      if (typeof cb === "function") this.on("timeout", cb)
+      return this
+    },
+    destroy(error) {
+      if (error) queueMicrotask(() => this.emit("error", error))
+      closeMessage(this)
       return this
     },
     pipe(dest) {
@@ -2426,10 +2518,43 @@ const WEB_SRC: &str = r##"
   const responseState = (res) => {
     let state = res[kResponse]
     if (!state) {
-      state = { headers: new Headers(), chunks: [], done: null }
+      state = { headers: new Headers(), chunks: [], done: null, controller: null, scheduled: false }
       Object.defineProperty(res, kResponse, { value: state, configurable: true })
     }
     return state
+  }
+  const responseBytes = (c) => (typeof c === "string" ? encoder.encode(c) : c instanceof Uint8Array ? c : c instanceof ArrayBuffer ? new Uint8Array(c) : ArrayBuffer.isView(c) ? viewBytes(c) : encoder.encode(String(c)))
+  const startStreaming = (res) => {
+    const state = responseState(res)
+    if (state.controller || !state.done || res.writableEnded || res.destroyed) return
+    sendHeaders(res)
+    let controller
+    const stream = new ReadableStream({
+      start(c) {
+        controller = c
+      },
+    })
+    state.controller = controller
+    for (const c of state.chunks) controller.enqueue(responseBytes(c))
+    state.chunks = []
+    internal = true
+    try {
+      state.done(new Response(stream, { status: res.statusCode, headers: state.headers }))
+    } finally {
+      internal = false
+    }
+  }
+  const abortResponse = (res) => {
+    const state = responseState(res)
+    if (res.writableFinished || res.destroyed) return
+    res.destroyed = true
+    if (state.controller) {
+      try {
+        state.controller.close()
+      } catch {}
+    }
+    queueMicrotask(() => res.emit("close"))
+    if (res.req) closeMessage(res.req)
   }
   function ServerResponse(req) {
     const state = responseState(this)
@@ -2462,6 +2587,7 @@ const WEB_SRC: &str = r##"
   defineMethods(ServerResponse.prototype, {
     flushHeaders() {
       sendHeaders(this)
+      startStreaming(this)
     },
     cork() {},
     uncork() {},
@@ -2524,11 +2650,24 @@ const WEB_SRC: &str = r##"
     addTrailers() {},
     write(chunk, encoding, cb) {
       if (typeof encoding === "function") [encoding, cb] = [undefined, encoding]
+      const state = responseState(this)
+      if (this.destroyed) {
+        if (typeof cb === "function") queueMicrotask(cb)
+        return false
+      }
       if (chunk != null) {
         const encoded = typeof chunk === "string" && typeof encoding === "string" && !/^utf-?8$/i.test(encoding) && typeof Buffer === "function" ? Buffer.from(chunk, encoding) : chunk
-        responseState(this).chunks.push(encoded)
+        if (state.controller) state.controller.enqueue(responseBytes(encoded))
+        else state.chunks.push(encoded)
       }
       sendHeaders(this)
+      if (!state.controller && !state.scheduled && state.done && !this.writableEnded) {
+        state.scheduled = true
+        queueMicrotask(() => {
+          state.scheduled = false
+          startStreaming(this)
+        })
+      }
       if (typeof cb === "function") queueMicrotask(cb)
       return true
     },
@@ -2537,6 +2676,22 @@ const WEB_SRC: &str = r##"
       else if (typeof encoding === "function") [encoding, cb] = [undefined, encoding]
       if (this.writableEnded) return this
       const state = responseState(this)
+      if (state.controller) {
+        if (chunk != null) this.write(chunk, encoding)
+        this.writableEnded = true
+        this.finished = true
+        try {
+          state.controller.close()
+        } catch {}
+        if (typeof cb === "function") queueMicrotask(cb)
+        queueMicrotask(() => {
+          this.writableFinished = true
+          this.emit("finish")
+          this.emit("close")
+          if (this.req) closeMessage(this.req)
+        })
+        return this
+      }
       if (chunk != null) this.write(chunk, encoding)
       this.writableEnded = true
       this.finished = true
@@ -2567,6 +2722,7 @@ const WEB_SRC: &str = r##"
         this.writableFinished = true
         this.emit("finish")
         this.emit("close")
+        if (this.req) closeMessage(this.req)
       })
       return this
     },
@@ -2692,9 +2848,13 @@ const WEB_SRC: &str = r##"
             e.code = "ERR_MISSING_ARGS"
             throw e
           }
-          srv = serve({ port, hostname: host ?? "127.0.0.1", upgrade: onUpgrade, tls }, (req) =>
+          srv = serve({ port, hostname: host ?? "::", upgrade: onUpgrade, tls }, (req) =>
             new Promise((resolve) => {
-              emit("request", new IncomingMessage(req), new ServerResponse(resolve))
+              const message = new IncomingMessage(req)
+              const response = new ServerResponse(resolve)
+              response.req = message
+              req.signal.addEventListener("abort", () => abortResponse(response), { once: true })
+              emit("request", message, response)
             }),
           )
         } catch (e) {
@@ -2818,8 +2978,12 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     let factory = vm.run_proto(proto)?;
     let natives = vm.new_object();
     method(vm, &natives, "fetch", 6, native_fetch);
+    method(vm, &natives, "fetchBody", 3, native_fetch_body);
     method(vm, &natives, "serve", 3, native_serve);
     method(vm, &natives, "reply", 4, native_reply);
+    method(vm, &natives, "replyHead", 3, native_reply_head);
+    method(vm, &natives, "replyChunk", 2, native_reply_chunk);
+    method(vm, &natives, "replyEnd", 2, native_reply_end);
     method(vm, &natives, "close", 1, native_close);
     method(vm, &natives, "abort", 1, native_abort);
     method(vm, &natives, "unref", 1, native_unref);
@@ -3001,6 +3165,52 @@ fn pairs_value(vm: &Vm, headers: Vec<(String, String)>) -> Value {
     vm.new_array(items)
 }
 
+pub struct FetchBody {
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handlers: Option<(Value, Value)>,
+    queued: Vec<Result<Vec<u8>, Option<String>>>,
+}
+
+fn fetch_body_deliver(
+    vm: &mut Vm,
+    id: u64,
+    piece: Result<Vec<u8>, Option<String>>,
+) -> Result<(), Value> {
+    let Some(entry) = vm.io_fetch_bodies.get_mut(&id) else {
+        return Ok(());
+    };
+    let Some((on_data, on_end)) = entry.handlers.clone() else {
+        entry.queued.push(piece);
+        return Ok(());
+    };
+    match piece {
+        Ok(bytes) => {
+            let chunk = super::binary::new_uint8(vm, bytes);
+            vm.call_value(&on_data, Value::Undefined, &[chunk])?;
+        }
+        Err(error) => {
+            vm.io_fetch_bodies.remove(&id);
+            vm.io.pending -= 1;
+            let arg = error.map(Value::from).unwrap_or(Value::Undefined);
+            vm.call_value(&on_end, Value::Undefined, &[arg])?;
+        }
+    }
+    Ok(())
+}
+
+fn native_fetch_body(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let id = vm.to_number(&arg(args, 0))? as u64;
+    let Some(entry) = vm.io_fetch_bodies.get_mut(&id) else {
+        return Ok(Value::Bool(false));
+    };
+    entry.handlers = Some((arg(args, 1), arg(args, 2)));
+    let queued = std::mem::take(&mut entry.queued);
+    for piece in queued {
+        fetch_body_deliver(vm, id, piece)?;
+    }
+    Ok(Value::Bool(true))
+}
+
 fn native_fetch(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let method = vm.to_string(&arg(args, 0))?.to_string();
     let url = vm.to_string(&arg(args, 1))?.to_string();
@@ -3020,6 +3230,15 @@ fn native_fetch(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let id = vm.io.next_id();
     vm.io.pending += 1;
     vm.io_fetches.insert(id, p.clone());
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    vm.io_fetch_bodies.insert(
+        id,
+        FetchBody {
+            cancel: cancel.clone(),
+            handlers: None,
+            queued: Vec::new(),
+        },
+    );
     let pair = vm.new_array(vec![(id as f64).into(), Value::Object(p)]);
     io::spawn_fetch(
         vm.io.tx.clone(),
@@ -3032,6 +3251,7 @@ fn native_fetch(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             timeout,
             follow,
             tls,
+            cancel,
         },
     );
     Ok(pair)
@@ -3039,7 +3259,11 @@ fn native_fetch(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 
 fn native_abort(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let id = vm.to_number(&arg(args, 0))? as u64;
-    if vm.io_fetches.remove(&id).is_some() {
+    vm.io_fetches.remove(&id);
+    if let Some(entry) = vm.io_fetch_bodies.remove(&id) {
+        entry
+            .cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         vm.io.pending -= 1;
     }
     Ok(Value::Undefined)
@@ -3097,10 +3321,46 @@ fn native_reply(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         None => vm.to_string(&arg(args, 3))?.as_bytes().to_vec(),
     };
     if let Some(tx) = vm.io_replies.remove(&id) {
-        let _ = tx.send(HttpReply {
+        let _ = tx.send(ReplyMsg::Full(HttpReply {
             status,
             headers,
             body,
+        }));
+    }
+    Ok(Value::Undefined)
+}
+
+fn native_reply_head(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let id = vm.to_number(&arg(args, 0))? as u64;
+    let status = vm.to_number(&arg(args, 1))? as u16;
+    let headers = pairs(vm, &arg(args, 2))?;
+    if let Some(tx) = vm.io_replies.get(&id) {
+        let _ = tx.send(ReplyMsg::Head { status, headers });
+    }
+    Ok(Value::Undefined)
+}
+
+fn native_reply_chunk(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let id = vm.to_number(&arg(args, 0))? as u64;
+    let body = match super::binary::buffer_source_bytes(&arg(args, 1)) {
+        Some(b) => b,
+        None => vm.to_string(&arg(args, 1))?.as_bytes().to_vec(),
+    };
+    let sent = match vm.io_replies.get(&id) {
+        Some(tx) => tx.send(ReplyMsg::Chunk(body)).is_ok(),
+        None => false,
+    };
+    Ok(Value::Bool(sent))
+}
+
+fn native_reply_end(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let id = vm.to_number(&arg(args, 0))? as u64;
+    let abort = arg(args, 1).truthy();
+    if let Some(tx) = vm.io_replies.remove(&id) {
+        let _ = tx.send(if abort {
+            ReplyMsg::Abort
+        } else {
+            ReplyMsg::End
         });
     }
     Ok(Value::Undefined)
@@ -3122,7 +3382,6 @@ fn fetch_value(vm: &mut Vm, r: FetchResponse) -> Value {
     o.set_own("url", r.url.into());
     let headers = pairs_value(vm, r.headers);
     o.set_own("headers", headers);
-    o.set_own("body", super::binary::new_uint8(vm, r.body));
     Value::Object(o)
 }
 
@@ -3155,17 +3414,21 @@ pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
         IoEvent::Worker { id, event } => super::threads::handle_worker(vm, id, event)?,
         IoEvent::Wake => {}
         IoEvent::WaitDone { id, result } => super::threads::handle_wait_done(vm, id, result),
+        IoEvent::FetchChunk { id, data } => fetch_body_deliver(vm, id, Ok(data))?,
+        IoEvent::FetchEnd { id, error } => fetch_body_deliver(vm, id, Err(error))?,
         IoEvent::Fetch { id, result } => {
             let Some(p) = vm.io_fetches.remove(&id) else {
                 return Ok(());
             };
-            vm.io.pending -= 1;
             match result {
                 Ok(r) => {
                     let v = fetch_value(vm, r);
                     vm.resolve_promise(&p, v);
                 }
                 Err(msg) => {
+                    if vm.io_fetch_bodies.remove(&id).is_some() {
+                        vm.io.pending -= 1;
+                    }
                     let e = vm.type_error("fetch failed");
                     let cause = vm.make_error(ErrorKind::Error, msg);
                     if let Value::Object(o) = &e {
@@ -3177,6 +3440,7 @@ pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
         }
         IoEvent::Request {
             server,
+            rid,
             request,
             reply,
         } => {
@@ -3184,10 +3448,23 @@ pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
                 return Ok(());
             };
             let dispatch = dispatch.clone();
-            let id = vm.io.next_id();
-            vm.io_replies.insert(id, reply);
+            vm.io_replies.insert(rid, reply);
             let raw = request_value(vm, request);
-            vm.call_value(&dispatch, Value::Undefined, &[raw, (id as f64).into()])?;
+            vm.call_value(&dispatch, Value::Undefined, &[raw, (rid as f64).into()])?;
+        }
+        IoEvent::RequestClosed { server, rid } => {
+            if !vm.io_replies.contains_key(&rid) {
+                return Ok(());
+            }
+            let Some((dispatch, _, _)) = vm.io_servers.get(&server) else {
+                return Ok(());
+            };
+            let dispatch = dispatch.clone();
+            vm.call_value(
+                &dispatch,
+                Value::Undefined,
+                &[Value::Null, (rid as f64).into()],
+            )?;
         }
         IoEvent::Upgrade {
             server,

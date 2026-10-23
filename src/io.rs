@@ -15,6 +15,7 @@ pub struct FetchRequest {
     pub timeout: Option<Duration>,
     pub follow: bool,
     pub tls: TlsClientOptions,
+    pub cancel: Arc<AtomicBool>,
 }
 
 pub struct FetchResponse {
@@ -22,7 +23,6 @@ pub struct FetchResponse {
     pub status_text: String,
     pub url: String,
     pub headers: Headers,
-    pub body: Vec<u8>,
 }
 
 pub struct HttpRequest {
@@ -39,15 +39,36 @@ pub struct HttpReply {
     pub body: Vec<u8>,
 }
 
+pub enum ReplyMsg {
+    Full(HttpReply),
+    Head { status: u16, headers: Headers },
+    Chunk(Vec<u8>),
+    End,
+    Abort,
+}
+
 pub enum IoEvent {
     Fetch {
         id: u64,
         result: Result<FetchResponse, String>,
     },
+    FetchChunk {
+        id: u64,
+        data: Vec<u8>,
+    },
+    FetchEnd {
+        id: u64,
+        error: Option<String>,
+    },
     Request {
         server: u64,
+        rid: u64,
         request: HttpRequest,
-        reply: Sender<HttpReply>,
+        reply: Sender<ReplyMsg>,
+    },
+    RequestClosed {
+        server: u64,
+        rid: u64,
     },
     Stdin(Option<Vec<u8>>),
     Socket {
@@ -214,6 +235,8 @@ pub enum SocketCmd {
     End,
     Destroy,
     Flush(Sender<()>),
+    ReadDone,
+    TlsFlush,
 }
 
 pub enum ChildEvent {
@@ -426,22 +449,13 @@ pub fn tls_server_config(
     Ok(Arc::new(config))
 }
 
-trait ReadTimeout {
-    fn read_timeout(&self, d: Duration);
+trait CloseNotify {
     fn close_notify(&mut self) {}
 }
 
-impl ReadTimeout for TcpStream {
-    fn read_timeout(&self, d: Duration) {
-        let _ = self.set_read_timeout(Some(d));
-    }
-}
+impl CloseNotify for TcpStream {}
 
-impl ReadTimeout for rustls::StreamOwned<rustls::ServerConnection, TcpStream> {
-    fn read_timeout(&self, d: Duration) {
-        let _ = self.sock.set_read_timeout(Some(d));
-    }
-
+impl CloseNotify for rustls::StreamOwned<rustls::ServerConnection, TcpStream> {
     fn close_notify(&mut self) {
         self.conn.send_close_notify();
         let _ = self.conn.complete_io(&mut self.sock);
@@ -467,143 +481,291 @@ fn tls_wrap(
     Ok(stream)
 }
 
-enum Flow {
-    Continue,
-    Stop,
+pub trait IntoSock {
+    fn into_sock(self) -> (TcpStream, Option<rustls::Connection>);
 }
 
-fn socket_cmd<S: Write>(
-    cmd: SocketCmd,
-    tcp: &TcpStream,
-    stream: &mut S,
-    write_done: &mut bool,
-    read_done: bool,
-    id: u64,
-    tx: &Sender<IoEvent>,
-) -> Flow {
-    match cmd {
-        SocketCmd::Write(data) => {
-            if let Err(e) = stream.write_all(&data).and_then(|_| stream.flush()) {
-                let _ = tx.send(IoEvent::Socket {
-                    id,
-                    event: SocketEvent::Error {
-                        code: error_code(&e).to_string(),
-                        message: format!("write {}", error_code(&e)),
-                    },
-                });
-                return Flow::Stop;
-            }
-            Flow::Continue
-        }
-        SocketCmd::End => {
-            let _ = stream.flush();
-            let _ = tcp.shutdown(std::net::Shutdown::Write);
-            *write_done = true;
-            if read_done {
-                Flow::Stop
-            } else {
-                Flow::Continue
-            }
-        }
-        SocketCmd::Flush(ack) => {
-            let _ = stream.flush();
-            let _ = ack.send(());
-            Flow::Continue
-        }
-        SocketCmd::Destroy => Flow::Stop,
+impl IntoSock for TcpStream {
+    fn into_sock(self) -> (TcpStream, Option<rustls::Connection>) {
+        (self, None)
     }
 }
 
-fn socket_loop<S: Read + Write>(
-    tcp: TcpStream,
-    mut stream: S,
+impl IntoSock for rustls::StreamOwned<rustls::ClientConnection, TcpStream> {
+    fn into_sock(self) -> (TcpStream, Option<rustls::Connection>) {
+        (self.sock, Some(rustls::Connection::Client(self.conn)))
+    }
+}
+
+impl IntoSock for rustls::StreamOwned<rustls::ServerConnection, TcpStream> {
+    fn into_sock(self) -> (TcpStream, Option<rustls::Connection>) {
+        (self.sock, Some(rustls::Connection::Server(self.conn)))
+    }
+}
+
+type SharedTls = Arc<std::sync::Mutex<rustls::Connection>>;
+
+fn lock_tls(conn: &SharedTls) -> std::sync::MutexGuard<'_, rustls::Connection> {
+    conn.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn drain_plaintext(conn: &mut rustls::Connection, out: &mut Vec<u8>) -> bool {
+    let mut chunk = [0u8; 16384];
+    loop {
+        match conn.reader().read(&mut chunk) {
+            Ok(0) => return true,
+            Ok(n) => out.extend_from_slice(&chunk[..n]),
+            Err(_) => return false,
+        }
+    }
+}
+
+fn tls_send(
+    conn: &SharedTls,
+    sock: &mut TcpStream,
+    data: &[u8],
+    close: bool,
+) -> std::io::Result<()> {
+    let mut out = Vec::with_capacity(data.len() + 64);
+    {
+        let mut c = lock_tls(conn);
+        let mut rest = data;
+        loop {
+            while !rest.is_empty() {
+                let n = c.writer().write(rest)?;
+                if n == 0 {
+                    break;
+                }
+                rest = &rest[n..];
+            }
+            while c.wants_write() {
+                c.write_tls(&mut out)?;
+            }
+            if rest.is_empty() {
+                break;
+            }
+        }
+        if close {
+            c.send_close_notify();
+            while c.wants_write() {
+                c.write_tls(&mut out)?;
+            }
+        }
+    }
+    if out.is_empty() {
+        return Ok(());
+    }
+    sock.write_all(&out)
+}
+
+fn quiet_read_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::UnexpectedEof
+    )
+}
+
+fn socket_reader(
+    mut sock: TcpStream,
+    conn: Option<SharedTls>,
     id: u64,
-    rx: Receiver<SocketCmd>,
+    cmd: Sender<SocketCmd>,
+    closed: Arc<AtomicBool>,
     tx: Sender<IoEvent>,
 ) {
+    let emit = |event: SocketEvent| {
+        if !closed.load(Ordering::SeqCst) {
+            let _ = tx.send(IoEvent::Socket { id, event });
+        }
+    };
+    let mut failed = false;
     let mut buf = vec![0u8; 65536];
-    let mut read_done = false;
-    let mut write_done = false;
-    'outer: loop {
-        if read_done {
-            match rx.recv() {
-                Ok(cmd) => {
-                    if let Flow::Stop =
-                        socket_cmd(cmd, &tcp, &mut stream, &mut write_done, read_done, id, &tx)
-                    {
-                        break 'outer;
-                    }
-                    if write_done {
-                        break 'outer;
-                    }
-                    continue;
-                }
-                Err(_) => break 'outer,
-            }
+    let mut plain = Vec::new();
+    if let Some(c) = &conn {
+        drain_plaintext(&mut lock_tls(c), &mut plain);
+        if !plain.is_empty() {
+            emit(SocketEvent::Data(std::mem::take(&mut plain)));
         }
-        loop {
-            match rx.try_recv() {
-                Ok(cmd) => {
-                    if let Flow::Stop =
-                        socket_cmd(cmd, &tcp, &mut stream, &mut write_done, read_done, id, &tx)
-                    {
-                        break 'outer;
-                    }
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => break 'outer,
-            }
-        }
-        match stream.read(&mut buf) {
-            Ok(0) => {
-                read_done = true;
-                let _ = tx.send(IoEvent::Socket {
-                    id,
-                    event: SocketEvent::End,
-                });
-                if write_done {
-                    break 'outer;
-                }
-            }
-            Ok(n) => {
-                let _ = tx.send(IoEvent::Socket {
-                    id,
-                    event: SocketEvent::Data(buf[..n].to_vec()),
-                });
-            }
+    }
+    loop {
+        let n = match sock.read(&mut buf) {
+            Ok(n) => n,
             Err(e)
                 if matches!(
                     e.kind(),
-                    std::io::ErrorKind::WouldBlock
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::WouldBlock
                         | std::io::ErrorKind::TimedOut
-                        | std::io::ErrorKind::Interrupted
-                ) => {}
-            Err(e) => {
-                if !matches!(
-                    e.kind(),
-                    std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::ConnectionAborted
-                        | std::io::ErrorKind::UnexpectedEof
-                ) {
-                    let code = error_code(&e);
-                    let _ = tx.send(IoEvent::Socket {
-                        id,
-                        event: SocketEvent::Error {
-                            code: code.to_string(),
-                            message: format!("read {code}"),
-                        },
-                    });
-                } else if !read_done {
-                    let _ = tx.send(IoEvent::Socket {
-                        id,
-                        event: SocketEvent::End,
-                    });
-                }
-                break 'outer;
+                ) =>
+            {
+                continue;
             }
+            Err(e) => {
+                if quiet_read_error(&e) {
+                    emit(SocketEvent::End);
+                } else {
+                    let code = error_code(&e);
+                    emit(SocketEvent::Error {
+                        code: code.to_string(),
+                        message: format!("read {code}"),
+                    });
+                    failed = true;
+                }
+                break;
+            }
+        };
+        if n == 0 {
+            emit(SocketEvent::End);
+            break;
+        }
+        let Some(c) = &conn else {
+            emit(SocketEvent::Data(buf[..n].to_vec()));
+            continue;
+        };
+        let mut failure = None;
+        let mut peer_closed = false;
+        let wants_write = {
+            let mut guard = lock_tls(c);
+            let mut input = &buf[..n];
+            while !input.is_empty() {
+                if let Err(e) = guard.read_tls(&mut input) {
+                    failure = Some(e.to_string());
+                    break;
+                }
+                match guard.process_new_packets() {
+                    Ok(state) => {
+                        peer_closed |= drain_plaintext(&mut guard, &mut plain);
+                        peer_closed |= state.peer_has_closed();
+                    }
+                    Err(e) => {
+                        failure = Some(e.to_string());
+                        break;
+                    }
+                }
+            }
+            guard.wants_write()
+        };
+        if !plain.is_empty() {
+            emit(SocketEvent::Data(std::mem::take(&mut plain)));
+        }
+        if wants_write {
+            let _ = cmd.send(SocketCmd::TlsFlush);
+        }
+        if let Some(message) = failure {
+            emit(SocketEvent::Error {
+                code: "ERR_SSL_PROTOCOL_ERROR".to_string(),
+                message,
+            });
+            failed = true;
+            break;
+        }
+        if peer_closed {
+            emit(SocketEvent::End);
+            break;
         }
     }
-    let _ = tcp.shutdown(std::net::Shutdown::Both);
+    let _ = cmd.send(if failed {
+        SocketCmd::Destroy
+    } else {
+        SocketCmd::ReadDone
+    });
+}
+
+fn socket_loop<S: IntoSock>(
+    stream: S,
+    id: u64,
+    cmd: Sender<SocketCmd>,
+    rx: Receiver<SocketCmd>,
+    tx: Sender<IoEvent>,
+) {
+    let (mut sock, conn) = stream.into_sock();
+    let _ = sock.set_read_timeout(None);
+    let conn = conn.map(|mut c| {
+        c.set_buffer_limit(None);
+        Arc::new(std::sync::Mutex::new(c))
+    });
+    let closed = Arc::new(AtomicBool::new(false));
+    match sock.try_clone() {
+        Ok(read_sock) => {
+            let conn = conn.clone();
+            let closed = closed.clone();
+            let tx = tx.clone();
+            std::thread::spawn(move || socket_reader(read_sock, conn, id, cmd, closed, tx));
+        }
+        Err(e) => {
+            let code = error_code(&e);
+            let _ = tx.send(IoEvent::Socket {
+                id,
+                event: SocketEvent::Error {
+                    code: code.to_string(),
+                    message: format!("read {code}"),
+                },
+            });
+            let _ = cmd.send(SocketCmd::Destroy);
+        }
+    }
+    let mut read_done = false;
+    let mut write_done = false;
+    while let Ok(command) = rx.recv() {
+        match command {
+            SocketCmd::Write(data) => {
+                if write_done {
+                    continue;
+                }
+                let r = match &conn {
+                    None => sock.write_all(&data),
+                    Some(c) => tls_send(c, &mut sock, &data, false),
+                };
+                if let Err(e) = r {
+                    let code = error_code(&e);
+                    if !closed.load(Ordering::SeqCst) {
+                        let _ = tx.send(IoEvent::Socket {
+                            id,
+                            event: SocketEvent::Error {
+                                code: code.to_string(),
+                                message: format!("write {code}"),
+                            },
+                        });
+                    }
+                    break;
+                }
+            }
+            SocketCmd::TlsFlush => {
+                if let Some(c) = &conn {
+                    let _ = tls_send(c, &mut sock, &[], false);
+                }
+            }
+            SocketCmd::End => {
+                if !write_done {
+                    if let Some(c) = &conn {
+                        let _ = tls_send(c, &mut sock, &[], true);
+                    }
+                    let _ = sock.flush();
+                    let _ = sock.shutdown(std::net::Shutdown::Write);
+                    write_done = true;
+                }
+                if read_done {
+                    break;
+                }
+            }
+            SocketCmd::ReadDone => {
+                read_done = true;
+                if write_done {
+                    break;
+                }
+            }
+            SocketCmd::Flush(ack) => {
+                let _ = sock.flush();
+                let _ = ack.send(());
+            }
+            SocketCmd::Destroy => break,
+        }
+    }
+    closed.store(true, Ordering::SeqCst);
+    let _ = sock.shutdown(std::net::Shutdown::Both);
     let _ = tx.send(IoEvent::Socket {
         id,
         event: SocketEvent::Closed,
@@ -618,6 +780,7 @@ pub fn socket_connect(
     tx: Sender<IoEvent>,
 ) -> Sender<SocketCmd> {
     let (ctx, crx) = channel::<SocketCmd>();
+    let own = ctx.clone();
     std::thread::spawn(move || {
         let fail = |code: &str, message: String| {
             let _ = tx.send(IoEvent::Socket {
@@ -644,51 +807,34 @@ pub fn socket_connect(
             fail("ENOTFOUND", format!("getaddrinfo ENOTFOUND {host}"));
             return;
         }
-        let mut stream = None;
-        let mut last: Option<std::io::Error> = None;
-        for a in &addrs {
-            match TcpStream::connect_timeout(a, Duration::from_secs(60)) {
-                Ok(s) => {
-                    stream = Some(s);
-                    break;
-                }
-                Err(e) => last = Some(e),
+        let stream = match connect_any(&addrs, Duration::from_secs(60)) {
+            Ok(s) => s,
+            Err(e) => {
+                let code = error_code(&e);
+                fail(code, format!("connect {code} {host}:{port}"));
+                return;
             }
-        }
-        let Some(stream) = stream else {
-            let e = last.unwrap_or_else(|| std::io::Error::other("connect failed"));
-            let code = error_code(&e);
-            fail(code, format!("connect {code} {host}:{port}"));
-            return;
         };
         let _ = stream.set_nodelay(true);
         let (Ok(local), Ok(remote)) = (stream.local_addr(), stream.peer_addr()) else {
             fail("EIO", "connect failed".to_string());
             return;
         };
-        let Ok(tcp) = stream.try_clone() else {
-            fail("EIO", "connect failed".to_string());
-            return;
-        };
         match tls {
             None => {
-                let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
                 let _ = tx.send(IoEvent::Socket {
                     id,
                     event: SocketEvent::Connected { local, remote },
                 });
-                socket_loop(tcp, stream, id, crx, tx);
+                socket_loop(stream, id, own, crx, tx);
             }
             Some(opts) => match tls_wrap(stream, &opts) {
                 Ok(secure) => {
-                    let _ = secure
-                        .sock
-                        .set_read_timeout(Some(Duration::from_millis(20)));
                     let _ = tx.send(IoEvent::Socket {
                         id,
                         event: SocketEvent::Connected { local, remote },
                     });
-                    socket_loop(tcp, secure, id, crx, tx);
+                    socket_loop(secure, id, own, crx, tx);
                 }
                 Err(message) => fail("ERR_TLS_HANDSHAKE", message),
             },
@@ -705,7 +851,7 @@ pub fn socket_listen(
     tx: Sender<IoEvent>,
     tls: Option<Arc<rustls::ServerConfig>>,
 ) -> std::io::Result<ServerHandle> {
-    let listener = TcpListener::bind((host, port))?;
+    let listener = bind_listener(host, port)?;
     let addr = listener.local_addr()?;
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
@@ -718,16 +864,13 @@ pub fn socket_listen(
             let (Ok(local), Ok(remote)) = (stream.local_addr(), stream.peer_addr()) else {
                 continue;
             };
-            let Ok(tcp) = stream.try_clone() else {
-                continue;
-            };
             let _ = stream.set_nodelay(true);
             let id = ids.fetch_add(1, Ordering::SeqCst) + 1;
             let (ctx, crx) = channel::<SocketCmd>();
+            let own = ctx.clone();
             let tx2 = tx.clone();
             match tls.clone() {
                 None => {
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(20)));
                     let _ = tx.send(IoEvent::Accept {
                         server,
                         id,
@@ -735,7 +878,7 @@ pub fn socket_listen(
                         remote,
                         cmd: ctx,
                     });
-                    std::thread::spawn(move || socket_loop(tcp, stream, id, crx, tx2));
+                    std::thread::spawn(move || socket_loop(stream, id, own, crx, tx2));
                 }
                 Some(config) => {
                     std::thread::spawn(move || {
@@ -746,13 +889,10 @@ pub fn socket_listen(
                         let mut secure = rustls::StreamOwned::new(conn, stream);
                         while secure.conn.is_handshaking() {
                             if secure.conn.complete_io(&mut secure.sock).is_err() {
-                                let _ = tcp.shutdown(std::net::Shutdown::Both);
+                                let _ = secure.sock.shutdown(std::net::Shutdown::Both);
                                 return;
                             }
                         }
-                        let _ = secure
-                            .sock
-                            .set_read_timeout(Some(Duration::from_millis(20)));
                         if tx2
                             .send(IoEvent::Accept {
                                 server,
@@ -765,7 +905,7 @@ pub fn socket_listen(
                         {
                             return;
                         }
-                        socket_loop(tcp, secure, id, crx, tx2);
+                        socket_loop(secure, id, own, crx, tx2);
                     });
                 }
             }
@@ -997,15 +1137,133 @@ pub fn child_spawn(
     Ok((ctx, pid))
 }
 
+#[derive(Debug, Default)]
+struct LoopbackResolver {
+    inner: ureq::unversioned::resolver::DefaultResolver,
+}
+
+impl ureq::unversioned::resolver::Resolver for LoopbackResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        let mut addrs = self.inner.resolve(uri, config, timeout)?;
+        if addrs.len() > 1 && addrs.iter().all(|a| a.ip().is_loopback()) {
+            let list: Vec<SocketAddr> = addrs.iter().copied().collect();
+            if let Ok(stream) = connect_any(&list, Duration::from_secs(2)) {
+                if let Ok(peer) = stream.peer_addr() {
+                    if let Some(i) = addrs.iter().position(|a| *a == peer) {
+                        addrs.swap(0, i);
+                    }
+                }
+            }
+        }
+        Ok(addrs)
+    }
+}
+
 fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
     AGENT.get_or_init(|| {
-        ureq::Agent::config_builder()
+        let config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .user_agent(format!("javasquirt/{}", crate::VERSION))
-            .build()
-            .into()
+            .build();
+        ureq::Agent::with_parts(
+            config,
+            ureq::unversioned::transport::DefaultConnector::new(),
+            LoopbackResolver::default(),
+        )
     })
+}
+
+fn interleave_families(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+    let Some(first) = addrs.first() else {
+        return Vec::new();
+    };
+    let (mut same, mut other): (std::collections::VecDeque<_>, std::collections::VecDeque<_>) =
+        addrs
+            .iter()
+            .copied()
+            .partition(|a| a.is_ipv4() == first.is_ipv4());
+    let mut out = Vec::with_capacity(addrs.len());
+    loop {
+        match (same.pop_front(), other.pop_front()) {
+            (None, None) => break,
+            (a, b) => {
+                out.extend(a);
+                out.extend(b);
+            }
+        }
+    }
+    out
+}
+
+pub fn connect_any(addrs: &[SocketAddr], timeout: Duration) -> std::io::Result<TcpStream> {
+    if addrs.len() == 1 {
+        return TcpStream::connect_timeout(&addrs[0], timeout);
+    }
+    let order = interleave_families(addrs);
+    let (rtx, rrx) = channel::<std::io::Result<TcpStream>>();
+    let mut started = 0;
+    let mut finished = 0;
+    let mut last = None;
+    loop {
+        if started < order.len() {
+            let addr = order[started];
+            let rtx = rtx.clone();
+            std::thread::spawn(move || {
+                let _ = rtx.send(TcpStream::connect_timeout(&addr, timeout));
+            });
+            started += 1;
+        }
+        let wait = if started < order.len() {
+            Duration::from_millis(250)
+        } else {
+            timeout + Duration::from_secs(1)
+        };
+        match rrx.recv_timeout(wait) {
+            Ok(Ok(stream)) => return Ok(stream),
+            Ok(Err(e)) => {
+                finished += 1;
+                last = Some(e);
+                if finished == order.len() {
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if started == order.len() {
+                    break;
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::TimedOut)))
+}
+
+fn bind_dual_stack(port: u16) -> std::io::Result<TcpListener> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.set_only_v6(false)?;
+    #[cfg(not(windows))]
+    socket.set_reuse_address(true)?;
+    let addr = SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
+    socket.bind(&addr.into())?;
+    socket.listen(1024)?;
+    Ok(socket.into())
+}
+
+pub fn bind_listener(host: &str, port: u16) -> std::io::Result<TcpListener> {
+    if host == "::" {
+        return bind_dual_stack(port).or_else(|_| TcpListener::bind(("0.0.0.0", port)));
+    }
+    TcpListener::bind((host, port))
 }
 
 pub fn http_get(url: &str, accept: Option<&str>) -> Result<Vec<u8>, String> {
@@ -1077,7 +1335,7 @@ fn fetch_tls_config(opts: &TlsClientOptions) -> Result<ureq::tls::TlsConfig, Str
     Ok(builder.build())
 }
 
-fn run_fetch(req: FetchRequest) -> Result<FetchResponse, String> {
+fn run_fetch(req: FetchRequest) -> Result<(FetchResponse, ureq::Body), String> {
     use ureq::RequestExt;
     let mut builder = ureq::http::Request::builder()
         .method(req.method.as_str())
@@ -1087,7 +1345,7 @@ fn run_fetch(req: FetchRequest) -> Result<FetchResponse, String> {
     }
     let redirects = if req.follow { 20 } else { 0 };
     let tls = fetch_tls_config(&req.tls)?;
-    let mut resp = match req.body {
+    let resp = match req.body {
         Some(body) => builder
             .body(body)
             .map_err(|e| e.to_string())?
@@ -1126,25 +1384,63 @@ fn run_fetch(req: FetchRequest) -> Result<FetchResponse, String> {
             )
         })
         .collect();
-    let body = resp
-        .body_mut()
-        .with_config()
-        .limit(u64::MAX)
-        .read_to_vec()
-        .map_err(|e| e.to_string())?;
-    Ok(FetchResponse {
-        status,
-        status_text: status_text(status).to_string(),
-        url,
-        headers,
+    let (_, body) = resp.into_parts();
+    Ok((
+        FetchResponse {
+            status,
+            status_text: status_text(status).to_string(),
+            url,
+            headers,
+        },
         body,
-    })
+    ))
 }
 
 pub fn spawn_fetch(tx: Sender<IoEvent>, id: u64, req: FetchRequest) {
     std::thread::spawn(move || {
-        let result = run_fetch(req);
-        let _ = tx.send(IoEvent::Fetch { id, result });
+        let cancel = req.cancel.clone();
+        let body = match run_fetch(req) {
+            Ok((head, body)) => {
+                if tx
+                    .send(IoEvent::Fetch {
+                        id,
+                        result: Ok(head),
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+                body
+            }
+            Err(e) => {
+                let _ = tx.send(IoEvent::Fetch { id, result: Err(e) });
+                return;
+            }
+        };
+        let mut reader = body.into_reader();
+        let mut buf = vec![0u8; 65536];
+        let error = loop {
+            if cancel.load(Ordering::SeqCst) {
+                return;
+            }
+            match reader.read(&mut buf) {
+                Ok(0) => break None,
+                Ok(n) => {
+                    if tx
+                        .send(IoEvent::FetchChunk {
+                            id,
+                            data: buf[..n].to_vec(),
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => break Some(e.to_string()),
+            }
+        };
+        let _ = tx.send(IoEvent::FetchEnd { id, error });
     });
 }
 
@@ -1178,7 +1474,7 @@ pub fn listen(
     tx: Sender<IoEvent>,
     tls: Option<Arc<rustls::ServerConfig>>,
 ) -> std::io::Result<ServerHandle> {
-    let listener = TcpListener::bind((host, port))?;
+    let listener = bind_listener(host, port)?;
     let addr = listener.local_addr()?;
     let stop = Arc::new(AtomicBool::new(false));
     let flag = stop.clone();
@@ -1243,6 +1539,7 @@ struct Parsed {
     request: HttpRequest,
     keep_alive: bool,
     head: bool,
+    http10: bool,
 }
 
 fn read_request(
@@ -1305,7 +1602,9 @@ fn read_request(
         format!("http://{host}{target}")
     };
     let head = method == "HEAD";
+    let http10 = version == "HTTP/1.0";
     Some(Parsed {
+        http10,
         request: HttpRequest {
             method,
             url,
@@ -1368,6 +1667,96 @@ fn write_reply(
     w.flush()
 }
 
+fn write_head(
+    w: &mut impl Write,
+    status: u16,
+    headers: &Headers,
+    keep_alive: bool,
+    chunked: bool,
+) -> std::io::Result<()> {
+    let mut out = Vec::with_capacity(256);
+    let _ = write!(out, "HTTP/1.1 {} {}\r\n", status, status_text(status));
+    let mut has_date = false;
+    for (k, v) in headers {
+        let lower = k.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "transfer-encoding" | "connection" | "keep-alive"
+        ) {
+            continue;
+        }
+        has_date |= lower == "date";
+        let _ = write!(out, "{k}: {v}\r\n");
+    }
+    if !has_date {
+        let _ = write!(out, "date: {}\r\n", http_date());
+    }
+    if chunked {
+        out.extend_from_slice(b"transfer-encoding: chunked\r\n");
+    }
+    if keep_alive {
+        out.extend_from_slice(b"connection: keep-alive\r\nkeep-alive: timeout=5\r\n\r\n");
+    } else {
+        out.extend_from_slice(b"connection: close\r\n\r\n");
+    }
+    w.write_all(&out)?;
+    w.flush()
+}
+
+fn write_chunk(w: &mut impl Write, data: &[u8]) -> std::io::Result<()> {
+    let mut out = Vec::with_capacity(data.len() + 16);
+    let _ = write!(out, "{:x}\r\n", data.len());
+    out.extend_from_slice(data);
+    out.extend_from_slice(b"\r\n");
+    w.write_all(&out)?;
+    w.flush()
+}
+
+fn peer_gone(tcp: &TcpStream) -> bool {
+    if tcp.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let mut probe = [0u8; 1];
+    let r = tcp.peek(&mut probe);
+    let _ = tcp.set_nonblocking(false);
+    match r {
+        Ok(0) => true,
+        Ok(_) => false,
+        Err(e) => e.kind() != std::io::ErrorKind::WouldBlock,
+    }
+}
+
+enum Waited {
+    Msg(ReplyMsg),
+    Dropped,
+}
+
+fn wait_reply(
+    rx: &Receiver<ReplyMsg>,
+    tcp: &TcpStream,
+    notified: &mut bool,
+    notify: &dyn Fn(),
+) -> Waited {
+    loop {
+        if *notified {
+            return match rx.recv() {
+                Ok(m) => Waited::Msg(m),
+                Err(_) => Waited::Dropped,
+            };
+        }
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(m) => return Waited::Msg(m),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Waited::Dropped,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if peer_gone(tcp) {
+                    *notified = true;
+                    notify();
+                }
+            }
+        }
+    }
+}
+
 fn wants_upgrade(headers: &Headers) -> bool {
     headers
         .iter()
@@ -1406,7 +1795,7 @@ fn serve_connection(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn serve_stream<S: Read + Write + ReadTimeout + Send + 'static>(
+fn serve_stream<S: Read + Write + CloseNotify + IntoSock + Send + 'static>(
     tcp: TcpStream,
     stream: S,
     local: SocketAddr,
@@ -1426,12 +1815,9 @@ fn serve_stream<S: Read + Write + ReadTimeout + Send + 'static>(
         if wants_upgrade(&parsed.request.headers) {
             let head = reader.buffer().to_vec();
             let stream = reader.into_inner();
-            stream.read_timeout(Duration::from_millis(20));
-            let Ok(tcp2) = tcp.try_clone() else {
-                return;
-            };
             let id = ids.fetch_add(1, Ordering::SeqCst) + 1;
             let (ctx, crx) = channel::<SocketCmd>();
+            let own = ctx.clone();
             if tx
                 .send(IoEvent::Upgrade {
                     server,
@@ -1446,13 +1832,15 @@ fn serve_stream<S: Read + Write + ReadTimeout + Send + 'static>(
             {
                 return;
             }
-            socket_loop(tcp2, stream, id, crx, tx);
+            socket_loop(stream, id, own, crx, tx);
             return;
         }
+        let rid = ids.fetch_add(1, Ordering::SeqCst) + 1;
         let (reply_tx, reply_rx) = channel();
         if tx
             .send(IoEvent::Request {
                 server,
+                rid,
                 request: parsed.request,
                 reply: reply_tx,
             })
@@ -1460,16 +1848,79 @@ fn serve_stream<S: Read + Write + ReadTimeout + Send + 'static>(
         {
             return;
         }
-        let Ok(reply) = reply_rx.recv() else {
+        let mut notified = false;
+        let notify = || {
+            let _ = tx.send(IoEvent::RequestClosed { server, rid });
+        };
+        let close = |writer: &mut S| {
+            let _ = writer.flush();
+            writer.close_notify();
+            let _ = tcp.shutdown(std::net::Shutdown::Both);
+        };
+        let Waited::Msg(first) = wait_reply(&reply_rx, &tcp, &mut notified, &notify) else {
+            let _ = tcp.shutdown(std::net::Shutdown::Both);
             return;
         };
         let keep_alive = parsed.keep_alive && !stop.load(Ordering::SeqCst);
         let writer = reader.get_mut();
-        if write_reply(writer, &reply, keep_alive, parsed.head).is_err() || !keep_alive {
-            let _ = writer.flush();
-            writer.close_notify();
-            let _ = tcp.shutdown(std::net::Shutdown::Both);
-            return;
+        match first {
+            ReplyMsg::Full(reply) => {
+                if write_reply(writer, &reply, keep_alive, parsed.head).is_err() || !keep_alive {
+                    close(writer);
+                    return;
+                }
+            }
+            ReplyMsg::Head { status, headers } => {
+                let no_body =
+                    parsed.head || status == 204 || status == 304 || (100..200).contains(&status);
+                let has_len = headers
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case("content-length"));
+                let chunked = !no_body && !has_len && !parsed.http10;
+                let keep_alive = keep_alive && (no_body || has_len || chunked);
+                let mut ok = write_head(writer, status, &headers, keep_alive, chunked).is_ok();
+                while ok {
+                    match wait_reply(&reply_rx, &tcp, &mut notified, &notify) {
+                        Waited::Msg(ReplyMsg::Chunk(data)) => {
+                            if no_body || data.is_empty() {
+                                continue;
+                            }
+                            let r = if chunked {
+                                write_chunk(writer, &data)
+                            } else {
+                                writer.write_all(&data).and_then(|_| writer.flush())
+                            };
+                            ok = r.is_ok();
+                        }
+                        Waited::Msg(ReplyMsg::End) => {
+                            if chunked {
+                                ok = writer
+                                    .write_all(b"0\r\n\r\n")
+                                    .and_then(|_| writer.flush())
+                                    .is_ok();
+                            }
+                            break;
+                        }
+                        Waited::Msg(ReplyMsg::Full(_) | ReplyMsg::Head { .. }) => {}
+                        Waited::Msg(ReplyMsg::Abort) | Waited::Dropped => ok = false,
+                    }
+                }
+                if !ok {
+                    if !notified {
+                        notify();
+                    }
+                    close(writer);
+                    return;
+                }
+                if !keep_alive {
+                    close(writer);
+                    return;
+                }
+            }
+            ReplyMsg::Chunk(_) | ReplyMsg::End | ReplyMsg::Abort => {
+                close(writer);
+                return;
+            }
         }
     }
 }
