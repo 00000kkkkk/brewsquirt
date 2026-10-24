@@ -58,9 +58,11 @@ pub struct Shape {
     index: Option<rustc_hash::FxHashMap<JsStr, u32>>,
     last: RefCell<Option<(JsStr, std::rc::Weak<Shape>)>>,
     transitions: RefCell<rustc_hash::FxHashMap<JsStr, std::rc::Weak<Shape>>>,
-    parent: Option<Rc<Shape>>,
+    hot: RefCell<Vec<Rc<Shape>>>,
     dictionary: bool,
 }
+
+const HOT_CHILDREN: usize = 8;
 
 thread_local! {
     static NEXT_SHAPE: Cell<u64> = const { Cell::new(1) };
@@ -83,7 +85,7 @@ impl Shape {
             index: None,
             last: RefCell::new(None),
             transitions: RefCell::new(rustc_hash::FxHashMap::default()),
-            parent: None,
+            hot: RefCell::new(Vec::new()),
             dictionary,
         };
         shape.reindex();
@@ -135,23 +137,41 @@ impl Shape {
                 }
             }
         }
-        if let Some(s) = self.transitions.borrow().get(key).and_then(|w| w.upgrade()) {
+        let found = self.transitions.borrow().get(key).and_then(|w| w.upgrade());
+        if let Some(s) = found {
             *self.last.borrow_mut() = Some((key.clone(), Rc::downgrade(&s)));
+            self.remember(&s);
             return s;
         }
         let mut keys = Vec::with_capacity(self.keys.len() + 1);
         keys.extend(self.keys.iter().cloned());
         keys.push(key.clone());
-        let mut shape = Shape::new(keys, false);
-        shape.parent = Some(self.clone());
-        let child = Rc::new(shape);
-        let mut t = self.transitions.borrow_mut();
-        if t.len() >= 16 && t.len().is_power_of_two() {
-            t.retain(|_, w| w.strong_count() > 0);
+        let child = Rc::new(Shape::new(keys, false));
+        {
+            let mut t = self.transitions.borrow_mut();
+            if t.len() >= 16 && t.len().is_power_of_two() {
+                t.retain(|_, w| w.strong_count() > 0);
+            }
+            t.insert(key.clone(), Rc::downgrade(&child));
         }
-        t.insert(key.clone(), Rc::downgrade(&child));
         *self.last.borrow_mut() = Some((key.clone(), Rc::downgrade(&child)));
+        self.remember(&child);
         child
+    }
+
+    fn remember(&self, s: &Rc<Shape>) {
+        let mut hot = self.hot.borrow_mut();
+        match hot.iter().position(|h| Rc::ptr_eq(h, s)) {
+            Some(0) => {}
+            Some(i) => {
+                let h = hot.remove(i);
+                hot.insert(0, h);
+            }
+            None => {
+                hot.insert(0, s.clone());
+                hot.truncate(HOT_CHILDREN);
+            }
+        }
     }
 }
 

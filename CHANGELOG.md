@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`loose`, `strict` and `stop-before-partial`). Every base64 and hex method validates its
   arguments and options and reports malformed input with a `SyntaxError`, as ES2026 specifies.
 
+### Changed
+
+- Objects built from the same literal or constructor share one hidden class even after the
+  objects that first used it are collected, so code that creates many short-lived objects runs
+  more than twice as fast.
+
 ### Fixed
 
 - In multiline mode `^` and `$` treat `\r`, U+2028 and U+2029 as line ends like `\n`, so
