@@ -892,6 +892,8 @@ impl Compiler {
                 (Op::Const(k), Op::CmpJump(c, t)) if number(k) => Some(Op::CmpConstJump(c, k, t)),
                 (Op::Const(k), Op::Add) if number(k) => Some(Op::AddConst(k)),
                 (Op::Const(k), Op::Sub) if number(k) => Some(Op::SubConst(k)),
+                (Op::Const(k), Op::Mul) if number(k) => Some(Op::MulConst(k)),
+                (Op::Const(k), Op::Mod) if number(k) => Some(Op::ModConst(k)),
                 (Op::GetLocal(s), Op::Undefined) => Some(Op::GetLocalUndef(s)),
                 (Op::GetUpvalChecked(i, k), Op::Undefined) => Some(Op::GetUpvalCheckedUndef(i, k)),
                 (Op::Undefined, Op::Undefined) => Some(Op::UndefinedN(2)),
@@ -901,7 +903,14 @@ impl Compiler {
                 _ => None,
             };
             if let Some(m) = merged {
-                if matches!(m, Op::CmpConstJump(..) | Op::AddConst(_) | Op::SubConst(_)) {
+                if matches!(
+                    m,
+                    Op::CmpConstJump(..)
+                        | Op::AddConst(_)
+                        | Op::SubConst(_)
+                        | Op::MulConst(_)
+                        | Op::ModConst(_)
+                ) {
                     st.lines[at - 1] = line;
                     st.cols[at - 1] = col;
                 }

@@ -6156,16 +6156,17 @@ impl Vm {
                     Op::Shl => arith!(|x, y| to_int32(x).wrapping_shl(to_uint32(y) & 31) as f64),
                     Op::Shr => arith!(|x, y| (to_int32(x) >> (to_uint32(y) & 31)) as f64),
                     Op::UShr => arith!(|x, y| (to_uint32(x) >> (to_uint32(y) & 31)) as f64),
-                    Op::AddConst(k) | Op::SubConst(k) => {
+                    Op::AddConst(k) | Op::SubConst(k) | Op::MulConst(k) | Op::ModConst(k) => {
                         let (Value::Number(x), Value::Number(y)) =
                             (top!(), unsafe { &*consts.add(k as usize) })
                         else {
                             break;
                         };
-                        if matches!(op, Op::AddConst(_)) {
-                            *x += *y
-                        } else {
-                            *x -= *y
+                        match op {
+                            Op::AddConst(_) => *x += *y,
+                            Op::SubConst(_) => *x -= *y,
+                            Op::MulConst(_) => *x *= *y,
+                            _ => *x = crate::number::js_rem(*x, *y),
                         }
                     }
                     Op::Neg | Op::Inc | Op::Dec | Op::ToNumeric => {
@@ -8940,6 +8941,26 @@ impl Vm {
                     }
                     self.stack.push(proto.consts[k as usize].clone());
                     num_op!(|x: f64, y: f64| x - y, BigOp::Sub)
+                }
+                Op::MulConst(k) => {
+                    if let (Some(Value::Number(x)), Value::Number(y)) =
+                        (self.stack.last_mut(), &proto.consts[k as usize])
+                    {
+                        *x *= *y;
+                        continue;
+                    }
+                    self.stack.push(proto.consts[k as usize].clone());
+                    num_op!(|x: f64, y: f64| x * y, BigOp::Mul)
+                }
+                Op::ModConst(k) => {
+                    if let (Some(Value::Number(x)), Value::Number(y)) =
+                        (self.stack.last_mut(), &proto.consts[k as usize])
+                    {
+                        *x = crate::number::js_rem(*x, *y);
+                        continue;
+                    }
+                    self.stack.push(proto.consts[k as usize].clone());
+                    num_op!(crate::number::js_rem, BigOp::Mod)
                 }
                 Op::GetLocalUndef(s) => {
                     let at = base + s as usize;

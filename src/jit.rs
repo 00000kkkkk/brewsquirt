@@ -198,6 +198,8 @@ fn flow(op: Op, ip: usize, d: i32) -> Option<Vec<(usize, i32)>> {
         | Op::DecLocal(_)
         | Op::AddConst(_)
         | Op::SubConst(_)
+        | Op::MulConst(_)
+        | Op::ModConst(_)
         | Op::Neg
         | Op::Not
         | Op::BitNot
@@ -337,6 +339,8 @@ fn inline_op(op: Op) -> bool {
             | Op::UShr
             | Op::AddConst(_)
             | Op::SubConst(_)
+            | Op::MulConst(_)
+            | Op::ModConst(_)
             | Op::Neg
             | Op::Inc
             | Op::Dec
@@ -546,6 +550,70 @@ impl Gen<'_, '_> {
         }
     }
 
+    fn rem_const(&mut self, x: V, y: f64) -> V {
+        if y.fract() != 0.0 || y == 0.0 || y.abs() >= 2147483648.0 {
+            let yv = self.b.ins().f64const(y);
+            return self.rem(x, yv);
+        }
+        let xi = self.b.ins().fcvt_to_sint_sat(types::I32, x);
+        let xb = self.b.ins().fcvt_from_sint(types::F64, xi);
+        let ok = self.b.ins().fcmp(FloatCC::Equal, xb, x);
+        let fast = self.b.create_block();
+        let slow = self.b.create_block();
+        let done = self.b.create_block();
+        self.b.append_block_param(done, types::F64);
+        self.b.ins().brif(ok, fast, &[], slow, &[]);
+        self.b.switch_to_block(fast);
+        let yi = self.b.ins().iconst(types::I32, y as i64);
+        let r = self.b.ins().srem(xi, yi);
+        let rf = self.b.ins().fcvt_from_sint(types::F64, r);
+        let rf = self.b.ins().fcopysign(rf, x);
+        self.b.ins().jump(done, &[BlockArg::Value(rf)]);
+        self.b.switch_to_block(slow);
+        let yv = self.b.ins().f64const(y);
+        let f = self
+            .b
+            .ins()
+            .iconst(types::I64, jit_rem as *const () as usize as i64);
+        let call = self.b.ins().call_indirect(self.sigs.rem, f, &[x, yv]);
+        let rs = self.b.inst_results(call)[0];
+        self.b.ins().jump(done, &[BlockArg::Value(rs)]);
+        self.b.switch_to_block(done);
+        self.b.block_params(done)[0]
+    }
+
+    fn rem(&mut self, x: V, y: V) -> V {
+        let xi = self.b.ins().fcvt_to_sint_sat(types::I32, x);
+        let yi = self.b.ins().fcvt_to_sint_sat(types::I32, y);
+        let xb = self.b.ins().fcvt_from_sint(types::F64, xi);
+        let yb = self.b.ins().fcvt_from_sint(types::F64, yi);
+        let ex = self.b.ins().fcmp(FloatCC::Equal, xb, x);
+        let ey = self.b.ins().fcmp(FloatCC::Equal, yb, y);
+        let nz = self.b.ins().icmp_imm_s(IntCC::NotEqual, yi, 0);
+        let ok = self.b.ins().band(ex, ey);
+        let ok = self.b.ins().band(ok, nz);
+        let fast = self.b.create_block();
+        let slow = self.b.create_block();
+        let done = self.b.create_block();
+        self.b.append_block_param(done, types::F64);
+        self.b.ins().brif(ok, fast, &[], slow, &[]);
+        self.b.switch_to_block(fast);
+        let r = self.b.ins().srem(xi, yi);
+        let rf = self.b.ins().fcvt_from_sint(types::F64, r);
+        let rf = self.b.ins().fcopysign(rf, x);
+        self.b.ins().jump(done, &[BlockArg::Value(rf)]);
+        self.b.switch_to_block(slow);
+        let f = self
+            .b
+            .ins()
+            .iconst(types::I64, jit_rem as *const () as usize as i64);
+        let call = self.b.ins().call_indirect(self.sigs.rem, f, &[x, y]);
+        let rs = self.b.inst_results(call)[0];
+        self.b.ins().jump(done, &[BlockArg::Value(rs)]);
+        self.b.switch_to_block(done);
+        self.b.block_params(done)[0]
+    }
+
     fn truthy(&mut self, slot: usize, slow: Block) -> V {
         let t = self.tag(slot);
         let done = self.b.create_block();
@@ -708,14 +776,7 @@ impl Gen<'_, '_> {
                     Op::Sub => self.b.ins().fsub(x, y),
                     Op::Mul => self.b.ins().fmul(x, y),
                     Op::Div => self.b.ins().fdiv(x, y),
-                    _ => {
-                        let f = self
-                            .b
-                            .ins()
-                            .iconst(types::I64, jit_rem as *const () as usize as i64);
-                        let call = self.b.ins().call_indirect(self.sigs.rem, f, &[x, y]);
-                        self.b.inst_results(call)[0]
-                    }
+                    _ => self.rem(x, y),
                 };
                 self.set_payload(d - 2, r);
                 self.goto(next);
@@ -744,7 +805,7 @@ impl Gen<'_, '_> {
                 self.set_payload(d - 2, r);
                 self.goto(next);
             }
-            Op::AddConst(k) | Op::SubConst(k) => {
+            Op::AddConst(k) | Op::SubConst(k) | Op::MulConst(k) | Op::ModConst(k) => {
                 let Value::Number(y) = proto.consts[k as usize] else {
                     self.step_call(ip, d, succs);
                     return;
@@ -754,10 +815,11 @@ impl Gen<'_, '_> {
                 self.guard(c, slow);
                 let x = self.num(d - 1);
                 let yv = self.b.ins().f64const(y);
-                let r = if matches!(op, Op::AddConst(_)) {
-                    self.b.ins().fadd(x, yv)
-                } else {
-                    self.b.ins().fsub(x, yv)
+                let r = match op {
+                    Op::AddConst(_) => self.b.ins().fadd(x, yv),
+                    Op::SubConst(_) => self.b.ins().fsub(x, yv),
+                    Op::MulConst(_) => self.b.ins().fmul(x, yv),
+                    _ => self.rem_const(x, y),
                 };
                 self.set_payload(d - 1, r);
                 self.goto(next);
@@ -1150,7 +1212,13 @@ impl Jit {
             b.seal_all_blocks();
             b.finalize(tc);
         }
+        let dump = std::env::var_os("JSQ_JIT_DUMP").is_some();
+        self.ctx.set_disasm(dump);
         let ok = self.module.define_function(id, &mut self.ctx).is_ok();
+        if dump && let Some(text) = self.ctx.compiled_code().and_then(|c| c.vcode.clone()) {
+            eprintln!("== jit {}", proto.name);
+            eprintln!("{text}");
+        }
         self.module.clear_context(&mut self.ctx);
         if !ok || self.module.finalize_definitions().is_err() {
             return false;

@@ -162,6 +162,8 @@ pub enum Op {
     CmpConstJump(Cmp, u32, u32),
     AddConst(u32),
     SubConst(u32),
+    MulConst(u32),
+    ModConst(u32),
     GetLocalUndef(u32),
     GetUpvalCheckedUndef(u32, u32),
     IncLocal(u32),
@@ -353,6 +355,8 @@ impl Op {
                 | Op::Mod
                 | Op::AddConst(_)
                 | Op::SubConst(_)
+                | Op::MulConst(_)
+                | Op::ModConst(_)
                 | Op::Lt
                 | Op::Gt
                 | Op::Le
@@ -523,6 +527,8 @@ impl FunctionProto {
                 Op::Const(c)
                 | Op::AddConst(c)
                 | Op::SubConst(c)
+                | Op::MulConst(c)
+                | Op::ModConst(c)
                 | Op::CmpConstJump(_, c, _)
                 | Op::GetGlobal(c)
                 | Op::SetGlobal(c)

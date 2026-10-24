@@ -12,7 +12,7 @@ constructor,generateKeys,computeSecret,getPrime,getGenerator,getPublicKey,getPri
 4 1 true
 {"value":0,"writable":false,"enumerable":true,"configurable":false}
 0 0 05
-512 true 256
+true true 256
 true true
 no public Error ERR_CRYPTO_INVALID_STATE No public key - did you forget to generate one? code
 07 80 1

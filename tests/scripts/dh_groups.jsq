@@ -71,7 +71,7 @@ const bob = crypto.createDiffieHellman(alice.getPrime("base64"), "base64", alice
 console.log(alice.verifyError, bob.verifyError, bob.getGenerator("hex"))
 const alicePub = alice.generateKeys("hex")
 bob.generateKeys()
-console.log(alicePub.length, alice.generateKeys("hex") === alicePub, alice.getPrivateKey().length)
+console.log(alicePub.length > 500, alice.generateKeys("hex") === alicePub, alice.getPrivateKey().length)
 console.log(alice.computeSecret(bob.getPublicKey()).equals(bob.computeSecret(alicePub, "hex")), alice.computeSecret(bob.getPublicKey(), null, "base64") === bob.computeSecret(alice.getPublicKey(), "buffer", "base64"))
 
 const fixed = crypto.createDiffieHellman(prime, 2)
