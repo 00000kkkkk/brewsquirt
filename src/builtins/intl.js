@@ -2,23 +2,6 @@
   const LOC = globalThis["%intlLocale%"]
   const NBSP = " "
   const NNBSP = " "
-  const NUMBER_DATA = {
-    en: { decimal: ".", group: ",", minGroup: 1, percent: "{n}%", currency: "{s}{n}", currencySpace: false },
-    de: { decimal: ",", group: ".", minGroup: 1, percent: "{n}" + NBSP + "%", currency: "{n}" + NBSP + "{s}" },
-    fr: { decimal: ",", group: NNBSP, minGroup: 1, percent: "{n}" + NBSP + "%", currency: "{n}" + NBSP + "{s}" },
-    es: { decimal: ",", group: ".", minGroup: 2, percent: "{n}" + NBSP + "%", currency: "{n}" + NBSP + "{s}" },
-    it: { decimal: ",", group: ".", minGroup: 1, percent: "{n}%", currency: "{n}" + NBSP + "{s}" },
-    pt: { decimal: ",", group: ".", minGroup: 1, percent: "{n}%", currency: "{s}" + NBSP + "{n}" },
-    nl: { decimal: ",", group: ".", minGroup: 1, percent: "{n}%", currency: "{s}" + NBSP + "{n}" },
-    uk: { decimal: ",", group: NBSP, minGroup: 1, percent: "{n}%", currency: "{n}" + NBSP + "{s}" },
-    ru: { decimal: ",", group: NBSP, minGroup: 1, percent: "{n}" + NBSP + "%", currency: "{n}" + NBSP + "{s}" },
-    pl: { decimal: ",", group: NBSP, minGroup: 2, percent: "{n}%", currency: "{n}" + NBSP + "{s}" },
-    sv: { decimal: ",", group: NBSP, minGroup: 1, percent: "{n}" + NBSP + "%", currency: "{n}" + NBSP + "{s}" },
-    tr: { decimal: ",", group: ".", minGroup: 1, percent: "%{n}", currency: "{s}{n}" },
-    ja: { decimal: ".", group: ",", minGroup: 1, percent: "{n}%", currency: "{s}{n}" },
-    zh: { decimal: ".", group: ",", minGroup: 1, percent: "{n}%", currency: "{s}{n}" },
-    ko: { decimal: ".", group: ",", minGroup: 1, percent: "{n}%", currency: "{s}{n}" },
-  }
   const CURRENCY = {
     USD: ["$", 2, "US dollars"], EUR: ["€", 2, "euros"], GBP: ["£", 2, "British pounds"],
     JPY: ["¥", 0, "Japanese yen"], CNY: ["CN¥", 2, "Chinese yuan"], INR: ["₹", 2, "Indian rupees"],
@@ -72,24 +55,6 @@
   const supportedList = (locales) => localeList(locales).filter((l) => KNOWN_LANGUAGES.has(l.split("-")[0].toLowerCase()))
   const resolve = (locales) => supportedList(locales)[0] ?? "en-US"
   const lang = (locale) => locale.split("-")[0]
-  const numberData = (locale) => {
-    const tag = String(locale)
-    if (/^(en|hi|bn|ta|te|mr|gu|kn|ml)-IN$/i.test(tag)) return { ...(NUMBER_DATA[lang(locale)] ?? NUMBER_DATA.en), indian: true }
-    return NUMBER_DATA[lang(locale)] ?? NUMBER_DATA.en
-  }
-
-  const groupDigits = (int, sep, minGroup, indian = false) => {
-    if (int.length < 4 + (minGroup - 1)) return int
-    let out = ""
-    for (let i = 0; i < int.length; i++) {
-      const fromEnd = int.length - i
-      const boundary = indian ? fromEnd === 3 || (fromEnd > 3 && (fromEnd - 3) % 2 === 0) : fromEnd % 3 === 0
-      if (i > 0 && boundary) out += sep
-      out += int[i]
-    }
-    return out
-  }
-
   const getOption = (options, key, values, fallback) => {
     const v = options[key]
     if (v === undefined) return fallback
@@ -151,9 +116,9 @@
   }
   const resolveNumberLocale = (list, optNu) => {
     const requested = list.find((l) => KNOWN_LANGUAGES.has(l.split("-")[0].toLowerCase()))
-    if (requested === undefined) return { locale: "en-US", nu: optNu !== undefined && nuSupported(optNu) ? optNu : "latn" }
+    if (requested === undefined) return { locale: "en-US", nu: optNu !== undefined && nuSupported(optNu) ? optNu : defaultNumberingSystem("en-US") }
     const { base, keywords } = parseExtension(requested)
-    let nu = "latn"
+    let nu = defaultNumberingSystem(base)
     let locale = base
     const extNu = keywords.nu
     if (extNu !== undefined && nuSupported(extNu)) {
@@ -325,34 +290,46 @@
     return { str, rounded: result.rounded }
   }
 
-  const COMPACT_DATA = {
-    en: { short: [[3, "K"], [6, "M"], [9, "B"], [12, "T"]], long: [[3, " thousand"], [6, " million"], [9, " billion"], [12, " trillion"]] },
-    "en-IN": { short: [[3, "K"], [5, "L"], [7, "Cr"]], long: [[3, " thousand"], [5, " lakh"], [7, " crore"]] },
-    de: {
-      short: [[6, NBSP + "Mio."], [9, NBSP + "Mrd."], [12, NBSP + "Bio."]],
-      long: [[3, " Tausend"], [6, [" Million", " Millionen"]], [9, [" Milliarde", " Milliarden"]], [12, [" Billion", " Billionen"]]],
-    },
-    ja: { short: [[4, "万"], [8, "億"], [12, "兆"]] },
-    ko: { short: [[3, "천"], [4, "만"], [8, "억"], [12, "조"]] },
-    zh: { short: [[4, "万"], [8, "亿"], [12, "万亿"]] },
-    "zh-Hant": { short: [[4, "萬"], [8, "億"], [12, "兆"]] },
+  const numberSymbols = (locale, nu) => {
+    const key = `${locale}\u0000${nu}`
+    const cached = symbolCache.get(key)
+    if (cached !== undefined) return cached
+    const dataLocale = bestAvailable("NumberFormat", parseExtension(locale).base) ?? "en"
+    const d = sectionData("num", dataLocale) ?? sectionData("num", "en")
+    let sym = d
+    if (nu !== undefined && nu !== d.nu) {
+      sym = { ...d, ...(d.latn ?? {}) }
+      if (nu === "arab") sym = { ...sym, ...ARAB_SYMBOLS }
+      else if (nu === "arabext") sym = { ...sym, ...ARABEXT_SYMBOLS }
+    }
+    const result = { ...sym, dataLocale, rules: pluralRulesFor(dataLocale, "cardinal").rules }
+    symbolCache.set(key, result)
+    return result
   }
-  const compactTable = (locale, display) => {
-    const { base } = parseExtension(locale)
-    const parts = base.split("-")
-    const lg = parts[0]
-    let entry = COMPACT_DATA[`${lg}-${parts[parts.length - 1]}`]
-    if (lg === "zh" && (parts.includes("Hant") || parts.includes("TW") || parts.includes("HK") || parts.includes("MO"))) entry = COMPACT_DATA["zh-Hant"]
-    entry ??= COMPACT_DATA[lg] ?? COMPACT_DATA.en
-    return (display === "long" ? entry.long : undefined) ?? entry.short
+  const symbolCache = new Map()
+  const ARAB_SYMBOLS = { decimal: "٫", group: "٬", currencyDecimal: "٫", currencyGroup: "٬", minus: "\u061c-", plus: "\u061c+", percentSign: "٪\u061c", exponent: "اس", exponentMinus: "\u061c-" }
+  const ARABEXT_SYMBOLS = { decimal: "٫", group: "٬", currencyDecimal: "٫", currencyGroup: "٬", minus: "\u200e-\u200e", plus: "\u200e+\u200e", percentSign: "٪", exponent: "×۱۰^", exponentMinus: "\u200e-\u200e" }
+  const BIDI_MARKS = /^([\u200e\u200f\u061c]*)(.*?)([\u200e\u200f\u061c]*)$/su
+  const markedParts = (type, symbol, layer) => {
+    const [, before, core, after] = BIDI_MARKS.exec(symbol)
+    const out = []
+    if (before) out.push({ type: "literal", value: before, layer })
+    out.push({ type, value: core, layer })
+    if (after) out.push({ type: "literal", value: after, layer })
+    return out
+  }
+  const defaultNumberingSystem = (base) => sectionData("num", bestAvailable("NumberFormat", base) ?? "en")?.nu ?? "latn"
+  const compactEntry = (o, mag) => {
+    const table = numberSymbols(o.locale, o.numberingSystem).compact[o.compactDisplay === "long" ? "long" : "short"]
+    return table[Math.max(0, Math.min(mag, table.length - 1))]
   }
   const exponentForMagnitude = (o, mag) => {
     if (o.notation === "scientific") return mag
     if (o.notation === "engineering") return Math.floor(mag / 3) * 3
     if (o.notation === "compact") {
-      let exp = 0
-      for (const [threshold] of compactTable(o.locale, o.compactDisplay)) if (mag >= threshold) exp = threshold
-      return exp
+      if (mag < 0) return 0
+      const entry = compactEntry(o, mag)
+      return entry ? entry[0] : 0
     }
     return 0
   }
@@ -365,40 +342,17 @@
     if (decMagnitude(r.rounded) === mag - exponent) return exponent
     return exponentForMagnitude(o, mag + 1)
   }
-  const compactSuffix = (o, exponent, shown) => {
-    const hit = compactTable(o.locale, o.compactDisplay).find(([threshold]) => threshold === exponent)
-    if (!hit) return ""
-    const word = hit[1]
-    return Array.isArray(word) ? word[shown === "1" ? 0 : 1] : word
-  }
-
-  const NUMBER_DATA_REGION = {
-    "pt-PT": { decimal: ",", group: NBSP, minGroup: 2, percent: "{n}%", currency: "{n}" + NBSP + "{s}" },
-    "de-CH": { decimal: ".", group: "’", minGroup: 1, percent: "{n}%", currency: "{s}" + NBSP + "{n}" },
-    "de-AT": { decimal: ",", group: NBSP, minGroup: 1, percent: "{n}" + NBSP + "%", currency: "{s}" + NBSP + "{n}" },
-  }
-  const localeData = (locale, nu) => {
-    const { base } = parseExtension(locale)
-    const parts = base.split("-")
-    const region = parts.find((p, i) => i > 0 && (p.length === 2 || /^\d{3}$/.test(p)))
-    let data = (region && NUMBER_DATA_REGION[`${parts[0]}-${region}`]) ?? numberData(base)
-    if (nu === "arab" || nu === "arabext") data = { ...data, decimal: "٫", group: "٬" }
-    return data
-  }
-  const LOCAL_SYMBOLS = {
-    ko: { USD: "US$" }, zh: { USD: "US$", CNY: "¥" }, ja: { JPY: "￥", CNY: "元" }, fr: { USD: "$US" }, es: { USD: "US$" },
-    pt: { USD: "US$" }, nl: { USD: "US$" }, sv: { USD: "US$" }, uk: { UAH: "₴", USD: "USD" }, ru: { RUB: "₽" },
-    pl: { PLN: "zł", USD: "USD" }, it: { USD: "USD" }, tr: { TRY: "₺" },
-  }
-  const ACCOUNTING_PARENS = new Set(["en", "ja", "ko", "zh"])
-  const currencySymbol = (o) => {
+  const currencySymbol = (o, data) => {
     if (o.currencyDisplay === "code") return o.currency
-    const info = CURRENCY[o.currency]
-    const symbol = LOCAL_SYMBOLS[lang(o.locale)]?.[o.currency] ?? info?.[0] ?? o.currency
-    if (o.currencyDisplay === "narrowSymbol") return symbol.replace(/^[A-Z]+(?=[^A-Z])/, "").replace(/(?<=[^A-Z])[A-Z]+$/, "") || symbol
+    const symbol = data.sym?.[o.currency] ?? o.currency
+    if (o.currencyDisplay === "narrowSymbol") return data.narrow?.[o.currency] ?? symbol
     return symbol
   }
-  const currencyDigits = (code) => CURRENCY[code]?.[1] ?? 2
+  let CURRENCY_DIGITS
+  const currencyDigits = (code) => {
+    CURRENCY_DIGITS ??= sectionData("num", "#digits") ?? {}
+    return CURRENCY_DIGITS[code] ?? 2
+  }
   const SANCTIONED_UNITS = new Set(
     "acre bit byte celsius centimeter day degree fahrenheit fluid-ounce foot gallon gigabit gigabyte gram hectare hour inch kilobit kilobyte kilogram kilometer liter megabit megabyte meter microsecond mile mile-scandinavian milliliter millimeter millisecond minute month nanosecond ounce percent petabyte pound second stone terabit terabyte week yard year".split(" "),
   )
@@ -510,7 +464,7 @@
     if (found === undefined) found = bestAvailable(service, "en-US") ?? "en"
     const result = { __proto__: null, locale: found, dataLocale: found }
     if (relevant !== undefined && "nu" in relevant) {
-      let nu = "latn"
+      let nu = defaultNumberingSystem(found)
       let addition = ""
       const ext = keywords.nu
       if (ext !== undefined && nuSupported(ext)) {
@@ -668,7 +622,7 @@
         compactDisplay,
         signDisplay,
       }
-      this.#data = localeData(locale, nu)
+      this.#data = numberSymbols(locale, nu)
       this.#digits = nuDigits(nu)
     }
     static #unwrap(x, method) {
@@ -699,8 +653,9 @@
       const inner = []
       let rounded = null
       let shown = ""
-      if (nan) body.push({ type: "nan", value: "NaN", layer: "number" })
-      else if (x.kind === "inf") body.push({ type: "infinity", value: "∞", layer: "number" })
+      let compactForm
+      if (nan) body.push({ type: "nan", value: data.nan, layer: "number" })
+      else if (x.kind === "inf") body.push({ type: "infinity", value: data.infinity, layer: "number" })
       else {
         const v = { kind: "finite", neg: false, d: x.d, e: x.e }
         if (o.style === "percent" && v.d !== "") v.e += 2
@@ -716,24 +671,40 @@
         const int = dot === -1 ? r.str : r.str.slice(0, dot)
         const g = o.useGrouping
         const minGroup = g === "always" ? 1 : g === "min2" ? 2 : data.minGroup
-        const chunks = g === false || int.length < 3 + minGroup ? [int] : groupDigits(int, "\u0000", 1, data.indian === true).split("\u0000")
+        const money = o.style === "currency" && o.currencyDisplay !== "name"
+        const primary = (money && data.currencyPrimary) || data.primary
+        const secondary = (money && data.currencySecondary) || data.secondary
+        let chunks = [int]
+        if (g !== false && int.length >= primary + minGroup) {
+          chunks = []
+          let end = int.length
+          let size = primary
+          while (end > size) {
+            chunks.unshift(int.slice(end - size, end))
+            end -= size
+            size = secondary
+          }
+          chunks.unshift(int.slice(0, end))
+        }
+        const groupSymbol = (money && data.currencyGroup) || data.group
         chunks.forEach((chunk, i) => {
-          if (i > 0) body.push({ type: "group", value: data.group, layer: "number" })
+          if (i > 0) body.push({ type: "group", value: groupSymbol, layer: "number" })
           body.push({ type: "integer", value: this.#tr(chunk), layer: "number" })
         })
         if (dot !== -1) {
-          body.push({ type: "decimal", value: data.decimal, layer: "number" })
+          body.push({ type: "decimal", value: (money && data.currencyDecimal) || data.decimal, layer: "number" })
           body.push({ type: "fraction", value: this.#tr(r.str.slice(dot + 1)), layer: "number" })
         }
         if (o.notation === "scientific" || o.notation === "engineering") {
-          inner.push({ type: "exponentSeparator", value: "E", layer: "inner" })
-          if (exponent < 0) inner.push({ type: "exponentMinusSign", value: "-", layer: "inner" })
+          inner.push({ type: "exponentSeparator", value: data.exponent, layer: "inner" })
+          if (exponent < 0) inner.push(...markedParts("exponentMinusSign", data.exponentMinus, "inner"))
           inner.push({ type: "exponentInteger", value: this.#tr(String(Math.abs(exponent))), layer: "inner" })
         } else if (o.notation === "compact" && exponent > 0) {
-          const suffix = compactSuffix(o, exponent, r.str)
-          const lead = /^[\s ]*/.exec(suffix)[0]
-          if (lead) inner.push({ type: "literal", value: lead, layer: "inner" })
-          if (suffix.length > lead.length) inner.push({ type: "compact", value: suffix.slice(lead.length), layer: "inner" })
+          const entry = compactEntry(o, exponent + int.length - 1)
+          if (entry) {
+            const forms = entry[1]
+            compactForm = (r.str === "1" && forms["1"]) || forms[pluralCategory(data.rules, pluralOperands(r.str, 0))] || forms.other
+          }
         }
       }
       const zero = rounded !== null && rounded.d === ""
@@ -743,49 +714,51 @@
       else if (o.signDisplay === "always") sign = neg ? "-" : "+"
       else if (o.signDisplay === "exceptZero") sign = nan || zero ? "" : neg ? "-" : "+"
       else if (o.signDisplay === "negative") sign = neg && !zero ? "-" : ""
-      const signParts = sign ? [{ type: sign === "-" ? "minusSign" : "plusSign", value: sign, layer: "middle" }] : []
-      const core = [...body, ...inner]
-      const out = []
-      if (o.style === "percent") {
-        const [before, after] = data.percent.split("{n}")
-        out.push(...signParts)
-        if (before) out.push({ type: "percentSign", value: "%", layer: "middle" })
-        out.push(...core)
-        if (after) {
-          const lit = after.slice(0, -1)
-          if (lit) out.push({ type: "literal", value: lit, layer: "middle" })
-          out.push({ type: "percentSign", value: "%", layer: "middle" })
+      const signParts = sign ? markedParts(sign === "-" ? "minusSign" : "plusSign", sign === "-" ? data.minus : data.plus, "middle") : []
+      let core = [...body, ...inner]
+      let signInside = false
+      if (compactForm !== undefined) {
+        core = []
+        signInside = o.style === "decimal" && compactForm[0] !== 0 && compactForm.includes(0)
+        for (const t of compactForm) {
+          if (t === 0) core.push(...(signInside ? signParts : []), ...body)
+          else if (typeof t === "object") core.push({ type: "compact", value: t.c, layer: "inner" })
+          else if (t !== "") core.push({ type: "literal", value: t, layer: "inner" })
         }
+      }
+      const choose = (patterns) => {
+        if (!sign || signInside) return patterns[0]
+        if (sign === "-" || patterns[1].includes(1)) return patterns[1]
+        return [1, ...patterns[0]]
+      }
+      const fill = (tokens, symbol) => {
+        const out = []
+        tokens.forEach((t, i) => {
+          if (t === 0) out.push(...core)
+          else if (t === 1) out.push(...signParts)
+          else if (t === 2) out.push({ type: "percentSign", value: data.percentSign, layer: "middle" })
+          else if (t === 3) {
+            const cur = { type: "currency", value: symbol, layer: "middle" }
+            const space = { type: "literal", value: NBSP, layer: "middle" }
+            if (tokens[i + 1] === 0 && !/[\p{S}\p{Z}]$/u.test(symbol)) out.push(cur, space)
+            else if (tokens[i - 1] === 0 && !/^[\p{S}\p{Z}]/u.test(symbol)) out.push(space, cur)
+            else out.push(cur)
+          } else if (t !== "") out.push({ type: "literal", value: t, layer: "middle" })
+        })
         return out
       }
+      if (o.style === "percent") return fill(choose(data.percentPattern))
       if (o.style === "currency") {
         if (o.currencyDisplay === "name") {
           const name = CURRENCY[o.currency]?.[2] ?? o.currency
           const singular = shown === "1" && name.endsWith("s") ? name.replace(/(?<=[a-z])s$/, "") : name
-          out.push(...signParts, ...core, { type: "literal", value: " ", layer: "outer" }, { type: "currency", value: singular, layer: "outer" })
-          return out
+          return [...fill(choose(data.decimalPattern)), { type: "literal", value: " ", layer: "outer" }, { type: "currency", value: singular, layer: "outer" }]
         }
-        const symbol = currencySymbol(o)
-        const paren = o.currencySign === "accounting" && sign === "-" && ACCOUNTING_PARENS.has(lang(o.locale))
-        const [before, after] = data.currency.split("{n}")
-        if (paren) out.push({ type: "literal", value: "(", layer: "middle" })
-        else out.push(...signParts)
-        if (before) {
-          const sym = before.replace("{s}", symbol)
-          out.push({ type: "currency", value: sym.trim(), layer: "middle" })
-          if (sym !== sym.trim() || /\p{L}$/u.test(symbol)) out.push({ type: "literal", value: NBSP, layer: "middle" })
-        }
-        out.push(...core)
-        if (after) {
-          out.push({ type: "literal", value: after.slice(0, after.indexOf("{s}")), layer: "middle" })
-          out.push({ type: "currency", value: symbol, layer: "middle" })
-        }
-        if (paren) out.push({ type: "literal", value: ")", layer: "middle" })
-        return out
+        return fill(choose(o.currencySign === "accounting" ? data.accountingPattern : data.currencyPattern), currencySymbol(o, data))
       }
       if (o.style === "unit") {
         const [short, long] = unitNames(o.unit)
-        out.push(...signParts, ...core)
+        const out = fill(choose(data.decimalPattern))
         if (o.unitDisplay === "long") {
           out.push({ type: "literal", value: " ", layer: "outer" }, { type: "unit", value: shown === "1" ? singularUnit(long) : long, layer: "outer" })
         } else if (short === "%" || short.startsWith("°") || UNIT_TIGHT[o.unitDisplay].has(lang(o.locale))) {
@@ -795,8 +768,7 @@
         }
         return out
       }
-      out.push(...signParts, ...core)
-      return out
+      return fill(choose(data.decimalPattern))
     }
     #range(start, end) {
       if (start === undefined || end === undefined) throw new TypeError("start or end is undefined")
@@ -2018,8 +1990,8 @@
   Object.defineProperty(Intl, "supportedValuesOf", {
     value: (key) => {
       const k = String(key)
-      if (k === "currency") return Object.keys(CURRENCY).sort()
-      if (k === "unit") return Object.keys(UNITS).sort()
+      if (k === "currency") return [...(sectionData("num", "#codes") ?? Object.keys(CURRENCY))]
+      if (k === "unit") return [...SANCTIONED_UNITS].sort()
       if (k === "calendar") return ["gregory"]
       if (k === "numberingSystem") return [...Object.keys(NU_ZERO), "hanidec"].sort()
       if (k === "timeZone") return tzList()

@@ -46,6 +46,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Intl.Segmenter` splits graphemes, words and sentences by the Unicode text segmentation rules,
   with `containing` and segment iterators, and `Intl.DisplayNames` names languages, dialects,
   regions, scripts, currencies, calendars and date fields in 45 locales.
+- `Intl.NumberFormat` formats numbers the way Node does in every locale it supports: decimal and
+  grouping separators, Indian and other grouping sizes, minimum grouping, signs with their bidi
+  marks, percent, currency and accounting patterns, currency symbols and narrow symbols, the
+  fraction digits of every ISO 4217 currency, scientific exponent symbols, default numbering
+  systems such as Persian digits for `fa` and Bengali digits for `bn`, and compact short and long
+  forms that agree with the plural category of the number. `Intl.supportedValuesOf` lists every
+  currency code and every sanctioned unit.
 - These constructors read and validate their options in the order ECMA-402 specifies,
   `supportedLocalesOf` takes options, and methods reject receivers of the wrong type.
 

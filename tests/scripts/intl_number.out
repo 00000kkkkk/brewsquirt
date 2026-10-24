@@ -1,0 +1,979 @@
+en nu=latn en
+en dec 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+en latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+en pct 0% | 50% | -25.6% | 1,234%
+en eur €0.00 | €1.00 | -€1,234.50 | €1,234,567.89
+en usd $1.00 | -$1,234.50
+en code CHF 1.00 | -CHF 1,234.50
+en acc €1.00 | (€1,234.50)
+en cs 999 | 1K | 1.5K | 12K | 1M | 1M | 2.5M | 1B | 1.2T | 1000T | -54K
+en cl 1 thousand | 1.5 thousand | 2 thousand | 12 thousand | 1 million | 2 million | 5 million | 1.5 million | 21 million | 1 billion | 2 billion | 1 trillion
+en sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+en eng 12.345E3 | 120E-6
+en sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +€5.00
+en group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+en parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+en-GB nu=latn en-GB
+en-GB dec 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+en-GB latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+en-GB pct 0% | 50% | -25.6% | 1,234%
+en-GB eur €0.00 | €1.00 | -€1,234.50 | €1,234,567.89
+en-GB usd US$1.00 | -US$1,234.50
+en-GB code CHF 1.00 | -CHF 1,234.50
+en-GB acc €1.00 | (€1,234.50)
+en-GB cs 999 | 1k | 1.5k | 12k | 1m | 1m | 2.5m | 1bn | 1.2tn | 1000tn | -54k
+en-GB cl 1 thousand | 1.5 thousand | 2 thousand | 12 thousand | 1 million | 2 million | 5 million | 1.5 million | 21 million | 1 billion | 2 billion | 1 trillion
+en-GB sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+en-GB eng 12.345E3 | 120E-6
+en-GB sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +€5.00
+en-GB group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+en-GB parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+en-IN nu=latn en-IN
+en-IN dec 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 1,23,456.789 | 1,23,45,67,890.12 | 0 | 1,00,00,00,00,00,00,00,00,00,000 | NaN | ∞ | -∞
+en-IN latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 1,23,456.789 | 1,23,45,67,890.12 | 0 | 1,00,00,00,00,00,00,00,00,00,000 | NaN | ∞ | -∞
+en-IN pct 0% | 50% | -25.6% | 1,234%
+en-IN eur €0.00 | €1.00 | -€1,234.50 | €12,34,567.89
+en-IN usd $1.00 | -$1,234.50
+en-IN code CHF 1.00 | -CHF 1,234.50
+en-IN acc €1.00 | (€1,234.50)
+en-IN cs 999 | 1K | 1.5K | 12K | 10L | 10L | 25L | 100Cr | 1.2LCr | 1000LCr | -54K
+en-IN cl 1 thousand | 1.5 thousand | 2 thousand | 12 thousand | 10 lakh | 20 lakh | 50 lakh | 15 lakh | 2.1 crore | 100 crore | 200 crore | 1 lakh crore
+en-IN sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+en-IN eng 12.345E3 | 120E-6
+en-IN sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +€5.00
+en-IN group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+en-IN parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+uk nu=latn uk
+uk dec 0 | -0 | 1 | -1 | 1,5 | -1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+uk latn 0 | -0 | 1 | -1 | 1,5 | -1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+uk pct 0% | 50% | -25,6% | 1 234%
+uk eur 0,00 EUR | 1,00 EUR | -1 234,50 EUR | 1 234 567,89 EUR
+uk usd 1,00 USD | -1 234,50 USD
+uk code 1,00 CHF | -1 234,50 CHF
+uk acc 1,00 EUR | -1 234,50 EUR
+uk cs 999 | 1 тис. | 1,5 тис. | 12 тис. | 1 млн | 1 млн | 2,5 млн | 1 млрд | 1,2 трлн | 1000 трлн | -54 тис.
+uk cl 1 тисяча | 1,5 тисячі | 2 тисячі | 12 тисяч | 1 мільйон | 2 мільйони | 5 мільйонів | 1,5 мільйона | 21 мільйон | 1 мільярд | 2 мільярди | 1 трильйон
+uk sci 0Е0 | 1,235Е4 | -1,2Е-4 | 1Е21
+uk eng 12,345Е3 | 120Е-6
+uk sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5,00 EUR
+uk group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+uk parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":" "},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"EUR"}]
+ru nu=latn ru
+ru dec 0 | -0 | 1 | -1 | 1,5 | -1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | не число | ∞ | -∞
+ru latn 0 | -0 | 1 | -1 | 1,5 | -1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | не число | ∞ | -∞
+ru pct 0 % | 50 % | -25,6 % | 1 234 %
+ru eur 0,00 € | 1,00 € | -1 234,50 € | 1 234 567,89 €
+ru usd 1,00 $ | -1 234,50 $
+ru code 1,00 CHF | -1 234,50 CHF
+ru acc 1,00 € | -1 234,50 €
+ru cs 999 | 1 тыс. | 1,5 тыс. | 12 тыс. | 1 млн | 1 млн | 2,5 млн | 1 млрд | 1,2 трлн | 1000 трлн | -54 тыс.
+ru cl 1 тысяча | 1,5 тысячи | 2 тысячи | 12 тысяч | 1 миллион | 2 миллиона | 5 миллионов | 1,5 миллиона | 21 миллион | 1 миллиард | 2 миллиарда | 1 триллион
+ru sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+ru eng 12,345E3 | 120E-6
+ru sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50 % / +5,00 €
+ru group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+ru parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":" "},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+pl nu=latn pl
+pl dec 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+pl latn 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+pl pct 0% | 50% | -25,6% | 1234%
+pl eur 0,00 € | 1,00 € | -1234,50 € | 1 234 567,89 €
+pl usd 1,00 USD | -1234,50 USD
+pl code 1,00 CHF | -1234,50 CHF
+pl acc 1,00 € | (1234,50 €)
+pl cs 999 | 1 tys. | 1,5 tys. | 12 tys. | 1 mln | 1 mln | 2,5 mln | 1 mld | 1,2 bln | 1000 bln | -54 tys.
+pl cl 1 tysiąc | 1,5 tysiąca | 2 tysiące | 12 tysięcy | 1 milion | 2 miliony | 5 milionów | 1,5 miliona | 21 milionów | 1 miliard | 2 miliardy | 1 bilion
+pl sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+pl eng 12,345E3 | 120E-6
+pl sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5,00 €
+pl group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+pl parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+de nu=latn de
+de dec 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+de latn 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+de pct 0 % | 50 % | -25,6 % | 1.234 %
+de eur 0,00 € | 1,00 € | -1.234,50 € | 1.234.567,89 €
+de usd 1,00 $ | -1.234,50 $
+de code 1,00 CHF | -1.234,50 CHF
+de acc 1,00 € | -1.234,50 €
+de cs 999 | 1000 | 1500 | 12.345 | 999.999 | 1 Mio. | 2,5 Mio. | 1 Mrd. | 1,2 Bio. | 1000 Bio. | -54.321
+de cl 1 Tausend | 1,5 Tausend | 2 Tausend | 12 Tausend | 1 Million | 2 Millionen | 5 Millionen | 1,5 Millionen | 21 Millionen | 1 Milliarde | 2 Milliarden | 1 Billion
+de sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+de eng 12,345E3 | 120E-6
+de sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50 % / +5,00 €
+de group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+de parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":"."},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+de-CH nu=latn de-CH
+de-CH dec 0 | -0 | 1 | -1 | 1.5 | -1'234.568 | 1'234 | 12'345 | 123'456.789 | 1'234'567'890.12 | 0 | 1'000'000'000'000'000'000'000 | NaN | ∞ | -∞
+de-CH latn 0 | -0 | 1 | -1 | 1.5 | -1'234.568 | 1'234 | 12'345 | 123'456.789 | 1'234'567'890.12 | 0 | 1'000'000'000'000'000'000'000 | NaN | ∞ | -∞
+de-CH pct 0% | 50% | -25.6% | 1'234%
+de-CH eur EUR 0.00 | EUR 1.00 | EUR-1'234.50 | EUR 1'234'567.89
+de-CH usd $ 1.00 | $-1'234.50
+de-CH code CHF 1.00 | CHF-1'234.50
+de-CH acc EUR 1.00 | EUR-1'234.50
+de-CH cs 999 | 1000 | 1500 | 12'345 | 999'999 | 1 Mio. | 2.5 Mio. | 1 Mrd. | 1.2 Bio. | 1000 Bio. | -54'321
+de-CH cl 1 Tausend | 1.5 Tausend | 2 Tausend | 12 Tausend | 1 Million | 2 Millionen | 5 Millionen | 1.5 Millionen | 21 Millionen | 1 Milliarde | 2 Milliarden | 1 Billion
+de-CH sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+de-CH eng 12.345E3 | 120E-6
+de-CH sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / EUR+5.00
+de-CH group 1'234 | 12'345 / 1234 | 12'345 / 1234567
+de-CH parts [{"type":"currency","value":"EUR"},{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":"'"},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+de-AT nu=latn de-AT
+de-AT dec 0 | -0 | 1 | -1 | 1,5 | -1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+de-AT latn 0 | -0 | 1 | -1 | 1,5 | -1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+de-AT pct 0 % | 50 % | -25,6 % | 1 234 %
+de-AT eur € 0,00 | € 1,00 | -€ 1.234,50 | € 1.234.567,89
+de-AT usd $ 1,00 | -$ 1.234,50
+de-AT code CHF 1,00 | -CHF 1.234,50
+de-AT acc € 1,00 | -€ 1.234,50
+de-AT cs 999 | 1000 | 1500 | 12 345 | 999 999 | 1 Mio. | 2,5 Mio. | 1 Mrd. | 1,2 Bio. | 1000 Bio. | -54 321
+de-AT cl 1 Tausend | 1,5 Tausend | 2 Tausend | 12 Tausend | 1 Million | 2 Millionen | 5 Millionen | 1,5 Millionen | 21 Millionen | 1 Milliarde | 2 Milliarden | 1 Billion
+de-AT sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+de-AT eng 12,345E3 | 120E-6
+de-AT sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50 % / +€ 5,00
+de-AT group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+de-AT parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"literal","value":" "},{"type":"integer","value":"1"},{"type":"group","value":"."},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"}]
+fr nu=latn fr
+fr dec 0 | -0 | 1 | -1 | 1,5 | -1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+fr latn 0 | -0 | 1 | -1 | 1,5 | -1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+fr pct 0 % | 50 % | -25,6 % | 1 234 %
+fr eur 0,00 € | 1,00 € | -1 234,50 € | 1 234 567,89 €
+fr usd 1,00 $US | -1 234,50 $US
+fr code 1,00 CHF | -1 234,50 CHF
+fr acc 1,00 € | (1 234,50 €)
+fr cs 999 | 1 k | 1,5 k | 12 k | 1 M | 1 M | 2,5 M | 1 Md | 1,2 Bn | 1000 Bn | -54 k
+fr cl mille | 1,5 millier | 2 mille | 12 mille | 1 million | 2 millions | 5 millions | 1,5 million | 21 millions | 1 milliard | 2 milliards | 1 billion
+fr sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+fr eng 12,345E3 | 120E-6
+fr sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50 % / +5,00 €
+fr group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+fr parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":" "},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+fr-CH nu=latn fr-CH
+fr-CH dec 0 | -0 | 1 | -1 | 1,5 | -1'234,568 | 1'234 | 12'345 | 123'456,789 | 1'234'567'890,12 | 0 | 1'000'000'000'000'000'000'000 | NaN | ∞ | -∞
+fr-CH latn 0 | -0 | 1 | -1 | 1,5 | -1'234,568 | 1'234 | 12'345 | 123'456,789 | 1'234'567'890,12 | 0 | 1'000'000'000'000'000'000'000 | NaN | ∞ | -∞
+fr-CH pct 0% | 50% | -25,6% | 1'234%
+fr-CH eur 0.00 € | 1.00 € | -1'234.50 € | 1'234'567.89 €
+fr-CH usd 1.00 $US | -1'234.50 $US
+fr-CH code 1.00 CHF | -1'234.50 CHF
+fr-CH acc 1.00 € | (1'234.50 €)
+fr-CH cs 999 | 1 k | 1,5 k | 12 k | 1 M | 1 M | 2,5 M | 1 Md | 1,2 Bn | 1000 Bn | -54 k
+fr-CH cl mille | 1,5 millier | 2 mille | 12 mille | 1 million | 2 millions | 5 millions | 1,5 million | 21 millions | 1 milliard | 2 milliards | 1 billion
+fr-CH sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+fr-CH eng 12,345E3 | 120E-6
+fr-CH sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5.00 €
+fr-CH group 1'234 | 12'345 / 1234 | 12'345 / 1234567
+fr-CH parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":"'"},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+es nu=latn es
+es dec 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+es latn 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+es pct 0 % | 50 % | -25,6 % | 1234 %
+es eur 0,00 € | 1,00 € | -1234,50 € | 1.234.567,89 €
+es usd 1,00 US$ | -1234,50 US$
+es code 1,00 CHF | -1234,50 CHF
+es acc 1,00 € | -1234,50 €
+es cs 999 | 1 mil | 1,5 mil | 12 mil | 1 M | 1 M | 2,5 M | 1000 M | 1,2 B | 1000 B | -54 mil
+es cl 1 mil | 1,5 mil | 2 mil | 12 mil | 1 millón | 2 millones | 5 millones | 1,5 millones | 21 millones | 1 mil millones | 2 mil millones | 1 billón
+es sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+es eng 12,345E3 | 120E-6
+es sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50 % / +5,00 €
+es group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+es parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+es-MX nu=latn es-MX
+es-MX dec 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+es-MX latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+es-MX pct 0% | 50% | -25.6% | 1,234%
+es-MX eur EUR 0.00 | EUR 1.00 | -EUR 1,234.50 | EUR 1,234,567.89
+es-MX usd USD 1.00 | -USD 1,234.50
+es-MX code CHF 1.00 | -CHF 1,234.50
+es-MX acc EUR 1.00 | -EUR 1,234.50
+es-MX cs 999 | 1 k | 1.5 k | 12 k | 1 M | 1 M | 2.5 M | 1000 M | 1.2 B | 1000 B | -54 k
+es-MX cl 1 mil | 1.5 mil | 2 mil | 12 mil | 1 millón | 2 millones | 5 millones | 1.5 millones | 21 millones | 1 mil millones | 2 mil millones | 1 billón
+es-MX sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+es-MX eng 12.345E3 | 120E-6
+es-MX sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +EUR 5.00
+es-MX group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+es-MX parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"EUR"},{"type":"literal","value":" "},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+it nu=latn it
+it dec 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+it latn 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+it pct 0% | 50% | -25,6% | 1234%
+it eur 0,00 € | 1,00 € | -1234,50 € | 1.234.567,89 €
+it usd 1,00 USD | -1234,50 USD
+it code 1,00 CHF | -1234,50 CHF
+it acc 1,00 € | -1234,50 €
+it cs 999 | 1K | 1,5K | 12K | 1 Mln | 1 Mln | 2,5 Mln | 1 Mld | 1,2 Bln | 1000 Bln | -54K
+it cl mille | 1,5 mila | 2 mila | 12 mila | 1 milione | 2 milioni | 5 milioni | 1,5 milioni | 21 milioni | 1 miliardo | 2 miliardi | 1 mille miliardi
+it sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+it eng 12,345E3 | 120E-6
+it sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5,00 €
+it group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+it parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+pt nu=latn pt
+pt dec 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+pt latn 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+pt pct 0% | 50% | -25,6% | 1.234%
+pt eur € 0,00 | € 1,00 | -€ 1.234,50 | € 1.234.567,89
+pt usd US$ 1,00 | -US$ 1.234,50
+pt code CHF 1,00 | -CHF 1.234,50
+pt acc € 1,00 | -€ 1.234,50
+pt cs 999 | 1 mil | 1,5 mil | 12 mil | 1 mi | 1 mi | 2,5 mi | 1 bi | 1,2 tri | 1000 tri | -54 mil
+pt cl 1 mil | 1,5 mil | 2 mil | 12 mil | 1 milhão | 2 milhões | 5 milhões | 1,5 milhão | 21 milhões | 1 bilhão | 2 bilhões | 1 trilhão
+pt sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+pt eng 12,345E3 | 120E-6
+pt sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +€ 5,00
+pt group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+pt parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"literal","value":" "},{"type":"integer","value":"1"},{"type":"group","value":"."},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"}]
+pt-PT nu=latn pt-PT
+pt-PT dec 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+pt-PT latn 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+pt-PT pct 0% | 50% | -25,6% | 1234%
+pt-PT eur 0,00 € | 1,00 € | -1234,50 € | 1 234 567,89 €
+pt-PT usd 1,00 US$ | -1234,50 US$
+pt-PT code 1,00 CHF | -1234,50 CHF
+pt-PT acc 1,00 € | (1234,50 €)
+pt-PT cs 999 | 1 mil | 1,5 mil | 12 mil | 1 M | 1 M | 2,5 M | 1 mM | 1,2 Bi | 1000 Bi | -54 mil
+pt-PT cl 1 mil | 1,5 mil | 2 mil | 12 mil | 1 milhão | 2 milhões | 5 milhões | 1,5 milhões | 21 milhões | 1 mil milhões | 2 mil milhões | 1 bilião
+pt-PT sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+pt-PT eng 12,345E3 | 120E-6
+pt-PT sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5,00 €
+pt-PT group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+pt-PT parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+nl nu=latn nl
+nl dec 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+nl latn 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+nl pct 0% | 50% | -25,6% | 1.234%
+nl eur € 0,00 | € 1,00 | € -1.234,50 | € 1.234.567,89
+nl usd US$ 1,00 | US$ -1.234,50
+nl code CHF 1,00 | CHF -1.234,50
+nl acc € 1,00 | (€ 1.234,50)
+nl cs 999 | 1K | 1,5K | 12K | 1 mln. | 1 mln. | 2,5 mln. | 1 mld. | 1,2 bln. | 1000 bln. | -54K
+nl cl 1 duizend | 1,5 duizend | 2 duizend | 12 duizend | 1 miljoen | 2 miljoen | 5 miljoen | 1,5 miljoen | 21 miljoen | 1 miljard | 2 miljard | 1 biljoen
+nl sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+nl eng 12,345E3 | 120E-6
+nl sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / € +5,00
+nl group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+nl parts [{"type":"currency","value":"€"},{"type":"literal","value":" "},{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":"."},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"}]
+sv nu=latn sv
+sv dec 0 | −0 | 1 | −1 | 1,5 | −1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | −∞
+sv latn 0 | −0 | 1 | −1 | 1,5 | −1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | −∞
+sv pct 0 % | 50 % | −25,6 % | 1 234 %
+sv eur 0,00 € | 1,00 € | −1 234,50 € | 1 234 567,89 €
+sv usd 1,00 US$ | −1 234,50 US$
+sv code 1,00 CHF | −1 234,50 CHF
+sv acc 1,00 € | −1 234,50 €
+sv cs 999 | 1 tn | 1,5 tn | 12 tn | 1 mn | 1 mn | 2,5 mn | 1 md | 1,2 bn | 1000 bn | −54 tn
+sv cl 1 tusen | 1,5 tusen | 2 tusen | 12 tusen | 1 miljon | 2 miljoner | 5 miljoner | 1,5 miljoner | 21 miljoner | 1 miljard | 2 miljarder | 1 biljon
+sv sci 0×10^0 | 1,235×10^4 | −1,2×10^−4 | 1×10^21
+sv eng 12,345×10^3 | 120×10^−6
+sv sign +0 | +1 | −1 / 0 | +1 | −1 | 0 / +50 % / +5,00 €
+sv group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+sv parts [{"type":"minusSign","value":"−"},{"type":"integer","value":"1"},{"type":"group","value":" "},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+fi nu=latn fi
+fi dec 0 | −0 | 1 | −1 | 1,5 | −1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | epäluku | ∞ | −∞
+fi latn 0 | −0 | 1 | −1 | 1,5 | −1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | epäluku | ∞ | −∞
+fi pct 0 % | 50 % | −25,6 % | 1 234 %
+fi eur 0,00 € | 1,00 € | −1 234,50 € | 1 234 567,89 €
+fi usd 1,00 $ | −1 234,50 $
+fi code 1,00 CHF | −1 234,50 CHF
+fi acc 1,00 € | −1 234,50 €
+fi cs 999 | 1 t. | 1,5 t. | 12 t. | 1 milj. | 1 milj. | 2,5 milj. | 1 mrd. | 1,2 bilj. | 1000 bilj. | −54 t.
+fi cl 1 tuhat | 1,5 tuhatta | 2 tuhatta | 12 tuhatta | 1 miljoona | 2 miljoonaa | 5 miljoonaa | 1,5 miljoonaa | 21 miljoonaa | 1 miljardi | 2 miljardia | 1 biljoona
+fi sci 0E0 | 1,235E4 | −1,2E−4 | 1E21
+fi eng 12,345E3 | 120E−6
+fi sign +0 | +1 | −1 / 0 | +1 | −1 | 0 / +50 % / +5,00 €
+fi group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+fi parts [{"type":"minusSign","value":"−"},{"type":"integer","value":"1"},{"type":"group","value":" "},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+da nu=latn da
+da dec 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+da latn 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+da pct 0 % | 50 % | -25,6 % | 1.234 %
+da eur 0,00 € | 1,00 € | -1.234,50 € | 1.234.567,89 €
+da usd 1,00 US$ | -1.234,50 US$
+da code 1,00 CHF | -1.234,50 CHF
+da acc 1,00 € | -1.234,50 €
+da cs 999 | 1 t | 1,5 t | 12 t | 1 mio. | 1 mio. | 2,5 mio. | 1 mia. | 1,2 bio. | 1000 bio. | -54 t
+da cl 1 tusind | 1,5 tusind | 2 tusind | 12 tusind | 1 million | 2 millioner | 5 millioner | 1,5 million | 21 millioner | 1 milliard | 2 milliarder | 1 billion
+da sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+da eng 12,345E3 | 120E-6
+da sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50 % / +5,00 €
+da group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+da parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":"."},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+nb nu=latn nb
+nb dec 0 | −0 | 1 | −1 | 1,5 | −1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | −∞
+nb latn 0 | −0 | 1 | −1 | 1,5 | −1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | −∞
+nb pct 0 % | 50 % | −25,6 % | 1 234 %
+nb eur 0,00 € | 1,00 € | −1 234,50 € | 1 234 567,89 €
+nb usd 1,00 USD | −1 234,50 USD
+nb code 1,00 CHF | −1 234,50 CHF
+nb acc € 1,00 | (€ 1 234,50)
+nb cs 999 | 1k | 1,5k | 12k | 1 mill. | 1 mill. | 2,5 mill. | 1 mrd. | 1,2 bill. | 1000 bill. | −54k
+nb cl 1 tusen | 1,5 tusen | 2 tusen | 12 tusen | 1 million | 2 millioner | 5 millioner | 1,5 millioner | 21 millioner | 1 milliard | 2 milliarder | 1 billion
+nb sci 0E0 | 1,235E4 | −1,2E−4 | 1E21
+nb eng 12,345E3 | 120E−6
+nb sign +0 | +1 | −1 / 0 | +1 | −1 | 0 / +50 % / +5,00 €
+nb group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+nb parts [{"type":"minusSign","value":"−"},{"type":"integer","value":"1"},{"type":"group","value":" "},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+cs nu=latn cs
+cs dec 0 | -0 | 1 | -1 | 1,5 | -1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+cs latn 0 | -0 | 1 | -1 | 1,5 | -1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+cs pct 0 % | 50 % | -25,6 % | 1 234 %
+cs eur 0,00 € | 1,00 € | -1 234,50 € | 1 234 567,89 €
+cs usd 1,00 US$ | -1 234,50 US$
+cs code 1,00 CHF | -1 234,50 CHF
+cs acc 1,00 € | -1 234,50 €
+cs cs 999 | 1 tis. | 1,5 tis. | 12 tis. | 1 mil. | 1 mil. | 2,5 mil. | 1 mld. | 1,2 bil. | 1000 bil. | -54 tis.
+cs cl 1 tisíc | 1,5 tisíce | 2 tisíce | 12 tisíc | 1 milion | 2 miliony | 5 milionů | 1,5 milionu | 21 milionů | 1 miliarda | 2 miliardy | 1 bilion
+cs sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+cs eng 12,345E3 | 120E-6
+cs sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50 % / +5,00 €
+cs group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+cs parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":" "},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+sk nu=latn sk
+sk dec 0 | -0 | 1 | -1 | 1,5 | -1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+sk latn 0 | -0 | 1 | -1 | 1,5 | -1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+sk pct 0 % | 50 % | -25,6 % | 1 234 %
+sk eur 0,00 € | 1,00 € | -1 234,50 € | 1 234 567,89 €
+sk usd 1,00 USD | -1 234,50 USD
+sk code 1,00 CHF | -1 234,50 CHF
+sk acc 1,00 € | (1 234,50 €)
+sk cs 999 | 1 tis. | 1,5 tis. | 12 tis. | 1 mil. | 1 mil. | 2,5 mil. | 1 mld. | 1,2 bil. | 1000 bil. | -54 tis.
+sk cl 1 tisíc | 1,5 tisíca | 2 tisíce | 12 tisíc | 1 milión | 2 milióny | 5 miliónov | 1,5 milióna | 21 miliónov | 1 miliarda | 2 miliardy | 1 bilión
+sk sci 0e0 | 1,235e4 | -1,2e-4 | 1e21
+sk eng 12,345e3 | 120e-6
+sk sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50 % / +5,00 €
+sk group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+sk parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":" "},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+hu nu=latn hu
+hu dec 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+hu latn 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+hu pct 0% | 50% | -25,6% | 1234%
+hu eur 0,00 EUR | 1,00 EUR | -1234,50 EUR | 1 234 567,89 EUR
+hu usd 1,00 USD | -1234,50 USD
+hu code 1,00 CHF | -1234,50 CHF
+hu acc 1,00 EUR | -1234,50 EUR
+hu cs 999 | 1 E | 1,5 E | 12 E | 1 M | 1 M | 2,5 M | 1 Mrd | 1,2 B | 1000 B | -54 E
+hu cl 1 ezer | 1,5 ezer | 2 ezer | 12 ezer | 1 millió | 2 millió | 5 millió | 1,5 millió | 21 millió | 1 milliárd | 2 milliárd | 1 billió
+hu sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+hu eng 12,345E3 | 120E-6
+hu sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5,00 EUR
+hu group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+hu parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"EUR"}]
+ro nu=latn ro
+ro dec 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+ro latn 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+ro pct 0 % | 50 % | -25,6 % | 1.234 %
+ro eur 0,00 EUR | 1,00 EUR | -1.234,50 EUR | 1.234.567,89 EUR
+ro usd 1,00 USD | -1.234,50 USD
+ro code 1,00 CHF | -1.234,50 CHF
+ro acc 1,00 EUR | (1.234,50 EUR)
+ro cs 999 | 1 K | 1,5 K | 12 K | 1 mil. | 1 mil. | 2,5 mil. | 1 mld. | 1,2 tril. | 1000 tril. | -54 K
+ro cl 1 mie | 1,5 mii | 2 mii | 12 mii | 1 milion | 2 milioane | 5 milioane | 1,5 milioane | 21 de milioane | 1 miliard | 2 miliarde | 1 trilion
+ro sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+ro eng 12,345E3 | 120E-6
+ro sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50 % / +5,00 EUR
+ro group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+ro parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":"."},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"EUR"}]
+bg nu=latn bg
+bg dec 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+bg latn 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+bg pct 0% | 50% | -25,6% | 1234%
+bg eur 0,00 € | 1,00 € | -1234,50 € | 1 234 567,89 €
+bg usd 1,00 щ.д. | -1234,50 щ.д.
+bg code 1,00 CHF | -1234,50 CHF
+bg acc 1,00 € | (1234,50 €)
+bg cs 999 | 1 хил. | 1,5 хил. | 12 хил. | 1 млн. | 1 млн. | 2,5 млн. | 1 млрд. | 1,2 трлн. | 1000 трлн. | -54 хил.
+bg cl 1 хил. | 1,5 хиляди | 2 хиляди | 12 хиляди | 1 милион | 2 милиона | 5 милиона | 1,5 милиона | 21 милиона | 1 милиард | 2 милиарда | 1 трилион
+bg sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+bg eng 12,345E3 | 120E-6
+bg sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5,00 €
+bg group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+bg parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+el nu=latn el
+el dec 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+el latn 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+el pct 0% | 50% | -25,6% | 1.234%
+el eur 0,00 € | 1,00 € | -1.234,50 € | 1.234.567,89 €
+el usd 1,00 $ | -1.234,50 $
+el code 1,00 CHF | -1.234,50 CHF
+el acc 1,00 € | -1.234,50 €
+el cs 999 | 1 χιλ. | 1,5 χιλ. | 12 χιλ. | 1 εκ. | 1 εκ. | 2,5 εκ. | 1 δισ. | 1,2 τρισ. | 1000 τρισ. | -54 χιλ.
+el cl 1 χιλιάδα | 1,5 χιλιάδες | 2 χιλιάδες | 12 χιλιάδες | 1 εκατομμύριο | 2 εκατομμύρια | 5 εκατομμύρια | 1,5 εκατομμύρια | 21 εκατομμύρια | 1 δισεκατομμύριο | 2 δισεκατομμύρια | 1 τρισεκατομμύριο
+el sci 0e0 | 1,235e4 | -1,2e-4 | 1e21
+el eng 12,345e3 | 120e-6
+el sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5,00 €
+el group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+el parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":"."},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+tr nu=latn tr
+tr dec 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+tr latn 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+tr pct %0 | %50 | -%25,6 | %1.234
+tr eur €0,00 | €1,00 | -€1.234,50 | €1.234.567,89
+tr usd $1,00 | -$1.234,50
+tr code CHF 1,00 | -CHF 1.234,50
+tr acc €1,00 | (€1.234,50)
+tr cs 999 | 1 B | 1,5 B | 12 B | 1 Mn | 1 Mn | 2,5 Mn | 1 Mr | 1,2 Tn | 1000 Tn | -54 B
+tr cl 1 bin | 1,5 bin | 2 bin | 12 bin | 1 milyon | 2 milyon | 5 milyon | 1,5 milyon | 21 milyon | 1 milyar | 2 milyar | 1 trilyon
+tr sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+tr eng 12,345E3 | 120E-6
+tr sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +%50 / +€5,00
+tr group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+tr parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"1"},{"type":"group","value":"."},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"}]
+he nu=latn he
+he dec 0 | ‎-0 | 1 | ‎-1 | 1.5 | ‎-1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | ‎-∞
+he latn 0 | ‎-0 | 1 | ‎-1 | 1.5 | ‎-1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | ‎-∞
+he pct 0% | 50% | ‎-25.6% | 1,234%
+he eur ‏0.00 ‏€ | ‏1.00 ‏€ | ‏‎-1,234.50 ‏€ | ‏1,234,567.89 ‏€
+he usd ‏1.00 ‏$ | ‏‎-1,234.50 ‏$
+he code ‏1.00 ‏CHF | ‏‎-1,234.50 ‏CHF
+he acc ‏1.00 ‏€ | ‏‎-1,234.50 ‏€
+he cs 999 | 1K‏ | 1.5K‏ | 12K‏ | 1M‏ | 1M‏ | 2.5M‏ | 1B‏ | 1.2T‏ | 1000T‏ | ‎-54K‏
+he cl ‏1 אלף | ‏1.5 אלף | ‏2 אלף | ‏12 אלף | ‏1 מיליון | ‏2 מיליון | ‏5 מיליון | ‏1.5 מיליון | ‏21 מיליון | ‏1 מיליארד | ‏2 מיליארד | ‏1 טריליון
+he sci 0E0 | 1.235E4 | ‎-1.2E‎-4 | 1E21
+he eng 12.345E3 | 120E‎-6
+he sign ‎+0 | ‎+1 | ‎-1 / 0 | ‎+1 | ‎-1 | 0 / ‎+50% / ‏‎+5.00 ‏€
+he group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+he parts [{"type":"literal","value":"‏‎"},{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"},{"type":"literal","value":" ‏"},{"type":"currency","value":"€"}]
+ar nu=latn ar
+ar dec 0 | ‎-0 | 1 | ‎-1 | 1.5 | ‎-1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | ليس رقمًا | ∞ | ‎-∞
+ar latn 0 | ‎-0 | 1 | ‎-1 | 1.5 | ‎-1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | ليس رقمًا | ∞ | ‎-∞
+ar pct 0‎%‎ | 50‎%‎ | ‎-25.6‎%‎ | 1,234‎%‎
+ar eur ‏0.00 € | ‏1.00 € | ‏‎-1,234.50 € | ‏1,234,567.89 €
+ar usd ‏1.00 US$ | ‏‎-1,234.50 US$
+ar code ‏1.00 CHF | ‏‎-1,234.50 CHF
+ar acc ؜1.00€ | (؜1,234.50€)
+ar cs 999 | 1 ألف | 1.5 ألف | 12 ألف | 1 مليون | 1 مليون | 2.5 مليون | 1 مليار | 1.2 ترليون | 1000 ترليون | ‎-54 ألف
+ar cl 1 ألف | 1.5 ألف | 2 ألف | 12 ألف | 1 مليون | 2 مليون | 5 ملايين | 1.5 مليون | 21 مليون | 1 مليار | 2 مليار | 1 ترليون
+ar sci 0E0 | 1.235E4 | ‎-1.2E‎-4 | 1E21
+ar eng 12.345E3 | 120E‎-6
+ar sign ‎+0 | ‎+1 | ‎-1 / 0 | ‎+1 | ‎-1 | 0 / ‎+50‎%‎ / ‏‎+5.00 €
+ar group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+ar parts [{"type":"literal","value":"‏‎"},{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+ar-EG nu=arab ar-EG
+ar-EG dec ٠ | ؜-٠ | ١ | ؜-١ | ١٫٥ | ؜-١٬٢٣٤٫٥٦٨ | ١٬٢٣٤ | ١٢٬٣٤٥ | ١٢٣٬٤٥٦٫٧٨٩ | ١٬٢٣٤٬٥٦٧٬٨٩٠٫١٢ | ٠ | ١٬٠٠٠٬٠٠٠٬٠٠٠٬٠٠٠٬٠٠٠٬٠٠٠٬٠٠٠ | ليس رقمًا | ∞ | ؜-∞
+ar-EG latn 0 | ‎-0 | 1 | ‎-1 | 1.5 | ‎-1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | ليس رقمًا | ∞ | ‎-∞
+ar-EG pct ٠٪؜ | ٥٠٪؜ | ؜-٢٥٫٦٪؜ | ١٬٢٣٤٪؜
+ar-EG eur ‏٠٫٠٠ € | ‏١٫٠٠ € | ؜-‏١٬٢٣٤٫٥٠ € | ‏١٬٢٣٤٬٥٦٧٫٨٩ €
+ar-EG usd ‏١٫٠٠ US$ | ؜-‏١٬٢٣٤٫٥٠ US$
+ar-EG code ‏١٫٠٠ CHF | ؜-‏١٬٢٣٤٫٥٠ CHF
+ar-EG acc ‏١٫٠٠ € | ؜-‏١٬٢٣٤٫٥٠ €
+ar-EG cs ٩٩٩ | ١ ألف | ١٫٥ ألف | ١٢ ألف | ١ مليون | ١ مليون | ٢٫٥ مليون | ١ مليار | ١٫٢ ترليون | ١٠٠٠ ترليون | ؜-٥٤ ألف
+ar-EG cl ١ ألف | ١٫٥ ألف | ٢ ألف | ١٢ ألف | ١ مليون | ٢ مليون | ٥ ملايين | ١٫٥ مليون | ٢١ مليون | ١ مليار | ٢ مليار | ١ ترليون
+ar-EG sci ٠أس٠ | ١٫٢٣٥أس٤ | ؜-١٫٢أس؜-٤ | ١أس٢١
+ar-EG eng ١٢٫٣٤٥أس٣ | ١٢٠أس؜-٦
+ar-EG sign ؜+٠ | ؜+١ | ؜-١ / ٠ | ؜+١ | ؜-١ | ٠ / ؜+٥٠٪؜ / ؜+‏٥٫٠٠ €
+ar-EG group ١٬٢٣٤ | ١٢٬٣٤٥ / ١٢٣٤ | ١٢٬٣٤٥ / ١٢٣٤٥٦٧
+ar-EG parts [{"type":"literal","value":"؜"},{"type":"minusSign","value":"-"},{"type":"literal","value":"‏"},{"type":"integer","value":"١"},{"type":"group","value":"٬"},{"type":"integer","value":"٢٣٤"},{"type":"decimal","value":"٫"},{"type":"fraction","value":"٥٠"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+fa nu=arabext fa
+fa dec ۰ | ‎−۰ | ۱ | ‎−۱ | ۱٫۵ | ‎−۱٬۲۳۴٫۵۶۸ | ۱٬۲۳۴ | ۱۲٬۳۴۵ | ۱۲۳٬۴۵۶٫۷۸۹ | ۱٬۲۳۴٬۵۶۷٬۸۹۰٫۱۲ | ۰ | ۱٬۰۰۰٬۰۰۰٬۰۰۰٬۰۰۰٬۰۰۰٬۰۰۰٬۰۰۰ | ناعدد | ∞ | ‎−∞
+fa latn 0 | ‎−0 | 1 | ‎−1 | 1.5 | ‎−1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | ناعدد | ∞ | ‎−∞
+fa pct ۰٪ | ۵۰٪ | ‎−۲۵٫۶٪ | ۱٬۲۳۴٪
+fa eur ‎€۰٫۰۰ | ‎€۱٫۰۰ | ‎−‎€۱٬۲۳۴٫۵۰ | ‎€۱٬۲۳۴٬۵۶۷٫۸۹
+fa usd ‎$۱٫۰۰ | ‎−‎$۱٬۲۳۴٫۵۰
+fa code ‎CHF ۱٫۰۰ | ‎−‎CHF ۱٬۲۳۴٫۵۰
+fa acc ‎€ ۱٫۰۰ | ‎(€ ۱٬۲۳۴٫۵۰)
+fa cs ۹۹۹ | ۱ هزار | ۱٫۵ هزار | ۱۲ هزار | ۱ میلیون | ۱ میلیون | ۲٫۵ میلیون | ۱ میلیارد | ۱٫۲ تریلیون | ۱۰۰۰ تریلیون | ‎−۵۴ هزار
+fa cl ۱ هزار | ۱٫۵ هزار | ۲ هزار | ۱۲ هزار | ۱ میلیون | ۲ میلیون | ۵ میلیون | ۱٫۵ میلیون | ۲۱ میلیون | ۱ میلیارد | ۲ میلیارد | ۱ هزارمیلیارد
+fa sci ۰×۱۰^۰ | ۱٫۲۳۵×۱۰^۴ | ‎−۱٫۲×۱۰^‎−۴ | ۱×۱۰^۲۱
+fa eng ۱۲٫۳۴۵×۱۰^۳ | ۱۲۰×۱۰^‎−۶
+fa sign ‎+۰ | ‎+۱ | ‎−۱ / ۰ | ‎+۱ | ‎−۱ | ۰ / ‎+۵۰٪ / ‎+‎€۵٫۰۰
+fa group ۱٬۲۳۴ | ۱۲٬۳۴۵ / ۱۲۳۴ | ۱۲٬۳۴۵ / ۱۲۳۴۵۶۷
+fa parts [{"type":"literal","value":"‎"},{"type":"minusSign","value":"−"},{"type":"literal","value":"‎"},{"type":"currency","value":"€"},{"type":"integer","value":"۱"},{"type":"group","value":"٬"},{"type":"integer","value":"۲۳۴"},{"type":"decimal","value":"٫"},{"type":"fraction","value":"۵۰"}]
+hi nu=latn hi
+hi dec 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 1,23,456.789 | 1,23,45,67,890.12 | 0 | 1,00,00,00,00,00,00,00,00,00,000 | NaN | ∞ | -∞
+hi latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 1,23,456.789 | 1,23,45,67,890.12 | 0 | 1,00,00,00,00,00,00,00,00,00,000 | NaN | ∞ | -∞
+hi pct 0% | 50% | -25.6% | 1,234%
+hi eur €0.00 | €1.00 | -€1,234.50 | €12,34,567.89
+hi usd $1.00 | -$1,234.50
+hi code CHF 1.00 | -CHF 1,234.50
+hi acc €1.00 | -€1,234.50
+hi cs 999 | 1 हज़ार | 1.5 हज़ार | 12 हज़ार | 10 लाख | 10 लाख | 25 लाख | 1 अ॰ | 12 ख॰ | 100 नील | -54 हज़ार
+hi cl 1 हज़ार | 1.5 हज़ार | 2 हज़ार | 12 हज़ार | 10 लाख | 20 लाख | 50 लाख | 15 लाख | 2.1 करोड़ | 1 अरब | 2 अरब | 10 खरब
+hi sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+hi eng 12.345E3 | 120E-6
+hi sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +€5.00
+hi group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+hi parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+bn nu=beng bn
+bn dec ০ | -০ | ১ | -১ | ১.৫ | -১,২৩৪.৫৬৮ | ১,২৩৪ | ১২,৩৪৫ | ১,২৩,৪৫৬.৭৮৯ | ১,২৩,৪৫,৬৭,৮৯০.১২ | ০ | ১,০০,০০,০০,০০,০০,০০,০০,০০,০০,০০০ | NaN | ∞ | -∞
+bn latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 1,23,456.789 | 1,23,45,67,890.12 | 0 | 1,00,00,00,00,00,00,00,00,00,000 | NaN | ∞ | -∞
+bn pct ০% | ৫০% | -২৫.৬% | ১,২৩৪%
+bn eur ০.০০€ | ১.০০€ | -১,২৩৪.৫০€ | ১২,৩৪,৫৬৭.৮৯€
+bn usd ১.০০ US$ | -১,২৩৪.৫০ US$
+bn code ১.০০ CHF | -১,২৩৪.৫০ CHF
+bn acc ১.০০€ | (১,২৩৪.৫০€)
+bn cs ৯৯৯ | ১ হা | ১.৫ হা | ১২ হা | ১০ লা | ১০ লা | ২৫ লা | ১০০ কো | ১.২ লা.কো. | ১০০০ লা.কো. | -৫৪ হা
+bn cl ১ হাজার | ১.৫ হাজার | ২ হাজার | ১২ হাজার | ১০ লাখ | ২০ লাখ | ৫০ লাখ | ১৫ লাখ | ২.১ কোটি | ১০০ কোটি | ২০০ কোটি | ১ লাখ কোটি
+bn sci ০E০ | ১.২৩৫E৪ | -১.২E-৪ | ১E২১
+bn eng ১২.৩৪৫E৩ | ১২০E-৬
+bn sign +০ | +১ | -১ / ০ | +১ | -১ | ০ / +৫০% / +৫.০০€
+bn group ১,২৩৪ | ১২,৩৪৫ / ১২৩৪ | ১২,৩৪৫ / ১২৩৪৫৬৭
+bn parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"১"},{"type":"group","value":","},{"type":"integer","value":"২৩৪"},{"type":"decimal","value":"."},{"type":"fraction","value":"৫০"},{"type":"currency","value":"€"}]
+mr nu=deva mr
+mr dec ० | -० | १ | -१ | १.५ | -१,२३४.५६८ | १,२३४ | १२,३४५ | १,२३,४५६.७८९ | १,२३,४५,६७,८९०.१२ | ० | १,००,००,००,००,००,००,००,००,००,००० | NaN | ∞ | -∞
+mr latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 1,23,456.789 | 1,23,45,67,890.12 | 0 | 1,00,00,00,00,00,00,00,00,00,000 | NaN | ∞ | -∞
+mr pct ०% | ५०% | -२५.६% | १,२३४%
+mr eur €०.०० | €१.०० | -€१,२३४.५० | €१,२३४,५६७.८९
+mr usd $१.०० | -$१,२३४.५०
+mr code CHF १.०० | -CHF १,२३४.५०
+mr acc €१.०० | (€१,२३४.५०)
+mr cs ९९९ | १ ह | १.५ ह | १२ ह | १० लाख | १० लाख | २५ लाख | १ अब्ज | १२ खर्व | १०० पद्म | -५४ ह
+mr cl १ हजार | १.५ हजार | २ हजार | १२ हजार | १० लाख | २० लाख | ५० लाख | १५ लाख | २.१ कोटी | १ अब्ज | २ अब्ज | १० खर्व
+mr sci ०E० | १.२३५E४ | -१.२E-४ | १E२१
+mr eng १२.३४५E३ | १२०E-६
+mr sign +० | +१ | -१ / ० | +१ | -१ | ० / +५०% / +€५.००
+mr group १,२३४ | १२,३४५ / १२३४ | १२,३४५ / १२३४५६७
+mr parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"१"},{"type":"group","value":","},{"type":"integer","value":"२३४"},{"type":"decimal","value":"."},{"type":"fraction","value":"५०"}]
+ne nu=deva ne
+ne dec ० | -० | १ | -१ | १.५ | -१,२३४.५६८ | १,२३४ | १२,३४५ | १,२३,४५६.७८९ | १,२३,४५,६७,८९०.१२ | ० | १,००,००,००,००,००,००,००,००,००,००० | NaN | ∞ | -∞
+ne latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 1,23,456.789 | 1,23,45,67,890.12 | 0 | 1,00,00,00,00,00,00,00,00,00,000 | NaN | ∞ | -∞
+ne pct ०% | ५०% | -२५.६% | १,२३४%
+ne eur € ०.०० | € १.०० | -€ १,२३४.५० | € १२,३४,५६७.८९
+ne usd US$ १.०० | -US$ १,२३४.५०
+ne code CHF १.०० | -CHF १,२३४.५०
+ne acc € १.०० | -€ १,२३४.५०
+ne cs ९९९ | १ हजार | १.५ हजार | १२ हजार | १० लाख | १० लाख | २५ लाख | १ अरब | १२ खरब | १०० शंख | -५४ हजार
+ne cl १ हजार | १.५ हजार | २ हजार | १२ हजार | १ करोड | २ करोड | ५ करोड | १.५ करोड | २१ करोड | १ अरब | २ अरब | १० खरब
+ne sci ०E० | १.२३५E४ | -१.२E-४ | १E२१
+ne eng १२.३४५E३ | १२०E-६
+ne sign +० | +१ | -१ / ० | +१ | -१ | ० / +५०% / +€ ५.००
+ne group १,२३४ | १२,३४५ / १२३४ | १२,३४५ / १२३४५६७
+ne parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"literal","value":" "},{"type":"integer","value":"१"},{"type":"group","value":","},{"type":"integer","value":"२३४"},{"type":"decimal","value":"."},{"type":"fraction","value":"५०"}]
+ja nu=latn ja
+ja dec 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+ja latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+ja pct 0% | 50% | -25.6% | 1,234%
+ja eur €0.00 | €1.00 | -€1,234.50 | €1,234,567.89
+ja usd $1.00 | -$1,234.50
+ja code CHF 1.00 | -CHF 1,234.50
+ja acc €1.00 | (€1,234.50)
+ja cs 999 | 1000 | 1500 | 1.2万 | 100万 | 100万 | 250万 | 10億 | 1.2兆 | 1000兆 | -5.4万
+ja cl 1000 | 1500 | 2000 | 1.2万 | 100万 | 200万 | 500万 | 150万 | 2100万 | 10億 | 20億 | 1兆
+ja sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+ja eng 12.345E3 | 120E-6
+ja sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +€5.00
+ja group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+ja parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+zh nu=latn zh
+zh dec 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+zh latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+zh pct 0% | 50% | -25.6% | 1,234%
+zh eur €0.00 | €1.00 | -€1,234.50 | €1,234,567.89
+zh usd US$1.00 | -US$1,234.50
+zh code CHF 1.00 | -CHF 1,234.50
+zh acc €1.00 | (€1,234.50)
+zh cs 999 | 1000 | 1500 | 1.2万 | 100万 | 100万 | 250万 | 10亿 | 1.2万亿 | 1000万亿 | -5.4万
+zh cl 1000 | 1500 | 2000 | 1.2万 | 100万 | 200万 | 500万 | 150万 | 2100万 | 10亿 | 20亿 | 1万亿
+zh sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+zh eng 12.345E3 | 120E-6
+zh sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +€5.00
+zh group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+zh parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+zh-TW nu=latn zh-TW
+zh-TW dec 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | 非數值 | ∞ | -∞
+zh-TW latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | 非數值 | ∞ | -∞
+zh-TW pct 0% | 50% | -25.6% | 1,234%
+zh-TW eur €0.00 | €1.00 | -€1,234.50 | €1,234,567.89
+zh-TW usd US$1.00 | -US$1,234.50
+zh-TW code CHF 1.00 | -CHF 1,234.50
+zh-TW acc €1.00 | (€1,234.50)
+zh-TW cs 999 | 1000 | 1500 | 1.2萬 | 100萬 | 100萬 | 250萬 | 10億 | 1.2兆 | 1000兆 | -5.4萬
+zh-TW cl 1000 | 1500 | 2000 | 1.2萬 | 100萬 | 200萬 | 500萬 | 150萬 | 2100萬 | 10億 | 20億 | 1兆
+zh-TW sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+zh-TW eng 12.345E3 | 120E-6
+zh-TW sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +€5.00
+zh-TW group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+zh-TW parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+ko nu=latn ko
+ko dec 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+ko latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+ko pct 0% | 50% | -25.6% | 1,234%
+ko eur €0.00 | €1.00 | -€1,234.50 | €1,234,567.89
+ko usd US$1.00 | -US$1,234.50
+ko code CHF 1.00 | -CHF 1,234.50
+ko acc €1.00 | (€1,234.50)
+ko cs 999 | 1천 | 1.5천 | 1.2만 | 100만 | 100만 | 250만 | 10억 | 1.2조 | 1000조 | -5.4만
+ko cl 1천 | 1.5천 | 2천 | 1.2만 | 100만 | 200만 | 500만 | 150만 | 2100만 | 10억 | 20억 | 1조
+ko sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+ko eng 12.345E3 | 120E-6
+ko sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +€5.00
+ko group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+ko parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+th nu=latn th
+th dec 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+th latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+th pct 0% | 50% | -25.6% | 1,234%
+th eur €0.00 | €1.00 | -€1,234.50 | €1,234,567.89
+th usd US$1.00 | -US$1,234.50
+th code CHF 1.00 | -CHF 1,234.50
+th acc €1.00 | (€1,234.50)
+th cs 999 | 1K | 1.5K | 12K | 1M | 1M | 2.5M | 1B | 1.2T | 1000T | -54K
+th cl 1 พัน | 1.5 พัน | 2 พัน | 1.2 หมื่น | 1 ล้าน | 2 ล้าน | 5 ล้าน | 1.5 ล้าน | 21 ล้าน | 1 พันล้าน | 2 พันล้าน | 1 ล้านล้าน
+th sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+th eng 12.345E3 | 120E-6
+th sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +€5.00
+th group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+th parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+vi nu=latn vi
+vi dec 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+vi latn 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+vi pct 0% | 50% | -25,6% | 1.234%
+vi eur 0,00 € | 1,00 € | -1.234,50 € | 1.234.567,89 €
+vi usd 1,00 US$ | -1.234,50 US$
+vi code 1,00 CHF | -1.234,50 CHF
+vi acc 1,00 € | -1.234,50 €
+vi cs 999 | 1 N | 1,5 N | 12 N | 1 Tr | 1 Tr | 2,5 Tr | 1 T | 1,2 NT | 1000 NT | -54 N
+vi cl 1 nghìn | 1,5 nghìn | 2 nghìn | 12 nghìn | 1 triệu | 2 triệu | 5 triệu | 1,5 triệu | 21 triệu | 1 tỷ | 2 tỷ | 1 nghìn tỷ
+vi sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+vi eng 12,345E3 | 120E-6
+vi sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5,00 €
+vi group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+vi parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":"."},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+id nu=latn id
+id dec 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+id latn 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+id pct 0% | 50% | -25,6% | 1.234%
+id eur €0,00 | €1,00 | -€1.234,50 | €1.234.567,89
+id usd US$1,00 | -US$1.234,50
+id code CHF 1,00 | -CHF 1.234,50
+id acc €1,00 | -€1.234,50
+id cs 999 | 1 rb | 1,5 rb | 12 rb | 1 jt | 1 jt | 2,5 jt | 1 M | 1,2 T | 1000 T | -54 rb
+id cl 1 ribu | 1,5 ribu | 2 ribu | 12 ribu | 1 juta | 2 juta | 5 juta | 1,5 juta | 21 juta | 1 miliar | 2 miliar | 1 triliun
+id sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+id eng 12,345E3 | 120E-6
+id sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +€5,00
+id group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+id parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"1"},{"type":"group","value":"."},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"}]
+ms nu=latn ms
+ms dec 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+ms latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+ms pct 0% | 50% | -25.6% | 1,234%
+ms eur €0.00 | €1.00 | -€1,234.50 | €1,234,567.89
+ms usd USD 1.00 | -USD 1,234.50
+ms code CHF 1.00 | -CHF 1,234.50
+ms acc €1.00 | (€1,234.50)
+ms cs 999 | 1K | 1.5K | 12K | 1J | 1J | 2.5J | 1B | 1.2T | 1000T | -54K
+ms cl 1 ribu | 1.5 ribu | 2 ribu | 12 ribu | 1 juta | 2 juta | 5 juta | 1.5 juta | 21 juta | 1 bilion | 2 bilion | 1 trilion
+ms sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+ms eng 12.345E3 | 120E-6
+ms sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +€5.00
+ms group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+ms parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+sw nu=latn sw
+sw dec 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+sw latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+sw pct 0% | 50% | -25.6% | 1,234%
+sw eur € 0.00 | € 1.00 | -€ 1,234.50 | € 1,234,567.89
+sw usd US$ 1.00 | -US$ 1,234.50
+sw code CHF 1.00 | -CHF 1,234.50
+sw acc € 1.00 | -€ 1,234.50
+sw cs 999 | elfu 1 | elfu 1.5 | elfu 12 | 1M | 1M | 2.5M | 1B | 1.2T | 1000T | elfu -54
+sw cl elfu 1 | elfu 1.5 | elfu 2 | elfu 12 | milioni 1 | milioni 2 | milioni 5 | milioni 1.5 | milioni 21 | bilioni 1 | bilioni 2 | trilioni 1
+sw sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+sw eng 12.345E3 | 120E-6
+sw sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +€ 5.00
+sw group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+sw parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"literal","value":" "},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+zu nu=latn zu
+zu dec 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+zu latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+zu pct 0% | 50% | -25.6% | 1,234%
+zu eur €0.00 | €1.00 | -€1,234.50 | €1,234,567.89
+zu usd $1.00 | -$1,234.50
+zu code CHF 1.00 | -CHF 1,234.50
+zu acc €1.00 | (€1,234.50)
+zu cs 999 | 1K | 1.5K | 12K | 1M | 1M | 2.5M | 1B | 1.2T | 1000T | -54K
+zu cl 1 inkulungwane | 1.5 inkulungwane | 2 inkulungwane | 12 inkulungwane | 1 isigidi | 2 isigidi | 5 isigidi | 1.5 isigidi | 21 isigidi | 1 isigidi sezigidi | 2 isigidi sezigidi | 1 isigidintathu
+zu sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+zu eng 12.345E3 | 120E-6
+zu sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +€5.00
+zu group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+zu parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+et nu=latn et
+et dec 0 | −0 | 1 | −1 | 1,5 | −1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | −∞
+et latn 0 | −0 | 1 | −1 | 1,5 | −1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | −∞
+et pct 0% | 50% | −25,6% | 1234%
+et eur 0,00 € | 1,00 € | −1234,50 € | 1 234 567,89 €
+et usd 1,00 $ | −1234,50 $
+et code 1,00 CHF | −1234,50 CHF
+et acc 1,00 € | (1234,50 €)
+et cs 999 | 1 tuh | 1,5 tuh | 12 tuh | 1 mln | 1 mln | 2,5 mln | 1 mld | 1,2 trln | 1000 trln | −54 tuh
+et cl 1 tuhat | 1,5 tuhat | 2 tuhat | 12 tuhat | 1 miljon | 2 miljonit | 5 miljonit | 1,5 miljonit | 21 miljonit | 1 miljard | 2 miljardit | 1 triljon
+et sci 0×10^0 | 1,235×10^4 | −1,2×10^−4 | 1×10^21
+et eng 12,345×10^3 | 120×10^−6
+et sign +0 | +1 | −1 / 0 | +1 | −1 | 0 / +50% / +5,00 €
+et group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+et parts [{"type":"minusSign","value":"−"},{"type":"integer","value":"1234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+lt nu=latn lt
+lt dec 0 | −0 | 1 | −1 | 1,5 | −1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | −∞
+lt latn 0 | −0 | 1 | −1 | 1,5 | −1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | −∞
+lt pct 0 % | 50 % | −25,6 % | 1 234 %
+lt eur 0,00 € | 1,00 € | −1 234,50 € | 1 234 567,89 €
+lt usd 1,00 USD | −1 234,50 USD
+lt code 1,00 CHF | −1 234,50 CHF
+lt acc 1,00 € | −1 234,50 €
+lt cs 999 | 1 tūkst. | 1,5 tūkst. | 12 tūkst. | 1 mln. | 1 mln. | 2,5 mln. | 1 mlrd. | 1,2 trln. | 1000 trln. | −54 tūkst.
+lt cl 1 tūkstantis | 1,5 tūkstančio | 2 tūkstančiai | 12 tūkstančių | 1 milijonas | 2 milijonai | 5 milijonai | 1,5 milijono | 21 milijonas | 1 milijardas | 2 milijardai | 1 trilijonas
+lt sci 0×10^0 | 1,235×10^4 | −1,2×10^−4 | 1×10^21
+lt eng 12,345×10^3 | 120×10^−6
+lt sign +0 | +1 | −1 / 0 | +1 | −1 | 0 / +50 % / +5,00 €
+lt group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+lt parts [{"type":"minusSign","value":"−"},{"type":"integer","value":"1"},{"type":"group","value":" "},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+lv nu=latn lv
+lv dec 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NS | ∞ | -∞
+lv latn 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NS | ∞ | -∞
+lv pct 0% | 50% | -25,6% | 1234%
+lv eur 0,00 € | 1,00 € | -1234,50 € | 1 234 567,89 €
+lv usd 1,00 $ | -1234,50 $
+lv code 1,00 CHF | -1234,50 CHF
+lv acc 1,00 € | -1234,50 €
+lv cs 999 | 1 tūkst. | 1,5 tūkst. | 12 tūkst. | 1 milj. | 1 milj. | 2,5 milj. | 1 mljrd. | 1,2 trilj. | 1000 trilj. | -54 tūkst.
+lv cl 1 tūkstotis | 1,5 tūkstoši | 2 tūkstoši | 12 tūkstoši | 1 miljons | 2 miljoni | 5 miljoni | 1,5 miljoni | 21 miljons | 1 miljards | 2 miljardi | 1 triljons
+lv sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+lv eng 12,345E3 | 120E-6
+lv sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5,00 €
+lv group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+lv parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+sl nu=latn sl
+sl dec 0 | −0 | 1 | −1 | 1,5 | −1234,568 | 1234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | −∞
+sl latn 0 | −0 | 1 | −1 | 1,5 | −1234,568 | 1234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | −∞
+sl pct 0 % | 50 % | −25,6 % | 1234 %
+sl eur 0,00 € | 1,00 € | −1234,50 € | 1.234.567,89 €
+sl usd 1,00 $ | −1234,50 $
+sl code 1,00 CHF | −1234,50 CHF
+sl acc 1,00 € | (1234,50 €)
+sl cs 999 | 1 tis. | 1,5 tis. | 12 tis. | 1 mio. | 1 mio. | 2,5 mio. | 1 mrd. | 1,2 bil. | 1000 bil. | −54 tis.
+sl cl 1 tisoč | 1,5 tisoč | 2 tisoč | 12 tisoč | 1 milijon | 2 milijona | 5 milijonov | 1,5 milijoni | 21 milijonov | 1 milijarda | 2 milijardi | 1 bilijon
+sl sci 0e0 | 1,235e4 | −1,2e−4 | 1e21
+sl eng 12,345e3 | 120e−6
+sl sign +0 | +1 | −1 / 0 | +1 | −1 | 0 / +50 % / +5,00 €
+sl group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+sl parts [{"type":"minusSign","value":"−"},{"type":"integer","value":"1234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+hr nu=latn hr
+hr dec 0 | −0 | 1 | −1 | 1,5 | −1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | −∞
+hr latn 0 | −0 | 1 | −1 | 1,5 | −1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | −∞
+hr pct 0 % | 50 % | −25,6 % | 1.234 %
+hr eur 0,00 € | 1,00 € | −1.234,50 € | 1.234.567,89 €
+hr usd 1,00 USD | −1.234,50 USD
+hr code 1,00 CHF | −1.234,50 CHF
+hr acc 1,00 € | −1.234,50 €
+hr cs 999 | 1 tis. | 1,5 tis. | 12 tis. | 1 mil. | 1 mil. | 2,5 mil. | 1 mlr. | 1,2 bil. | 1000 bil. | −54 tis.
+hr cl 1 tisuća | 1,5 tisuća | 2 tisuće | 12 tisuća | 1 milijun | 2 milijuna | 5 milijuna | 1,5 milijuna | 21 milijun | 1 milijarda | 2 milijarde | 1 bilijun
+hr sci 0E0 | 1,235E4 | −1,2E−4 | 1E21
+hr eng 12,345E3 | 120E−6
+hr sign +0 | +1 | −1 / 0 | +1 | −1 | 0 / +50 % / +5,00 €
+hr group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+hr parts [{"type":"minusSign","value":"−"},{"type":"integer","value":"1"},{"type":"group","value":"."},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+sr nu=latn sr
+sr dec 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+sr latn 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+sr pct 0% | 50% | -25,6% | 1.234%
+sr eur 0,00 € | 1,00 € | -1.234,50 € | 1.234.567,89 €
+sr usd 1,00 US$ | -1.234,50 US$
+sr code 1,00 CHF | -1.234,50 CHF
+sr acc 1,00 € | (1.234,50 €)
+sr cs 999 | 1 хиљ. | 1,5 хиљ. | 12 хиљ. | 1 мил. | 1 мил. | 2,5 мил. | 1 млрд. | 1,2 бил. | 1000 бил. | -54 хиљ.
+sr cl 1 хиљада | 1,5 хиљада | 2 хиљаде | 12 хиљада | 1 милион | 2 милиона | 5 милиона | 1,5 милиона | 21 милион | 1 милијарда | 2 милијарде | 1 билион
+sr sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+sr eng 12,345E3 | 120E-6
+sr sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5,00 €
+sr group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+sr parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":"."},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+sr-Latn nu=latn sr-Latn
+sr-Latn dec 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+sr-Latn latn 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+sr-Latn pct 0% | 50% | -25,6% | 1.234%
+sr-Latn eur 0,00 € | 1,00 € | -1.234,50 € | 1.234.567,89 €
+sr-Latn usd 1,00 US$ | -1.234,50 US$
+sr-Latn code 1,00 CHF | -1.234,50 CHF
+sr-Latn acc 1,00 € | (1.234,50 €)
+sr-Latn cs 999 | 1 hilj. | 1,5 hilj. | 12 hilj. | 1 mil. | 1 mil. | 2,5 mil. | 1 mlrd. | 1,2 bil. | 1000 bil. | -54 hilj.
+sr-Latn cl 1 hiljada | 1,5 hiljada | 2 hiljade | 12 hiljada | 1 milion | 2 miliona | 5 miliona | 1,5 miliona | 21 milion | 1 milijarda | 2 milijarde | 1 bilion
+sr-Latn sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+sr-Latn eng 12,345E3 | 120E-6
+sr-Latn sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5,00 €
+sr-Latn group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+sr-Latn parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":"."},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+be nu=latn be
+be dec 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+be latn 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | NaN | ∞ | -∞
+be pct 0 % | 50 % | -25,6 % | 1234 %
+be eur 0,00 € | 1,00 € | -1234,50 € | 1 234 567,89 €
+be usd 1,00 $ | -1234,50 $
+be code 1,00 CHF | -1234,50 CHF
+be acc 1,00 € | -1234,50 €
+be cs 999 | 1 тыс. | 1,5 тыс. | 12 тыс. | 1 млн | 1 млн | 2,5 млн | 1 млрд | 1,2 трлн | 1000 трлн | -54 тыс.
+be cl 1 тысяча | 1,5 тысячы | 2 тысячы | 12 тысяч | 1 мільён | 2 мільёны | 5 мільёнаў | 1,5 мільёна | 21 мільён | 1 мільярд | 2 мільярды | 1 трыльён
+be sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+be eng 12,345E3 | 120E-6
+be sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50 % / +5,00 €
+be group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+be parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+kk nu=latn kk
+kk dec 0 | -0 | 1 | -1 | 1,5 | -1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | сан емес | ∞ | -∞
+kk latn 0 | -0 | 1 | -1 | 1,5 | -1 234,568 | 1 234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | сан емес | ∞ | -∞
+kk pct 0% | 50% | -25,6% | 1 234%
+kk eur 0,00 € | 1,00 € | -1 234,50 € | 1 234 567,89 €
+kk usd 1,00 $ | -1 234,50 $
+kk code 1,00 CHF | -1 234,50 CHF
+kk acc 1,00 € | -1 234,50 €
+kk cs 999 | 1 мың | 1,5 мың | 12 мың | 1 млн | 1 млн | 2,5 млн | 1 млрд | 1,2 трлн | 1000 трлн | -54 мың
+kk cl 1 мың | 1,5 мың | 2 мың | 12 мың | 1 миллион | 2 миллион | 5 миллион | 1,5 миллион | 21 миллион | 1 миллиард | 2 миллиард | 1 триллион
+kk sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+kk eng 12,345E3 | 120E-6
+kk sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5,00 €
+kk group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+kk parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":" "},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+ka nu=latn ka
+ka dec 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | არ არის რიცხვი | ∞ | -∞
+ka latn 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | არ არის რიცხვი | ∞ | -∞
+ka pct 0% | 50% | -25,6% | 1234%
+ka eur 0,00 € | 1,00 € | -1234,50 € | 1 234 567,89 €
+ka usd 1,00 US$ | -1234,50 US$
+ka code 1,00 CHF | -1234,50 CHF
+ka acc 1,00 € | -1234,50 €
+ka cs 999 | 1 ათ. | 1,5 ათ. | 12 ათ. | 1 მლნ. | 1 მლნ. | 2,5 მლნ. | 1 მლრდ. | 1,2 ტრლ. | 1000 ტრლ. | -54 ათ.
+ka cl 1 ათასი | 1,5 ათასი | 2 ათასი | 12 ათასი | 1 მილიონი | 2 მილიონი | 5 მილიონი | 1,5 მილიონი | 21 მილიონი | 1 მილიარდი | 2 მილიარდი | 1 ტრილიონი
+ka sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+ka eng 12,345E3 | 120E-6
+ka sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5,00 €
+ka group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+ka parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+hy nu=latn hy
+hy dec 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | ՈչԹ | ∞ | -∞
+hy latn 0 | -0 | 1 | -1 | 1,5 | -1234,568 | 1234 | 12 345 | 123 456,789 | 1 234 567 890,12 | 0 | 1 000 000 000 000 000 000 000 | ՈչԹ | ∞ | -∞
+hy pct 0% | 50% | -25,6% | 1234%
+hy eur 0,00 € | 1,00 € | -1234,50 € | 1 234 567,89 €
+hy usd 1,00 $ | -1234,50 $
+hy code 1,00 CHF | -1234,50 CHF
+hy acc 1,00 € | -1234,50 €
+hy cs 999 | 1 հզր | 1,5 հզր | 12 հզր | 1 մլն | 1 մլն | 2,5 մլն | 1 մլրդ | 1,2 տրլն | 1000 տրլն | -54 հզր
+hy cl 1 հազար | 1,5 հազար | 2 հազար | 12 հազար | 1 միլիոն | 2 միլիոն | 5 միլիոն | 1,5 միլիոն | 21 միլիոն | 1 միլիարդ | 2 միլիարդ | 1 տրիլիոն
+hy sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+hy eng 12,345E3 | 120E-6
+hy sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5,00 €
+hy group 1 234 | 12 345 / 1234 | 12 345 / 1234567
+hy parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+is nu=latn is
+is dec 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+is latn 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | -∞
+is pct 0% | 50% | -25,6% | 1.234%
+is eur 0,00 EUR | 1,00 EUR | -1.234,50 EUR | 1.234.567,89 EUR
+is usd 1,00 USD | -1.234,50 USD
+is code 1,00 CHF | -1.234,50 CHF
+is acc 1,00 EUR | -1.234,50 EUR
+is cs 999 | 1 þ. | 1,5 þ. | 12 þ. | 1 m. | 1 m. | 2,5 m. | 1 ma. | 1,2 bn | 1000 bn | -54 þ.
+is cl 1 þúsund | 1,5 þúsund | 2 þúsund | 12 þúsund | 1 milljón | 2 milljónir | 5 milljónir | 1,5 milljónir | 21 milljón | 1 milljarður | 2 milljarðar | 1 billjón
+is sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+is eng 12,345E3 | 120E-6
+is sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5,00 EUR
+is group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+is parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":"."},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"},{"type":"literal","value":" "},{"type":"currency","value":"EUR"}]
+ga nu=latn ga
+ga dec 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | Nuimh | ∞ | -∞
+ga latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | Nuimh | ∞ | -∞
+ga pct 0% | 50% | -25.6% | 1,234%
+ga eur €0.00 | €1.00 | -€1,234.50 | €1,234,567.89
+ga usd $1.00 | -$1,234.50
+ga code CHF 1.00 | -CHF 1,234.50
+ga acc €1.00 | (€1,234.50)
+ga cs 999 | 1k | 1.5k | 12k | 1M | 1M | 2.5M | 1B | 1.2T | 1000T | -54k
+ga cl 1 mhíle | 1.5 míle | 2 mhíle | 12 míle | 1 mhilliún | 2 mhilliún | 5 mhilliún | 1.5 milliún | 21 milliún | 1 bhilliún | 2 bhilliún | 1 trilliún
+ga sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+ga eng 12.345E3 | 120E-6
+ga sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +€5.00
+ga group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+ga parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+cy nu=latn cy
+cy dec 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+cy latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+cy pct 0% | 50% | -25.6% | 1,234%
+cy eur €0.00 | €1.00 | -€1,234.50 | €1,234,567.89
+cy usd US$1.00 | -US$1,234.50
+cy code CHF 1.00 | -CHF 1,234.50
+cy acc €1.00 | (€1,234.50)
+cy cs 999 | 1K | 1.5K | 12K | 1M | 1M | 2.5M | 1B | 1.2T | 1000T | -54K
+cy cl 1 mil | 1.5 mil | 2K | 12 mil | 1 miliwn | 2 miliwn | 5 miliwn | 1.5 miliwn | 21 miliwn | 1 biliwn | 2 biliwn | 1 triliwn
+cy sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+cy eng 12.345E3 | 120E-6
+cy sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +€5.00
+cy group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+cy parts [{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+my nu=mymr my
+my dec ၀ | -၀ | ၁ | -၁ | ၁.၅ | -၁,၂၃၄.၅၆၈ | ၁,၂၃၄ | ၁၂,၃၄၅ | ၁၂၃,၄၅၆.၇၈၉ | ၁,၂၃၄,၅၆၇,၈၉၀.၁၂ | ၀ | ၁,၀၀၀,၀၀၀,၀၀၀,၀၀၀,၀၀၀,၀၀၀,၀၀၀ | ဂဏန်းမဟုတ်သော | ∞ | -∞
+my latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | ဂဏန်းမဟုတ်သော | ∞ | -∞
+my pct ၀% | ၅၀% | -၂၅.၆% | ၁,၂၃၄%
+my eur ၀.၀၀ € | ၁.၀၀ € | -၁,၂၃၄.၅၀ € | ၁,၂၃၄,၅၆၇.၈၉ €
+my usd ၁.၀၀ US$ | -၁,၂၃၄.၅၀ US$
+my code ၁.၀၀ CHF | -၁,၂၃၄.၅၀ CHF
+my acc € ၁.၀၀ | -€ ၁,၂၃၄.၅၀
+my cs ၉၉၉ | ၁ ထောင် | ၁.၅ ထောင် | ၁.၂ သောင်း | ၁ သန်း | ၁ သန်း | ၂.၅ သန်း | ၁၀၀ ဋေ | ဋေ ၁.၂ သိန်း | ၁၀ ကောဋိ | -၅.၄ သောင်း
+my cl ၁ ထောင် | ၁.၅ ထောင် | ၂ ထောင် | ၁.၂ သောင်း | ၁ သန်း | ၂ သန်း | ၅ သန်း | ၁.၅ သန်း | ၂.၁ ကုဋေ | ၁၀၀ ကုဋေ | ၂၀၀ ကုဋေ | ကုဋေ ၁ သိန်း
+my sci ၀E၀ | ၁.၂၃၅E၄ | -၁.၂E-၄ | ၁E၂၁
+my eng ၁၂.၃၄၅E၃ | ၁၂၀E-၆
+my sign +၀ | +၁ | -၁ / ၀ | +၁ | -၁ | ၀ / +၅၀% / +၅.၀၀ €
+my group ၁,၂၃၄ | ၁၂,၃၄၅ / ၁၂၃၄ | ၁၂,၃၄၅ / ၁၂၃၄၅၆၇
+my parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"၁"},{"type":"group","value":","},{"type":"integer","value":"၂၃၄"},{"type":"decimal","value":"."},{"type":"fraction","value":"၅၀"},{"type":"literal","value":" "},{"type":"currency","value":"€"}]
+km nu=latn km
+km dec 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+km latn 0 | -0 | 1 | -1 | 1.5 | -1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | -∞
+km pct 0% | 50% | -25.6% | 1,234%
+km eur 0.00€ | 1.00€ | -1,234.50€ | 1,234,567.89€
+km usd 1.00$ | -1,234.50$
+km code 1.00 CHF | -1,234.50 CHF
+km acc 1.00€ | (1,234.50€)
+km cs 999 | 1ពាន់ | 1.5ពាន់ | 12 ពាន់ | 1 លាន | 1 លាន | 2.5 លាន | 1 ប៊ីលាន | 1.2 ទ្រីលាន | 1000 ទ្រីលាន | -54 ពាន់
+km cl 1 ពាន់ | 1.5 ពាន់ | 2 ពាន់ | 12 ពាន់ | 1 លាន | 2 លាន | 5 លាន | 1.5 លាន | 21 លាន | 1 ប៊ីលាន | 2 ប៊ីលាន | 1 ទ្រីលាន
+km sci 0E0 | 1.235E4 | -1.2E-4 | 1E21
+km eng 12.345E3 | 120E-6
+km sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / +5.00€
+km group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+km parts [{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"},{"type":"currency","value":"€"}]
+lo nu=latn lo
+lo dec 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | ບໍ່​ແມ່ນ​ໂຕ​ເລກ | ∞ | -∞
+lo latn 0 | -0 | 1 | -1 | 1,5 | -1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | ບໍ່​ແມ່ນ​ໂຕ​ເລກ | ∞ | -∞
+lo pct 0% | 50% | -25,6% | 1.234%
+lo eur €0,00 | €1,00 | €-1.234,50 | €1.234.567,89
+lo usd US$1,00 | US$-1.234,50
+lo code CHF 1,00 | CHF-1.234,50
+lo acc €1,00 | €-1.234,50
+lo cs 999 | 1 ພັນ | 1,5 ພັນ | 12 ພັນ | 1 ລ້ານ | 1 ລ້ານ | 2,5 ລ້ານ | 1 ຕື້ | 1,2 ລ້ານລ້ານ | 1000ລລ | -54 ພັນ
+lo cl 1 ພັນ | 1,5 ພັນ | 2 ພັນ | 12 ພັນ | 1 ລ້ານ | 2 ລ້ານ | 5 ລ້ານ | 1,5 ລ້ານ | 21 ລ້ານ | 1 ຕື້ | 2 ຕື້ | 1 ລ້ານລ້ານ
+lo sci 0E0 | 1,235E4 | -1,2E-4 | 1E21
+lo eng 12,345E3 | 120E-6
+lo sign +0 | +1 | -1 / 0 | +1 | -1 | 0 / +50% / €+5,00
+lo group 1.234 | 12.345 / 1234 | 12.345 / 1234567
+lo parts [{"type":"currency","value":"€"},{"type":"minusSign","value":"-"},{"type":"integer","value":"1"},{"type":"group","value":"."},{"type":"integer","value":"234"},{"type":"decimal","value":","},{"type":"fraction","value":"50"}]
+ps nu=arabext ps
+ps dec ۰ | ‎-‎۰ | ۱ | ‎-‎۱ | ۱٫۵ | ‎-‎۱٬۲۳۴٫۵۶۸ | ۱٬۲۳۴ | ۱۲٬۳۴۵ | ۱۲۳٬۴۵۶٫۷۸۹ | ۱٬۲۳۴٬۵۶۷٬۸۹۰٫۱۲ | ۰ | ۱٬۰۰۰٬۰۰۰٬۰۰۰٬۰۰۰٬۰۰۰٬۰۰۰٬۰۰۰ | NaN | ∞ | ‎-‎∞
+ps latn 0 | ‎−0 | 1 | ‎−1 | 1,5 | ‎−1.234,568 | 1.234 | 12.345 | 123.456,789 | 1.234.567.890,12 | 0 | 1.000.000.000.000.000.000.000 | NaN | ∞ | ‎−∞
+ps pct ۰٪ | ۵۰٪ | ‎-‎۲۵٫۶٪ | ۱٬۲۳۴٪
+ps eur € ۰٫۰۰ | € ۱٫۰۰ | ‎-‎€ ۱٬۲۳۴٫۵۰ | € ۱٬۲۳۴٬۵۶۷٫۸۹
+ps usd $ ۱٫۰۰ | ‎-‎$ ۱٬۲۳۴٫۵۰
+ps code CHF ۱٫۰۰ | ‎-‎CHF ۱٬۲۳۴٫۵۰
+ps acc €۱٫۰۰ | (€۱٬۲۳۴٫۵۰)
+ps cs ۹۹۹ | ۱K | ۱٫۵K | ۱۲K | ۱M | ۱M | ۲٫۵M | ۱B | ۱٫۲T | ۱۰۰۰T | ‎-‎۵۴K
+ps cl ۱۰۰۰ | ۱۵۰۰ | ۲۰۰۰ | ۱۲٬۳۴۵ | ۱٬۰۰۰٬۰۰۰ | ۲٬۰۰۰٬۰۰۰ | ۵٬۰۰۰٬۰۰۰ | ۱٬۵۰۰٬۰۰۰ | ۲۱٬۰۰۰٬۰۰۰ | ۱G | ۲G | ۱۰۰۰G
+ps sci ۰×۱۰^۰ | ۱٫۲۳۵×۱۰^۴ | ‎-‎۱٫۲×۱۰^‎-‎۴ | ۱×۱۰^۲۱
+ps eng ۱۲٫۳۴۵×۱۰^۳ | ۱۲۰×۱۰^‎-‎۶
+ps sign ‎+‎۰ | ‎+‎۱ | ‎-‎۱ / ۰ | ‎+‎۱ | ‎-‎۱ | ۰ / ‎+‎۵۰٪ / ‎+‎€ ۵٫۰۰
+ps group ۱٬۲۳۴ | ۱۲٬۳۴۵ / ۱۲۳۴ | ۱۲٬۳۴۵ / ۱۲۳۴۵۶۷
+ps parts [{"type":"literal","value":"‎"},{"type":"minusSign","value":"-"},{"type":"literal","value":"‎"},{"type":"currency","value":"€"},{"type":"literal","value":" "},{"type":"integer","value":"۱"},{"type":"group","value":"٬"},{"type":"integer","value":"۲۳۴"},{"type":"decimal","value":"٫"},{"type":"fraction","value":"۵۰"}]
+ur nu=latn ur
+ur dec 0 | ‎-0 | 1 | ‎-1 | 1.5 | ‎-1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | ‎-∞
+ur latn 0 | ‎-0 | 1 | ‎-1 | 1.5 | ‎-1,234.568 | 1,234 | 12,345 | 123,456.789 | 1,234,567,890.12 | 0 | 1,000,000,000,000,000,000,000 | NaN | ∞ | ‎-∞
+ur pct 0% | 50% | ‎-25.6% | 1,234%
+ur eur €0.00 | €1.00 | ‎-€1,234.50 | €1,234,567.89
+ur usd $1.00 | ‎-$1,234.50
+ur code CHF 1.00 | ‎-CHF 1,234.50
+ur acc €1.00 | (€1,234.50)
+ur cs 999 | 1 ہزار | 1.5 ہزار | 12 ہزار | 10 لاکھ | 10 لاکھ | 25 لاکھ | 1 ارب | 12 کھرب | 1000 ٹریلین | ‎-54 ہزار
+ur cl 1 ہزار | 1.5 ہزار | 2 ہزار | 12 ہزار | 10 لاکھ | 20 لاکھ | 50 لاکھ | 15 لاکھ | 2.1 کروڑ | 1 ارب | 2 ارب | 10 کھرب
+ur sci 0E0 | 1.235E4 | ‎-1.2E‎-4 | 1E21
+ur eng 12.345E3 | 120E‎-6
+ur sign ‎+0 | ‎+1 | ‎-1 / 0 | ‎+1 | ‎-1 | 0 / ‎+50% / ‎+€5.00
+ur group 1,234 | 12,345 / 1234 | 12,345 / 1234567
+ur parts [{"type":"literal","value":"‎"},{"type":"minusSign","value":"-"},{"type":"currency","value":"€"},{"type":"integer","value":"1"},{"type":"group","value":","},{"type":"integer","value":"234"},{"type":"decimal","value":"."},{"type":"fraction","value":"50"}]
+؜-١٬٢٣٤٫٥
+‎-1,234.5
+‎−1,234.5
+१२,३४,५६७
