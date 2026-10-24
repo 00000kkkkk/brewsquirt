@@ -48,6 +48,7 @@ const flag = new Int32Array(new SharedArrayBuffer(4))
 const pending = Atomics.waitAsync(flag, 0, 0)
 console.log("async", pending.async)
 const notifier = new Worker("const a = new Int32Array(require('node:worker_threads').workerData); Atomics.store(a, 0, 1); Atomics.notify(a, 0)", { eval: true, workerData: flag.buffer })
+const notifierExit = once(notifier, "exit")
 console.log("waitAsync", await pending.value)
 console.log(Atomics.waitAsync(flag, 0, 0).value, Atomics.waitAsync(flag, 0, 1, 0).value)
-await once(notifier, "exit")
+await notifierExit
