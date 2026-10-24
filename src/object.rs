@@ -226,6 +226,10 @@ impl PropMap {
         }
     }
 
+    pub fn raw_keys(&self) -> &[JsStr] {
+        &self.shape.keys
+    }
+
     fn own_keys(&mut self) -> &mut Vec<JsStr> {
         if !self.shape.dictionary || Rc::get_mut(&mut self.shape).is_none() {
             self.shape = Rc::new(Shape::new(self.shape.keys.clone(), true));

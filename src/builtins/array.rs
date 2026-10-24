@@ -267,27 +267,47 @@ fn from(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         return generic(vm, "from", this, args);
     }
     let src = arg(args, 0);
+    let f = arg(args, 1);
+    if !f.is_undefined() {
+        expect_fn(vm, &f)?;
+    }
     let array_like = match &src {
         Value::Object(_) => vm.get_prop(&src, crate::object::ITER_KEY)?.is_nullish(),
         _ => false,
     };
-    let f = arg(args, 1);
     if !f.is_undefined() && !array_like && src.is_object() {
         return generic(vm, "from", this, args);
     }
     let list = match &src {
-        Value::Object(_) if array_like => {
+        Value::Object(o) if array_like => {
             let n = vm.get_prop(&src, "length")?;
             let n = to_integer(vm, &n)?.max(0.0);
             if n > u32::MAX as f64 {
                 return Err(vm.range_error("Invalid array length"));
             }
             let n = n as usize;
+            let this_arg = arg(args, 2);
             let mut out = Vec::with_capacity(n.min(1 << 16));
+            let mut sig = index_free(o);
             for i in 0..n {
-                out.push(vm.get_prop(&src, &i.to_string())?);
+                if sig.as_ref().is_some_and(|s| !same_chain(o, s)) {
+                    sig = index_free(o);
+                }
+                let v = if sig.is_some() {
+                    Value::Undefined
+                } else {
+                    vm.get_prop(&src, &i.to_string())?
+                };
+                if f.is_undefined() {
+                    out.push(v);
+                } else {
+                    match vm.call_value(&f, this_arg.clone(), &[v, Value::Number(i as f64)])? {
+                        Value::Number(x) => out.push(Value::Number(x)),
+                        r => out.push(r),
+                    }
+                }
             }
-            out
+            return Ok(vm.new_array(out));
         }
         Value::Undefined | Value::Null => {
             return Err(vm.type_error(format!("{} is not iterable", inspect_plain(&src))));
@@ -304,6 +324,46 @@ fn from(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         out.push(vm.call_value(&f, this_arg.clone(), &[v, Value::Number(i as f64)])?);
     }
     Ok(vm.new_array(out))
+}
+
+fn index_free(o: &Rc<Obj>) -> Option<Vec<(usize, u64)>> {
+    let mut sig = Vec::new();
+    let mut cur = o.clone();
+    loop {
+        if !matches!(cur.kind, ObjKind::Ordinary) {
+            return None;
+        }
+        {
+            let props = cur.props.borrow();
+            if props
+                .raw_keys()
+                .iter()
+                .any(|k| k.as_bytes().first().is_some_and(u8::is_ascii_digit))
+            {
+                return None;
+            }
+            sig.push((Rc::as_ptr(&cur) as usize, props.shape_id()));
+        }
+        let next = cur.proto.borrow().clone();
+        match next {
+            Some(p) => cur = p,
+            None => return Some(sig),
+        }
+    }
+}
+
+fn same_chain(o: &Rc<Obj>, sig: &[(usize, u64)]) -> bool {
+    let mut cur = Some(o.clone());
+    for &(p, id) in sig {
+        let Some(c) = cur else {
+            return false;
+        };
+        if Rc::as_ptr(&c) as usize != p || c.props.borrow().shape_id() != id {
+            return false;
+        }
+        cur = c.proto.borrow().clone();
+    }
+    cur.is_none()
 }
 
 fn of(vm: &mut Vm, this: Value, args: &[Value]) -> R {

@@ -318,6 +318,7 @@ pub struct Vm {
     pub(crate) frames: Vec<Frame>,
     pub(crate) handlers: Vec<Handler>,
     pub(crate) open_upvalues: BTreeMap<usize, Rc<UpCell>>,
+    pub(crate) highest_open: usize,
     pub(crate) console_indent: usize,
     pub globals: Globals,
     arg_buf: Vec<Value>,
@@ -1094,6 +1095,7 @@ impl Vm {
             frames: Vec::with_capacity(64),
             handlers: Vec::new(),
             open_upvalues: BTreeMap::new(),
+            highest_open: 0,
             console_indent: 0,
             globals: Globals::default(),
             arg_buf: Vec::new(),
@@ -2866,6 +2868,7 @@ impl Vm {
         }
         let u = UpCell::new(Upvalue::Open(idx));
         self.open_upvalues.insert(idx, u.clone());
+        self.highest_open = self.highest_open.max(idx);
         u
     }
 
@@ -3075,12 +3078,59 @@ impl Vm {
         })
     }
 
+    #[inline(always)]
+    fn push_plain_frame(&mut self, closure: Rc<Closure>, base: usize) {
+        self.push_frame_raw(closure, base, false, None);
+    }
+
+    #[inline(always)]
+    fn push_frame_raw(
+        &mut self,
+        closure: Rc<Closure>,
+        base: usize,
+        construct: bool,
+        new_target: Option<Rc<Obj>>,
+    ) {
+        self.frames.reserve(1);
+        unsafe {
+            let n = self.frames.len();
+            let p = self.frames.as_mut_ptr().add(n);
+            std::ptr::addr_of_mut!((*p).closure).write(closure);
+            std::ptr::addr_of_mut!((*p).ip).write(0);
+            std::ptr::addr_of_mut!((*p).base).write(base);
+            std::ptr::addr_of_mut!((*p).construct).write(construct);
+            std::ptr::addr_of_mut!((*p).co).write(None);
+            std::ptr::addr_of_mut!((*p).new_target).write(new_target);
+            std::ptr::addr_of_mut!((*p).brands).write(Vec::new());
+            self.frames.set_len(n + 1);
+        }
+    }
+
+    #[inline(always)]
+    fn drop_top_frame(&mut self) {
+        unsafe {
+            let n = self.frames.len() - 1;
+            self.frames.set_len(n);
+            std::ptr::drop_in_place(self.frames.as_mut_ptr().add(n));
+        }
+    }
+
+    #[inline(always)]
     fn close_upvalues(&mut self, from: usize) {
+        if self.open_upvalues.is_empty() || self.highest_open < from {
+            return;
+        }
+        self.close_upvalues_slow(from);
+    }
+
+    #[inline(never)]
+    fn close_upvalues_slow(&mut self, from: usize) {
         if self
             .open_upvalues
             .last_key_value()
             .is_none_or(|(k, _)| *k < from)
         {
+            self.highest_open = self.open_upvalues.last_key_value().map_or(0, |(k, _)| *k);
             return;
         }
         let tail = self.open_upvalues.split_off(&from);
@@ -3088,6 +3138,7 @@ impl Vm {
             let v = self.stack[idx].clone();
             *u.borrow_mut() = Upvalue::Closed(v);
         }
+        self.highest_open = self.open_upvalues.last_key_value().map_or(0, |(k, _)| *k);
     }
 
     pub(crate) fn push_frame(
@@ -3155,19 +3206,12 @@ impl Vm {
             }
             self.stack.push(arr);
         }
-        self.frames.push(Frame {
-            closure: c,
-            ip: 0,
-            base: ci + 1,
-            construct,
-            co: None,
-            new_target: if construct {
-                self.next_new_target.take()
-            } else {
-                None
-            },
-            brands: Vec::new(),
-        });
+        let new_target = if construct {
+            self.next_new_target.take()
+        } else {
+            None
+        };
+        self.push_frame_raw(c, ci + 1, construct, new_target);
         Ok(())
     }
 
@@ -3224,9 +3268,15 @@ impl Vm {
                     return self.start_coroutine(f, c.clone(), this, args);
                 }
                 let mark = self.stack.len();
+                self.stack.reserve(args.len() + 2);
                 self.stack.push(f.clone());
                 self.stack.push(this);
-                self.stack.extend_from_slice(args);
+                for a in args {
+                    match a {
+                        Value::Number(x) => push_number(&mut self.stack, *x),
+                        v => self.stack.push(v.clone()),
+                    }
+                }
                 if let Err(e) = self.push_frame(c.clone(), args.len(), false) {
                     self.stack.truncate(mark);
                     return Err(e);
@@ -5792,10 +5842,8 @@ impl Vm {
                     Op::PopTo(n) => {
                         let to = unsafe { stk.add(base + n as usize) };
                         if self.builders.is_empty()
-                            && self
-                                .open_upvalues
-                                .last_key_value()
-                                .is_none_or(|(k, _)| *k < base + n as usize)
+                            && (self.open_upvalues.is_empty()
+                                || self.highest_open < base + n as usize)
                         {
                             while sp > to {
                                 discard!();
@@ -5989,15 +6037,7 @@ impl Vm {
                                     self.stack.truncate(ci + 2 + np);
                                 }
                                 self.frames[fi].ip = ip + 1;
-                                self.frames.push(Frame {
-                                    closure: c,
-                                    ip: 0,
-                                    base: ci + 1,
-                                    construct: false,
-                                    co: None,
-                                    new_target: None,
-                                    brands: Vec::new(),
-                                });
+                                self.push_plain_frame(c, ci + 1);
                                 continue 'frame;
                             }
                             ObjKind::Native(_) => {
@@ -6039,7 +6079,7 @@ impl Vm {
                         }
                         if let Value::Number(x) = self.stack[n - 1] {
                             unsafe { self.stack.set_len(n - 1) };
-                            self.frames.pop();
+                            self.drop_top_frame();
                             self.stack.truncate(base - 1);
                             if self.frames.len() == stop {
                                 return Ok(Value::Number(x));
@@ -6048,7 +6088,7 @@ impl Vm {
                             continue 'frame;
                         }
                         let result = self.stack.pop().unwrap_or_default();
-                        self.frames.pop();
+                        self.drop_top_frame();
                         self.stack.truncate(base - 1);
                         if self.frames.len() == stop {
                             return Ok(result);

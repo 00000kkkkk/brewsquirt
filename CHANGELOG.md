@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the dispatch loop, and template literals build their string in one pass with a fast
   integer formatter, so `array.push`, string building and `Map` keyed by template strings run
   25-40% faster.
+- Function calls write their frame in place and skip closing upvalues when none are open, so
+  recursive code such as `fib` runs about 30% faster.
+- `Array.from({ length: n }, fn)` no longer builds a string key for every index of a plain
+  array-like object, and is about 40% faster.
 - `JSON.parse` builds JavaScript values directly instead of going through an intermediate tree,
   and `JSON.stringify` reads plain objects without generic property lookups or temporary
   strings, so a parse and stringify round trip is more than twice as fast.
@@ -39,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `Array.from` with a mapping function checks that it is callable before reading the source and
+  reads each element just before mapping it, in the order the specification requires.
 - `JSON.parse` accepts numbers outside the double range (`1e400` is `Infinity`), lone surrogate
   escapes such as `"\ud800"`, and arrays and objects nested more than 128 levels deep.
 - In multiline mode `^` and `$` treat `\r`, U+2028 and U+2029 as line ends like `\n`, so

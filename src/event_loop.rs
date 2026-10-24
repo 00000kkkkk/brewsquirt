@@ -192,6 +192,7 @@ impl Vm {
             self.stack[idx] = v;
             *u.borrow_mut() = Upvalue::Open(idx);
             self.open_upvalues.insert(idx, u);
+            self.highest_open = self.highest_open.max(idx);
         }
         let delegate = matches!(
             saved.closure.proto.code.get(saved.ip.wrapping_sub(1)),
