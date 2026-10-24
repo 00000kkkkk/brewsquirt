@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Intl.Locale` follows the current specification and CLDR data. It parses and canonicalizes
+  full Unicode locale identifiers, including language, script, region and variant aliases,
+  grandfathered tags, `-u-` and `-t-` extensions and their value aliases. It has likely-subtags
+  `maximize` and `minimize`, the `firstDayOfWeek` option, and `getCalendars`, `getCollations`,
+  `getHourCycles`, `getNumberingSystems`, `getTimeZones`, `getTextInfo` and `getWeekInfo`,
+  which honour the `rg` and `sd` keywords. `Intl.getCanonicalLocales` and every `Intl`
+  constructor share the same canonicalization. Docusaurus builds.
+- `v8.serialize` and `v8.deserialize` use V8's wire format and produce the same bytes as Node,
+  so data written by one runtime reads in the other. webpack's persistent cache is shared
+  between Node and jsq.
+
 ### Fixed
 
 - A `/` right after the `)` of an `if`, `for`, `for await`, `while` or `with` header starts a

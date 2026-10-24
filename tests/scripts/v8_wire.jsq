@@ -1,0 +1,52 @@
+const v8 = require("v8")
+const util = require("util")
+const cyc = {}
+cyc.self = cyc
+const shared = { s: 1 }
+const ab = new ArrayBuffer(4)
+const err = new TypeError("m", { cause: 1 })
+err.stack = "S"
+const sparse = []
+sparse[5] = 1
+const cases = {
+  undef: undefined, nul: null, t: true, f: false, int: 42, neg: -5, big30: 2 ** 30, i32max: 2 ** 31 - 1, over: 2 ** 31, negzero: -0, dbl: 1.5, nan: NaN,
+  str: "hello", latin: "h\u00e9llo\u00ff", two: "\u65e5\u672c", mixed: ["x", "\u65e5"], emoji: "\u{1f600}",
+  big: 123n, bigneg: -(2n ** 70n), big0: 0n,
+  obj: { a: 1, b: "x", c: [1, 2], d: { e: null } }, objint: { 2: 1, 1: 2, b: 3 }, cyc, refs: [shared, shared, { shared }],
+  arr: [1, "a", null, undefined, true], sparse, arrprops: Object.assign([1], { x: 2 }),
+  date: new Date(1700000000000), re: /a(b)+/gimsuy,
+  map: new Map([["a", { z: 1 }], [1, [2]]]), set: new Set([1, "two", { three: 3 }]),
+  ab: new ArrayBuffer(3), resz: new ArrayBuffer(2, { maxByteLength: 8 }),
+  buf: Buffer.from("hi"), u8: new Uint8Array([1, 2, 3]), i16: new Int16Array([-1, 2]), f64: new Float64Array([1.5]), dv: new DataView(new ArrayBuffer(2)),
+  b64: new BigInt64Array([-1n]), sub: new Uint8Array(ab, 1, 2), sameview: (() => { const u = new Uint8Array(2); return [u, u] })(),
+  err, boxed: [Object(1), Object(true), Object("s"), Object(5n)],
+}
+for (const [k, v] of Object.entries(cases)) {
+  const bytes = v8.serialize(v)
+  const back = v8.deserialize(bytes)
+  const same = k === "dv" || util.inspect(back, { depth: 10 }) === util.inspect(v, { depth: 10 })
+  console.log(k, bytes.toString("hex"), same)
+}
+const back = v8.deserialize(v8.serialize(cases.err))
+console.log(back instanceof TypeError, back.message, back.stack, back.cause, Object.keys(back))
+const round = v8.deserialize(v8.serialize(cases.cyc))
+console.log(round.self === round, Buffer.isBuffer(v8.deserialize(v8.serialize(Buffer.from("x")))))
+for (const bad of [() => 1, Symbol("q"), new WeakMap()]) {
+  try {
+    v8.serialize(bad)
+  } catch (e) {
+    console.log(e.constructor.name, e.message)
+  }
+}
+for (const hex of ["00", "ff0f6f", "ff10"]) {
+  try {
+    v8.deserialize(Buffer.from(hex, "hex"))
+  } catch (e) {
+    console.log(hex, e.message)
+  }
+}
+try {
+  v8.deserialize("x")
+} catch (e) {
+  console.log(e.code)
+}

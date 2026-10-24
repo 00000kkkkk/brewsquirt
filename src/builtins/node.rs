@@ -7524,10 +7524,17 @@ const NODE_SRC: &str = r##"
     setFlagsFromString() {},
     cachedDataVersionTag: () => 0,
     serialize: (v) => {
-      const bytes = native.wireSerialize(v)
+      const bytes = native.v8Serialize(v, Buffer.prototype)
       return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     },
-    deserialize: (b) => native.wireDeserialize(b),
+    deserialize: (b) => {
+      if (!ArrayBuffer.isView(b)) {
+        const e = new TypeError(`The "buffer" argument must be an instance of Buffer, TypedArray, or DataView. Received ${describeReceived(b)}`)
+        e.code = "ERR_INVALID_ARG_TYPE"
+        throw e
+      }
+      return native.v8Deserialize(b, Buffer.prototype)
+    },
     writeHeapSnapshot: notSupported("v8.writeHeapSnapshot"),
     takeCoverage() {},
     stopCoverage() {},
@@ -9107,6 +9114,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         method(vm, &n, name, arity, f);
     }
     super::threads::install_natives(vm, &n);
+    super::v8wire::install_natives(vm, &n);
     super::cryptokeys::install_natives(vm, &n);
     let exports = vm.call_value(&factory, Value::Undefined, &[Value::Object(n)])?;
     let buffer = vm.get_prop(&exports, "Buffer")?;

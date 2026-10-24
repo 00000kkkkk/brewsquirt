@@ -1,0 +1,52 @@
+undef ff0f5f true
+nul ff0f30 true
+t ff0f54 true
+f ff0f46 true
+int ff0f4954 true
+neg ff0f4909 true
+big30 ff0f498080808008 true
+i32max ff0f49feffffff0f true
+over ff0f4e000000000000e041 true
+negzero ff0f4e0000000000000080 true
+dbl ff0f4e000000000000f83f true
+nan ff0f4e000000000000f87f true
+str ff0f220568656c6c6f true
+latin ff0f220668e96c6c6fff true
+two ff0f6304e5652c67 true
+mixed ff0f4102220178006302e565240002 true
+emoji ff0f63043dd800de true
+big ff0f5a107b00000000000000 true
+bigneg ff0f5a2100000000000000004000000000000000 true
+big0 ff0f5a00 true
+obj ff0f6f22016149022201622201782201634102490249042400022201646f220165307b017b04 true
+objint ff0f6f490249044904490222016249067b03 true
+cyc ff0f6f220473656c665e007b01 true
+refs ff0f41036f22017349027b015e016f22067368617265645e017b01240003 true
+arr ff0f41054902220161305f54240005 true
+sparse ff0f6106490a4902400106 true
+arrprops ff0f410149022201784904240101 true
+date ff0f4400008056febc7842 true
+re ff0f522205612862292b3f true
+map ff0f3b2201616f22017a49027b014902410149042400013a04 true
+set ff0f274902220374776f6f2205746872656549067b012c03 true
+ab ff0f4203000000 true
+resz ff0f7e02080000 true
+buf ff0f5c0a026869 true
+u8 ff0f5c0103010203 true
+i16 ff0f5c0304ffff0200 true
+f64 ff0f5c0808000000000000f83f true
+dv ff0f5c09020000 true
+b64 ff0f5c0b08ffffffffffffffff true
+sub ff0f5c01020000 true
+sameview ff0f41025c010200005e01240002 true
+err ff0f72546d22016d732201536349022e true
+boxed ff0f41046e000000000000f03f79732201737a100500000000000000240004 true
+true m S 1 []
+true true
+Error () => 1 could not be cloned.
+Error Symbol(q) could not be cloned.
+Error #<WeakMap> could not be cloned.
+00 Unable to deserialize cloned data due to invalid or unsupported version.
+ff0f6f Unable to deserialize cloned data.
+ff10 Unable to deserialize cloned data due to invalid or unsupported version.
+ERR_INVALID_ARG_TYPE

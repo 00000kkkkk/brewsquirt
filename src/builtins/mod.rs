@@ -14,6 +14,7 @@ pub mod sqlite;
 pub mod threads;
 pub mod typed;
 pub mod uverr;
+pub mod v8wire;
 pub mod wasm;
 mod winpath;
 pub use reflect::{array_like, key_value};

@@ -1,0 +1,49 @@
+en                             en                             en-Latn-US                     en
+en-US                          en-US                          en-Latn-US                     en
+zh-Hant                        zh-Hant                        zh-Hant-TW                     zh-TW
+zh-TW                          zh-TW                          zh-Hant-TW                     zh-TW
+sr-ME                          sr-ME                          sr-Latn-ME                     sr-ME
+und-Cyrl-RO                    und-Cyrl-RO                    bg-Cyrl-RO                     bg-RO
+und-Armn-SU                    und-Armn-AM                    hy-Armn-AM                     hy
+ru-SU                          ru-RU                          ru-Cyrl-RU                     ru
+cmn                            zh                             zh-Hans-CN                     zh
+sh                             sr-Latn                        sr-Latn-RS                     sr-Latn
+mo                             ro                             ro-Latn-RO                     ro
+art-lojban                     jbo                            jbo-Latn-001                   jbo
+sgn-GR                         gss                            gss                            gss
+sgn-Latn-DE                    gsg-Latn                       gsg-Latn                       gsg-Latn
+ja-Latn-hepburn-heploc         ja-Latn-alalc97                ja-Latn-JP-alalc97             ja-Latn-alalc97
+hy-arevela                     hy                             hy-Armn-AM                     hy
+bh-IN                          bho-IN                         bho-Deva-IN                    bho
+en-u-ca-islamicc-tz-cnckg      en-u-ca-islamic-civil-tz-cnsha en-Latn-US-u-ca-islamic-civil-tz-cnsha en-u-ca-islamic-civil-tz-cnsha
+de-u-co-phonebk-ka-shifted-kb-yes de-u-co-phonebk-ka-shifted-kb  de-Latn-DE-u-co-phonebk-ka-shifted-kb de-u-co-phonebk-ka-shifted-kb
+en-t-iw                        en-t-he                        en-Latn-US-t-he                en-t-he
+AR-arab-eg-U-NU-LATN           ar-Arab-EG-u-nu-latn           ar-Arab-EG-u-nu-latn           ar-u-nu-latn
+pa-PK                          pa-PK                          pa-Arab-PK                     pa-PK
+ckb-NT                         ckb-IQ                         ckb-Arab-IQ                    ckb
+und-Latn-IR                    und-Latn-IR                    tk-Latn-IR                     tk-IR
+[ 'en-US', 'he', 'id-ID', 'yi' ]
+en-US {"ca":["gregory"],"co":["emoji","eor"],"hc":["h12"],"nu":["latn"],"tz":["America/Adak","America/Anchorage","America/Boise","America/Chicago","America/Denver","America/Detroit","America/Indiana/Knox","America/Indiana/Marengo","America/Indiana/Petersburg","America/Indiana/Tell_City","America/Indiana/Vevay","America/Indiana/Vincennes","America/Indiana/Winamac","America/Indianapolis","America/Juneau","America/Kentucky/Monticello","America/Los_Angeles","America/Louisville","America/Menominee","America/Metlakatla","America/New_York","America/Nome","America/North_Dakota/Beulah","America/North_Dakota/Center","America/North_Dakota/New_Salem","America/Phoenix","America/Sitka","America/Yakutat","Pacific/Honolulu"],"ti":{"direction":"ltr"},"wi":{"firstDay":7,"weekend":[6,7]}}
+ar-EG {"ca":["gregory","coptic","islamic","islamic-civil","islamic-tbla"],"co":["compat","emoji","eor"],"hc":["h12"],"nu":["arab"],"tz":["Africa/Cairo"],"ti":{"direction":"rtl"},"wi":{"firstDay":6,"weekend":[5,6]}}
+ar {"ca":["gregory","coptic","islamic","islamic-civil","islamic-tbla"],"co":["compat","emoji","eor"],"hc":["h12"],"nu":["latn"],"ti":{"direction":"rtl"},"wi":{"firstDay":6,"weekend":[5,6]}}
+he {"ca":["gregory","hebrew","islamic","islamic-civil","islamic-tbla"],"co":["emoji","eor"],"hc":["h23"],"nu":["latn"],"ti":{"direction":"rtl"},"wi":{"firstDay":7,"weekend":[5,6]}}
+fa-AF {"ca":["persian","gregory","islamic","islamic-civil","islamic-tbla"],"co":["emoji","eor"],"hc":["h23"],"nu":["arabext"],"tz":["Asia/Kabul"],"ti":{"direction":"rtl"},"wi":{"firstDay":6,"weekend":[4,5]}}
+ja-JP {"ca":["gregory","japanese"],"co":["emoji","eor","unihan"],"hc":["h23"],"nu":["latn"],"tz":["Asia/Tokyo"],"ti":{"direction":"ltr"},"wi":{"firstDay":7,"weekend":[6,7]}}
+zh-TW {"ca":["gregory","roc","chinese"],"co":["emoji","eor","pinyin","stroke","unihan","zhuyin"],"hc":["h12"],"nu":["latn"],"tz":["Asia/Taipei"],"ti":{"direction":"ltr"},"wi":{"firstDay":7,"weekend":[6,7]}}
+de-AT {"ca":["gregory"],"co":["emoji","eor","phonebk"],"hc":["h23"],"nu":["latn"],"tz":["Europe/Vienna"],"ti":{"direction":"ltr"},"wi":{"firstDay":1,"weekend":[6,7]}}
+es-MX {"ca":["gregory"],"co":["emoji","eor","trad"],"hc":["h12"],"nu":["latn"],"tz":["America/Bahia_Banderas","America/Cancun","America/Chihuahua","America/Ciudad_Juarez","America/Hermosillo","America/Matamoros","America/Mazatlan","America/Merida","America/Mexico_City","America/Monterrey","America/Ojinaga","America/Tijuana"],"ti":{"direction":"ltr"},"wi":{"firstDay":7,"weekend":[6,7]}}
+hi-IN {"ca":["gregory","indian"],"co":["emoji","eor"],"hc":["h12"],"nu":["latn"],"tz":["Asia/Calcutta"],"ti":{"direction":"ltr"},"wi":{"firstDay":7,"weekend":[7]}}
+th {"ca":["buddhist","gregory"],"co":["emoji","eor"],"hc":["h23"],"nu":["latn"],"ti":{"direction":"ltr"},"wi":{"firstDay":7,"weekend":[6,7]}}
+en-GB {"ca":["gregory"],"co":["emoji","eor"],"hc":["h23"],"nu":["latn"],"tz":["Europe/London"],"ti":{"direction":"ltr"},"wi":{"firstDay":1,"weekend":[6,7]}}
+en-u-rg-gbzzzz {"ca":["gregory"],"co":["emoji","eor"],"hc":["h23"],"nu":["latn"],"ti":{"direction":"ltr"},"wi":{"firstDay":1,"weekend":[6,7]}}
+en-u-fw-tue {"ca":["gregory"],"co":["emoji","eor"],"hc":["h12"],"nu":["latn"],"ti":{"direction":"ltr"},"wi":{"firstDay":2,"weekend":[6,7]}}
+fr-CA {"ca":["gregory"],"co":["emoji","eor"],"hc":["h23"],"nu":["latn"],"tz":["America/Blanc-Sablon","America/Cambridge_Bay","America/Coral_Harbour","America/Creston","America/Dawson","America/Dawson_Creek","America/Edmonton","America/Fort_Nelson","America/Glace_Bay","America/Goose_Bay","America/Halifax","America/Inuvik","America/Iqaluit","America/Moncton","America/Rankin_Inlet","America/Regina","America/Resolute","America/St_Johns","America/Swift_Current","America/Toronto","America/Vancouver","America/Whitehorse","America/Winnipeg"],"ti":{"direction":"ltr"},"wi":{"firstDay":7,"weekend":[6,7]}}
+ko {"ca":["gregory","dangi"],"co":["emoji","eor","searchjl","unihan"],"hc":["h12"],"nu":["latn"],"ti":{"direction":"ltr"},"wi":{"firstDay":7,"weekend":[6,7]}}
+en-GB-u-ca-gregory-fw-mon-hc-h23-kn gregory h23 true mon en-GB
+[object Intl.Locale] 1
+ RangeError
+en- RangeError
+x-private RangeError
+en-US-US RangeError
+de-1996-1996 RangeError
+abcdefghi RangeError

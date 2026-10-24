@@ -21,7 +21,7 @@ pub fn new_buffer(vm: &Vm, bytes: Vec<u8>) -> Rc<Obj> {
     new_buffer_with_max(vm, bytes, None)
 }
 
-fn new_buffer_with_max(vm: &Vm, bytes: Vec<u8>, max: Option<usize>) -> Rc<Obj> {
+pub fn new_buffer_with_max(vm: &Vm, bytes: Vec<u8>, max: Option<usize>) -> Rc<Obj> {
     Obj::new(
         ObjKind::ArrayBuffer(Box::new(BufferData {
             bytes: RefCell::new(bytes),

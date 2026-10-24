@@ -2090,7 +2090,7 @@ Each one is backed by the same runtime as the `squirt:` modules.
 | `node:sys`, `node:domain`, `node:trace_events`, `node:repl`, `node:sea`, `node:wasi` | Aliases and small implementations so that packages importing them load |
 | `node:dns`, `node:dns/promises` | `lookup`, `resolve`, `resolve4`, `resolve6` through the system resolver |
 | `node:vm`                      | `Script`, `runInThisContext` (with `filename`, `lineOffset` and `columnOffset` in stack traces), `runInNewContext` and `runInContext` (sandboxes are plain objects scoped with `with`), `createContext`, `compileFunction` with `params` and `parsingContext` |
-| `node:v8`                      | `serialize` and `deserialize` with the structured-clone algorithm (`Map`, `Set`, `Date`, `RegExp`, `BigInt`, typed arrays, errors and cycles), `getHeapStatistics` and the other introspection functions; heap snapshots throw `ENOTSUP` |
+| `node:v8`                      | `serialize` and `deserialize` in V8's wire format, byte for byte what Node writes (`Map`, `Set`, `Date`, `RegExp`, `BigInt`, buffers and typed arrays, errors and cycles), so caches are shared with Node; `getHeapStatistics` and the other introspection functions; heap snapshots throw `ENOTSUP` |
 | `node:async_hooks`             | `AsyncLocalStorage` whose store is visible to synchronous callees of `run` and `enterWith`, `AsyncResource`, `createHook` as a no-op |
 | `node:punycode`                | `encode`, `decode`, `toASCII`, `toUnicode`, `ucs2`                |
 | `node:worker_threads`          | `Worker` runs a file (or `eval: true` source) on its own thread with a separate heap, so workers execute in parallel: messages, `workerData` and `environmentData` are structured clones, transfer lists move `ArrayBuffer`s and `MessagePort`s, `SharedArrayBuffer`s share memory and `Atomics.wait`, `waitAsync` and `notify` block and wake across threads; `online`, `message`, `error` and `exit` events, `terminate` (which interrupts running code), `ref`/`unref`, `process.exit` ending only the worker, `receiveMessageOnPort`, `isMainThread`, `parentPort`, `workerData` and `threadId`. Pools such as `piscina`, `tinypool` and `workerpool` work. `resourceLimits` and piped worker stdio are not implemented |
@@ -2479,7 +2479,8 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
 - Native addons built against the V8 C++ API instead of Node-API, and the libuv event loop
   (`napi_get_uv_event_loop`)
 - `Intl` covers numbers, plural rules, lists, relative times, collation and segmentation in a
-  handful of locales; dates know the month and weekday names, date orders and separators of
+  handful of locales; `Intl.Locale` has the full CLDR alias, likely-subtags, calendar, hour
+  cycle, week, time zone and text direction data; dates know the month and weekday names, date orders and separators of
   English (US, GB, AU, CA), Ukrainian, Russian, German, French, Spanish, Italian, Portuguese,
   Polish, Dutch, Swedish, Turkish, Japanese and Chinese and fall back to English elsewhere;
   every IANA time zone is supported, but `timeZoneName: "long"` falls back to GMT offsets

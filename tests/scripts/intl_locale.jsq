@@ -1,0 +1,21 @@
+const tags = ["en", "en-US", "zh-Hant", "zh-TW", "sr-ME", "und-Cyrl-RO", "und-Armn-SU", "ru-SU", "cmn", "sh", "mo", "art-lojban", "sgn-GR", "sgn-Latn-DE", "ja-Latn-hepburn-heploc", "hy-arevela", "bh-IN", "en-u-ca-islamicc-tz-cnckg", "de-u-co-phonebk-ka-shifted-kb-yes", "en-t-iw", "AR-arab-eg-U-NU-LATN", "pa-PK", "ckb-NT", "und-Latn-IR"]
+for (const t of tags) {
+  const l = new Intl.Locale(t)
+  console.log(t.padEnd(30), String(l).padEnd(30), String(l.maximize()).padEnd(30), String(l.minimize()))
+}
+console.log(Intl.getCanonicalLocales(["EN-us", "en-US", "iw", "in-ID", "ji"]))
+for (const t of ["en-US", "ar-EG", "ar", "he", "fa-AF", "ja-JP", "zh-TW", "de-AT", "es-MX", "hi-IN", "th", "en-GB", "en-u-rg-gbzzzz", "en-u-fw-tue", "fr-CA", "ko"]) {
+  const l = new Intl.Locale(t)
+  console.log(t, JSON.stringify({ ca: l.getCalendars(), co: l.getCollations(), hc: l.getHourCycles(), nu: l.getNumberingSystems(), tz: l.getTimeZones(), ti: l.getTextInfo(), wi: l.getWeekInfo() }))
+}
+const opts = new Intl.Locale("en", { region: "GB", calendar: "gregory", hourCycle: "h23", numeric: true, firstDayOfWeek: "mon" })
+console.log(String(opts), opts.calendar, opts.hourCycle, opts.numeric, opts.firstDayOfWeek, opts.baseName)
+console.log(Object.prototype.toString.call(opts), Intl.Locale.length)
+for (const bad of ["", "en-", "x-private", "en-US-US", "de-1996-1996", "abcdefghi"]) {
+  try {
+    new Intl.Locale(bad)
+    console.log("accepted", bad)
+  } catch (e) {
+    console.log(bad, e.constructor.name)
+  }
+}

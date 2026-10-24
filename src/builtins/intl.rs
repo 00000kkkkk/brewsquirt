@@ -4,8 +4,12 @@ use crate::vm::Vm;
 
 pub const LAZY_GLOBALS: [&str; 1] = ["Intl"];
 
+const LOCALE_SRC: &str = include_str!("intl_locale.js");
+const LOCALE_DATA: &str = include_str!("locale_data.json");
+
 const INTL_SRC: &str = r##"
 (() => {
+  const LOC = globalThis["%intlLocale%"]
   const NBSP = " "
   const NNBSP = " "
   const NUMBER_DATA = {
@@ -48,38 +52,29 @@ const INTL_SRC: &str = r##"
 
   const canonical = (tag) => {
     if (typeof tag !== "string") throw new TypeError("Incorrect locale information provided")
-    const parts = tag.replace(/_/g, "-").split("-")
-    if (!/^[A-Za-z]{2,8}$/.test(parts[0])) throw new RangeError(`Incorrect locale information provided`)
-    let extension = false
-    return parts
-      .map((p, i) => {
-        if (i === 0) return p.toLowerCase()
-        if (p.length === 1) extension = true
-        if (extension) return p.toLowerCase()
-        return p.length === 2 ? p.toUpperCase() : p.length === 4 ? p[0].toUpperCase() + p.slice(1).toLowerCase() : p.toLowerCase()
-      })
-      .join("-")
+    const c = LOC.canonicalize(tag)
+    if (c === null) throw new RangeError(`Incorrect locale information provided`)
+    return c
   }
   const localeList = (locales) => {
     if (locales === undefined) return []
     if (locales === null) throw new TypeError("Cannot convert undefined or null to object")
-    let list
-    if (typeof locales === "string" || (typeof locales === "object" && "baseName" in locales && typeof locales.maximize === "function")) list = [locales]
-    else {
-      const source = Object(locales)
-      const len = Math.min(Math.max(Math.trunc(Number(source.length)) || 0, 0), 2 ** 53 - 1)
-      list = []
-      for (let k = 0; k < len; k++) {
-        if (!(k in source)) continue
-        const item = source[k]
-        if (typeof item !== "string" && (item === null || typeof item !== "object")) throw new TypeError(`Language ID should be string or object.`)
-        list.push(item)
-      }
-    }
     const out = []
-    for (const l of list) {
-      const c = canonical(typeof l === "object" ? String(l) : l)
-      if (!out.includes(c)) out.push(c)
+    const add = (c) => {
+      for (let i = 0; i < out.length; i++) if (out[i] === c) return
+      out[out.length] = c
+    }
+    if (typeof locales === "string" || LOC.isLocaleObject(locales)) {
+      add(LOC.isLocaleObject(locales) ? LOC.localeTag(locales) : canonical(locales))
+      return out
+    }
+    const source = Object(locales)
+    const len = Math.min(Math.max(Math.trunc(Number(source.length)) || 0, 0), 2 ** 53 - 1)
+    for (let k = 0; k < len; k++) {
+      if (!(k in source)) continue
+      const item = source[k]
+      if (typeof item !== "string" && (item === null || typeof item !== "object")) throw new TypeError(`Language ID should be string or object.`)
+      add(LOC.isLocaleObject(item) ? LOC.localeTag(item) : canonical(typeof item === "object" ? String(item) : item))
     }
     return out
   }
@@ -1232,7 +1227,7 @@ const INTL_SRC: &str = r##"
   const NORDIC_DA = tailoring(["æ", "ø", "å"])
   const COLLATION_TAILORING = { sv: NORDIC_SV, fi: NORDIC_SV, da: NORDIC_DA, nb: NORDIC_DA, nn: NORDIC_DA, no: NORDIC_DA }
   const COLLATIONS = { de: ["phonebk"], es: ["trad"], zh: ["big5han", "gb2312", "pinyin", "stroke", "unihan", "zhuyin"], ja: ["unihan"], ko: ["searchjl", "unihan"] }
-  const collationSupported = (base, co) => co === "emoji" || co === "eor" || (COLLATIONS[lang(base)] ?? []).includes(co)
+  const collationSupported = (base, co) => co === "emoji" || co === "eor" || (COLLATIONS[lang(base)] ?? []).includes(co) || new Locale(base).getCollations().includes(co)
   const PHONEBOOK = { "ä": "a\u0308e", "ö": "o\u0308e", "ü": "u\u0308e", "Ä": "A\u0308e", "Ö": "O\u0308e", "Ü": "U\u0308e" }
   class Collator {
     #o
@@ -1672,33 +1667,7 @@ const INTL_SRC: &str = r##"
     }
   }
 
-  class Locale {
-    #tag
-    constructor(tag) {
-      this.#tag = canonical(String(tag))
-    }
-    get baseName() {
-      return this.#tag
-    }
-    get language() {
-      return this.#tag.split("-")[0]
-    }
-    get region() {
-      return this.#tag.split("-").find((p, i) => i > 0 && /^[A-Z]{2}$/.test(p))
-    }
-    get script() {
-      return this.#tag.split("-").find((p, i) => i > 0 && /^[A-Z][a-z]{3}$/.test(p))
-    }
-    toString() {
-      return this.#tag
-    }
-    maximize() {
-      return this
-    }
-    minimize() {
-      return this
-    }
-  }
+  const Locale = LOC.Locale
 
   const callable = (C, chain = false) => {
     const f = function (...args) {
@@ -1722,7 +1691,18 @@ const INTL_SRC: &str = r##"
     Object.defineProperty(Intl, name, { value, writable: true, configurable: true, enumerable: false })
     Object.defineProperty(value.prototype, Symbol.toStringTag, { value: `Intl.${name}`, configurable: true })
   }
-  Object.defineProperty(Intl, "getCanonicalLocales", { value: (l) => localeList(l), writable: true, configurable: true })
+  Object.defineProperty(Intl, "getCanonicalLocales", {
+    value: {
+      getCanonicalLocales(locales) {
+        const list = localeList(locales)
+        const out = []
+        for (let i = 0; i < list.length; i++) out[i] = list[i]
+        return out
+      },
+    }.getCanonicalLocales,
+    writable: true,
+    configurable: true,
+  })
   Object.defineProperty(Intl, "supportedValuesOf", {
     value: (key) => {
       const k = String(key)
@@ -1731,7 +1711,7 @@ const INTL_SRC: &str = r##"
       if (k === "calendar") return ["gregory"]
       if (k === "numberingSystem") return [...Object.keys(NU_ZERO), "hanidec"].sort()
       if (k === "timeZone") return tzList()
-      if (k === "collation") return ["big5han", "emoji", "eor", "gb2312", "phonebk", "pinyin", "searchjl", "stroke", "trad", "unihan", "zhuyin"]
+      if (k === "collation") return ["big5han", "compat", "dict", "emoji", "eor", "gb2312", "phonebk", "phonetic", "pinyin", "searchjl", "stroke", "trad", "unihan", "zhuyin"]
       throw new RangeError(`Invalid key : ${k}`)
     },
     writable: true,
@@ -1827,6 +1807,10 @@ fn tz_system(_vm: &mut Vm, _this: Value, _args: &[Value]) -> Result<Value, Value
     Ok(Value::from(name))
 }
 
+fn locale_data(_vm: &mut Vm, _this: Value, _args: &[Value]) -> Result<Value, Value> {
+    Ok(Value::from(LOCALE_DATA))
+}
+
 pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     if let Some(v) = vm.globals.get("Intl").cloned() {
         return Ok(v);
@@ -1841,7 +1825,16 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         let v = super::native_fn(vm, name, arity, f);
         vm.define_global(name, v);
     }
+    let data = super::native_fn(vm, "%localeData%", 0, locale_data);
+    vm.define_global("%localeData%", data);
     let dir = std::env::current_dir().unwrap_or_default();
+    let locale_proto = match vm.compile(LOCALE_SRC, "<squirt:intl-locale>", dir.clone(), Mode::Repl)
+    {
+        Ok(p) => p,
+        Err(e) => return Err(vm.syntax_error_value(&e, "<squirt:intl-locale>")),
+    };
+    let locale = vm.run_proto(locale_proto)?;
+    vm.define_global("%intlLocale%", locale);
     let proto = match vm.compile(INTL_SRC, "<squirt:intl>", dir, Mode::Repl) {
         Ok(p) => p,
         Err(e) => return Err(vm.syntax_error_value(&e, "<squirt:intl>")),
