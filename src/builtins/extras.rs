@@ -1903,9 +1903,6 @@ define(globalThis, "global", globalThis)
     setSourceMapsEnabled(value) {
       process.sourceMapsEnabled = !!value
     },
-    getActiveResourcesInfo() {
-      return []
-    },
     setUncaughtExceptionCaptureCallback(fn) {
       if (fn !== null && typeof fn !== "function") throw new TypeError('The "fn" argument must be of type function or null')
       if (fn !== null && capture !== null) {

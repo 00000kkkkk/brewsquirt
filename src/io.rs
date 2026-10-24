@@ -1628,6 +1628,19 @@ fn run_fetch(req: FetchRequest) -> Result<(FetchResponse, ureq::Body), String> {
             .timeout_global(req.timeout)
             .allow_non_standard_methods(true)
             .tls_config(tls)
+            .user_agent(if req.decode {
+                ureq::config::AutoHeaderValue::Provided(std::sync::Arc::new(format!(
+                    "javasquirt/{}",
+                    crate::VERSION
+                )))
+            } else {
+                ureq::config::AutoHeaderValue::None
+            })
+            .accept(if req.decode {
+                ureq::config::AutoHeaderValue::Default
+            } else {
+                ureq::config::AutoHeaderValue::None
+            })
             .build()
             .run(),
         None => builder
@@ -1640,6 +1653,19 @@ fn run_fetch(req: FetchRequest) -> Result<(FetchResponse, ureq::Body), String> {
             .timeout_global(req.timeout)
             .allow_non_standard_methods(true)
             .tls_config(tls)
+            .user_agent(if req.decode {
+                ureq::config::AutoHeaderValue::Provided(std::sync::Arc::new(format!(
+                    "javasquirt/{}",
+                    crate::VERSION
+                )))
+            } else {
+                ureq::config::AutoHeaderValue::None
+            })
+            .accept(if req.decode {
+                ureq::config::AutoHeaderValue::Default
+            } else {
+                ureq::config::AutoHeaderValue::None
+            })
             .build()
             .run(),
     }

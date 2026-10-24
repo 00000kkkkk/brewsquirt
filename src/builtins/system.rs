@@ -49,6 +49,13 @@ pub fn install(vm: &mut Vm) {
         super::node::get_builtin_module,
     );
     method(vm, &process, "uptime", 0, uptime);
+    method(
+        vm,
+        &process,
+        "getActiveResourcesInfo",
+        0,
+        active_resources_info,
+    );
     method(vm, &process, "memoryUsage", 0, memory_usage);
     method(
         vm,
@@ -840,4 +847,55 @@ pub fn fs_module(vm: &mut Vm) -> Value {
     method(vm, &fs, "mkdir", 1, fs_mkdir);
     fs.set_hidden("default", Value::Object(fs.clone()));
     Value::Object(fs)
+}
+
+fn active_resources_info(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    let mut names: Vec<&str> = Vec::new();
+    names.extend(vm.io_servers.values().map(|_| "TCPServerWrap"));
+    names.extend(
+        vm.io_net_servers
+            .values()
+            .filter(|e| e.refed)
+            .map(|_| "TCPServerWrap"),
+    );
+    names.extend(
+        vm.io_sockets
+            .values()
+            .filter(|e| e.refed)
+            .map(|_| "TCPSocketWrap"),
+    );
+    names.extend(
+        vm.io_children
+            .values()
+            .filter(|e| e.refed)
+            .map(|_| "ProcessWrap"),
+    );
+    names.extend(
+        vm.io_watchers
+            .values()
+            .filter(|e| e.refed)
+            .map(|_| "FSEventWrap"),
+    );
+    names.extend(vm.io_fetches.keys().map(|_| "FetchRequest"));
+    names.extend(vm.threads.active_names());
+    if vm.stdin_handler.is_some() && !vm.stdin_stopped {
+        names.push("TTYWrap");
+    }
+    names.extend(std::iter::repeat_n(
+        "ThreadsafeFunction",
+        crate::napi::refed_tsfns(),
+    ));
+    let counted = names.len();
+    names.extend(std::iter::repeat_n(
+        "Handle",
+        vm.io.pending.saturating_sub(counted),
+    ));
+    let timers = vm
+        .timers
+        .values()
+        .filter(|t| !vm.unref_timers.contains(&t.id))
+        .count();
+    names.extend(std::iter::repeat_n("Timeout", timers));
+    let list = names.into_iter().map(Value::from).collect();
+    Ok(vm.new_array(list))
 }

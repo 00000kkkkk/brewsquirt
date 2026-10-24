@@ -342,3 +342,46 @@ fn node_test_flag_discovers_and_aggregates() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn stdin_is_a_readable_stream() {
+    use std::io::Write;
+    let mut child = jsq()
+        .current_dir(root())
+        .args([
+            "-e",
+            "const { Readable } = require(\"node:stream\")\nconsole.log(process.stdin instanceof Readable)\nprocess.stdin.once(\"readable\", () => {\n  let chunk\n  let text = \"\"\n  while ((chunk = process.stdin.read()) !== null) text += chunk\n  console.log(JSON.stringify(text))\n  process.stdin.pause()\n  console.log(process.getActiveResourcesInfo().includes(\"TTYWrap\"))\n})",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn jsq");
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin.write_all(b"abc").expect("write stdin");
+    let out = child.wait_with_output().expect("wait jsq");
+    drop(stdin);
+    assert_eq!(normalize(&out.stdout), "true\n\"abc\"\nfalse\n");
+    assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn unsettled_top_level_await_exits_with_13() {
+    let dir = std::env::temp_dir().join(format!("jsq-tla-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("main.mjs"),
+        "console.log(\"before\")\nawait new Promise(() => {})\nconsole.log(\"never\")\n",
+    )
+    .unwrap();
+    let out = run_in(&dir, &["main.mjs"]);
+    assert_eq!(out.status.code(), Some(13));
+    assert_eq!(normalize(&out.stdout), "before\n");
+    let stderr = normalize(&out.stderr);
+    assert!(
+        stderr.starts_with("Warning: Detected unsettled top-level await at file:///")
+            && stderr.contains("main.mjs"),
+        "{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

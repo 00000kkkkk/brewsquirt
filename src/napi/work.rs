@@ -179,6 +179,12 @@ pub unsafe extern "C" fn napi_cancel_async_work(
     env.status(GENERIC_FAILURE)
 }
 
+pub fn refed_tsfns() -> usize {
+    REFED_TSFNS.load(Ordering::SeqCst)
+}
+
+static REFED_TSFNS: AtomicUsize = AtomicUsize::new(0);
+
 #[unsafe(no_mangle)]
 #[allow(clippy::too_many_arguments)]
 pub unsafe extern "C" fn napi_create_threadsafe_function(
@@ -207,6 +213,7 @@ pub unsafe extern "C" fn napi_create_threadsafe_function(
     });
     TSFN_FUNCS.with(|m| m.borrow_mut().insert(id, f));
     env.vm().io.pending += 1;
+    REFED_TSFNS.fetch_add(1, Ordering::SeqCst);
     let tsfn = Box::into_raw(Box::new(Tsfn {
         env: envp,
         id,
@@ -308,6 +315,7 @@ pub unsafe extern "C" fn napi_unref_threadsafe_function(
     };
     if t.refed.swap(false, Ordering::SeqCst) {
         env.vm().io.pending = env.vm().io.pending.saturating_sub(1);
+        REFED_TSFNS.fetch_sub(1, Ordering::SeqCst);
     }
     env.status(OK)
 }
@@ -323,6 +331,7 @@ pub unsafe extern "C" fn napi_ref_threadsafe_function(
     };
     if !t.refed.swap(true, Ordering::SeqCst) {
         env.vm().io.pending += 1;
+        REFED_TSFNS.fetch_add(1, Ordering::SeqCst);
     }
     env.status(OK)
 }
@@ -382,6 +391,7 @@ pub fn handle_event(vm: &mut Vm, ev: NapiEvent) -> Result<(), Value> {
             let t = unsafe { Box::from_raw(ptr as *mut Tsfn) };
             if t.refed.load(Ordering::SeqCst) {
                 vm.io.pending = vm.io.pending.saturating_sub(1);
+                REFED_TSFNS.fetch_sub(1, Ordering::SeqCst);
             }
             TSFN_FUNCS.with(|m| m.borrow_mut().remove(&t.id));
             if let Some(env) = unsafe { t.env.as_mut() } {

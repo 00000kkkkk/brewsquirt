@@ -106,7 +106,7 @@ mod uv;
 mod values;
 mod work;
 
-pub use work::{NapiEvent, handle_event};
+pub use work::{NapiEvent, handle_event, refed_tsfns};
 
 const ERROR_MESSAGES: [&str; 24] = [
     "",

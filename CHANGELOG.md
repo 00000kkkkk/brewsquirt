@@ -40,6 +40,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Duplex`. `unzipper` calls `Stream.PassThrough()` that way.
 - Streams have a `closed` property, and `stream.finished` and `pipeline` wait for `close` on
   writable streams that auto-destroy, as Node does.
+- `process.stdin` is a real `Readable`. Listening for `end` no longer starts reading,
+  `pause()` and `unref()` let the process exit while the pipe stays open, and input that arrives
+  after a pause is kept instead of dropped. The Vite dev server exits after `server.close()`.
+- `fs.realpathSync`, `fs.realpath` and module paths keep the casing and short names of the path
+  they were given and only resolve symbolic links, like Node; `fs.realpathSync.native` returns
+  the canonical path. Vite no longer serves project files through `/@fs/` on Windows when the
+  working directory's casing differs from the disk.
+- `http.request` sends no default `User-Agent` or `Accept` header, as in Node.
+- `new tls.TLSSocket(stream)` around a plain duplex stream exposes `_handle._parentWrap`, which
+  `http2-wrapper` (used by `got`) reads when it loads.
+- `process.getActiveResourcesInfo()` lists the timers, servers, sockets, child processes,
+  watchers, message ports, stdin and N-API thread-safe functions that keep the process alive.
+- A module whose top-level `await` never settles prints Node's "Detected unsettled top-level
+  await" warning and exits with code 13 instead of exiting silently with 0.
 
 ## [1.8.0] - 2026-10-24
 

@@ -1404,8 +1404,20 @@ const NODE_SRC: &str = r##"
   }
   promises.constants = fs.constants
   fs.promises = promises
-  fs.realpath.native = fs.realpath
-  fs.realpathSync.native = fs.realpathSync
+  fs.realpathSync.native = function realpathSync(path) {
+    return native.realpath(pathOf(path), true)
+  }
+  fs.realpath.native = function realpath(path, options, cb) {
+    if (typeof options === "function") cb = options
+    let out
+    let error = null
+    try {
+      out = fs.realpathSync.native(path)
+    } catch (e) {
+      error = e
+    }
+    queueMicrotask(() => cb(error, out))
+  }
   Object.assign(fs.constants, { O_RDONLY: 0, O_WRONLY: 1, O_RDWR: 2, O_CREAT: 64, O_EXCL: 128, O_NOCTTY: 256, O_TRUNC: 512, O_APPEND: 1024, O_DIRECTORY: 65536, O_NOFOLLOW: 131072, O_SYNC: 1052672, O_DSYNC: 4096, O_NONBLOCK: 2048, S_IFMT: 61440, S_IFREG: 32768, S_IFDIR: 16384, S_IFCHR: 8192, S_IFBLK: 24576, S_IFIFO: 4096, S_IFLNK: 40960, S_IFSOCK: 49152, S_IRWXU: 448, S_IRUSR: 256, S_IWUSR: 128, S_IXUSR: 64, S_IRWXG: 56, S_IRGRP: 32, S_IWGRP: 16, S_IXGRP: 8, S_IRWXO: 7, S_IROTH: 4, S_IWOTH: 2, S_IXOTH: 1, UV_FS_O_FILEMAP: 0, COPYFILE_EXCL: 1, COPYFILE_FICLONE: 2, COPYFILE_FICLONE_FORCE: 4 })
 
   function fileURLToPath(url) {
@@ -2291,74 +2303,6 @@ const NODE_SRC: &str = r##"
     isBigInt64Array: (v) => v instanceof BigInt64Array,
     isBigUint64Array: (v) => v instanceof BigUint64Array,
   }
-
-  const stdin = new EventEmitter()
-  let stdinEncoding = null
-  let stdinStarted = false
-  let stdinEnded = false
-  const stdinChunks = []
-  let stdinWake = null
-  stdin.fd = 0
-  if (native.isTTY(0)) stdin.isTTY = true
-  stdin.setEncoding = (enc) => {
-    stdinEncoding = enc
-    return stdin
-  }
-  const startStdin = () => {
-    if (stdinStarted) return
-    stdinStarted = true
-    native.stdin((chunk) => {
-      if (chunk === null) {
-        stdinEnded = true
-        if (stdinWake) stdinWake()
-        stdin.emit("end")
-        stdin.emit("close")
-        return
-      }
-      const buf = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength)
-      stdinChunks.push(buf)
-      if (stdinWake) stdinWake()
-      if (stdin.listenerCount("data") > 0) stdin.emit("data", stdinEncoding ? buf.toString(stdinEncoding) : buf)
-    })
-  }
-  const baseOn = stdin.on.bind(stdin)
-  stdin.on = stdin.addListener = (name, fn) => {
-    baseOn(name, fn)
-    if (name === "data" || name === "readable" || name === "end") startStdin()
-    return stdin
-  }
-  stdin.resume = () => {
-    startStdin()
-    return stdin
-  }
-  stdin.pause = () => {
-    native.stdinStop()
-    return stdin
-  }
-  stdin.unref = () => {
-    native.stdinStop()
-    return stdin
-  }
-  stdin.ref = () => stdin
-  stdin.read = () => {
-    if (stdinChunks.length === 0) return null
-    const all = Buffer.concat(stdinChunks.splice(0))
-    return stdinEncoding ? all.toString(stdinEncoding) : all
-  }
-  stdin[Symbol.asyncIterator] = async function* () {
-    startStdin()
-    while (true) {
-      if (stdinChunks.length > 0) {
-        const c = stdinChunks.shift()
-        yield stdinEncoding ? c.toString(stdinEncoding) : c
-        continue
-      }
-      if (stdinEnded) return
-      await new Promise((r) => (stdinWake = r))
-      stdinWake = null
-    }
-  }
-
 
   class Interface extends EventEmitter {
     #input
@@ -3982,6 +3926,69 @@ const NODE_SRC: &str = r##"
   fs.WriteStream = WriteStream
   fs.createReadStream = (path, options) => new fs.ReadStream(path, options)
   fs.createWriteStream = (path, options) => new fs.WriteStream(path, options)
+  let stdinStarted = false
+  let stdinUnref = false
+  let stdinEnded = false
+  const stdin = new Readable({
+    highWaterMark: 65536,
+    read() {
+      if (!stdinStarted) {
+        stdinStarted = true
+        native.stdin((chunk) => {
+          if (chunk === null) {
+            stdinEnded = true
+            stdin.push(null)
+            return
+          }
+          stdin.push(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength))
+        })
+      } else if (stdinUnref && !stdinEnded && !stdinUserPaused) {
+        stdinUnref = false
+        native.stdinRef()
+      }
+    },
+  })
+  let stdinUserPaused = false
+  stdin.fd = 0
+  if (native.isTTY(0)) {
+    stdin.isTTY = true
+    stdin.isRaw = false
+    stdin.setRawMode = (flag) => {
+      stdin.isRaw = !!flag
+      return stdin
+    }
+  }
+  const stdinRelease = () => {
+    if (stdinStarted && !stdinUnref && !stdinEnded) {
+      stdinUnref = true
+      native.stdinStop()
+    }
+  }
+  stdin.pause = function () {
+    stdinUserPaused = true
+    Readable.prototype.pause.call(this)
+    stdinRelease()
+    return this
+  }
+  stdin.resume = function () {
+    stdinUserPaused = false
+    return Readable.prototype.resume.call(this)
+  }
+  stdin.on = stdin.addListener = function (event, listener) {
+    if (event === "readable") stdinUserPaused = false
+    return Readable.prototype.on.call(this, event, listener)
+  }
+  stdin.unref = function () {
+    stdinRelease()
+    return this
+  }
+  stdin.ref = function () {
+    if (stdinStarted && stdinUnref && !stdinEnded) {
+      stdinUnref = false
+      native.stdinRef()
+    }
+    return this
+  }
   for (const stdio of [globalThis.process?.stdout, globalThis.process?.stderr]) {
     if (!stdio || typeof stdio !== "object" || kWrite in stdio) continue
     const raw = stdio.write
@@ -6441,6 +6448,52 @@ const NODE_SRC: &str = r##"
   net.getDefaultAutoSelectFamily = () => true
   net.setDefaultAutoSelectFamily = () => {}
 
+  class JSStreamSocket extends Duplex {
+    constructor(stream) {
+      super({ allowHalfOpen: true })
+      this.stream = stream
+      this.connecting = false
+      this.remoteAddress = stream?.remoteAddress
+      this.remotePort = stream?.remotePort
+      stream.on("data", (chunk) => {
+        if (!this.push(chunk)) stream.pause()
+      })
+      stream.on("end", () => this.push(null))
+      stream.on("error", (e) => this.destroy(e))
+      stream.on("close", () => {
+        if (!this.destroyed) this.destroy()
+      })
+    }
+    _read() {
+      this.stream.resume?.()
+    }
+    _write(chunk, encoding, cb) {
+      this.stream.write(chunk, encoding, cb)
+    }
+    _final(cb) {
+      this.stream.end(cb)
+    }
+    _destroy(err, cb) {
+      if (!this.stream.destroyed) this.stream.destroy(err)
+      cb(err)
+    }
+    setNoDelay() {
+      return this
+    }
+    setKeepAlive() {
+      return this
+    }
+    setTimeout(ms, cb) {
+      if (typeof cb === "function") this.once("timeout", cb)
+      return this
+    }
+    ref() {
+      return this
+    }
+    unref() {
+      return this
+    }
+  }
   class TLSSocket extends Socket {
     constructor(socket, options = {}) {
       super({ ...options, [kTls]: true })
@@ -6448,6 +6501,7 @@ const NODE_SRC: &str = r##"
       this.authorized = true
       this.authorizationError = null
       this.alpnProtocol = false
+      if (socket && typeof socket.on === "function" && !(socket instanceof Socket)) this._handle = { _parentWrap: new JSStreamSocket(socket) }
     }
     getPeerCertificate() {
       return {}
@@ -7915,13 +7969,21 @@ const NODE_SRC: &str = r##"
     const write = (line) => process.stdout.write(line + "\n")
     const fmt = (ms) => String(Number(ms.toFixed(4)))
     const indent = (depth) => "  ".repeat(Math.max(0, depth))
+    let cwdReal = null
     const location = () => {
       for (const line of String(new Error().stack).split("\n").slice(1)) {
         const m = line.match(/\(?([^()\s]+):(\d+):(\d+)\)?\s*$/)
         if (!m || m[1].startsWith("<") || m[1].startsWith("node:")) continue
         let file = m[1]
         if (file.startsWith("file:")) file = fileURLToPath(file)
-        return `${modulePath().relative(process.cwd(), file).replace(/\\/g, "/")}:${m[2]}:${m[3]}`
+        if (cwdReal === null) {
+          try {
+            cwdReal = fs.realpathSync(process.cwd())
+          } catch {
+            cwdReal = process.cwd()
+          }
+        }
+        return `${modulePath().relative(cwdReal, file).replace(/\\/g, "/")}:${m[2]}:${m[3]}`
       }
       return null
     }
@@ -8688,7 +8750,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let n = vm.new_object();
-    let natives: [(&str, u32, crate::object::NativeFn); 63] = [
+    let natives: [(&str, u32, crate::object::NativeFn); 64] = [
         ("isProxy", 1, is_proxy),
         ("watchStart", 4, super::netio::watch_start),
         ("watchClose", 1, super::netio::watch_close),
@@ -8728,7 +8790,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         ("rename", 2, fs_rename),
         ("copy", 2, fs_copy),
         ("cp", 3, fs_cp),
-        ("realpath", 1, fs_realpath),
+        ("realpath", 2, fs_realpath),
         ("symlink", 2, fs_symlink),
         ("readlink", 1, fs_readlink),
         ("resolve", 1, fs_resolve),
@@ -8736,6 +8798,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         ("isTTY", 1, is_tty),
         ("stdin", 1, stdin_start),
         ("stdinStop", 0, stdin_stop),
+        ("stdinRef", 0, stdin_ref),
         ("digest", 2, crypto_digest),
         ("hmac", 3, crypto_hmac),
         ("randomBytes", 1, crypto_random_bytes),
@@ -10450,8 +10513,13 @@ fn fs_cp(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 
 fn fs_realpath(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let p = path_of(vm, args, 0)?;
-    std::fs::canonicalize(&p)
-        .map(|c| Value::from(strip_unc(&c)))
+    let resolved = if arg(args, 1).truthy() {
+        std::fs::canonicalize(&p).map(|c| strip_unc(&c))
+    } else {
+        crate::module::node_realpath(Path::new(&p)).map(|c| c.display().to_string())
+    };
+    resolved
+        .map(Value::from)
         .map_err(|e| fs_error(vm, &e, "realpath", &p, None))
 }
 
@@ -10526,20 +10594,22 @@ fn stdin_stop(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
     Ok(Value::Undefined)
 }
 
+fn stdin_ref(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    if vm.stdin_stopped && vm.stdin_handler.is_some() {
+        vm.stdin_stopped = false;
+        vm.io.pending += 1;
+    }
+    Ok(Value::Undefined)
+}
+
 pub fn handle_stdin(vm: &mut Vm, chunk: Option<Vec<u8>>) -> Result<(), Value> {
     let Some(handler) = vm.stdin_handler.clone() else {
         return Ok(());
     };
-    let stopped = vm.stdin_stopped;
     let arg = match chunk {
-        Some(bytes) => {
-            if stopped {
-                return Ok(());
-            }
-            new_uint8(vm, bytes)
-        }
+        Some(bytes) => new_uint8(vm, bytes),
         None => {
-            if !stopped {
+            if !vm.stdin_stopped {
                 vm.stdin_stopped = true;
                 vm.io.pending -= 1;
             }

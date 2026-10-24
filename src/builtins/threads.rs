@@ -604,6 +604,24 @@ impl ThreadState {
             .map(|(id, _)| *id)
     }
 
+    pub fn active_names(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        out.extend(
+            self.ports
+                .values()
+                .filter(|p| p.counted)
+                .map(|_| "MessagePort"),
+        );
+        out.extend(
+            self.workers
+                .values()
+                .filter(|w| w.counted)
+                .map(|_| "Worker"),
+        );
+        out.extend(self.async_waits.keys().map(|_| "AtomicsWaitAsync"));
+        out
+    }
+
     #[inline]
     pub fn interrupted(&self) -> bool {
         self.interrupt.load(Ordering::Relaxed)

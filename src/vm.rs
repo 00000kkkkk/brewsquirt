@@ -343,6 +343,7 @@ pub struct Vm {
     pub(crate) unref_timers: rustc_hash::FxHashSet<u64>,
     pub(crate) pending_rejections: Vec<Rc<Obj>>,
     pub(crate) main_promise: Option<Rc<Obj>>,
+    pub(crate) main_url: Option<String>,
     pub(crate) global_obj: Option<Rc<Obj>>,
     pub(crate) co_signal: Option<Signal>,
     pub accessors_used: bool,
@@ -851,6 +852,7 @@ impl Vm {
             unref_timers: rustc_hash::FxHashSet::default(),
             pending_rejections: Vec::new(),
             main_promise: None,
+            main_url: None,
             global_obj: None,
             co_signal: None,
             accessors_used: false,
@@ -1572,7 +1574,10 @@ impl Vm {
         match r {
             Ok(v) if Vm::is_promise(&v) => {
                 if let Value::Object(p) = &v {
-                    self.main_promise.get_or_insert_with(|| p.clone());
+                    if self.main_promise.is_none() {
+                        self.main_promise = Some(p.clone());
+                        self.main_url = Some(Self::module_file_url(&abs));
+                    }
                 }
                 Ok(v)
             }

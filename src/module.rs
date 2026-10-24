@@ -125,7 +125,12 @@ fn real_path(p: &Path) -> PathBuf {
 }
 
 fn canonical_uncached(p: &Path) -> PathBuf {
-    let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    node_realpath(p).unwrap_or_else(|_| {
+        strip_verbatim(std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+    })
+}
+
+pub fn strip_verbatim(c: PathBuf) -> PathBuf {
     let text = c.to_string_lossy();
     if let Some(rest) = text.strip_prefix(r"\\?\") {
         if let Some(unc) = rest.strip_prefix("UNC\\") {
@@ -134,6 +139,58 @@ fn canonical_uncached(p: &Path) -> PathBuf {
         return PathBuf::from(rest);
     }
     c
+}
+
+pub fn node_realpath(p: &Path) -> std::io::Result<PathBuf> {
+    use std::path::Component;
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(p)
+    };
+    let abs = strip_verbatim(abs);
+    let split = |path: &Path, result: &mut PathBuf, queue: &mut Vec<std::ffi::OsString>| {
+        let mut rest = Vec::new();
+        for c in path.components() {
+            match c {
+                Component::Prefix(_) | Component::RootDir => result.push(c.as_os_str()),
+                other => rest.push(other.as_os_str().to_os_string()),
+            }
+        }
+        queue.extend(rest.into_iter().rev());
+    };
+    let mut result = PathBuf::new();
+    let mut queue: Vec<std::ffi::OsString> = Vec::new();
+    split(&abs, &mut result, &mut queue);
+    let mut hops = 0;
+    while let Some(name) = queue.pop() {
+        if name == "." {
+            continue;
+        }
+        if name == ".." {
+            result.pop();
+            continue;
+        }
+        let next = result.join(&name);
+        let meta = std::fs::symlink_metadata(&next)?;
+        if !meta.file_type().is_symlink() {
+            result = next;
+            continue;
+        }
+        hops += 1;
+        if hops > 64 {
+            return Err(std::io::Error::other("too many symbolic links encountered"));
+        }
+        let target = strip_verbatim(std::fs::read_link(&next)?);
+        let resolved = if target.is_absolute() {
+            target
+        } else {
+            result.join(target)
+        };
+        result = PathBuf::new();
+        split(&resolved, &mut result, &mut queue);
+    }
+    Ok(result)
 }
 
 pub const EXTENSIONS: [&str; 11] = [

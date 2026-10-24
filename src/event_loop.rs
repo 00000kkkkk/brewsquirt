@@ -711,11 +711,33 @@ impl Vm {
         }
         if !self.exiting {
             self.exiting = true;
+            self.report_unsettled_main();
             let code = crate::builtins::exit_code(self);
             self.emit_process("exit", &[Value::Number(code as f64)])?;
         }
         crate::builtins::netio::flush_sockets(self);
         Ok(())
+    }
+
+    fn report_unsettled_main(&mut self) {
+        let Some(p) = self.main_promise.clone() else {
+            return;
+        };
+        let pending = match &p.kind {
+            ObjKind::Promise(d) => matches!(d.borrow().state, PromiseState::Pending),
+            _ => false,
+        };
+        if !pending {
+            return;
+        }
+        self.flush();
+        let url = self.main_url.clone().unwrap_or_default();
+        eprintln!("Warning: Detected unsettled top-level await at {url}");
+        if crate::builtins::exit_code(self) == 0 {
+            if let Some(process) = self.globals.get("process").cloned() {
+                let _ = self.set_prop(&process, "exitCode".into(), Value::Number(13.0));
+            }
+        }
     }
 
     fn next_timer_seq(&mut self) -> u64 {
