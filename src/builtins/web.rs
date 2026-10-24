@@ -551,13 +551,16 @@ const WEB_SRC: &str = r##"
     }
   }
 
+  const kHeaderList = Symbol("headerList")
   class Headers {
     #map = new Map()
+    #names = new Map()
     #sorted = null
     constructor(init) {
       if (init == null) return
       if (typeof init === "object" && #map in init) {
         this.#map = new Map(init.#map)
+        this.#names = new Map(init.#names)
         return
       }
       if (typeof init[Symbol.iterator] === "function") {
@@ -578,11 +581,14 @@ const WEB_SRC: &str = r##"
       const v = String(value).trim()
       const cur = this.#map.get(k)
       this.#sorted = null
+      if (cur === undefined) this.#names.set(k, String(name))
       this.#map.set(k, cur === undefined ? v : k === "set-cookie" ? `${cur}\n${v}` : `${cur}, ${v}`)
     }
     set(name, value) {
       this.#sorted = null
-      this.#map.set(lower(name), String(value).trim())
+      const k = lower(name)
+      this.#names.set(k, String(name))
+      this.#map.set(k, String(value).trim())
     }
     get(name) {
       const v = this.#map.get(lower(name))
@@ -598,7 +604,13 @@ const WEB_SRC: &str = r##"
     }
     delete(name) {
       this.#sorted = null
+      this.#names.delete(lower(name))
       this.#map.delete(lower(name))
+    }
+    [kHeaderList]() {
+      const out = []
+      for (const [k, v] of this.#map) out.push([this.#names.get(k) ?? k, k === "set-cookie" ? v.split("\n").join(", ") : v])
+      return out
     }
     forEach(fn, thisArg) {
       for (const [k, v] of this) fn.call(thisArg, v, k, this)
@@ -2119,23 +2131,50 @@ const WEB_SRC: &str = r##"
   }
 
   class Response extends Body {
+    #status
+    #statusText
+    #headers
+    #redirected
+    #type
+    #url
     constructor(body = null, init = {}) {
       super(body)
+      init ??= {}
       const status = init.status ?? 200
       if (!internal && (status < 200 || status > 599)) {
         throw new RangeError(`init["status"] must be in the range of 200 to 599, inclusive.`)
       }
-      this.status = status
-      this.statusText = init.statusText ?? ""
-      this.headers = init.headers instanceof Headers && internal ? init.headers : new Headers(init.headers)
-      if (!internal && body != null && !this.headers.has("content-type")) {
+      this.#status = status
+      this.#statusText = init.statusText ?? ""
+      this.#headers = init.headers instanceof Headers && internal ? init.headers : new Headers(init.headers)
+      if (!internal && body != null && !this.#headers.has("content-type")) {
         const t = defaultType(body)
-        if (t) this.headers.set("content-type", t)
+        if (t) this.#headers.set("content-type", t)
       }
-      this.ok = status >= 200 && status < 300
-      this.redirected = init.redirected ?? false
-      this.type = internal ? "basic" : "default"
-      this.url = init.url ?? ""
+      this.#redirected = init.redirected ?? false
+      this.#type = internal ? "basic" : "default"
+      this.#url = init.url ?? ""
+    }
+    get status() {
+      return this.#status
+    }
+    get statusText() {
+      return this.#statusText
+    }
+    get headers() {
+      return this.#headers
+    }
+    get ok() {
+      return this.#status >= 200 && this.#status < 300
+    }
+    get redirected() {
+      return this.#redirected
+    }
+    get type() {
+      return this.#type
+    }
+    get url() {
+      return this.#url
     }
     clone() {
       if (this.bodyUsed) throw new TypeError("Response.clone: Body has already been consumed.")
@@ -2146,14 +2185,23 @@ const WEB_SRC: &str = r##"
         raw = b
       }
       internal = true
+      let copy
       try {
-        return new Response(raw, this)
+        copy = new Response(raw, {
+          status: this.#status,
+          statusText: this.#statusText,
+          headers: new Headers(this.#headers),
+          url: this.#url,
+          redirected: this.#redirected,
+        })
       } finally {
         internal = false
       }
+      copy.#type = this.#type
+      return copy
     }
     static json(data, init = {}) {
-      const headers = new Headers(init.headers)
+      const headers = new Headers(init?.headers)
       if (!headers.has("content-type")) headers.set("content-type", "application/json")
       return new Response(JSON.stringify(data), { ...init, headers })
     }
@@ -2161,10 +2209,34 @@ const WEB_SRC: &str = r##"
       if (![301, 302, 303, 307, 308].includes(status)) throw new RangeError("Invalid status code")
       return new Response(null, { status, headers: { location: String(url) } })
     }
+    static error() {
+      internal = true
+      let r
+      try {
+        r = new Response(null, { status: 0 })
+      } finally {
+        internal = false
+      }
+      r.#type = "error"
+      return r
+    }
   }
 
   class Request extends Body {
+    #method
+    #url
+    #headers
+    #redirect
+    #signal
+    #mode
+    #credentials
+    #cache
+    #referrer
+    #referrerPolicy
+    #integrity
+    #keepalive
     constructor(input, init = {}) {
+      init ??= {}
       const src = input instanceof Request ? input : null
       const method = String(init.method ?? src?.method ?? "GET").toUpperCase()
       const body = init.body !== undefined ? init.body : src ? src[kRaw] : null
@@ -2172,15 +2244,70 @@ const WEB_SRC: &str = r##"
         throw new TypeError("Request with GET/HEAD method cannot have body.")
       }
       super(body)
-      this.method = method
-      this.url = src ? src.url : internal ? String(input) : new URL(String(input)).href
-      this.headers = new Headers(init.headers ?? src?.headers)
-      if (body != null && !this.headers.has("content-type")) {
+      this.#method = method
+      this.#url = src ? src.url : internal ? String(input) : new URL(String(input)).href
+      this.#headers = new Headers(init.headers ?? src?.headers)
+      if (body != null && !this.#headers.has("content-type")) {
         const t = defaultType(body)
-        if (t) this.headers.set("content-type", t)
+        if (t) this.#headers.set("content-type", t)
       }
-      this.redirect = init.redirect ?? src?.redirect ?? "follow"
-      this.signal = init.signal ?? src?.signal ?? new AbortSignal(SIGNAL_KEY)
+      this.#redirect = init.redirect ?? src?.redirect ?? "follow"
+      this.#signal = init.signal ?? src?.signal ?? new AbortSignal(SIGNAL_KEY)
+      this.#mode = init.mode ?? src?.mode ?? "cors"
+      this.#credentials = init.credentials ?? src?.credentials ?? "same-origin"
+      this.#cache = init.cache ?? src?.cache ?? "default"
+      this.#referrer = init.referrer === "" ? "" : init.referrer ?? src?.referrer ?? "about:client"
+      this.#referrerPolicy = init.referrerPolicy ?? src?.referrerPolicy ?? ""
+      this.#integrity = init.integrity ?? src?.integrity ?? ""
+      this.#keepalive = Boolean(init.keepalive ?? src?.keepalive ?? false)
+    }
+    get method() {
+      return this.#method
+    }
+    get url() {
+      return this.#url
+    }
+    get headers() {
+      return this.#headers
+    }
+    get redirect() {
+      return this.#redirect
+    }
+    get signal() {
+      return this.#signal
+    }
+    get destination() {
+      return ""
+    }
+    get referrer() {
+      return this.#referrer
+    }
+    get referrerPolicy() {
+      return this.#referrerPolicy
+    }
+    get mode() {
+      return this.#mode
+    }
+    get credentials() {
+      return this.#credentials
+    }
+    get cache() {
+      return this.#cache
+    }
+    get integrity() {
+      return this.#integrity
+    }
+    get keepalive() {
+      return this.#keepalive
+    }
+    get isReloadNavigation() {
+      return false
+    }
+    get isHistoryNavigation() {
+      return false
+    }
+    get duplex() {
+      return "half"
     }
     clone() {
       if (this.bodyUsed) throw new TypeError("Request.clone: Body has already been consumed.")
@@ -3347,8 +3474,53 @@ const WEB_SRC: &str = r##"
     const q = quoteInspect
     return `URL {\n  href: ${q(this.href)},\n  origin: ${q(this.origin)},\n  protocol: ${q(this.protocol)},\n  username: ${q(this.username)},\n  password: ${q(this.password)},\n  host: ${q(this.host)},\n  hostname: ${q(this.hostname)},\n  port: ${q(this.port)},\n  pathname: ${q(this.pathname)},\n  search: ${q(this.search)},\n  searchParams: ${this.searchParams[inspectCustom]()},\n  hash: ${q(this.hash)}\n}`
   })
+  const viewInspect = (name, props) => function (depth, options, inspect) {
+    const p = props(this)
+    if (typeof inspect === "function") return `${name} ${inspect(p, options)}`
+    return Object.assign(new ({ [name]: class {} })[name](), p)
+  }
+  defineInspect(ReadableStream.prototype, viewInspect("ReadableStream", (s) => ({
+    locked: s.locked,
+    state: s[kStream]?.state ?? "readable",
+    supportsBYOB: s[kStream]?.type === "bytes",
+  })))
+  defineInspect(AbortSignal.prototype, viewInspect("AbortSignal", (s) => ({ aborted: s.aborted })))
+  for (const C of [Response, Request]) {
+    for (const k of ["arrayBuffer", "blob", "body", "bodyUsed", "bytes", "formData", "json", "text"]) {
+      const d = Object.getOwnPropertyDescriptor(Body.prototype, k)
+      if (d) Object.defineProperty(C.prototype, k, d)
+    }
+  }
+  defineInspect(Response.prototype, viewInspect("Response", (r) => ({
+    status: r.status,
+    statusText: r.statusText,
+    headers: r.headers,
+    body: r.body,
+    bodyUsed: r.bodyUsed,
+    ok: r.ok,
+    redirected: r.redirected,
+    type: r.type,
+    url: r.url,
+  })))
+  defineInspect(Request.prototype, viewInspect("Request", (r) => ({
+    method: r.method,
+    url: r.url,
+    headers: r.headers,
+    destination: r.destination,
+    referrer: r.referrer,
+    referrerPolicy: r.referrerPolicy,
+    mode: r.mode,
+    credentials: r.credentials,
+    cache: r.cache,
+    redirect: r.redirect,
+    integrity: r.integrity,
+    keepalive: r.keepalive,
+    isReloadNavigation: r.isReloadNavigation,
+    isHistoryNavigation: r.isHistoryNavigation,
+    signal: r.signal,
+  })))
   defineInspect(Headers.prototype, function () {
-    const items = [...this].map(([k, v]) => `${/^[a-z_$][\w$]*$/i.test(k) ? k : quoteInspect(k)}: ${quoteInspect(v)}`)
+    const items = this[kHeaderList]().map(([k, v]) => `${/^[a-z_$][\w$]*$/i.test(k) ? k : quoteInspect(k)}: ${quoteInspect(v)}`)
     return items.length === 0 ? "Headers {}" : `Headers { ${items.join(", ")} }`
   })
 
@@ -3765,7 +3937,8 @@ fn native_serve(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     };
     let addr = handle.addr;
     vm.io.pending += 1;
-    vm.io_servers.insert(id, (dispatch, upgrade, handle));
+    let frame = vm.async_frame.clone();
+    vm.io_servers.insert(id, (dispatch, upgrade, handle, frame));
     Ok(vm.new_array(vec![
         (id as f64).into(),
         (addr.port() as f64).into(),
@@ -3829,7 +4002,7 @@ fn native_reply_end(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 
 fn native_close(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let id = vm.to_number(&arg(args, 0))? as u64;
-    if let Some((_, _, handle)) = vm.io_servers.remove(&id) {
+    if let Some((_, _, handle, _)) = vm.io_servers.remove(&id) {
         handle.close();
         vm.io.pending -= 1;
     }
@@ -3917,27 +4090,34 @@ pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
             request,
             reply,
         } => {
-            let Some((dispatch, _, _)) = vm.io_servers.get(&server) else {
+            let Some((dispatch, _, _, frame)) = vm.io_servers.get(&server) else {
                 return Ok(());
             };
             let dispatch = dispatch.clone();
+            let frame = frame.clone();
             vm.io_replies.insert(rid, reply);
             let raw = request_value(vm, request);
-            vm.call_value(&dispatch, Value::Undefined, &[raw, (rid as f64).into()])?;
+            let prev = std::mem::replace(&mut vm.async_frame, frame);
+            let r = vm.call_value(&dispatch, Value::Undefined, &[raw, (rid as f64).into()]);
+            vm.async_frame = prev;
+            r?;
         }
         IoEvent::RequestClosed { server, rid } => {
             if !vm.io_replies.contains_key(&rid) {
                 return Ok(());
             }
-            let Some((dispatch, _, _)) = vm.io_servers.get(&server) else {
+            let Some((dispatch, _, _, frame)) = vm.io_servers.get(&server) else {
                 return Ok(());
             };
             let dispatch = dispatch.clone();
-            vm.call_value(
+            let prev = std::mem::replace(&mut vm.async_frame, frame.clone());
+            let r = vm.call_value(
                 &dispatch,
                 Value::Undefined,
                 &[Value::Null, (rid as f64).into()],
-            )?;
+            );
+            vm.async_frame = prev;
+            r?;
         }
         IoEvent::Upgrade {
             server,
@@ -3948,8 +4128,10 @@ pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
             cmd,
             head,
         } => {
-            let upgrade = match vm.io_servers.get(&server) {
-                Some((_, upgrade, _)) if upgrade.is_callable() => upgrade.clone(),
+            let (upgrade, frame) = match vm.io_servers.get(&server) {
+                Some((_, upgrade, _, frame)) if upgrade.is_callable() => {
+                    (upgrade.clone(), frame.clone())
+                }
                 _ => {
                     let _ = cmd.send(crate::io::SocketCmd::Destroy);
                     return Ok(());
@@ -3961,12 +4143,14 @@ pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
                     cmd,
                     handler: Value::Undefined,
                     refed: true,
+                    frame: frame.clone(),
                 },
             );
             vm.io.pending += 1;
             let raw = request_value(vm, request);
             let head = super::binary::new_uint8(vm, head);
-            vm.call_value(
+            let prev = std::mem::replace(&mut vm.async_frame, frame);
+            let r = vm.call_value(
                 &upgrade,
                 Value::Undefined,
                 &[
@@ -3978,7 +4162,9 @@ pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
                     Value::Number(remote.port() as f64),
                     head,
                 ],
-            )?;
+            );
+            vm.async_frame = prev;
+            r?;
         }
     }
     Ok(())

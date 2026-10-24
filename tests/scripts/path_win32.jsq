@@ -1,0 +1,23 @@
+import path from "node:path"
+const w = path.win32
+const cases = [
+  ["dirname", "/_app"], ["dirname", "/a/b"], ["dirname", "C:\\a\\b"], ["dirname", "\\_app"], ["dirname", "C:\\"], ["dirname", "C:"], ["dirname", "\\\\server\\share\\x"], ["dirname", "a/b/"], ["dirname", "C:/x/y"],
+  ["basename", "C:\\a\\b.txt"], ["basename", "/x/y/"], ["basename", "C:"], ["extname", "a/.b"], ["extname", "a.b.c"],
+  ["normalize", "/_app"], ["normalize", "C:/a/../b"], ["normalize", "\\\\server\\share\\..\\x"], ["normalize", "a//b\\c/"], ["normalize", "C:"], ["normalize", ""],
+  ["resolve", "D:\\a", "b"],
+  ["join", "/", "_app"], ["join", "C:", "a"], ["join", "a", "", "b"],
+  ["relative", "C:\\a", "C:\\a\\b\\c"], ["relative", "C:\\a\\b", "C:\\a\\c"], ["relative", "C:\\a", "D:\\b"],   ["isAbsolute", "/x"], ["isAbsolute", "C:x"], ["isAbsolute", "C:\\x"], ["isAbsolute", "\\\\s\\h"],
+  ["toNamespacedPath", "C:\\a"], ["toNamespacedPath", "\\\\s\\h\\x"],
+  ["parse", "C:\\a\\b.txt"], ["parse", "/x/y.z"],
+  ["format", { root: "C:\\", dir: "C:\\a", base: "b.txt" }],
+]
+for (const [fn, ...args] of cases) {
+  let out
+  try {
+    out = w[fn](...args)
+  } catch (e) {
+    out = e.code
+  }
+  const shown = out
+  console.log(fn, JSON.stringify(args), JSON.stringify(shown))
+}

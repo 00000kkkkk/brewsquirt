@@ -249,8 +249,26 @@ fn exec(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 }
 
 fn test(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let (o, data) = this_regexp(vm, &this)?;
+    if !this.is_object() {
+        return Err(vm.type_error(format!(
+            "Method RegExp.prototype.test called on incompatible receiver {}",
+            inspect_plain(&this)
+        )));
+    }
     let s = vm.to_string(&arg(args, 0))?;
+    let exec = vm.get_prop(&this, "exec")?;
+    let builtin = vm
+        .pristine
+        .as_ref()
+        .is_some_and(|p| exec.strict_eq(&p.regexp_exec));
+    if !builtin && exec.is_callable() {
+        let r = vm.call_value(&exec, this.clone(), &[Value::Str(s)])?;
+        if !matches!(r, Value::Null) && !r.is_object() {
+            return Err(vm.type_error("exec result must be an object or null"));
+        }
+        return Ok(Value::Bool(!matches!(r, Value::Null)));
+    }
+    let (o, data) = this_regexp(vm, &this)?;
     let tracks = data.global || data.sticky;
     let li = last_index(vm, &o)?;
     let start16 = if tracks { li } else { 0.0 };

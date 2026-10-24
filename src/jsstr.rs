@@ -15,6 +15,8 @@ struct Header {
     len: usize,
 }
 
+const ASCII: usize = 1 << (usize::BITS - 1);
+
 pub struct JsStr {
     ptr: NonNull<Header>,
     _owned: PhantomData<*const u8>,
@@ -38,7 +40,7 @@ impl JsStr {
             };
             p.write(Header {
                 rc: Cell::new(1),
-                len,
+                len: if s.is_ascii() { len | ASCII } else { len },
             });
             std::ptr::copy_nonoverlapping(s.as_ptr(), (p as *mut u8).add(size_of::<Header>()), len);
             JsStr {
@@ -53,8 +55,13 @@ impl JsStr {
         unsafe {
             let h = self.ptr.as_ptr();
             let data = (h as *const u8).add(size_of::<Header>());
-            std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, (*h).len))
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(data, (*h).len & !ASCII))
         }
+    }
+
+    #[inline]
+    pub fn is_ascii(&self) -> bool {
+        unsafe { (*self.ptr.as_ptr()).len & ASCII != 0 }
     }
 
     #[inline]
@@ -98,7 +105,7 @@ impl Drop for JsStr {
             let h = self.ptr.as_ptr();
             let n = (*h).rc.get() - 1;
             if n == 0 {
-                let len = (*h).len;
+                let len = (*h).len & !ASCII;
                 dealloc(h as *mut u8, Self::layout(len));
             } else {
                 (*h).rc.set(n);

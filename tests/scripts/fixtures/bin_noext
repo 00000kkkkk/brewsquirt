@@ -1,0 +1,4 @@
+#!/usr/bin/env node
+"use strict"
+module.exports = { kind: typeof require, named: __filename.endsWith("bin_noext") }
+if (require.main === module) console.log("main", Object.keys(module.exports).join(","))

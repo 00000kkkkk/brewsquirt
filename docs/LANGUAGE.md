@@ -2229,6 +2229,19 @@ Matchers: `toBe`, `toEqual`, `toStrictEqual`, `toBeTruthy`, `toBeFalsy`, `toBeNu
 `toBeLessThan`, `toBeLessThanOrEqual`, `toBeCloseTo`, `toBeInstanceOf`, `toContain`,
 `toContainEqual`, `toHaveLength`, `toHaveProperty`, `toMatch`, `toMatchObject` and `toThrow`.
 
+Files written for Node's `node:test` module run as in Node. `jsq file.test.mjs` runs the file's
+tests and prints Node's report, and `jsq --test [paths...]` finds test files the way
+`node --test` does, runs each in its own process and prints one combined report:
+
+```js
+import { test } from "node:test"
+import assert from "node:assert"
+
+test("adds", () => {
+  assert.strictEqual(1 + 2, 3)
+})
+```
+
 Test runners from npm work as well. Vitest and Jest, installed with `vrotdaem`, run their suites
 under `jsq`:
 
@@ -2353,6 +2366,9 @@ running code.
 The `JSQ_GC_THRESHOLD` environment variable sets the minimum number of allocations between
 collections (default 200000). Small values are useful for stress testing.
 
+`JSQ_SAMPLE_STACKS=<milliseconds>` prints the main thread's JavaScript call stack to standard
+error at that interval, which shows where a slow or stuck program spends its time.
+
 ## CLI reference
 
 ### `jsq`
@@ -2365,6 +2381,7 @@ collections (default 200000). Small values are useful for stress testing.
 | `jsq -p "<code>"`             | Evaluates the code string and prints the resulting value.        |
 | `jsq --disasm <file.jsq>`     | Compiles the file and prints its bytecode without running it.    |
 | `jsq test [paths...] [--filter <text>]` | Runs test files, see [Testing](#testing).           |
+| `jsq --test [paths...]`       | Runs `node:test` files like `node --test`, see [Testing](#testing). |
 | `jsq --version`               | Prints the version.                                              |
 | `jsq -r <module> <file>`      | Requires a module before the entry file runs; `--require` is the long form. |
 | `jsq --import <module> <file>` | Imports an ES module before the entry file runs.                |

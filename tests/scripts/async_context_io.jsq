@@ -1,0 +1,46 @@
+import { AsyncLocalStorage } from "node:async_hooks"
+import net from "node:net"
+import fs from "node:fs"
+import { spawn, exec } from "node:child_process"
+import zlib from "node:zlib"
+import crypto from "node:crypto"
+import dns from "node:dns"
+import os from "node:os"
+import path from "node:path"
+const storage = new AsyncLocalStorage()
+const out = []
+const mark = (k) => out.push(`${k}=${storage.getStore() ?? "-"}`)
+const server = net.createServer((sock) => {
+  mark("server-conn")
+  sock.on("data", (d) => {
+    mark("server-data")
+    sock.end("pong")
+  })
+})
+await new Promise((r) => server.listen(0, "127.0.0.1", r))
+await storage.run("S", () => new Promise((resolve) => {
+  const c = net.connect(server.address().port, "127.0.0.1", () => {
+    mark("connect")
+    c.write("ping")
+  })
+  c.on("data", () => mark("client-data"))
+  c.on("close", () => {
+    mark("client-close")
+    resolve()
+  })
+}))
+server.close()
+await storage.run("F", () => new Promise((resolve) => fs.stat(".", () => { mark("fs-stat"); resolve() })))
+await storage.run("W", () => new Promise((resolve) => fs.writeFile(path.join(os.tmpdir(), `jsq-ctx-${process.pid}.txt`), "x", () => { mark("fs-write"); fs.unlink(path.join(os.tmpdir(), `jsq-ctx-${process.pid}.txt`), () => { mark("fs-unlink"); resolve() }) })))
+await storage.run("C", () => new Promise((resolve) => {
+  const p = spawn(process.execPath, ["-e", "console.log(1)"])
+  p.stdout.on("data", () => mark("child-data"))
+  p.on("close", () => { mark("child-close"); resolve() })
+}))
+await storage.run("E", () => new Promise((resolve) => exec(`"${process.execPath}" -e "1"`, () => { mark("exec-cb"); resolve() })))
+await storage.run("Z", () => new Promise((resolve) => zlib.gzip("abc", () => { mark("zlib"); resolve() })))
+await storage.run("R", () => new Promise((resolve) => crypto.randomBytes(4, () => { mark("random"); resolve() })))
+await storage.run("P", () => new Promise((resolve) => crypto.pbkdf2("a", "b", 1, 8, "sha256", () => { mark("pbkdf2"); resolve() })))
+await storage.run("D", () => new Promise((resolve) => dns.lookup("localhost", () => { mark("dns"); resolve() })))
+await storage.run("T", () => new Promise((resolve) => { const t = setTimeout(() => { mark("timer"); resolve() }, 1); t.unref; }))
+console.log(out.sort().join(" "))

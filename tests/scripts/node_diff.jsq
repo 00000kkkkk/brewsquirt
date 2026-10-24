@@ -32,7 +32,7 @@ for (const fn of [() => Buffer.alloc(4).readUInt32BE(2), () => Buffer.alloc(-1),
     console.log(e.constructor.name, e.code, e.message)
   }
 }
-console.log(path.win32.toNamespacedPath("C:\\a\\b"), path.win32.toNamespacedPath("\\\\srv\\share\\x"), path.win32.toNamespacedPath("rel"), path.posix.toNamespacedPath("/a/b"))
+console.log(path.win32.toNamespacedPath("C:\\a\\b"), path.win32.toNamespacedPath("\\\\srv\\share\\x"), path.win32.toNamespacedPath("\\\\.\\pipe\\x"), path.posix.toNamespacedPath("/a/b"))
 console.log(querystring.unescape("%41%zz+x"), new URL("blob:https://a.com/uuid").origin, new URL("blob:foo").origin, util.types.isProxy(new Proxy({}, {})), util.types.isProxy({}))
 const order = []
 Promise.resolve().then(() => order.push("micro"))

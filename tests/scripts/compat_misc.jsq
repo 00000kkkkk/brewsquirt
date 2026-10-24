@@ -1,0 +1,46 @@
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import util from "node:util"
+import { createRequire } from "node:module"
+import { execFileSync } from "node:child_process"
+
+const o = { else: 10, return: 8, typeof: 6, in: 4, delete: 9 }
+const e = 2
+console.log(o.else / e / 1, o.return / e, o?.typeof / e / 3, o.in/e/2, o.delete /3/ 1)
+console.log(typeof /x/.source, [/a/g].length, void /b/.flags)
+
+const one = /\uD83D[\uDE00-\uDE4F]/
+const pair = /[\uD83C-\uD83D][\uDC00-\uDFFF]/
+const flags = /\uD83C[\uDDE6-\uDDFF]\uD83C[\uDDE6-\uDDFF]/g
+const mixed = /a\uD83D[\uDE00\uDE03]b/
+console.log(one.test("\u{1F600}"), one.test("\u{1F680}"), pair.test("\u{1F680}"), "a\u{1F600}b".replace(one, "_"))
+console.log("x\u{1F1FA}\u{1F1E6}y\u{1F1EC}\u{1F1E7}".match(flags).length, mixed.test("a\u{1F603}b"), mixed.test("a\u{1F601}b"))
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jsq-misc-"))
+const file = path.join(dir, "v.bin")
+const fd = fs.openSync(file, "w+")
+console.log(fs.writevSync(fd, [Buffer.from("ab"), Buffer.from("cde")]))
+console.log(fs.writevSync(fd, [Buffer.from("XY")], 1))
+const a = Buffer.alloc(2)
+const b = Buffer.alloc(5)
+console.log(fs.readvSync(fd, [a, b], 0), a.toString(), b.toString("utf8", 0, 3))
+await new Promise((resolve) => fs.writev(fd, [Buffer.from("!")], 5, (err, n, bufs) => {
+  console.log(err, n, bufs.length)
+  resolve()
+}))
+const res = await util.promisify(fs.writev)(fd, [Buffer.from("?")], 6)
+console.log(res.bytesWritten, res.buffer.length)
+fs.closeSync(fd)
+console.log(fs.readFileSync(file, "utf8"))
+const fh = await fs.promises.open(file, "r+")
+console.log((await fh.writev([Buffer.from("Z")], 0)).bytesWritten)
+const c = Buffer.alloc(3)
+console.log((await fh.readv([c], 0)).bytesRead, c.toString())
+await fh.close()
+fs.rmSync(dir, { recursive: true, force: true })
+
+const require = createRequire(import.meta.url)
+const bin = require("./fixtures/bin_noext")
+console.log(bin.kind, bin.named)
+console.log(execFileSync(process.execPath, [path.join("fixtures", "bin_noext")], { encoding: "utf8" }).trim())

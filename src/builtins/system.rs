@@ -652,8 +652,9 @@ fn chdir(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 fn next_tick(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let f = arg(args, 0);
     expect_fn(vm, &f)?;
+    let frame = vm.async_frame.clone();
     vm.ticks
-        .push_back((f, args.get(1..).unwrap_or(&[]).to_vec()));
+        .push_back((f, args.get(1..).unwrap_or(&[]).to_vec(), frame));
     Ok(Value::Undefined)
 }
 

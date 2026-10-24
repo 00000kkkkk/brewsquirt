@@ -13,6 +13,18 @@ pub type NativeFn = fn(&mut Vm, Value, &[Value]) -> Result<Value, Value>;
 const INDEX_AT: usize = 12;
 
 pub const NON_ENUM: u8 = 1;
+
+thread_local! {
+    static ATTR_EPOCH: Cell<u64> = const { Cell::new(0) };
+}
+
+fn bump_attrs() {
+    ATTR_EPOCH.with(|e| e.set(e.get().wrapping_add(1)));
+}
+
+pub fn attrs_epoch() -> u64 {
+    ATTR_EPOCH.with(Cell::get)
+}
 pub const READ_ONLY: u8 = 2;
 pub const NON_CONFIG: u8 = 4;
 
@@ -239,7 +251,9 @@ impl PropMap {
     pub fn set_attrs(&mut self, key: &str, bits: u8) {
         if bits == 0 {
             if let Some(x) = &mut self.extra {
-                x.attrs.remove(key);
+                if x.attrs.remove(key).is_some() {
+                    bump_attrs();
+                }
                 if x.is_empty() {
                     self.extra = None;
                 }
@@ -252,7 +266,15 @@ impl PropMap {
                 .get_or_insert_with(Box::default)
                 .attrs
                 .insert(k, bits);
+            bump_attrs();
         }
+    }
+
+    pub fn has_enumerable_string_key(&self) -> bool {
+        self.shape
+            .keys
+            .iter()
+            .any(|k| !is_symbol_key(k) && self.attrs(k) & NON_ENUM == 0)
     }
 
     pub fn attr_entries(&self) -> impl Iterator<Item = (&JsStr, u8)> {
@@ -262,6 +284,7 @@ impl PropMap {
     }
 
     pub fn set_index_attrs(&mut self, key: &JsStr, bits: u8) {
+        bump_attrs();
         if bits == 0 {
             if let Some(x) = &mut self.extra {
                 x.attrs.remove(&**key);
@@ -441,7 +464,9 @@ impl PropMap {
             .expect("unique dictionary shape")
             .reindex();
         if let Some(x) = &mut self.extra {
-            x.attrs.remove(key);
+            if x.attrs.remove(key).is_some() {
+                bump_attrs();
+            }
             if x.is_empty() {
                 self.extra = None;
             }
@@ -542,6 +567,7 @@ impl PropMap {
     }
 
     pub fn clear(&mut self) {
+        bump_attrs();
         self.shape = Shape::root();
         self.values.clear();
         self.extra = None;
@@ -1120,7 +1146,7 @@ pub enum Reaction {
 
 pub struct PromiseData {
     pub state: PromiseState,
-    pub reactions: Vec<Reaction>,
+    pub reactions: Vec<(Reaction, Value)>,
     pub handled: bool,
     pub initialized: bool,
 }
@@ -1225,7 +1251,7 @@ pub enum IterState {
     SetValues(Rc<Obj>, usize),
     SetEntries(Rc<Obj>, usize),
     List(Vec<Value>, usize),
-    ForIn(Value, Vec<Value>, usize),
+    ForIn(Value, Vec<Value>, usize, Option<u64>),
     Protocol(Value, Value),
     Typed(Rc<Obj>, usize, u8),
 }

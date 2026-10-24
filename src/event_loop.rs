@@ -9,9 +9,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 pub(crate) enum Job {
-    Reaction(Reaction, Value, bool),
-    Thenable(Rc<Obj>, Value, Value),
-    Callback(Value, Vec<Value>),
+    Reaction(Reaction, Value, bool, Value),
+    Thenable(Rc<Obj>, Value, Value, Value),
+    Callback(Value, Vec<Value>, Value),
 }
 
 pub(crate) struct Timer {
@@ -19,6 +19,7 @@ pub(crate) struct Timer {
     pub callback: Value,
     pub args: Vec<Value>,
     pub interval: Option<u128>,
+    pub frame: Value,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -424,8 +425,9 @@ impl Vm {
                     return;
                 }
                 Ok(then) if then.is_callable() => {
+                    let frame = self.async_frame.clone();
                     self.microtasks
-                        .push_back(Job::Thenable(p.clone(), v.clone(), then));
+                        .push_back(Job::Thenable(p.clone(), v.clone(), then, frame));
                     return;
                 }
                 Ok(_) => {}
@@ -458,9 +460,9 @@ impl Vm {
         if unhandled {
             self.pending_rejections.push(p.clone());
         }
-        for r in reactions {
+        for (r, frame) in reactions {
             self.microtasks
-                .push_back(Job::Reaction(r, arg.clone(), rejected));
+                .push_back(Job::Reaction(r, arg.clone(), rejected, frame));
         }
     }
 
@@ -477,17 +479,19 @@ impl Vm {
                 PromiseState::Rejected(e) => Some((e.clone(), true)),
             }
         };
+        let frame = self.async_frame.clone();
         match settled {
             None => {
                 if let ObjKind::Promise(data) = &p.kind {
-                    data.borrow_mut().reactions.push(r);
+                    data.borrow_mut().reactions.push((r, frame));
                 }
             }
             Some((arg, rejected)) => {
                 if rejected {
                     self.pending_rejections.retain(|x| !Rc::ptr_eq(x, p));
                 }
-                self.microtasks.push_back(Job::Reaction(r, arg, rejected));
+                self.microtasks
+                    .push_back(Job::Reaction(r, arg, rejected, frame));
             }
         }
     }
@@ -533,12 +537,25 @@ impl Vm {
     }
 
     pub fn queue_microtask(&mut self, f: Value, args: Vec<Value>) {
-        self.microtasks.push_back(Job::Callback(f, args));
+        let frame = self.async_frame.clone();
+        self.microtasks.push_back(Job::Callback(f, args, frame));
     }
 
     fn run_job(&mut self, job: Job) -> Result<(), Value> {
+        let frame = match &job {
+            Job::Reaction(_, _, _, frame)
+            | Job::Thenable(_, _, _, frame)
+            | Job::Callback(_, _, frame) => frame.clone(),
+        };
+        let prev = std::mem::replace(&mut self.async_frame, frame);
+        let r = self.run_job_in_frame(job);
+        self.async_frame = prev;
+        r
+    }
+
+    fn run_job_in_frame(&mut self, job: Job) -> Result<(), Value> {
         match job {
-            Job::Reaction(reaction, arg, rejected) => match reaction {
+            Job::Reaction(reaction, arg, rejected, _) => match reaction {
                 Reaction::Then {
                     on_fulfilled,
                     on_rejected,
@@ -577,13 +594,13 @@ impl Vm {
                     self.async_step(&co, arg, mode);
                 }
             },
-            Job::Thenable(p, thenable, then) => {
+            Job::Thenable(p, thenable, then, _) => {
                 let (resolve, reject) = self.resolving_functions(&p);
                 if let Err(e) = self.call_value(&then, thenable, &[resolve, reject]) {
                     self.reject_promise(&p, e);
                 }
             }
-            Job::Callback(f, args) => {
+            Job::Callback(f, args, _) => {
                 self.call_value(&f, Value::Undefined, &args)?;
             }
         }
@@ -596,8 +613,8 @@ impl Vm {
                 self.run_job(job)?;
                 continue;
             }
-            if let Some((f, args)) = self.ticks.pop_front() {
-                self.run_job(Job::Callback(f, args))?;
+            if let Some((f, args, frame)) = self.ticks.pop_front() {
+                self.run_job(Job::Callback(f, args, frame))?;
                 continue;
             }
             if !self.kept_alive.is_empty() {
@@ -770,6 +787,7 @@ impl Vm {
                 callback,
                 args,
                 interval: repeat.then_some(delay),
+                frame: self.async_frame.clone(),
             },
         );
         self.timer_keys.insert(id, key);
@@ -821,10 +839,14 @@ impl Vm {
                     callback: timer.callback.clone(),
                     args: timer.args.clone(),
                     interval: Some(interval),
+                    frame: timer.frame.clone(),
                 },
             );
         }
-        self.call_value(&timer.callback, Value::Undefined, &timer.args)?;
+        let prev = std::mem::replace(&mut self.async_frame, timer.frame);
+        let r = self.call_value(&timer.callback, Value::Undefined, &timer.args);
+        self.async_frame = prev;
+        r?;
         Ok(true)
     }
 

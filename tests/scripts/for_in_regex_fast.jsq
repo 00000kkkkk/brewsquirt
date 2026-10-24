@@ -1,0 +1,98 @@
+const keys = (o) => {
+  const out = []
+  for (const k in o) out.push(k)
+  return out.join(",")
+}
+
+const a = { x: 1, y: 2, z: 3 }
+console.log(keys(a))
+const seen = []
+for (const k in a) {
+  seen.push(k)
+  if (k === "x") delete a.y
+}
+console.log(seen.join(","))
+
+const b = { p: 1, q: 2 }
+const added = []
+for (const k in b) {
+  added.push(k)
+  b.r = 3
+}
+console.log(added.join(","), keys(b))
+
+class Base {}
+const inst = new Base()
+inst.own = 1
+console.log(keys(inst))
+Base.prototype.inherited = 2
+console.log(keys(inst))
+Object.defineProperty(Base.prototype, "inherited", { enumerable: false })
+console.log(keys(inst))
+Object.defineProperty(Base.prototype, "inherited", { enumerable: true })
+console.log(keys(inst))
+delete Base.prototype.inherited
+console.log(keys(inst))
+
+const proto = { shared: 1 }
+const child = Object.create(proto)
+child.mine = 2
+console.log(keys(child))
+Object.defineProperty(child, "shared", { value: 3, enumerable: false })
+console.log(keys(child))
+
+Object.prototype.leak = 1
+console.log(keys({ k: 1 }))
+delete Object.prototype.leak
+console.log(keys({ k: 1 }))
+
+const numeric = { b: 1, 2: 1, a: 1, 1: 1 }
+console.log(keys(numeric))
+console.log(keys([5, 6]), keys("hi"), keys(null), keys(42))
+
+const re = /a(b)?/
+console.log(re.test("cab"), re.test("xyz"), /^$/.test(""))
+const g = /o/g
+console.log(g.test("foo"), g.lastIndex, g.test("foo"), g.lastIndex, g.test("foo"), g.lastIndex)
+const sticky = /b/y
+sticky.lastIndex = 1
+console.log(sticky.test("abc"), sticky.lastIndex, sticky.test("abc"), sticky.lastIndex)
+const custom = /x/
+custom.exec = () => ({ length: 0 })
+console.log(custom.test("nothing"))
+custom.exec = () => null
+console.log(custom.test("x"))
+custom.exec = () => 1
+try {
+  custom.test("x")
+} catch (e) {
+  console.log(e.constructor.name)
+}
+let calls = 0
+const fake = { exec() { calls++; return calls > 1 ? null : [] } }
+console.log(RegExp.prototype.test.call(fake, "a"), RegExp.prototype.test.call(fake, "a"), calls)
+try {
+  RegExp.prototype.test.call(1, "a")
+} catch (e) {
+  console.log(e.constructor.name)
+}
+try {
+  RegExp.prototype.test.call({}, "a")
+} catch (e) {
+  console.log(e.constructor.name)
+}
+class R2 extends RegExp {
+  exec(s) {
+    return s === "yes" ? [s] : null
+  }
+}
+console.log(new R2("zzz").test("yes"), new R2("yes").test("no"))
+const order = []
+const tricky = /q/
+Object.defineProperty(tricky, "exec", { get() { order.push("exec"); return RegExp.prototype.exec } })
+tricky.test({ toString() { order.push("str"); return "q" } })
+console.log(order.join(","))
+const big = "é" + "x".repeat(2000) + "needle" + "y".repeat(10)
+console.log(big.indexOf("needle"), big.charCodeAt(0), big.charCodeAt(2001), big.slice(2001, 2007), big.length)
+const ascii = "a".repeat(1000) + "needle"
+console.log(ascii.indexOf("needle"), ascii.indexOf("needle", 2000), ascii.indexOf("", 5000), ascii.charCodeAt(1003), ascii.slice(1000), ascii.at(-1), ascii[1002])

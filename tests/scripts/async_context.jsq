@@ -1,0 +1,118 @@
+import { AsyncLocalStorage, AsyncResource } from "node:async_hooks"
+import { EventEmitter } from "node:events"
+import fs from "node:fs"
+import http from "node:http"
+import { setTimeout as sleep } from "node:timers/promises"
+
+const storage = new AsyncLocalStorage()
+const other = new AsyncLocalStorage({ name: "other", defaultValue: "dflt" })
+const log = []
+const note = (label) => log.push(`${label}=${storage.getStore() ?? "-"}`)
+
+console.log(storage.getStore(), other.getStore(), other.name, JSON.stringify(storage.name))
+
+await storage.run("A", async () => {
+  note("sync")
+  await null
+  note("await")
+  await Promise.resolve().then(() => note("then"))
+  queueMicrotask(() => note("microtask"))
+  process.nextTick(() => note("tick"))
+  setTimeout(() => note("timeout"), 1)
+  setImmediate(() => note("immediate"))
+  const iv = setInterval(() => {
+    note("interval")
+    clearInterval(iv)
+  }, 1)
+  await sleep(20)
+  note("sleep")
+  await storage.run("B", async () => {
+    note("nested")
+    await sleep(1)
+    note("nested-after")
+  })
+  note("restored")
+  const emitter = new EventEmitter()
+  emitter.on("x", () => note("emit-sync"))
+  emitter.emit("x")
+  await new Promise((resolve) => fs.readFile(new URL(import.meta.url), () => {
+    note("fs-cb")
+    resolve()
+  }))
+  await fs.promises.stat(new URL(import.meta.url))
+  note("fs-promise")
+  const results = await Promise.all([1, 2].map(async (n) => {
+    await sleep(n)
+    return storage.getStore() + n
+  }))
+  log.push(`all=${results.join("|")}`)
+  async function* gen() {
+    yield storage.getStore()
+    await sleep(1)
+    yield storage.getStore()
+  }
+  for await (const v of gen()) log.push(`gen=${v}`)
+  const thenable = { then(resolve) { note("thenable"); resolve(1) } }
+  await thenable
+})
+note("outside")
+console.log(log.sort().join(" "))
+
+const pending = storage.run("C", () => new Promise((resolve) => setTimeout(resolve, 5)).then(() => storage.getStore()))
+console.log("then-captured", await pending)
+
+const p = Promise.resolve()
+const viaThen = storage.run("D", () => p.then(() => storage.getStore()))
+console.log("registration", await viaThen)
+
+const bound = storage.run("E", () => AsyncLocalStorage.bind(() => storage.getStore()))
+const snap = storage.run("F", () => AsyncLocalStorage.snapshot())
+console.log("bind", bound(), "snapshot", snap(() => storage.getStore()), "plain", storage.getStore())
+
+const resource = storage.run("G", () => new AsyncResource("thing"))
+console.log("resource", resource.runInAsyncScope(function (x) { return [storage.getStore(), this.k, x].join(",") }, { k: 1 }, 2))
+const rb = storage.run("H", () => AsyncResource.bind(function () { return storage.getStore() }))
+console.log("resource-bind", rb(), rb.length, resource.type, Object.keys(resource).length)
+
+storage.run("I", () => {
+  other.run("J", () => {
+    console.log("both", storage.getStore(), other.getStore())
+    storage.exit(() => console.log("exit", storage.getStore(), other.getStore()))
+  })
+  console.log("after-other", other.getStore())
+})
+
+storage.enterWith("K")
+console.log("enterWith", storage.getStore())
+setTimeout(() => console.log("enterWith-timer", storage.getStore()), 1)
+await sleep(5)
+storage.disable()
+console.log("disabled", storage.getStore())
+storage.run("L", () => console.log("reenabled", storage.getStore()))
+
+try {
+  storage.run("M", () => {
+    throw new Error("boom")
+  })
+} catch (e) {
+  console.log("thrown", e.message, storage.getStore())
+}
+
+const server = http.createServer((req, res) => {
+  res.end(String(storage.getStore()))
+})
+await new Promise((resolve) => server.listen(0, resolve))
+const body = await storage.run("N", () => new Promise((resolve) => {
+  http.get(`http://127.0.0.1:${server.address().port}/`, (res) => {
+    let data = ""
+    res.on("data", (d) => (data += d))
+    res.on("end", () => resolve(`${data}|${storage.getStore()}`))
+  })
+}))
+console.log("http", body)
+const fetched = await storage.run("O", async () => {
+  const r = await fetch(`http://127.0.0.1:${server.address().port}/`)
+  return `${await r.text()}|${storage.getStore()}`
+})
+console.log("fetch", fetched)
+server.close()

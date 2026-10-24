@@ -1,0 +1,38 @@
+Response {
+  status: 201,
+  statusText: 'Made',
+  headers: Headers { a: '1' },
+  body: null,
+  bodyUsed: false,
+  ok: true,
+  redirected: false,
+  type: 'default',
+  url: ''
+}
+[] [] true default
+Request {
+  method: 'POST',
+  url: 'http://a.b/c',
+  headers: Headers { 'x-k': 'v', 'content-type': 'text/plain;charset=UTF-8' },
+  destination: '',
+  referrer: 'about:client',
+  referrerPolicy: '',
+  mode: 'cors',
+  credentials: 'same-origin',
+  cache: 'default',
+  redirect: 'follow',
+  integrity: '',
+  keepalive: false,
+  isReloadNavigation: false,
+  isHistoryNavigation: false,
+  signal: AbortSignal { aborted: false }
+}
+[] half cors same-origin default about:client false
+override:http://x.y/z GET true
+200 2 default payload payload true
+error 0 application/json
+299 true
+["arrayBuffer","blob","body","bodyUsed","bytes","clone","constructor","formData","headers","json","ok","redirected","status","statusText","text","type","url"]
+AbortSignal { aborted: false }
+{ nested: { signal: AbortSignal { aborted: true } } }
+ReadableStream { locked: false, state: 'readable', supportsBYOB: false }

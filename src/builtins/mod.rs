@@ -15,6 +15,7 @@ pub mod threads;
 pub mod typed;
 pub mod uverr;
 pub mod wasm;
+mod winpath;
 pub use reflect::{array_like, key_value};
 mod number;
 mod object;

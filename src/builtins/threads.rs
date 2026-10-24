@@ -567,6 +567,7 @@ pub struct WorkerInit {
 pub struct ThreadState {
     pub uid: u64,
     pub interrupt: Arc<AtomicBool>,
+    pub sample: Arc<AtomicBool>,
     pub terminating: bool,
     pub exit_code: Option<i32>,
     pub worker: Option<WorkerInit>,
@@ -583,6 +584,7 @@ impl Default for ThreadState {
         ThreadState {
             uid: next_id(),
             interrupt: Arc::new(AtomicBool::new(false)),
+            sample: Arc::new(AtomicBool::new(false)),
             terminating: false,
             exit_code: None,
             worker: None,
@@ -625,6 +627,26 @@ impl ThreadState {
     #[inline]
     pub fn interrupted(&self) -> bool {
         self.interrupt.load(Ordering::Relaxed)
+    }
+
+    pub fn take_sample(&self) -> bool {
+        if self.sample.swap(false, Ordering::SeqCst) {
+            self.interrupt.store(false, Ordering::SeqCst);
+            return true;
+        }
+        false
+    }
+
+    pub fn start_sampler(&self, every: std::time::Duration) {
+        let sample = self.sample.clone();
+        let interrupt = self.interrupt.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(every);
+                sample.store(true, Ordering::SeqCst);
+                interrupt.store(true, Ordering::SeqCst);
+            }
+        });
     }
 }
 

@@ -17,11 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `*_test.*`, `test-*.*`, `test.*` and files under `test` directories (JavaScript and
   TypeScript, outside `node_modules` and `nude_modules`), runs each file in its own process and
   prints one combined report, so `"test": "node --test"` scripts run under jsq.
+- `fs.writev`, `fs.readv`, their `Sync` and promisified forms, and `FileHandle.writev` and
+  `FileHandle.readv`.
+- `JSQ_SAMPLE_STACKS=<milliseconds>` prints the main thread's JavaScript stack to stderr at that
+  interval, to find where a slow or stuck program spends its time.
 
 ### Changed
 
 - Stack frames of ES modules show `file://` URLs, as in Node, instead of paths relative to the
   working directory.
+- `RegExp.prototype.test` no longer builds a match array when `exec` is the built-in one and runs
+  about six times faster. `for...in` loops skip the prototype scan when no prototype has
+  enumerable properties and run about twice as fast. Indexing ASCII strings no longer consults the
+  UTF-16 index cache. Property reads and method lookups that hit an inline cache push the value
+  straight onto the stack, which makes parser-heavy code such as acorn and Babel 5-8% faster.
 
 ### Fixed
 
@@ -54,6 +63,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   watchers, message ports, stdin and N-API thread-safe functions that keep the process alive.
 - A module whose top-level `await` never settles prints Node's "Detected unsettled top-level
   await" warning and exits with code 13 instead of exiting silently with 0.
+- `path.win32` and `path.posix` follow Node's algorithms on every platform, including
+  drive-relative paths, UNC roots, `..` above the root, `relative` across drives, `parse`,
+  `format` and `toNamespacedPath`. `next build` no longer prints a false warning about reserved
+  pages on Windows.
+- A `/` after a property name that is a keyword, as in `a.else / b`, is division instead of the
+  start of a regular expression.
+- Regular expressions without the `u` flag that spell astral characters as surrogate pairs, such
+  as `\uD83D[\uDE00-\uDE4F]` or `[\uD83C-\uD83D][\uDC00-\uDFFF]`, match those characters.
+  `emoji-regex` works.
+- Files without an extension, such as package binaries, load as CommonJS unless the nearest
+  `package.json` says `"type": "module"`. The `next` binary runs.
+- `fs.readlink` on something that is not a link fails with `EINVAL` on Windows, as in Node.
+- `AsyncLocalStorage` keeps its store across `await`, promise callbacks, thenables,
+  `queueMicrotask`, `process.nextTick`, timers and `setImmediate`, following Node 24's context
+  frames: a callback runs in the context that was current when it was scheduled. Sockets, servers,
+  child processes and file watchers deliver their events in the context they were created in.
+  `AsyncResource` and `EventEmitterAsyncResource` run callbacks in the context they were created
+  in, and `AsyncLocalStorage` supports `defaultValue`, `name`, `bind` and `snapshot`. Next.js App
+  Router pages that call `headers()` or `cookies()` now prerender and render.
+- `Request` and `Response` expose `url`, `status`, `headers` and their other fields as prototype
+  getters instead of own properties, so subclasses such as Next.js `NextRequest` can override
+  them. `Request` gains `mode`, `credentials`, `cache`, `referrer`, `referrerPolicy`, `integrity`,
+  `keepalive` and `duplex`, `Response.error()` exists, and `Response.clone()` copies the headers.
+- `util.inspect` passes `inspect` as the third argument to custom inspect functions and no longer
+  indents an object returned by one twice. `Request`, `Response`, `ReadableStream` and
+  `AbortSignal` print like Node, and `Headers` prints in insertion order with the original names.
 
 ## [1.8.0] - 2026-10-24
 

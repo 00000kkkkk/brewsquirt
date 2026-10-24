@@ -257,6 +257,76 @@ fn expand_class_strings(chars: Vec<char>) -> Vec<char> {
     out
 }
 
+fn surrogate_class(
+    chars: &[char],
+    open: usize,
+    lo: u32,
+    hi: u32,
+) -> Option<(Vec<(u32, u32)>, usize)> {
+    if chars.get(open) != Some(&'[') || chars.get(open + 1) == Some(&'^') {
+        return None;
+    }
+    let mut ranges = Vec::new();
+    let mut i = open + 1;
+    let unit = |at: usize| -> Option<u32> {
+        if chars.get(at) == Some(&'\\') && chars.get(at + 1) == Some(&'u') {
+            hex_digits(chars, at + 2, 4).filter(|v| (lo..=hi).contains(v))
+        } else {
+            None
+        }
+    };
+    loop {
+        if chars.get(i) == Some(&']') {
+            break;
+        }
+        let start = unit(i)?;
+        i += 6;
+        if chars.get(i) == Some(&'-') && chars.get(i + 1) != Some(&']') {
+            let end = unit(i + 1)?;
+            if end < start {
+                return None;
+            }
+            ranges.push((start, end));
+            i += 7;
+        } else {
+            ranges.push((start, start));
+        }
+    }
+    if ranges.is_empty() {
+        return None;
+    }
+    if lo == 0xdc00 && matches!(chars.get(i + 1), Some('*' | '+' | '?' | '{')) {
+        return None;
+    }
+    Some((ranges, i))
+}
+
+fn astral_class(highs: &[(u32, u32)], lows: &[(u32, u32)]) -> String {
+    let mut spans: Vec<(u32, u32)> = Vec::new();
+    for &(h1, h2) in highs {
+        for h in h1..=h2 {
+            for &(l1, l2) in lows {
+                let a = 0x10000 + ((h - 0xd800) << 10) + (l1 - 0xdc00);
+                let b = 0x10000 + ((h - 0xd800) << 10) + (l2 - 0xdc00);
+                match spans.last_mut() {
+                    Some(last) if last.1 + 1 == a => last.1 = b,
+                    _ => spans.push((a, b)),
+                }
+            }
+        }
+    }
+    let mut out = String::from("[");
+    for (a, b) in spans {
+        if a == b {
+            out.push_str(&format!("\\x{{{a:X}}}"));
+        } else {
+            out.push_str(&format!("\\x{{{a:X}}}-\\x{{{b:X}}}"));
+        }
+    }
+    out.push(']');
+    out
+}
+
 pub fn translate(source: &str, flags: &str) -> Result<String, String> {
     let vmode = flags.contains('v');
     let mut chars: Vec<char> = source.chars().collect();
@@ -411,6 +481,16 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                                     }
                                 }
                             }
+                            if !in_class && !unicode && (0xd800..0xdc00).contains(&cp) {
+                                if let Some((lows, close)) =
+                                    surrogate_class(&chars, i + 1, 0xdc00, 0xdfff)
+                                {
+                                    out.push_str(&astral_class(&[(cp, cp)], &lows));
+                                    i = close;
+                                    i += 1;
+                                    continue;
+                                }
+                            }
                             if (0xd800..0xe000).contains(&cp) {
                                 cp = crate::value::LONE_BASE + (cp - 0xd800);
                             }
@@ -501,6 +581,17 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                 }
             }
             '[' if !in_class => {
+                if !unicode {
+                    if let Some((highs, close)) = surrogate_class(&chars, i, 0xd800, 0xdbff) {
+                        if let Some((lows, close2)) =
+                            surrogate_class(&chars, close + 1, 0xdc00, 0xdfff)
+                        {
+                            out.push_str(&astral_class(&highs, &lows));
+                            i = close2 + 1;
+                            continue;
+                        }
+                    }
+                }
                 if chars.get(i + 1) == Some(&']') {
                     out.push_str("(?:[^\\x00-\\x{10FFFF}])");
                     i += 2;

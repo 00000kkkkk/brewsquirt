@@ -82,17 +82,19 @@ fn custom_inspect(ctx: &mut Ctx, o: &Rc<Obj>, rt: usize) -> Option<String> {
         return None;
     }
     let options = vm.new_object();
+    let inspect =
+        crate::builtins::native_fn(vm, "inspect", 2, crate::builtins::node::native_inspect);
     let result = vm
         .call_value(
             &f,
             Value::Object(o.clone()),
-            &[depth, Value::Object(options)],
+            &[depth, Value::Object(options), inspect],
         )
         .ok()?;
     let text = match &result {
         Value::Str(s) => s.to_string(),
         Value::Object(r) if Rc::ptr_eq(r, o) => return None,
-        other => format_value(ctx, other, rt, false),
+        other => return Some(format_value(ctx, other, rt, false)),
     };
     if ctx.indent > 0 && text.contains('\n') {
         let pad = " ".repeat(ctx.indent);

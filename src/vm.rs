@@ -336,7 +336,8 @@ pub struct Vm {
     pub rng: u64,
     pub(crate) native_depth: usize,
     pub(crate) microtasks: VecDeque<Job>,
-    pub(crate) ticks: VecDeque<(Value, Vec<Value>)>,
+    pub(crate) ticks: VecDeque<(Value, Vec<Value>, Value)>,
+    pub(crate) async_frame: Value,
     pub(crate) timers: BTreeMap<(u128, u64), Timer>,
     pub(crate) timer_keys: FxHashMap<u64, (u128, u64)>,
     pub(crate) timer_seq: u64,
@@ -381,6 +382,7 @@ pub struct Vm {
     pub(crate) proto_indices: bool,
     pub(crate) binary_ctors: Vec<Value>,
     pub(crate) pristine: Option<Box<Pristine>>,
+    for_in_protos: FxHashMap<usize, (u64, u64, bool)>,
     pub(crate) array_ctor: Option<Rc<Obj>>,
     pub(crate) io: crate::io::Io,
     pub(crate) io_fetches: FxHashMap<u64, Rc<Obj>>,
@@ -391,7 +393,7 @@ pub struct Vm {
     pub(crate) io_watchers: FxHashMap<u64, builtins::netio::WatchEntry>,
     pub(crate) io_files: FxHashMap<u32, std::fs::File>,
     pub(crate) next_fd: u32,
-    pub(crate) io_servers: FxHashMap<u64, (Value, Value, crate::io::ServerHandle)>,
+    pub(crate) io_servers: FxHashMap<u64, (Value, Value, crate::io::ServerHandle, Value)>,
     pub(crate) io_replies: FxHashMap<u64, std::sync::mpsc::Sender<crate::io::ReplyMsg>>,
     pub(crate) web: Option<Value>,
     pub(crate) node: Option<Value>,
@@ -512,6 +514,59 @@ fn plain_property(v: &Value) -> bool {
 #[inline(always)]
 fn ic_plain(v: &Value, accessors: bool) -> bool {
     !matches!(v, Value::Uninit) && !(accessors && matches!(v, Value::Object(a) if a.is_accessor()))
+}
+
+#[inline(always)]
+fn push_plain(stack: &mut Vec<Value>, v: Option<&Value>, accessors: bool) -> bool {
+    match v {
+        Some(Value::Number(x)) => {
+            let x = *x;
+            stack.reserve(1);
+            unsafe {
+                let n = stack.len();
+                std::ptr::write(stack.as_mut_ptr().add(n), Value::Number(x));
+                stack.set_len(n + 1);
+            }
+            true
+        }
+        Some(v) if ic_plain(v, accessors) => {
+            stack.push(v.clone());
+            true
+        }
+        _ => false,
+    }
+}
+
+#[inline(always)]
+fn ic_push(stack: &mut Vec<Value>, o: &Obj, ic: &crate::bytecode::PropIc) -> bool {
+    let props = o.props.borrow();
+    if props.shape_id() != ic.shape.get() {
+        return false;
+    }
+    let holder = ic.holder.get();
+    if holder == 0 {
+        return push_plain(
+            stack,
+            props.value_at(ic.index.get() as usize),
+            props.may_have_accessors(),
+        );
+    }
+    let proto = o.proto.borrow();
+    let Some(p) = &*proto else {
+        return false;
+    };
+    if Rc::as_ptr(p) as usize != holder {
+        return false;
+    }
+    let pp = p.props.borrow();
+    if pp.shape_id() != ic.holder_shape.get() {
+        return false;
+    }
+    push_plain(
+        stack,
+        pp.value_at(ic.index.get() as usize),
+        pp.may_have_accessors(),
+    )
 }
 
 #[inline(always)]
@@ -846,6 +901,7 @@ impl Vm {
             native_depth: 0,
             microtasks: VecDeque::new(),
             ticks: VecDeque::new(),
+            async_frame: Value::Undefined,
             timers: BTreeMap::new(),
             timer_keys: FxHashMap::default(),
             timer_seq: 0,
@@ -881,6 +937,7 @@ impl Vm {
             proto_indices: false,
             binary_ctors: Vec::new(),
             pristine: None,
+            for_in_protos: FxHashMap::default(),
             array_ctor: None,
             io: crate::io::Io::default(),
             io_fetches: FxHashMap::default(),
@@ -916,6 +973,16 @@ impl Vm {
         crate::gc::configure_from_env();
         builtins::install(&mut vm);
         builtins::run_prelude(&mut vm);
+        if !is_worker {
+            if let Some(ms) = std::env::var("JSQ_SAMPLE_STACKS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .filter(|ms| *ms > 0)
+            {
+                vm.threads
+                    .start_sampler(std::time::Duration::from_millis(ms));
+            }
+        }
         if !is_worker && std::env::var_os("JSQ_IPC").is_some() {
             let _ = builtins::node::setup_ipc(&mut vm);
         }
@@ -2710,7 +2777,11 @@ impl Vm {
             return Err(self.range_error("Maximum call stack size exceeded"));
         }
         if self.threads.interrupted() {
-            return Err(self.terminate_value());
+            if self.threads.take_sample() {
+                self.print_sample();
+            } else {
+                return Err(self.terminate_value());
+            }
         }
         let p = &c.proto;
         let np = p.num_params as usize;
@@ -2774,6 +2845,11 @@ impl Vm {
             },
         });
         Ok(())
+    }
+
+    fn print_sample(&mut self) {
+        self.flush();
+        eprintln!("[jsq sample]{}", self.stack_trace());
     }
 
     pub(crate) fn terminate_value(&mut self) -> Value {
@@ -4545,17 +4621,21 @@ impl Vm {
                     }
                     return Ok(v);
                 }
-                IterState::ForIn(obj, keys, i) => {
+                IterState::ForIn(obj, keys, i, shape) => {
                     let obj = obj.clone();
                     let k = keys.get(*i).cloned();
                     if k.is_some() {
                         *i += 1;
                     }
+                    let unchanged = match (&obj, shape) {
+                        (Value::Object(o), Some(id)) => o.props.borrow().shape_id() == *id,
+                        _ => false,
+                    };
                     drop(st);
                     return match k {
                         None => Ok(None),
                         Some(k) => {
-                            if self.has_property(&obj, &k)? {
+                            if unchanged || self.has_property(&obj, &k)? {
                                 Ok(Some(k))
                             } else {
                                 self.iter_next(it)
@@ -4653,6 +4733,49 @@ impl Vm {
             out.push(x);
         }
         Ok(out)
+    }
+
+    fn proto_has_enumerable(&mut self, p: &Rc<Obj>, epoch: u64) -> bool {
+        let props = p.props.borrow();
+        if props.is_empty() {
+            return false;
+        }
+        let id = props.shape_id();
+        let at = Rc::as_ptr(p) as usize;
+        if let Some(&(sid, ep, r)) = self.for_in_protos.get(&at) {
+            if sid == id && ep == epoch {
+                return r;
+            }
+        }
+        let r = props.has_enumerable_string_key();
+        drop(props);
+        if self.for_in_protos.len() >= 256 {
+            self.for_in_protos.clear();
+        }
+        self.for_in_protos.insert(at, (id, epoch, r));
+        r
+    }
+
+    fn for_in_state(&mut self, v: &Value) -> IterState {
+        let Value::Object(o) = v else {
+            return IterState::List(self.own_keys(v), 0);
+        };
+        let epoch = crate::object::attrs_epoch();
+        let mut inherited = false;
+        let mut cur = o.proto.borrow().clone();
+        while let Some(p) = cur {
+            if self.proto_has_enumerable(&p, epoch) {
+                inherited = true;
+                break;
+            }
+            cur = p.proto.borrow().clone();
+        }
+        if inherited {
+            return IterState::ForIn(v.clone(), self.for_in_keys(v), 0, None);
+        }
+        let keys = self.own_keys(v);
+        let shape = matches!(o.kind, ObjKind::Ordinary).then(|| o.props.borrow().shape_id());
+        IterState::ForIn(v.clone(), keys, 0, shape)
     }
 
     pub fn for_in_keys(&self, v: &Value) -> Vec<Value> {
@@ -5194,15 +5317,21 @@ impl Vm {
                     if !self.builders.is_empty() {
                         self.flush_builder(abs);
                     }
-                    let fast = match &self.stack[abs] {
-                        Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => {
-                            let Value::Str(key) = &proto.consts[k as usize] else {
-                                unreachable!()
-                            };
-                            ic_read(o, key, &proto.ics[proto.ic_index[ip - 1] as usize])
-                                .filter(plain_property)
-                        }
-                        _ => None,
+                    let ic = &proto.ics[proto.ic_index[ip - 1] as usize];
+                    let optr = match &self.stack[abs] {
+                        Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => Rc::as_ptr(o),
+                        _ => std::ptr::null(),
+                    };
+                    if !optr.is_null() && ic_push(&mut self.stack, unsafe { &*optr }, ic) {
+                        continue;
+                    }
+                    let fast = if optr.is_null() {
+                        None
+                    } else {
+                        let Value::Str(key) = &proto.consts[k as usize] else {
+                            unreachable!()
+                        };
+                        ic_fill_read(unsafe { &*optr }, key, ic).filter(plain_property)
                     };
                     let v = match fast {
                         Some(v) => v,
@@ -5217,15 +5346,22 @@ impl Vm {
                 Op::GetLocalMethod(s, k) => {
                     let abs = base + s as usize;
                     self.flush_builder(abs);
-                    let fast = match &self.stack[abs] {
-                        Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => {
-                            let Value::Str(key) = &proto.consts[k as usize] else {
-                                unreachable!()
-                            };
-                            ic_read(o, key, &proto.ics[proto.ic_index[ip - 1] as usize])
-                                .filter(plain_property)
-                        }
-                        _ => None,
+                    let ic = &proto.ics[proto.ic_index[ip - 1] as usize];
+                    let optr = match &self.stack[abs] {
+                        Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => Rc::as_ptr(o),
+                        _ => std::ptr::null(),
+                    };
+                    if !optr.is_null() && ic_push(&mut self.stack, unsafe { &*optr }, ic) {
+                        self.stack.extend_from_within(abs..=abs);
+                        continue;
+                    }
+                    let fast = if optr.is_null() {
+                        None
+                    } else {
+                        let Value::Str(key) = &proto.consts[k as usize] else {
+                            unreachable!()
+                        };
+                        ic_fill_read(unsafe { &*optr }, key, ic).filter(plain_property)
                     };
                     let obj = self.stack[abs].clone();
                     let f = match fast {
@@ -5516,6 +5652,17 @@ impl Vm {
                     self.stack.push(Value::Str(t.into()));
                 }
                 Op::GetProp(k) => {
+                    let top = self.stack.len() - 1;
+                    if let Value::Object(o) = &self.stack[top] {
+                        if matches!(o.kind, ObjKind::Ordinary) {
+                            let optr = Rc::as_ptr(o);
+                            let ic = &proto.ics[proto.ic_index[ip - 1] as usize];
+                            if ic_push(&mut self.stack, unsafe { &*optr }, ic) {
+                                self.stack.swap_remove(top);
+                                continue;
+                            }
+                        }
+                    }
                     let obj = pop!();
                     let v = match &obj {
                         Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => {
@@ -5653,6 +5800,17 @@ impl Vm {
                     self.stack.push(Value::Bool(r));
                 }
                 Op::GetMethod(k) => {
+                    let top = self.stack.len() - 1;
+                    if let Value::Object(o) = &self.stack[top] {
+                        if matches!(o.kind, ObjKind::Ordinary) {
+                            let optr = Rc::as_ptr(o);
+                            let ic = &proto.ics[proto.ic_index[ip - 1] as usize];
+                            if ic_push(&mut self.stack, unsafe { &*optr }, ic) {
+                                self.stack.swap(top, top + 1);
+                                continue;
+                            }
+                        }
+                    }
                     let obj = pop!();
                     let fast = match &obj {
                         Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => {
@@ -6219,6 +6377,11 @@ impl Vm {
                 Op::Jump(t) => {
                     if (t as usize) < ip && self.threads.interrupted() {
                         self.frames[fi].ip = ip;
+                        if self.threads.take_sample() {
+                            self.print_sample();
+                            ip = t as usize;
+                            continue;
+                        }
                         let e = self.terminate_value();
                         throw!(e);
                     }
@@ -6806,12 +6969,8 @@ impl Vm {
                 }
                 Op::ForInIter => {
                     let v = pop!();
-                    let keys = self.for_in_keys(&v);
-                    let it = if v.is_object() {
-                        self.new_iter(IterState::ForIn(v, keys, 0))
-                    } else {
-                        self.new_iter(IterState::List(keys, 0))
-                    };
+                    let state = self.for_in_state(&v);
+                    let it = self.new_iter(state);
                     self.stack.push(it);
                 }
                 Op::IterNext(t) => {

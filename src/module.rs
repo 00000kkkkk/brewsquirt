@@ -623,7 +623,7 @@ pub fn is_commonjs_source(path: &Path, source: Option<&str>) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
         "cjs" | "cts" | "json" | "node" => return true,
-        "js" | "ts" | "jsx" | "tsx" => {}
+        "" | "js" | "ts" | "jsx" | "tsx" => {}
         _ => return false,
     }
     if let Some(v) = CJS_CACHE.with(|c| c.borrow().get(path).copied()) {

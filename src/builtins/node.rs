@@ -715,14 +715,29 @@ const NODE_SRC: &str = r##"
     constructor(options) {
       super(typeof options === "object" && options !== null ? options : undefined)
       const name = typeof options === "string" ? options : options?.name ?? new.target.name
+      const frame = native.asyncFrame()
+      const enter = (fn, thisArg, args) => {
+        const prior = native.asyncFrame()
+        native.setAsyncFrame(frame)
+        try {
+          return Reflect.apply(fn, thisArg, args)
+        } finally {
+          native.setAsyncFrame(prior)
+        }
+      }
       this.#resource = {
         name,
         asyncId: () => 0,
         triggerAsyncId: () => 0,
         emitDestroy() {},
-        runInAsyncScope: (fn, thisArg, ...args) => fn.apply(thisArg, args),
-        bind: (fn) => fn,
+        runInAsyncScope: (fn, thisArg, ...args) => enter(fn, thisArg, args),
+        bind: (fn) => function (...args) {
+          return enter(fn, this, args)
+        },
       }
+    }
+    emit(event, ...args) {
+      return this.#resource.runInAsyncScope(super.emit, this, event, ...args)
     }
     get asyncResource() {
       return this.#resource
@@ -1132,6 +1147,33 @@ const NODE_SRC: &str = r##"
     if (cb) queueMicrotask(() => (error ? cb(error) : cb(null, n, data)))
   }
   promisifyArgs(fs.write, ["bytesWritten", "buffer"])
+  fs.writevSync = function writevSync(fd, buffers, position) {
+    let total = 0
+    for (const b of buffers) total += fs.writeSync(fd, b, 0, b.byteLength, position == null ? null : position + total)
+    return total
+  }
+  fs.readvSync = function readvSync(fd, buffers, position) {
+    let total = 0
+    for (const b of buffers) {
+      const n = fs.readSync(fd, b, 0, b.byteLength, position == null ? null : position + total)
+      total += n
+      if (n < b.byteLength) break
+    }
+    return total
+  }
+  const vectored = (sync) => function (fd, buffers, position, cb) {
+    if (typeof position === "function") [position, cb] = [null, position]
+    let n
+    let error = null
+    try {
+      n = sync(fd, buffers, position)
+    } catch (e) {
+      error = e
+    }
+    queueMicrotask(() => (error ? cb(error) : cb(null, n, buffers)))
+  }
+  fs.writev = promisifyArgs(vectored(fs.writevSync), ["bytesWritten", "buffer"])
+  fs.readv = promisifyArgs(vectored(fs.readvSync), ["bytesRead", "buffers"])
   class FileHandle extends EventEmitter {
     #fd
     constructor(fd) {
@@ -1164,6 +1206,14 @@ const NODE_SRC: &str = r##"
       this.#check()
       const bytesWritten = fs.writeSync(this.#fd, data, ...rest)
       return { bytesWritten, buffer: data }
+    }
+    async writev(buffers, position) {
+      this.#check()
+      return { bytesWritten: fs.writevSync(this.#fd, buffers, position), buffers }
+    }
+    async readv(buffers, position) {
+      this.#check()
+      return { bytesRead: fs.readvSync(this.#fd, buffers, position), buffers }
     }
     async readFile(options) {
       this.#check()
@@ -7467,73 +7517,129 @@ const NODE_SRC: &str = r##"
     Channel,
   }
 
+  const getFrame = native.asyncFrame
+  const setFrame = native.setAsyncFrame
+  const runInFrame = (frame, fn, thisArg, args) => {
+    const prior = getFrame()
+    setFrame(frame)
+    try {
+      return Reflect.apply(fn, thisArg, args)
+    } finally {
+      setFrame(prior)
+    }
+  }
+  const kResourceFrame = Symbol("asyncContextFrame")
+  const kResourceType = Symbol("asyncResourceType")
+  const kAsyncId = Symbol("asyncId")
+  const kTriggerId = Symbol("triggerAsyncId")
+  let asyncIdCounter = 1
+  class AsyncResource {
+    constructor(type, opts) {
+      if (typeof type !== "string") {
+        throw nodeTypeError("ERR_INVALID_ARG_TYPE", `The "type" argument must be of type string. Received ${describeReceived(type)}`)
+      }
+      this[kResourceType] = type
+      this[kResourceFrame] = getFrame()
+      this[kAsyncId] = asyncIdCounter++
+      this[kTriggerId] = typeof opts === "number" ? opts : (opts?.triggerAsyncId ?? 0)
+    }
+    runInAsyncScope(fn, thisArg, ...args) {
+      return runInFrame(this[kResourceFrame], fn, thisArg, args)
+    }
+    emitDestroy() {
+      return this
+    }
+    asyncId() {
+      return this[kAsyncId]
+    }
+    triggerAsyncId() {
+      return this[kTriggerId]
+    }
+    bind(fn, thisArg) {
+      if (typeof fn !== "function") {
+        throw nodeTypeError("ERR_INVALID_ARG_TYPE", `The "fn" argument must be of type function. Received ${describeReceived(fn)}`)
+      }
+      const resource = this
+      const bound = thisArg === undefined
+        ? function (...args) {
+            return runInFrame(resource[kResourceFrame], fn, this, args)
+          }
+        : function (...args) {
+            return runInFrame(resource[kResourceFrame], fn, thisArg, args)
+          }
+      let self = this
+      Object.defineProperties(bound, {
+        length: { configurable: true, enumerable: false, value: fn.length, writable: false },
+        asyncResource: {
+          configurable: true,
+          enumerable: true,
+          get() {
+            return self
+          },
+          set(v) {
+            self = v
+          },
+        },
+      })
+      return bound
+    }
+    static bind(fn, type, thisArg) {
+      type = type || fn?.name
+      return new AsyncResource(type || "bound-anonymous-fn").bind(fn, thisArg)
+    }
+  }
   class AsyncLocalStorage {
-    #store
-    #active = false
+    #defaultValue
+    #name
+    constructor(options = {}) {
+      if (options === null || typeof options !== "object") {
+        throw nodeTypeError("ERR_INVALID_ARG_TYPE", `The "options" argument must be of type object. Received ${describeReceived(options)}`)
+      }
+      this.#defaultValue = options.defaultValue
+      if (options.name !== undefined) this.#name = String(options.name)
+    }
     static bind(fn) {
-      return fn
+      return AsyncResource.bind(fn)
     }
     static snapshot() {
-      return (fn, ...args) => fn(...args)
+      const frame = getFrame()
+      return function runInAsyncScope(fn, ...args) {
+        return runInFrame(frame, fn, this, args)
+      }
     }
-    getStore() {
-      return this.#active ? this.#store : undefined
+    get name() {
+      return this.#name || ""
+    }
+    disable() {
+      getFrame()?.delete(this)
+    }
+    enterWith(store) {
+      const frame = new Map(getFrame())
+      frame.set(this, store)
+      setFrame(frame)
     }
     run(store, fn, ...args) {
-      const prev = [this.#active, this.#store]
-      this.#active = true
-      this.#store = store
+      const prior = this.getStore()
+      if (Object.is(prior, store)) return Reflect.apply(fn, null, args)
+      this.enterWith(store)
       try {
-        return fn(...args)
+        return Reflect.apply(fn, null, args)
       } finally {
-        ;[this.#active, this.#store] = prev
+        this.enterWith(prior)
       }
     }
     exit(fn, ...args) {
-      const prev = [this.#active, this.#store]
-      this.#active = false
-      try {
-        return fn(...args)
-      } finally {
-        ;[this.#active, this.#store] = prev
-      }
+      return this.run(undefined, fn, ...args)
     }
-    enterWith(store) {
-      this.#active = true
-      this.#store = store
-    }
-    disable() {
-      this.#active = false
-      this.#store = undefined
+    getStore() {
+      const frame = getFrame()
+      if (!frame?.has(this)) return this.#defaultValue
+      return frame.get(this)
     }
   }
-  let asyncIdCounter = 1
   const asyncHooks = {
     AsyncLocalStorage,
-    AsyncResource: class AsyncResource {
-      constructor(type) {
-        this.type = type
-        this.id = asyncIdCounter++
-      }
-      runInAsyncScope(fn, thisArg, ...args) {
-        return fn.apply(thisArg, args)
-      }
-      emitDestroy() {
-        return this
-      }
-      asyncId() {
-        return this.id
-      }
-      triggerAsyncId() {
-        return 0
-      }
-      bind(fn) {
-        return fn
-      }
-      static bind(fn) {
-        return fn
-      }
-    },
+    AsyncResource,
     createHook: () => ({ enable() { return this }, disable() { return this } }),
     executionAsyncId: () => 1,
     triggerAsyncId: () => 0,
@@ -8750,7 +8856,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let n = vm.new_object();
-    let natives: [(&str, u32, crate::object::NativeFn); 64] = [
+    let natives: [(&str, u32, crate::object::NativeFn); 66] = [
         ("isProxy", 1, is_proxy),
         ("watchStart", 4, super::netio::watch_start),
         ("watchClose", 1, super::netio::watch_close),
@@ -8812,6 +8918,8 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         ("vmRunInContext", 5, vm_run_in_context),
         ("vmContextGlobals", 0, vm_context_globals),
         ("testHarness", 0, native_test_harness),
+        ("asyncFrame", 0, native_async_frame),
+        ("setAsyncFrame", 1, native_set_async_frame),
         ("setModuleClass", 1, native_set_module_class),
         ("cjsCompile", 3, native_cjs_compile),
         ("dnsLookup", 1, dns_lookup),
@@ -9690,6 +9798,15 @@ fn native_test_harness(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
     Ok(Value::Bool(vm.test_harness))
 }
 
+fn native_async_frame(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
+    Ok(vm.async_frame.clone())
+}
+
+fn native_set_async_frame(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    vm.async_frame = arg(args, 0);
+    Ok(Value::Undefined)
+}
+
 fn vm_context_globals(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
     let names = crate::vm::CONTEXT_GLOBALS
         .iter()
@@ -9839,7 +9956,7 @@ fn raw_error_name(code: Option<i32>) -> &'static str {
         Some(6) => "EBADF",
         Some(4) => "EMFILE",
         Some(1921) => "ELOOP",
-        Some(87) => "EINVAL",
+        Some(87) | Some(4390) => "EINVAL",
         _ => "EIO",
     }
 }

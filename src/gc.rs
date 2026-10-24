@@ -247,7 +247,7 @@ fn obj_edges(o: &Obj, f: &mut dyn FnMut(Edge<'_>)) {
                             value_edge(v, f);
                         }
                     }
-                    IterState::ForIn(obj, items, _) => {
+                    IterState::ForIn(obj, items, _, _) => {
                         value_edge(obj, f);
                         for v in items {
                             value_edge(v, f);
@@ -274,8 +274,9 @@ fn obj_edges(o: &Obj, f: &mut dyn FnMut(Edge<'_>)) {
                     PromiseState::Fulfilled(v) | PromiseState::Rejected(v) => value_edge(v, f),
                     PromiseState::Pending => {}
                 }
-                for r in &p.reactions {
+                for (r, frame) in &p.reactions {
                     reaction_edges(r, f);
+                    value_edge(frame, f);
                 }
             }
         }

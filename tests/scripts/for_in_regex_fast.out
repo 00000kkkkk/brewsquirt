@@ -1,0 +1,27 @@
+x,y,z
+x,z
+p,q p,q,r
+own
+own,inherited
+own
+own,inherited
+own
+mine,shared
+mine
+k,leak
+k
+1,2,b,a
+0,1 0,1  
+true false true
+true 2 true 3 false 0
+true 2 false 0
+true
+false
+TypeError
+true false 2
+TypeError
+TypeError
+true false
+str,exec
+2001 233 110 needle 2017
+1000 -1 1006 100 needle e e

@@ -305,6 +305,11 @@ fn build_index(s: &str) -> StrIndex {
 pub fn str_index(s: &JsStr) -> Rc<StrIndex> {
     STR_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
+        if let Some((k, idx)) = cache.first() {
+            if JsStr::ptr_eq(k, s) {
+                return idx.clone();
+            }
+        }
         if let Some(pos) = cache.iter().position(|(k, _)| JsStr::ptr_eq(k, s)) {
             let entry = cache.remove(pos);
             let idx = entry.1.clone();
@@ -463,6 +468,9 @@ impl StrIndex {
 }
 
 pub fn len16_rc(s: &JsStr) -> usize {
+    if s.is_ascii() {
+        return s.len();
+    }
     if s.len() < INDEX_MIN {
         len16(s)
     } else {
@@ -471,6 +479,9 @@ pub fn len16_rc(s: &JsStr) -> usize {
 }
 
 pub fn byte_index_rc(s: &JsStr, unit: usize) -> usize {
+    if s.is_ascii() {
+        return unit.min(s.len());
+    }
     if s.len() < INDEX_MIN {
         crate::regexp::byte_index(s, unit)
     } else {
@@ -479,6 +490,9 @@ pub fn byte_index_rc(s: &JsStr, unit: usize) -> usize {
 }
 
 pub fn utf16_index_rc(s: &JsStr, byte: usize) -> usize {
+    if s.is_ascii() {
+        return byte;
+    }
     if s.len() < INDEX_MIN {
         crate::regexp::utf16_index(s, byte)
     } else {
@@ -487,6 +501,9 @@ pub fn utf16_index_rc(s: &JsStr, byte: usize) -> usize {
 }
 
 pub fn code_unit_at_rc(s: &JsStr, i: usize) -> Option<u16> {
+    if s.is_ascii() {
+        return s.as_bytes().get(i).map(|b| *b as u16);
+    }
     if s.len() < INDEX_MIN {
         code_unit_at(s, i)
     } else {
@@ -495,6 +512,9 @@ pub fn code_unit_at_rc(s: &JsStr, i: usize) -> Option<u16> {
 }
 
 pub fn char_at16_rc(s: &JsStr, i: usize) -> Option<String> {
+    if s.is_ascii() {
+        return s.as_bytes().get(i).map(|b| (*b as char).to_string());
+    }
     if s.len() < INDEX_MIN {
         char_at16(s, i)
     } else {
@@ -503,6 +523,10 @@ pub fn char_at16_rc(s: &JsStr, i: usize) -> Option<String> {
 }
 
 pub fn slice16_rc(s: &JsStr, start: usize, end: usize) -> String {
+    if s.is_ascii() {
+        let e = end.min(s.len());
+        return s[start.min(e)..e].to_string();
+    }
     if s.len() < INDEX_MIN {
         slice16(s, start, end)
     } else {
@@ -511,6 +535,12 @@ pub fn slice16_rc(s: &JsStr, start: usize, end: usize) -> String {
 }
 
 pub fn index_of16_rc(s: &JsStr, needle: &str, from: usize) -> Option<usize> {
+    if s.is_ascii() {
+        if from > s.len() {
+            return needle.is_empty().then_some(s.len());
+        }
+        return s[from..].find(needle).map(|i| i + from);
+    }
     if s.len() < INDEX_MIN || needle.chars().any(is_lone) {
         index_of16(s, needle, from)
     } else {

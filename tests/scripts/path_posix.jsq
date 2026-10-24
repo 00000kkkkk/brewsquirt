@@ -1,0 +1,25 @@
+import path from "node:path"
+const p = path.posix
+const cases = [
+  ["dirname", "/_app"], ["dirname", "/a/b"], ["dirname", "a/b/"], ["dirname", "//x"], ["dirname", "a"], ["dirname", "/"], ["dirname", ""], ["dirname", "C:\\a\\b"],
+  ["basename", "/x/y/"], ["basename", "a.js", ".js"], ["basename", "/a/b.js", "b.js"], ["basename", "x\\y"], ["basename", "a.tar.gz", ".gz"], ["basename", "/"],
+  ["extname", "a/.b"], ["extname", "a.b.c"], ["extname", ".."], ["extname", "a."], ["extname", ".bashrc"], ["extname", "a\\b.c"],
+  ["normalize", "/a/../../b"], ["normalize", "a/../.."], ["normalize", "./"], ["normalize", "a//b/./c/"], ["normalize", ""], ["normalize", "//a"], ["normalize", "../a/.."],
+  ["resolve", "/x", "y", "../z"], ["resolve", "/a", "/b", "c"],
+  ["join", "/", "_app"], ["join", "a", "", "b"], ["join", "", ""], ["join", "a/", "/b/"], ["join", "..", "../x"],
+  ["relative", "/a/b", "/a/b/c/d"], ["relative", "/a/b/c", "/a/d"], ["relative", "/a", "/a"], ["relative", "/a/b", "/"], ["relative", "/", "/x"],
+  ["isAbsolute", "/x"], ["isAbsolute", "x"], ["isAbsolute", ""],
+  ["parse", "/x/y.z"], ["parse", "/"], ["parse", "a/b"], ["parse", ".bashrc"], ["parse", "/a/.."], ["parse", "a.b."], ["parse", "/home/user/dir/file.txt"],
+  ["format", { root: "/", dir: "/a", base: "b.txt" }], ["format", { name: "x", ext: "js" }], ["format", { root: "/", base: "f" }],
+  ["toNamespacedPath", "/a/b"],
+]
+for (const [fn, ...args] of cases) {
+  let out
+  try {
+    out = p[fn](...args)
+  } catch (e) {
+    out = e.code
+  }
+  const shown = out
+  console.log(fn, JSON.stringify(args), JSON.stringify(shown))
+}

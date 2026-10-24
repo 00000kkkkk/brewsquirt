@@ -13,24 +13,28 @@ pub struct SocketEntry {
     pub cmd: Sender<SocketCmd>,
     pub handler: Value,
     pub refed: bool,
+    pub frame: Value,
 }
 
 pub struct NetServerEntry {
     pub handler: Value,
     pub handle: ServerHandle,
     pub refed: bool,
+    pub frame: Value,
 }
 
 pub struct ChildEntry {
     pub cmd: Sender<ChildCmd>,
     pub handler: Value,
     pub refed: bool,
+    pub frame: Value,
 }
 
 pub struct WatchEntry {
     pub cmd: Sender<io::WatchCmd>,
     pub handler: Value,
     pub refed: bool,
+    pub frame: Value,
 }
 
 pub fn watch_start(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
@@ -57,6 +61,7 @@ pub fn watch_start(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             cmd,
             handler,
             refed: true,
+            frame: vm.async_frame.clone(),
         },
     );
     Ok(Value::Number(id as f64))
@@ -88,15 +93,18 @@ pub fn watch_ref(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 pub fn handle_watch(vm: &mut Vm, id: u64, event: io::WatchEvent) -> Result<(), Value> {
-    let Some(handler) = vm.io_watchers.get(&id).map(|e| e.handler.clone()) else {
+    let Some((handler, frame)) = vm
+        .io_watchers
+        .get(&id)
+        .map(|e| (e.handler.clone(), e.frame.clone()))
+    else {
         return Ok(());
     };
     let filename = match event.filename {
         Some(f) => Value::from(f),
         None => Value::Null,
     };
-    vm.call_value(&handler, Value::Undefined, &[event.kind.into(), filename])?;
-    Ok(())
+    call_handler(vm, &handler, &frame, &[event.kind.into(), filename])
 }
 
 fn id_arg(vm: &mut Vm, args: &[Value]) -> Result<u64, Value> {
@@ -222,6 +230,7 @@ pub fn net_connect(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             cmd,
             handler,
             refed: true,
+            frame: vm.async_frame.clone(),
         },
     );
     Ok(Value::Number(id as f64))
@@ -229,8 +238,10 @@ pub fn net_connect(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 
 pub fn net_attach(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let id = id_arg(vm, args)?;
+    let frame = vm.async_frame.clone();
     if let Some(e) = vm.io_sockets.get_mut(&id) {
         e.handler = arg(args, 1);
+        e.frame = frame;
     }
     Ok(Value::Undefined)
 }
@@ -314,6 +325,7 @@ pub fn net_listen(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             handler,
             handle,
             refed: true,
+            frame: vm.async_frame.clone(),
         },
     );
     Ok(vm.new_array(vec![
@@ -426,6 +438,7 @@ pub fn child_spawn(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
                     cmd,
                     handler,
                     refed: true,
+                    frame: vm.async_frame.clone(),
                 },
             );
             Ok(vm.new_array(vec![Value::Number(id as f64), Value::Number(pid as f64)]))
@@ -528,11 +541,14 @@ fn addr_values(addr: &SocketAddr) -> [Value; 2] {
     ]
 }
 
-fn call_handler(vm: &mut Vm, handler: &Value, args: &[Value]) -> Result<(), Value> {
-    if handler.is_callable() {
-        vm.call_value(handler, Value::Undefined, args)?;
+fn call_handler(vm: &mut Vm, handler: &Value, frame: &Value, args: &[Value]) -> Result<(), Value> {
+    if !handler.is_callable() {
+        return Ok(());
     }
-    Ok(())
+    let prev = std::mem::replace(&mut vm.async_frame, frame.clone());
+    let r = vm.call_value(handler, Value::Undefined, args);
+    vm.async_frame = prev;
+    r.map(|_| ())
 }
 
 pub fn handle_socket(vm: &mut Vm, id: u64, event: SocketEvent) -> Result<(), Value> {
@@ -540,6 +556,7 @@ pub fn handle_socket(vm: &mut Vm, id: u64, event: SocketEvent) -> Result<(), Val
         return Ok(());
     };
     let handler = entry.handler.clone();
+    let frame = entry.frame.clone();
     match event {
         SocketEvent::Connected {
             local,
@@ -549,23 +566,31 @@ pub fn handle_socket(vm: &mut Vm, id: u64, event: SocketEvent) -> Result<(), Val
             let [la, lp] = addr_values(&local);
             let [ra, rp] = addr_values(&remote);
             let alpn = alpn.map(Value::from).unwrap_or(Value::Bool(false));
-            call_handler(vm, &handler, &["connect".into(), la, lp, ra, rp, alpn])
+            call_handler(
+                vm,
+                &handler,
+                &frame,
+                &["connect".into(), la, lp, ra, rp, alpn],
+            )
         }
         SocketEvent::Data(bytes) => {
             let chunk = super::typed::new_uint8(vm, bytes);
-            call_handler(vm, &handler, &["data".into(), chunk])
+            call_handler(vm, &handler, &frame, &["data".into(), chunk])
         }
-        SocketEvent::End => call_handler(vm, &handler, &["end".into()]),
-        SocketEvent::Error { code, message } => {
-            call_handler(vm, &handler, &["error".into(), message.into(), code.into()])
-        }
+        SocketEvent::End => call_handler(vm, &handler, &frame, &["end".into()]),
+        SocketEvent::Error { code, message } => call_handler(
+            vm,
+            &handler,
+            &frame,
+            &["error".into(), message.into(), code.into()],
+        ),
         SocketEvent::Closed => {
             if let Some(e) = vm.io_sockets.remove(&id) {
                 if e.refed {
                     adjust_pending(vm, -1);
                 }
             }
-            call_handler(vm, &handler, &["close".into()])
+            call_handler(vm, &handler, &frame, &["close".into()])
         }
     }
 }
@@ -584,12 +609,14 @@ pub fn handle_accept(
         return Ok(());
     };
     let handler = entry.handler.clone();
+    let frame = entry.frame.clone();
     vm.io_sockets.insert(
         id,
         SocketEntry {
             cmd,
             handler: Value::Undefined,
             refed: true,
+            frame: frame.clone(),
         },
     );
     vm.io.pending += 1;
@@ -599,6 +626,7 @@ pub fn handle_accept(
     call_handler(
         vm,
         &handler,
+        &frame,
         &[Value::Number(id as f64), la, lp, ra, rp, alpn],
     )
 }
@@ -608,16 +636,19 @@ pub fn handle_child(vm: &mut Vm, id: u64, event: ChildEvent) -> Result<(), Value
         return Ok(());
     };
     let handler = entry.handler.clone();
+    let frame = entry.frame.clone();
     match event {
         ChildEvent::Stdout(bytes) => {
             let chunk = super::typed::new_uint8(vm, bytes);
-            call_handler(vm, &handler, &["stdout".into(), chunk])
+            call_handler(vm, &handler, &frame, &["stdout".into(), chunk])
         }
         ChildEvent::Stderr(bytes) => {
             let chunk = super::typed::new_uint8(vm, bytes);
-            call_handler(vm, &handler, &["stderr".into(), chunk])
+            call_handler(vm, &handler, &frame, &["stderr".into(), chunk])
         }
-        ChildEvent::Error(message) => call_handler(vm, &handler, &["error".into(), message.into()]),
+        ChildEvent::Error(message) => {
+            call_handler(vm, &handler, &frame, &["error".into(), message.into()])
+        }
         ChildEvent::Exit { code, signal } => {
             if let Some(e) = vm.io_children.remove(&id) {
                 if e.refed {
@@ -626,7 +657,7 @@ pub fn handle_child(vm: &mut Vm, id: u64, event: ChildEvent) -> Result<(), Value
             }
             let code = code.map(|c| Value::Number(c as f64)).unwrap_or(Value::Null);
             let signal = signal.map(Value::from).unwrap_or(Value::Null);
-            call_handler(vm, &handler, &["exit".into(), code, signal])
+            call_handler(vm, &handler, &frame, &["exit".into(), code, signal])
         }
     }
 }

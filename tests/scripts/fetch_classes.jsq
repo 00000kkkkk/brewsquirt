@@ -1,0 +1,34 @@
+const r = new Response(null, { status: 201, statusText: "Made", headers: { a: "1" } })
+console.log(r)
+console.log(Object.keys(r), Object.getOwnPropertyNames(r), r.ok, r.type)
+const q = new Request("http://a.b/c", { method: "post", body: "x", headers: { "x-k": "v" } })
+console.log(q)
+console.log(Object.keys(q), q.duplex, q.mode, q.credentials, q.cache, q.referrer, q.keepalive)
+class NextLike extends Request {
+  #u
+  constructor(input, init) {
+    super(input, init)
+    this.#u = "override:" + super.url
+  }
+  get url() {
+    return this.#u
+  }
+}
+const n = new NextLike("http://x.y/z")
+console.log(n.url, n.method, n instanceof Request)
+const body = new Response("payload", { headers: { a: "2" } })
+const c = body.clone()
+console.log(c.status, c.headers.get("a"), c.type, await c.text(), await body.text(), body.bodyUsed)
+console.log(Response.error().type, Response.error().status, Response.json({ a: 1 }).headers.get("content-type"))
+class MyRes extends Response {
+  get status() {
+    return 299
+  }
+}
+console.log(new MyRes("y").status, new MyRes("y").ok)
+console.log(JSON.stringify(Object.getOwnPropertyNames(Response.prototype).sort()))
+const ac = new AbortController()
+console.log(ac.signal)
+ac.abort()
+console.log({ nested: { signal: ac.signal } })
+console.log(new ReadableStream())

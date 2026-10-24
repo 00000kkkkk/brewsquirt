@@ -1,0 +1,17 @@
+undefined dflt other ""
+all=A1|A2 await=A emit-sync=A fs-cb=A fs-promise=A gen=A gen=A immediate=A interval=A microtask=A nested-after=B nested=B outside=- restored=A sleep=A sync=A then=A thenable=A tick=A timeout=A
+then-captured C
+registration D
+bind E snapshot F plain undefined
+resource G,1,2
+resource-bind H 0 undefined 0
+both I J
+exit undefined J
+after-other dflt
+enterWith K
+enterWith-timer K
+disabled undefined
+reenabled L
+thrown boom undefined
+http undefined|N
+fetch undefined|O

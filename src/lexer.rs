@@ -128,6 +128,20 @@ pub fn decode_entities(s: &str) -> String {
     out
 }
 
+fn regex_allowed_after(out: &[Token]) -> bool {
+    let n = out.len();
+    if n >= 2
+        && matches!(out[n - 1].tok, Tok::Ident(_))
+        && matches!(
+            out[n - 2].tok,
+            Tok::Punct(P::Dot) | Tok::Punct(P::QuestionDot)
+        )
+    {
+        return false;
+    }
+    regex_allowed(out.last().map(|t| &t.tok))
+}
+
 fn regex_allowed(prev: Option<&Tok>) -> bool {
     match prev {
         None => true,
@@ -420,7 +434,7 @@ impl<'a> Lexer<'a> {
             let regex_ok = c == '/'
                 && match forced {
                     Some(f) => f,
-                    None => regex_allowed(out.last().map(|t| &t.tok)),
+                    None => regex_allowed_after(out),
                 };
             let tok = if regex_ok {
                 let save = (self.pos, self.line, self.col);
@@ -479,7 +493,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn jsx_start(&self, out: &[Token]) -> bool {
-        if !regex_allowed(out.last().map(|t| &t.tok)) {
+        if !regex_allowed_after(out) {
             return false;
         }
         if let [.., before, last] = out {

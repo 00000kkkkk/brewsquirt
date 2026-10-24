@@ -1042,10 +1042,6 @@ const RegExpStringIteratorPrototype = Object.create(IteratorPrototype, {
 const STATE = Symbol("regexp iterator state")
 
 defineAll(RegExpProto, {
-  test(S) {
-    const R = requireObj(this, "test")
-    return regExpExec(R, toStr(S)) !== null
-  },
   [Symbol.match](string) {
     const rx = requireObj(this, "[Symbol.match]")
     const S = toStr(string)

@@ -8,171 +8,10 @@ type R = Result<Value, Value>;
 
 const NATIVE_SEP: char = std::path::MAIN_SEPARATOR;
 
-fn is_sep(c: char, sep: char) -> bool {
-    c == '/' || (sep == '\\' && c == '\\')
-}
-
-fn drive_root(p: &str, sep: char) -> (String, &str) {
-    if sep == '\\' {
-        let b = p.as_bytes();
-        if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
-            let rest = &p[2..];
-            if rest.starts_with(['/', '\\']) {
-                return (format!("{}{}", &p[..2], sep), &rest[1..]);
-            }
-            return (p[..2].to_string(), rest);
-        }
-    }
-    if p.starts_with(|c| is_sep(c, sep)) {
-        return (sep.to_string(), &p[1..]);
-    }
-    (String::new(), p)
-}
-
-fn normalize_with(p: &str, sep: char) -> String {
-    if p.is_empty() {
-        return ".".to_string();
-    }
-    let trailing = p.ends_with(|c| is_sep(c, sep)) && p.len() > 1;
-    let (root, rest) = drive_root(p, sep);
-    let absolute = root.ends_with(sep);
-    let mut parts: Vec<&str> = Vec::new();
-    for seg in rest.split(|c| is_sep(c, sep)) {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                if parts.last().is_some_and(|l| *l != "..") {
-                    parts.pop();
-                } else if !absolute {
-                    parts.push("..");
-                }
-            }
-            s => parts.push(s),
-        }
-    }
-    let mut out = root.clone();
-    out.push_str(&parts.join(&sep.to_string()));
-    if out.is_empty() {
-        out.push('.');
-    }
-    if trailing && !out.ends_with(sep) {
-        out.push(sep);
-    }
-    out
-}
-
-fn is_absolute_with(p: &str, sep: char) -> bool {
-    let (root, _) = drive_root(p, sep);
-    root.ends_with(sep)
-}
-
 fn cwd_string() -> String {
     std::env::current_dir()
         .map(|d| d.display().to_string())
         .unwrap_or_else(|_| ".".to_string())
-}
-
-fn resolve_with(parts: &[String], sep: char) -> String {
-    let mut acc = String::new();
-    for p in parts.iter().rev() {
-        if p.is_empty() {
-            continue;
-        }
-        acc = if acc.is_empty() {
-            p.clone()
-        } else {
-            format!("{p}{sep}{acc}")
-        };
-        if is_absolute_with(&acc, sep) {
-            break;
-        }
-    }
-    if !is_absolute_with(&acc, sep) {
-        let cwd = if sep == NATIVE_SEP {
-            cwd_string()
-        } else {
-            cwd_string().replace('\\', "/")
-        };
-        acc = if acc.is_empty() {
-            cwd
-        } else {
-            format!("{cwd}{sep}{acc}")
-        };
-    }
-    let n = normalize_with(&acc, sep);
-    if n.len() > 1 && n.ends_with(sep) && !n.ends_with(&format!(":{sep}")) {
-        n[..n.len() - 1].to_string()
-    } else {
-        n
-    }
-}
-
-fn split_last(p: &str, sep: char) -> (&str, &str) {
-    let trimmed = p.trim_end_matches(|c| is_sep(c, sep));
-    if trimmed.is_empty() {
-        return (if p.is_empty() { "" } else { &p[..1] }, "");
-    }
-    match trimmed.rfind(|c| is_sep(c, sep)) {
-        Some(i) => (&trimmed[..i], &trimmed[i + 1..]),
-        None => ("", trimmed),
-    }
-}
-
-fn dirname_with(p: &str, sep: char) -> String {
-    let (root, rest) = drive_root(p, sep);
-    if rest.trim_matches(|c| is_sep(c, sep)).is_empty() {
-        return if root.is_empty() {
-            ".".to_string()
-        } else {
-            root
-        };
-    }
-    let (dir, _) = split_last(p, sep);
-    if dir.is_empty() {
-        if root.is_empty() {
-            ".".to_string()
-        } else {
-            root
-        }
-    } else if dir.len() < root.len() {
-        root
-    } else {
-        dir.to_string()
-    }
-}
-
-fn basename_with(p: &str, sep: char) -> String {
-    let (_, rest) = drive_root(p, sep);
-    let (_, base) = split_last(rest, sep);
-    base.to_string()
-}
-
-fn extname_of(base: &str) -> String {
-    match base.rfind('.') {
-        Some(0) | None => String::new(),
-        Some(i) => base[i..].to_string(),
-    }
-}
-
-fn relative_with(from: &str, to: &str, sep: char) -> String {
-    let from = resolve_with(&[from.to_string()], sep);
-    let to = resolve_with(&[to.to_string()], sep);
-    let fold = |s: &str| {
-        if sep == '\\' {
-            s.to_lowercase()
-        } else {
-            s.to_string()
-        }
-    };
-    let fa: Vec<&str> = from.split(sep).filter(|s| !s.is_empty()).collect();
-    let ta: Vec<&str> = to.split(sep).filter(|s| !s.is_empty()).collect();
-    let mut i = 0;
-    while i < fa.len() && i < ta.len() && fold(fa[i]) == fold(ta[i]) {
-        i += 1;
-    }
-    let mut parts: Vec<&str> = vec![".."; fa.len() - i];
-    parts.extend(&ta[i..]);
-    parts.join(&sep.to_string())
 }
 
 fn strings(vm: &mut Vm, args: &[Value]) -> Result<Vec<String>, Value> {
@@ -202,133 +41,193 @@ fn sep_of(this: &Value) -> char {
     }
 }
 
+fn posix_cwd() -> String {
+    let cwd = cwd_string();
+    if cfg!(windows) {
+        let unix = cwd.replace('\\', "/");
+        match unix.find('/') {
+            Some(i) => unix[i..].to_string(),
+            None => unix,
+        }
+    } else {
+        cwd
+    }
+}
+
+fn win_resolve(parts: &[String]) -> String {
+    super::winpath::resolve(parts, &cwd_string(), |drive| {
+        std::env::var(format!("={drive}")).ok()
+    })
+}
+
 fn p_join(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let sep = sep_of(&this);
     let parts = strings(vm, args)?;
-    let joined = parts
-        .iter()
-        .filter(|p| !p.is_empty())
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(&sep.to_string());
-    Ok(normalize_with(&joined, sep).into())
+    Ok(if sep_of(&this) == '\\' {
+        super::winpath::join(&parts)
+    } else {
+        super::winpath::posix_join(&parts)
+    }
+    .into())
 }
 
 fn p_resolve(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let sep = sep_of(&this);
     let parts = strings(vm, args)?;
-    Ok(resolve_with(&parts, sep).into())
+    Ok(if sep_of(&this) == '\\' {
+        win_resolve(&parts)
+    } else {
+        super::winpath::posix_resolve(&parts, &posix_cwd())
+    }
+    .into())
 }
 
 fn p_normalize(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let sep = sep_of(&this);
-    let p = strings(vm, &args[..args.len().min(1)])?;
-    Ok(normalize_with(p.first().map(String::as_str).unwrap_or(""), sep).into())
+    let p = strings(vm, &[arg(args, 0)])?;
+    Ok(if sep_of(&this) == '\\' {
+        super::winpath::normalize(&p[0])
+    } else {
+        super::winpath::posix_normalize(&p[0])
+    }
+    .into())
 }
 
 fn p_dirname(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let sep = sep_of(&this);
     let p = strings(vm, &[arg(args, 0)])?;
-    Ok(dirname_with(&p[0], sep).into())
+    Ok(if sep_of(&this) == '\\' {
+        super::winpath::dirname(&p[0])
+    } else {
+        super::winpath::posix_dirname(&p[0])
+    }
+    .into())
 }
 
 fn p_basename(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let sep = sep_of(&this);
     let p = strings(vm, &[arg(args, 0)])?;
-    let mut base = basename_with(&p[0], sep);
-    if let Value::Str(ext) = arg(args, 1) {
-        if !ext.is_empty() && base.ends_with(&*ext) && base.len() > ext.len() {
-            base.truncate(base.len() - ext.len());
+    let suffix = match arg(args, 1) {
+        Value::Undefined => None,
+        Value::Str(s) => Some(s.to_string()),
+        other => {
+            return Err(vm.type_error(format!(
+                "The \"suffix\" argument must be of type string. Received {}",
+                crate::inspect::inspect_plain(&other)
+            )));
         }
+    };
+    Ok(if sep_of(&this) == '\\' {
+        super::winpath::basename(&p[0], suffix.as_deref())
+    } else {
+        super::winpath::posix_basename(&p[0], suffix.as_deref())
     }
-    Ok(base.into())
+    .into())
 }
 
 fn p_extname(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let sep = sep_of(&this);
     let p = strings(vm, &[arg(args, 0)])?;
-    Ok(extname_of(&basename_with(&p[0], sep)).into())
+    Ok(if sep_of(&this) == '\\' {
+        super::winpath::extname(&p[0])
+    } else {
+        super::winpath::posix_extname(&p[0])
+    }
+    .into())
 }
 
 fn p_is_absolute(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let sep = sep_of(&this);
     let p = strings(vm, &[arg(args, 0)])?;
-    Ok(Value::Bool(is_absolute_with(&p[0], sep)))
+    Ok(Value::Bool(if sep_of(&this) == '\\' {
+        super::winpath::is_absolute(&p[0])
+    } else {
+        p[0].starts_with('/')
+    }))
 }
 
 fn p_to_namespaced(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let sep = sep_of(&this);
     let input = arg(args, 0);
-    if !matches!(input, Value::Str(_)) {
+    let Value::Str(raw) = &input else {
+        return Ok(input);
+    };
+    if sep_of(&this) != '\\' || raw.is_empty() {
         return Ok(input);
     }
-    let p = strings(vm, &[input])?;
-    let path = p[0].as_str();
-    if sep != '\\' || path.is_empty() || !is_absolute_with(path, sep) || path.starts_with("\\\\?\\")
-    {
+    let path = raw.to_string();
+    let resolved = win_resolve(std::slice::from_ref(&path));
+    let chars: Vec<char> = resolved.chars().collect();
+    if chars.len() <= 2 {
         return Ok(path.into());
     }
-    if let Some(rest) = path.strip_prefix("\\\\") {
-        return Ok(format!("\\\\?\\UNC\\{rest}").into());
+    if chars[0] == '\\' {
+        if chars[1] == '\\' && chars[2] != '?' && chars[2] != '.' {
+            return Ok(format!("\\\\?\\UNC\\{}", &resolved[2..]).into());
+        }
+    } else if chars[0].is_ascii_alphabetic() && chars[1] == ':' && chars[2] == '\\' {
+        return Ok(format!("\\\\?\\{resolved}").into());
     }
-    Ok(format!("\\\\?\\{path}").into())
+    let _ = vm;
+    Ok(path.into())
 }
 
 fn p_relative(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let sep = sep_of(&this);
     let p = strings(vm, &[arg(args, 0), arg(args, 1)])?;
-    Ok(relative_with(&p[0], &p[1], sep).into())
+    Ok(if sep_of(&this) == '\\' {
+        super::winpath::relative(&p[0], &p[1], |x| win_resolve(&[x.to_string()]))
+    } else {
+        super::winpath::posix_relative(&p[0], &p[1], &posix_cwd())
+    }
+    .into())
 }
 
 fn p_parse(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let sep = sep_of(&this);
     let p = strings(vm, &[arg(args, 0)])?;
-    let path = &p[0];
-    let (root, _) = drive_root(path, sep);
-    let base = basename_with(path, sep);
-    let ext = extname_of(&base);
-    let name = base[..base.len() - ext.len()].to_string();
-    let dir = if base.is_empty() {
-        root.clone()
+    let parsed = if sep_of(&this) == '\\' {
+        super::winpath::parse(&p[0])
     } else {
-        let d = dirname_with(path, sep);
-        if d == "." && !path.starts_with('.') {
-            String::new()
-        } else {
-            d
-        }
+        super::winpath::posix_parse(&p[0])
     };
     let o = vm.new_object();
-    o.set_own("root", root.into());
-    o.set_own("dir", dir.into());
-    o.set_own("base", base.into());
-    o.set_own("ext", ext.into());
-    o.set_own("name", name.into());
+    o.set_own("root", parsed.root.into());
+    o.set_own("dir", parsed.dir.into());
+    o.set_own("base", parsed.base.into());
+    o.set_own("ext", parsed.ext.into());
+    o.set_own("name", parsed.name.into());
     Ok(Value::Object(o))
 }
 
 fn p_format(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let sep = sep_of(&this);
     let o = arg(args, 0);
+    if !o.is_object() {
+        return Err(vm.type_error(format!(
+            "The \"pathObject\" argument must be of type object. Received {}",
+            crate::inspect::inspect_plain(&o)
+        )));
+    }
     let get = |vm: &mut Vm, k: &str| -> Result<String, Value> {
         match vm.get_prop(&o, k)? {
             Value::Undefined | Value::Null => Ok(String::new()),
             v => Ok(vm.to_string(&v)?.to_string()),
         }
     };
-    let dir = get(vm, "dir")?;
     let root = get(vm, "root")?;
+    let dir_raw = get(vm, "dir")?;
+    let dir = if dir_raw.is_empty() {
+        root.clone()
+    } else {
+        dir_raw
+    };
     let mut base = get(vm, "base")?;
     if base.is_empty() {
-        base = format!("{}{}", get(vm, "name")?, get(vm, "ext")?);
+        let ext = get(vm, "ext")?;
+        let ext = if ext.is_empty() || ext.starts_with('.') {
+            ext
+        } else {
+            format!(".{ext}")
+        };
+        base = format!("{}{}", get(vm, "name")?, ext);
     }
-    let head = if dir.is_empty() { root.clone() } else { dir };
-    Ok(if head.is_empty() {
+    Ok(if dir.is_empty() {
         base
-    } else if head == root || head.ends_with(sep) {
-        format!("{head}{base}")
+    } else if dir == root {
+        format!("{dir}{base}")
     } else {
-        format!("{head}{sep}{base}")
+        format!("{dir}{sep}{base}")
     }
     .into())
 }
