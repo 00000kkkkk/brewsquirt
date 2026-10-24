@@ -1,0 +1,13 @@
+true false undefined
+ERR_INVALID_ARG_TYPE The "obj" argument must be an instance of Blob. Received type string ('x')
+ERR_MISSING_ARGS
+[ 'parse', 'canParse', 'createObjectURL', 'revokeObjectURL' ] function createObjectURL
+200 OK text/plain 6 true héllo
+undefined
+revoked TypeError fetch failed
+200 "text/plain" 2 hi
+200 "text/plain;charset=US-ASCII" 13 Hello, World!
+200 "text/plain;charset=utf-8" 3 ✓
+200 "application/json" 7 {"a":1}
+200 "text/html;charset=utf-8" 9 <b>hi</b>
+bad TypeError fetch failed

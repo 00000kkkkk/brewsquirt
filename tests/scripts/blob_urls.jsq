@@ -1,0 +1,20 @@
+import { Blob, resolveObjectURL } from "node:buffer"
+const b = new Blob(["héllo"], { type: "Text/Plain" })
+const u = URL.createObjectURL(b)
+console.log(/^blob:nodedata:[0-9a-f-]{36}$/.test(u), resolveObjectURL(u) === b, resolveObjectURL("blob:nodedata:none"))
+try { URL.createObjectURL("x") } catch (e) { console.log(e.code, e.message) }
+try { URL.revokeObjectURL() } catch (e) { console.log(e.code) }
+console.log(Object.keys(URL), typeof URL.createObjectURL, URL.createObjectURL.name)
+;(async () => {
+  const r = await fetch(u)
+  console.log(r.status, r.statusText, r.headers.get("content-type"), r.headers.get("content-length"), r.url === u, await r.text())
+  URL.revokeObjectURL(u)
+  console.log(resolveObjectURL(u))
+  await fetch(u).catch((e) => console.log("revoked", e.name, e.message))
+  for (const d of ["data:text/plain;base64,aGk=", "data:,Hello%2C%20World%21", "data:;charset=utf-8,%E2%9C%93", "data:application/JSON,{\"a\":1}", "data:text/html;charset=utf-8;base64,PGI+aGk8L2I+"]) {
+    const res = await fetch(d)
+    const bytes = new Uint8Array(await res.arrayBuffer())
+    console.log(res.status, JSON.stringify(res.headers.get("content-type")), bytes.length, Buffer.from(bytes).toString("utf8").slice(0, 20))
+  }
+  await fetch("data:nocomma").catch((e) => console.log("bad", e.name, e.message))
+})()

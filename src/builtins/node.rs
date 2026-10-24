@@ -494,7 +494,7 @@ const NODE_SRC: &str = r##"
       return true
     },
     transcode: (source, fromEnc, toEnc) => Buffer.from(stringFromBytes(source, fromEnc), toEnc),
-    resolveObjectURL: () => undefined,
+    resolveObjectURL: (id) => URL[Symbol.for("jsq.resolveObjectURL")](id),
     get Blob() {
       return globalThis.Blob
     },

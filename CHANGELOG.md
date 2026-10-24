@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alternative names, authority information access, validity dates, fingerprints, serial number,
   extended key usage and public key, with `checkHost`, `checkIP`, `checkEmail`, `checkIssued`,
   `checkPrivateKey`, `verify` and `toLegacyObject`, in the formats Node prints.
+- `URL.createObjectURL`, `URL.revokeObjectURL` and `buffer.resolveObjectURL`, and `fetch` reads
+  `blob:` URLs made by them as well as `data:` URLs, with the content types Node reports.
 - TLS client certificates: `tls.connect`, `https.request` and `https.Agent` take `cert`, `key`
   and `passphrase`, including passphrase-encrypted PKCS#8 keys. `tls.createServer` and
   `https.createServer` take `requestCert`, `ca` and `rejectUnauthorized` to require and verify

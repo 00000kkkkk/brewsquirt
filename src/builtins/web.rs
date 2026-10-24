@@ -979,19 +979,19 @@ const WEB_SRC: &str = r##"
     toJSON() {
       return this.href
     }
+    static parse(input, base) {
+      try {
+        return new URL(input, base)
+      } catch {
+        return null
+      }
+    }
     static canParse(input, base) {
       try {
         new URL(input, base)
         return true
       } catch {
         return false
-      }
-    }
-    static parse(input, base) {
-      try {
-        return new URL(input, base)
-      } catch {
-        return null
       }
     }
   }
@@ -2325,9 +2325,113 @@ const WEB_SRC: &str = r##"
     }
   }
 
+  const blobUrls = new Map()
+  const describeArg = (v) => {
+    if (v === null) return "null"
+    if (v === undefined) return "undefined"
+    if (typeof v === "function") return `function ${v.name}`
+    if (typeof v === "object") return v.constructor?.name ? `an instance of ${v.constructor.name}` : "an instance of Object"
+    const shown = typeof v === "string" ? `'${v.length > 28 ? v.slice(0, 25) + "..." : v}'` : String(v)
+    return `type ${typeof v} (${shown})`
+  }
+  Object.defineProperties(URL, {
+    createObjectURL: {
+      value: function createObjectURL(obj) {
+        if (!(obj instanceof Blob)) {
+          const e = new TypeError(`The "obj" argument must be an instance of Blob. Received ${describeArg(obj)}`)
+          e.code = "ERR_INVALID_ARG_TYPE"
+          throw e
+        }
+        const id = `blob:nodedata:${globalThis.crypto.randomUUID()}`
+        blobUrls.set(id, obj)
+        return id
+      },
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    revokeObjectURL: {
+      value: function revokeObjectURL(url) {
+        if (arguments.length === 0) {
+          const e = new TypeError('The "url" argument must be specified')
+          e.code = "ERR_MISSING_ARGS"
+          throw e
+        }
+        blobUrls.delete(String(url))
+      },
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    },
+    [Symbol.for("jsq.resolveObjectURL")]: {
+      value: (url) => {
+        const blob = blobUrls.get(String(url))
+        return blob === undefined ? undefined : blob.slice(0, blob.size, blob.type)
+      },
+    },
+  })
+  for (const name of ["parse", "canParse"]) Object.defineProperty(URL, name, { enumerable: true })
+  const percentDecode = (s) => {
+    const out = []
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i)
+      if (c === 37 && /^[0-9a-fA-F]{2}$/.test(s.slice(i + 1, i + 3))) {
+        out.push(parseInt(s.slice(i + 1, i + 3), 16))
+        i += 2
+      } else if (c < 128) {
+        out.push(c)
+      } else {
+        for (const b of encoder.encode(s[i])) out.push(b)
+      }
+    }
+    return new Uint8Array(out)
+  }
+  const dataUrlResponse = (href) => {
+    const rest = href.slice(5)
+    const comma = rest.indexOf(",")
+    if (comma < 0) throw new TypeError("fetch failed", { cause: new Error("invalid data: URL") })
+    let mime = rest.slice(0, comma).replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, "")
+    let body = percentDecode(rest.slice(comma + 1))
+    const b64 = /;[\t\n\f\r ]*base64$/i.exec(mime)
+    if (b64) {
+      mime = mime.slice(0, b64.index)
+      const text = String.fromCharCode(...body).replace(/[\t\n\f\r ]+/g, "")
+      try {
+        body = Uint8Array.from(atob(text), (ch) => ch.charCodeAt(0))
+      } catch {
+        throw new TypeError("fetch failed", { cause: new Error("invalid base64 in data: URL") })
+      }
+    }
+    if (mime.startsWith(";")) mime = "text/plain" + mime
+    const [essence, ...params] = mime.split(";")
+    const valid = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+\/[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(essence.trim())
+    const contentType = valid ? [essence.trim().toLowerCase(), ...params.map((p) => p.trim())].join(";") : "text/plain;charset=US-ASCII"
+    internal = true
+    try {
+      return new Response(body, { status: 200, statusText: "OK", headers: { "content-type": contentType }, url: href, redirected: false })
+    } finally {
+      internal = false
+    }
+  }
+
   async function fetch(input, init = {}) {
     const req = new Request(input, init)
     const url = new URL(req.url)
+    if (url.protocol === "data:") {
+      req.signal.throwIfAborted()
+      return dataUrlResponse(url.href)
+    }
+    if (url.protocol === "blob:") {
+      req.signal.throwIfAborted()
+      const blob = blobUrls.get(url.href)
+      if (!blob || req.method !== "GET") throw new TypeError("fetch failed", { cause: new Error(blob ? "invalid method" : "invalid blob: URL") })
+      internal = true
+      try {
+        return new Response(blob, { status: 200, statusText: "OK", headers: { "content-type": blob.type, "content-length": String(blob.size) }, url: url.href, redirected: false })
+      } finally {
+        internal = false
+      }
+    }
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       throw new TypeError("fetch failed", { cause: new Error(`unsupported protocol ${url.protocol}`) })
     }
