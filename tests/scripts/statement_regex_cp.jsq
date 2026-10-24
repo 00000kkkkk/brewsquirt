@@ -1,0 +1,27 @@
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
+
+const lines = ["a", " b", "\tc", "  "]
+let last = 0
+for (let i = 0; i < lines.length; i++) /[^ \t]/.exec(lines[i]) && (last = i)
+let n = 0
+while (n < 2) /x/.test("x") && n++
+if (n === 2) /y/g.lastIndex = 0
+for (const word of ["ab", "cd"]) /b/.test(word) && (last += 10)
+const host = { if(x) { return x * 2 }, while: 6 }
+console.log(last, n, host.if(4) / 2 / 1, host.while / 3 / 1, (8) / 2 / 2, Math.max(9, 3) / 3)
+
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "jsq-cp-"))
+fs.writeFileSync(path.join(dir, "a.txt"), "x")
+fs.cpSync(path.join(dir, "a.txt"), path.join(dir, "deep", "er", "a.txt"))
+await fs.promises.cp(path.join(dir, "a.txt"), path.join(dir, "p", "q", "b.txt"))
+fs.mkdirSync(path.join(dir, "src", "sub"), { recursive: true })
+fs.writeFileSync(path.join(dir, "src", "sub", "c.txt"), "y")
+fs.cpSync(path.join(dir, "src"), path.join(dir, "out", "nested", "dst"), { recursive: true })
+console.log(
+  fs.readFileSync(path.join(dir, "deep", "er", "a.txt"), "utf8"),
+  fs.existsSync(path.join(dir, "p", "q", "b.txt")),
+  fs.readFileSync(path.join(dir, "out", "nested", "dst", "sub", "c.txt"), "utf8"),
+)
+fs.rmSync(dir, { recursive: true, force: true })

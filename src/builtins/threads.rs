@@ -874,6 +874,34 @@ fn close_local(vm: &mut Vm, id: u64, notify: bool) -> Result<(), Value> {
     Ok(())
 }
 
+fn close_owned_ports(vm: &mut Vm) {
+    let local: Vec<u64> = vm.threads.ports.keys().copied().collect();
+    for id in local {
+        let _ = close_local(vm, id, true);
+    }
+    let uid = vm.threads.uid;
+    let mut ports = PORTS.lock().unwrap_or_else(|e| e.into_inner());
+    let owned: Vec<u64> = ports
+        .iter()
+        .filter(|(_, st)| !st.closed && st.owner.as_ref().is_some_and(|(u, _)| *u == uid))
+        .map(|(id, _)| *id)
+        .collect();
+    for id in owned {
+        let peer = ports.get(&id).map(|s| s.peer);
+        if let Some(st) = ports.get_mut(&id) {
+            st.closed = true;
+            st.owner = None;
+        }
+        if let Some(peer) = peer {
+            if let Some(st) = ports.get(&peer) {
+                if !st.closed {
+                    let _ = send_to(&st.owner, peer, PortEvent::Close);
+                }
+            }
+        }
+    }
+}
+
 fn port_arg(vm: &mut Vm, args: &[Value]) -> Result<u64, Value> {
     Ok(vm.to_number(&arg(args, 0))? as u64)
 }
@@ -1213,6 +1241,7 @@ fn run_worker(
     if let Some(port) = port {
         let _ = close_local(&mut vm, port, true);
     }
+    close_owned_ports(&mut vm);
     drop(vm);
     WORKERS
         .lock()

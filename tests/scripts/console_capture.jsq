@@ -1,0 +1,33 @@
+const orig = process.stdout.write
+let captured = ""
+process.stdout.write = function (chunk) {
+  captured += chunk
+  return true
+}
+console.log("hidden", 1, { a: 1 })
+console.info("info too")
+console.group("group")
+console.log("inside")
+console.groupEnd()
+process.stdout.write = orig
+const origErr = process.stderr.write
+let errCaptured = ""
+process.stderr.write = function (chunk) {
+  errCaptured += chunk
+  return true
+}
+console.error("err hidden")
+console.warn("warn hidden")
+console.assert(false, "assert hidden")
+process.stderr.write = origErr
+console.log("captured:", JSON.stringify(captured))
+console.log("stderr captured:", JSON.stringify(errCaptured))
+const lines = []
+const wrapped = process.stdout.write
+process.stdout.write = function (chunk, ...rest) {
+  lines.push(String(chunk).trim())
+  return wrapped.call(this, chunk, ...rest)
+}
+console.log("passes through")
+process.stdout.write = wrapped
+console.log("wrapper saw:", lines.join("|"))

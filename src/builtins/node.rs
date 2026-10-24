@@ -3766,6 +3766,7 @@ const NODE_SRC: &str = r##"
     w.finished = true
     const fin = (err) => {
       if (err) return stream.destroy(err)
+      stream.emit("prefinish")
       stream.writableFinished = true
       stream.emit("finish")
       const r = stream[kRead]
@@ -4039,12 +4040,165 @@ const NODE_SRC: &str = r##"
     }
     return this
   }
-  for (const stdio of [globalThis.process?.stdout, globalThis.process?.stderr]) {
+  const TERM_ENVS = { eterm: 4, cons25: 4, console: 4, cygwin: 4, dtterm: 4, gnome: 4, hurd: 4, jfbterm: 4, konsole: 4, kterm: 4, mlterm: 4, mosh: 24, putty: 4, st: 4, "rxvt-unicode-24bit": 24, terminator: 24, "xterm-kitty": 24 }
+  const CI_ENVS = [["APPVEYOR", 8], ["BUILDKITE", 8], ["CIRCLECI", 24], ["DRONE", 8], ["GITEA_ACTIONS", 24], ["GITHUB_ACTIONS", 24], ["GITLAB_CI", 8], ["TRAVIS", 8]]
+  const TERM_ENV_PATTERNS = [/ansi/, /color/, /linux/, /direct/, /^con[0-9]*x[0-9]/, /^rxvt/, /^screen/, /^xterm/, /^vt100/, /^vt220/]
+  const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k)
+  function getColorDepth(env = process.env) {
+    if (env.FORCE_COLOR !== undefined) {
+      switch (env.FORCE_COLOR) {
+        case "":
+        case "1":
+        case "true":
+          return 4
+        case "2":
+          return 8
+        case "3":
+          return 24
+        default:
+          return 1
+      }
+    }
+    if (env.NODE_DISABLE_COLORS !== undefined || env.NO_COLOR !== undefined || env.TERM === "dumb") return 1
+    if (process.platform === "win32") {
+      const release = String(process.getBuiltinModule("node:os").release()).split(".")
+      if (+release[0] >= 10) {
+        const build = +release[2]
+        if (build >= 14931) return 24
+        if (build >= 10586) return 8
+      }
+      return 4
+    }
+    if (env.TMUX) return 24
+    if (own(env, "TF_BUILD") && own(env, "AGENT_NAME")) return 4
+    if (own(env, "CI")) {
+      for (const [name, colors] of CI_ENVS) if (own(env, name)) return colors
+      if (env.CI_NAME === "codeship") return 8
+      return 1
+    }
+    if ("TEAMCITY_VERSION" in env) return /^(9\.(0*[1-9]\d*)\.|\d{2,}\.)/.test(env.TEAMCITY_VERSION) ? 4 : 1
+    switch (env.TERM_PROGRAM) {
+      case "iTerm.app":
+        if (!env.TERM_PROGRAM_VERSION || /^[0-2]\./.test(env.TERM_PROGRAM_VERSION)) return 8
+        return 24
+      case "HyperTerm":
+      case "MacTerm":
+        return 24
+      case "Apple_Terminal":
+        return 8
+    }
+    if (env.COLORTERM === "truecolor" || env.COLORTERM === "24bit") return 24
+    if (env.TERM) {
+      if (/truecolor/.test(env.TERM)) return 24
+      if (/^xterm-256/.test(env.TERM)) return 8
+      const term = env.TERM.toLowerCase()
+      if (TERM_ENVS[term]) return TERM_ENVS[term]
+      if (TERM_ENV_PATTERNS.some((re) => re.test(term))) return 4
+    }
+    if (env.COLORTERM) return 4
+    return 1
+  }
+  function hasColors(count, env) {
+    if (env === undefined && (count === undefined || (typeof count === "object" && count !== null))) {
+      env = count
+      count = 16
+    } else if (!Number.isInteger(count) || count < 2) {
+      throw Object.assign(new RangeError(`The value of "count" is out of range. It must be >= 2. Received ${count}`), { code: "ERR_OUT_OF_RANGE" })
+    }
+    return count <= 2 ** getColorDepth(env)
+  }
+  const stdRaw = new Map()
+  const ttyMethods = {
+    getColorDepth,
+    hasColors,
+    _refreshSize() {
+      const size = native.ttySize(this.fd)
+      if (!size) return
+      const changed = size[0] !== this.columns || size[1] !== this.rows
+      this.columns = size[0]
+      this.rows = size[1]
+      if (changed) this.emit("resize")
+    },
+    getWindowSize() {
+      return [this.columns, this.rows]
+    },
+    cursorTo(x, y, cb) {
+      if (typeof y === "function") [y, cb] = [undefined, y]
+      if (Number.isNaN(x) || Number.isNaN(y)) throw nodeTypeError("ERR_INVALID_CURSOR_POS", "Cannot set cursor row without setting its column")
+      return this.write(typeof y !== "number" ? `\x1b[${x + 1}G` : `\x1b[${y + 1};${x + 1}H`, cb)
+    },
+    moveCursor(dx, dy, cb) {
+      let data = ""
+      if (dx < 0) data += `\x1b[${-dx}D`
+      else if (dx > 0) data += `\x1b[${dx}C`
+      if (dy < 0) data += `\x1b[${-dy}A`
+      else if (dy > 0) data += `\x1b[${dy}B`
+      if (!data) {
+        if (typeof cb === "function") queueMicrotask(cb)
+        return true
+      }
+      return this.write(data, cb)
+    },
+    clearLine(dir, cb) {
+      return this.write(dir < 0 ? "\x1b[1K" : dir > 0 ? "\x1b[0K" : "\x1b[2K", cb)
+    },
+    clearScreenDown(cb) {
+      return this.write("\x1b[0J", cb)
+    },
+  }
+  function TtyWriteStream(fd) {
+    if (!(this instanceof TtyWriteStream)) return new TtyWriteStream(fd)
+    const raw = stdRaw.get(fd)
+    initWritable(this, {
+      decodeStrings: false,
+      write(chunk, encoding, cb) {
+        if (raw) raw.call(this, chunk, encoding)
+        else fs.writeSync(fd, typeof chunk === "string" ? Buffer.from(chunk, encoding) : chunk)
+        cb()
+      },
+    })
+    this.fd = fd
+    this._type = "tty"
+    const size = native.ttySize(fd)
+    this.columns = size?.[0] ?? 80
+    this.rows = size?.[1] ?? 24
+  }
+  Object.setPrototypeOf(TtyWriteStream.prototype, Writable.prototype)
+  Object.setPrototypeOf(TtyWriteStream, Writable)
+  Object.defineProperty(TtyWriteStream, "name", { value: "WriteStream" })
+  TtyWriteStream.prototype.isTTY = true
+  Object.assign(TtyWriteStream.prototype, ttyMethods)
+  function TtyReadStream(fd) {
+    if (!(this instanceof TtyReadStream)) return new TtyReadStream(fd)
+    Readable.call(this)
+    this.fd = fd
+    this.isRaw = false
+    this.isTTY = true
+  }
+  Object.setPrototypeOf(TtyReadStream.prototype, Readable.prototype)
+  Object.setPrototypeOf(TtyReadStream, Readable)
+  Object.defineProperty(TtyReadStream, "name", { value: "ReadStream" })
+  TtyReadStream.prototype.setRawMode = function setRawMode(flag) {
+    this.isRaw = !!flag
+    return this
+  }
+  Object.defineProperty(TtyReadStream, Symbol.hasInstance, {
+    value(object) {
+      if (Function.prototype[Symbol.hasInstance].call(this, object)) return true
+      return this === TtyReadStream && object === stdin && stdin.isTTY === true
+    },
+    configurable: true,
+  })
+  tty.WriteStream = TtyWriteStream
+  tty.ReadStream = TtyReadStream
+  for (const [stdio, fd] of [[globalThis.process?.stdout, 1], [globalThis.process?.stderr, 2]]) {
     if (!stdio || typeof stdio !== "object" || kWrite in stdio) continue
     const raw = stdio.write
+    stdRaw.set(fd, raw)
     delete stdio.on
     delete stdio.once
-    Object.setPrototypeOf(stdio, Writable.prototype)
+    const terminal = stdio.isTTY === true
+    Object.setPrototypeOf(stdio, terminal ? TtyWriteStream.prototype : Writable.prototype)
     initWritable(stdio, {
       decodeStrings: false,
       write(chunk, encoding, cb) {
@@ -4052,6 +4206,12 @@ const NODE_SRC: &str = r##"
         cb()
       },
     })
+    if (terminal) {
+      stdio._type = "tty"
+      const size = native.ttySize(fd)
+      stdio.columns = size?.[0] ?? 80
+      stdio.rows = size?.[1] ?? 24
+    }
     stdio._isStdio = true
     stdio.destroySoon = stdio.destroy
   }
@@ -4075,10 +4235,36 @@ const NODE_SRC: &str = r##"
   Object.defineProperties(Duplex.prototype, writableGetters)
   for (const name of Object.keys(writableMethods)) if (name !== "destroy") Duplex.prototype[name] = writableMethods[name]
 
+  const kTransformFlushed = Symbol("transformFlushed")
+  function transformFinal(cb) {
+    if (this[kTransformFlushed]) {
+      if (cb) cb()
+      return
+    }
+    this[kTransformFlushed] = true
+    const fail = (err) => (cb ? cb(err) : this.destroy(err))
+    const finish = (err, data) => {
+      if (err) return fail(err)
+      if (data != null) this.push(data)
+      this.push(null)
+      if (cb) cb()
+    }
+    if (typeof this._flush === "function") {
+      try {
+        this._flush(finish)
+      } catch (e) {
+        fail(e)
+      }
+    } else finish()
+  }
+  function transformPrefinish() {
+    if (this._final !== transformFinal) transformFinal.call(this)
+  }
   function Transform(options) {
     options = options ?? {}
     if (!(this instanceof Transform)) return new Transform(options)
     Duplex.call(this, options)
+    this.on("prefinish", transformPrefinish)
     if (typeof options.transform === "function") this._transform = options.transform
     if (typeof options.flush === "function") this._flush = options.flush
     if (typeof options.final === "function") {
@@ -4108,21 +4294,7 @@ const NODE_SRC: &str = r##"
         cb(e)
       }
     },
-    _final(cb) {
-      const finish = (err, data) => {
-        if (err) return cb(err)
-        if (data != null) this.push(data)
-        this.push(null)
-        cb()
-      }
-      if (typeof this._flush === "function") {
-        try {
-          this._flush(finish)
-        } catch (e) {
-          cb(e)
-        }
-      } else finish()
-    },
+    _final: transformFinal,
   })
 
   function PassThrough(options) {
@@ -8862,7 +9034,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let n = vm.new_object();
-    let natives: [(&str, u32, crate::object::NativeFn); 66] = [
+    let natives: [(&str, u32, crate::object::NativeFn); 67] = [
         ("isProxy", 1, is_proxy),
         ("watchStart", 4, super::netio::watch_start),
         ("watchClose", 1, super::netio::watch_close),
@@ -8925,6 +9097,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         ("vmContextGlobals", 0, vm_context_globals),
         ("testHarness", 0, native_test_harness),
         ("asyncFrame", 0, native_async_frame),
+        ("ttySize", 1, native_tty_size),
         ("setAsyncFrame", 1, native_set_async_frame),
         ("setModuleClass", 1, native_set_module_class),
         ("cjsCompile", 3, native_cjs_compile),
@@ -9715,6 +9888,8 @@ fn module_create_require(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     };
     let require = bind(vm, "require", super::system::require_at);
     let resolve = bind(vm, "resolve", super::system::require_resolve_at);
+    let paths = bind(vm, "paths", super::system::require_resolve_paths_at);
+    resolve.set_hidden("paths", Value::Object(paths));
     require.set_hidden("resolve", Value::Object(resolve));
     let cache = vm.require_cache_object_public();
     require.set_own("cache", Value::Object(cache));
@@ -9823,6 +9998,80 @@ fn vm_run_script(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 
 fn native_test_harness(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
     Ok(Value::Bool(vm.test_harness))
+}
+
+fn terminal_size(fd: i32) -> Option<(u16, u16)> {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        #[derive(Default)]
+        struct Coord {
+            x: i16,
+            y: i16,
+        }
+        #[repr(C)]
+        #[derive(Default)]
+        struct Rect {
+            left: i16,
+            top: i16,
+            right: i16,
+            bottom: i16,
+        }
+        #[repr(C)]
+        #[derive(Default)]
+        struct Info {
+            size: Coord,
+            cursor: Coord,
+            attributes: u16,
+            window: Rect,
+            max: Coord,
+        }
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetStdHandle(which: u32) -> isize;
+            fn GetConsoleScreenBufferInfo(handle: isize, info: *mut Info) -> i32;
+        }
+        let which = match fd {
+            0 => -10i32 as u32,
+            2 => -12i32 as u32,
+            _ => -11i32 as u32,
+        };
+        let mut info = Info::default();
+        let ok = unsafe { GetConsoleScreenBufferInfo(GetStdHandle(which), &mut info) };
+        if ok == 0 {
+            return None;
+        }
+        let cols = (info.window.right - info.window.left + 1).max(1) as u16;
+        let rows = (info.window.bottom - info.window.top + 1).max(1) as u16;
+        Some((cols, rows))
+    }
+    #[cfg(unix)]
+    {
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        let r = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut ws as *mut libc::winsize) };
+        if r != 0 || ws.ws_col == 0 {
+            return None;
+        }
+        Some((ws.ws_col, ws.ws_row))
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = fd;
+        None
+    }
+}
+
+fn native_tty_size(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let fd = match arg(args, 0) {
+        Value::Number(n) => n as i32,
+        _ => 1,
+    };
+    Ok(match terminal_size(fd) {
+        Some((cols, rows)) => {
+            vm.new_array(vec![Value::Number(cols as f64), Value::Number(rows as f64)])
+        }
+        None => Value::Null,
+    })
 }
 
 fn native_async_frame(vm: &mut Vm, _this: Value, _args: &[Value]) -> R {
@@ -10632,6 +10881,9 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
         }
         Ok(())
     } else {
+        if let Some(parent) = to.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
         std::fs::copy(from, to).map(|_| ())
     }
 }

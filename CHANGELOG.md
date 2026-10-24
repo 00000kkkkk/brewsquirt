@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A `/` right after the `)` of an `if`, `for`, `for await`, `while` or `with` header starts a
+  regular expression, as in `for (...) /re/.exec(s)`, instead of being read as division. The
+  `untyped` package used by Nuxt loads.
+- `fs.cp`, `fs.cpSync` and `fs.promises.cp` create the destination's missing parent directories
+  when copying a file, as Node does. Nuxt production builds complete.
+- A `Transform` subclass that overrides `_final` still ends its readable side after `_final`,
+  through a `prefinish` event as in Node. Writable streams emit `prefinish` before `finish`.
+  parse5's `RewritingStream`, which Angular uses for `index.html`, no longer hangs a pipeline.
+- When a worker thread exits or is terminated, the message ports it owned are closed and their
+  partners emit `close`, so they no longer keep the process alive. Angular CLI builds exit when
+  they are done.
+- `console.log`, `console.error` and the other console methods write through
+  `process.stdout.write` and `process.stderr.write` when a program has replaced them, as in Node,
+  so output capture in test runners and terminal UIs sees console output.
+- `require.resolve(request, { paths })` resolves from the given directories, and
+  `require.resolve.paths(request)` lists the lookup paths.
+- `node:tty` has `WriteStream` and `ReadStream`, with Node's `getColorDepth`, `hasColors`,
+  `getWindowSize`, `cursorTo`, `moveCursor`, `clearLine` and `clearScreenDown`, and
+  `process.stdout` and `process.stderr` are `tty.WriteStream`s with `columns` and `rows` when
+  they are terminals.
+
 ## [1.9.0] - 2026-10-24
 
 ### Added

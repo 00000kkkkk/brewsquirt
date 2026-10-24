@@ -1,0 +1,8 @@
+transform with _final: HELLO WORLD AGAIN
+flush once: ab! final,flush
+finished worker: message:hi close
+terminated worker: message:hi close
+resolve with paths: bin_noext
+missing: MODULE_NOT_FOUND
+lookup paths: true true null null
+tty: WriteStream function 8 1 true

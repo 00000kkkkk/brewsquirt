@@ -1,0 +1,4 @@
+captured: "hidden 1 { a: 1 }\ninfo too\ngroup\n  inside\n"
+stderr captured: "err hidden\nwarn hidden\nAssertion failed: assert hidden\n"
+passes through
+wrapper saw: passes through

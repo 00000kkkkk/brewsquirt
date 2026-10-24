@@ -46,6 +46,8 @@ pub fn tokenize_from(
         in_template: false,
         sep_seen: false,
         force_regex: Some(regex_first),
+        parens: Vec::new(),
+        close_head: false,
         jsx: jsx.0,
         jsx_ts: jsx.1,
     };
@@ -80,6 +82,8 @@ pub fn tokenize_jsx(src: &str, html: bool, jsx: bool, ts: bool) -> Result<Vec<To
         in_template: false,
         sep_seen: false,
         force_regex: None,
+        parens: Vec::new(),
+        close_head: false,
         jsx,
         jsx_ts: ts,
     };
@@ -128,7 +132,31 @@ pub fn decode_entities(s: &str) -> String {
     out
 }
 
-fn regex_allowed_after(out: &[Token]) -> bool {
+fn opens_statement_head(before: &[Token]) -> bool {
+    let n = before.len();
+    let ident = |i: usize| match &before[i].tok {
+        Tok::Ident(name) if !before[i].escaped => Some(&**name),
+        _ => None,
+    };
+    if n == 0 {
+        return false;
+    }
+    let after_dot = n >= 2
+        && matches!(
+            before[n - 2].tok,
+            Tok::Punct(P::Dot) | Tok::Punct(P::QuestionDot)
+        );
+    match ident(n - 1) {
+        Some("if" | "for" | "while" | "with") => !after_dot,
+        Some("await") => n >= 2 && ident(n - 2) == Some("for"),
+        _ => false,
+    }
+}
+
+fn regex_allowed_after(out: &[Token], close_head: bool) -> bool {
+    if matches!(out.last().map(|t| &t.tok), Some(Tok::Punct(P::RParen))) {
+        return close_head;
+    }
     let n = out.len();
     if n >= 2
         && matches!(out[n - 1].tok, Tok::Ident(_))
@@ -222,6 +250,8 @@ struct Lexer<'a> {
     in_template: bool,
     sep_seen: bool,
     force_regex: Option<bool>,
+    parens: Vec<bool>,
+    close_head: bool,
     jsx: bool,
     jsx_ts: bool,
 }
@@ -434,7 +464,7 @@ impl<'a> Lexer<'a> {
             let regex_ok = c == '/'
                 && match forced {
                     Some(f) => f,
-                    None => regex_allowed_after(out),
+                    None => regex_allowed_after(out, self.close_head),
                 };
             let tok = if regex_ok {
                 let save = (self.pos, self.line, self.col);
@@ -453,6 +483,19 @@ impl<'a> Lexer<'a> {
                 Tok::Str(_) | Tok::Num(_) => std::mem::take(&mut self.legacy_escape),
                 _ => false,
             };
+            let paren = match &tok {
+                Tok::Punct(P::LParen) => Some(true),
+                Tok::Punct(P::RParen) => Some(false),
+                _ => None,
+            };
+            match paren {
+                Some(true) => {
+                    let head = opens_statement_head(out);
+                    self.parens.push(head);
+                }
+                Some(false) => self.close_head = self.parens.pop().unwrap_or(false),
+                None => {}
+            }
             out.push(Token {
                 tok,
                 line,
@@ -493,7 +536,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn jsx_start(&self, out: &[Token]) -> bool {
-        if !regex_allowed_after(out) {
+        if !regex_allowed_after(out, self.close_head) {
             return false;
         }
         if let [.., before, last] = out {

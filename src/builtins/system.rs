@@ -120,6 +120,9 @@ pub fn install(vm: &mut Vm) {
     ] {
         let stream = vm.new_object();
         method(vm, &stream, "write", 1, f);
+        if let Some(w) = stream.get_own("write") {
+            vm.std_writers[if fd == 1.0 { 0 } else { 1 }] = w;
+        }
         use std::io::IsTerminal;
         let tty = if fd == 1.0 {
             std::io::stdout().is_terminal()
@@ -149,6 +152,9 @@ pub fn install(vm: &mut Vm) {
     let require = native_fn(vm, "require", 1, require);
     if let Value::Object(r) = &require {
         method(vm, r, "resolve", 1, require_resolve);
+        if let Some(Value::Object(res)) = r.get_own("resolve") {
+            method(vm, &res, "paths", 1, require_resolve_paths);
+        }
         let cache = vm.require_cache_object_public();
         r.set_own("cache", Value::Object(cache));
         let main = vm.new_object();
@@ -374,22 +380,49 @@ fn console_line(vm: &mut Vm, args: &[Value]) -> Result<String, Value> {
     Ok(s)
 }
 
+fn replaced_writer(vm: &Vm, err: bool) -> Option<(Value, Value)> {
+    let Some(Value::Object(process)) = vm.globals.get("process") else {
+        return None;
+    };
+    let stream = process.get_own(if err { "stderr" } else { "stdout" })?;
+    let Value::Object(s) = &stream else {
+        return None;
+    };
+    let write = s.get_chain("write")?;
+    let native = &vm.std_writers[usize::from(err)];
+    if !write.is_callable() || write.strict_eq(native) {
+        return None;
+    }
+    Some((write, stream))
+}
+
+fn console_emit(vm: &mut Vm, err: bool, text: String) -> R {
+    if let Some((write, stream)) = replaced_writer(vm, err) {
+        vm.call_value(&write, stream, &[Value::from(text)])?;
+        return Ok(Value::Undefined);
+    }
+    if err {
+        vm.write_err(&text);
+    } else {
+        vm.write_out(&text);
+    }
+    Ok(Value::Undefined)
+}
+
 fn log(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let s = console_line(vm, args)?;
-    vm.write_out(&s);
-    Ok(Value::Undefined)
+    console_emit(vm, false, s)
 }
 
 fn error(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let s = console_line(vm, args)?;
-    vm.write_err(&s);
-    Ok(Value::Undefined)
+    console_emit(vm, true, s)
 }
 
 fn group(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     if !args.is_empty() {
         let s = console_line(vm, args)?;
-        vm.write_out(&s);
+        console_emit(vm, false, s)?;
     }
     vm.console_indent += 1;
     Ok(Value::Undefined)
@@ -409,7 +442,7 @@ fn assert(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         } else {
             format!("Assertion failed: {msg}\n")
         };
-        vm.write_err(&line);
+        console_emit(vm, true, line)?;
     }
     Ok(Value::Undefined)
 }
@@ -496,6 +529,82 @@ pub fn require_at(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     vm.require_module(&spec, &from)
 }
 
+fn resolve_request(vm: &mut Vm, spec: &crate::jsstr::JsStr, from_dir: &Path, options: &Value) -> R {
+    let mut dirs = vec![from_dir.to_path_buf()];
+    if options.is_object() {
+        let paths = vm.get_prop(options, "paths")?;
+        if !paths.is_nullish() {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            dirs.clear();
+            for p in vm.iterate(&paths)? {
+                let p = vm.to_string(&p)?;
+                dirs.push(cwd.join(p.as_str()));
+            }
+        }
+    }
+    let mut last = None;
+    for dir in &dirs {
+        match crate::module::resolve_with(spec, dir, true) {
+            Ok(p) => return Ok(Value::Str(p.display().to_string().into())),
+            Err(msg) => last = Some(msg),
+        }
+    }
+    let msg = last.unwrap_or_else(|| format!("Cannot find module '{spec}'"));
+    let e = vm.make_error(ErrorKind::Error, msg);
+    if let Value::Object(o) = &e {
+        o.set_own("code", "MODULE_NOT_FOUND".into());
+    }
+    Err(e)
+}
+
+fn lookup_paths(vm: &mut Vm, spec: &str, from_dir: &Path) -> R {
+    if spec.starts_with("node:") || crate::builtins::node::BUILTIN_MODULES.contains(&spec) {
+        return Ok(Value::Null);
+    }
+    if spec == "." || spec == ".." || spec.starts_with("./") || spec.starts_with("../") {
+        let dir = Value::from(from_dir.display().to_string());
+        return Ok(vm.new_array(vec![dir]));
+    }
+    let mut out = Vec::new();
+    for dir in from_dir.ancestors() {
+        if dir.file_name().is_some_and(|n| n == "node_modules") {
+            continue;
+        }
+        out.push(Value::from(dir.join("node_modules").display().to_string()));
+    }
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
+    if let Some(home) = home {
+        let home = Path::new(&home);
+        out.push(Value::from(
+            home.join(".node_modules").display().to_string(),
+        ));
+        out.push(Value::from(
+            home.join(".node_libraries").display().to_string(),
+        ));
+    }
+    if let Some(prefix) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().and_then(Path::parent).map(Path::to_path_buf))
+    {
+        out.push(Value::from(
+            prefix.join("lib").join("node").display().to_string(),
+        ));
+    }
+    Ok(vm.new_array(out))
+}
+
+pub fn require_resolve_paths_at(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let spec = vm.to_string(&arg(args, 1))?;
+    let from = base_module(vm, &arg(args, 0))?;
+    lookup_paths(vm, &spec, &from.dir)
+}
+
+fn require_resolve_paths(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let spec = vm.to_string(&arg(args, 0))?;
+    let from = caller_module(vm);
+    lookup_paths(vm, &spec, &from.dir)
+}
+
 pub fn require_resolve_at(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let spec = vm.to_string(&arg(args, 1))?;
     let bare = !spec.starts_with('.') && !spec.starts_with('/') && !spec.contains(':');
@@ -506,16 +615,7 @@ pub fn require_resolve_at(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         return Ok(Value::Str(spec));
     }
     let from = base_module(vm, &arg(args, 0))?;
-    match crate::module::resolve_with(&spec, &from.dir, true) {
-        Ok(p) => Ok(Value::Str(p.display().to_string().into())),
-        Err(msg) => {
-            let e = vm.make_error(ErrorKind::Error, msg);
-            if let Value::Object(o) = &e {
-                o.set_own("code", "MODULE_NOT_FOUND".into());
-            }
-            Err(e)
-        }
-    }
+    resolve_request(vm, &spec, &from.dir, &arg(args, 2))
 }
 
 fn require(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
@@ -545,16 +645,7 @@ fn require_resolve(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         return Ok(Value::Str(spec));
     }
     let from = caller_module(vm);
-    match crate::module::resolve_with(&spec, &from.dir, true) {
-        Ok(p) => Ok(Value::Str(p.display().to_string().into())),
-        Err(msg) => {
-            let e = vm.make_error(ErrorKind::Error, msg);
-            if let Value::Object(o) = &e {
-                o.set_own("code", "MODULE_NOT_FOUND".into());
-            }
-            Err(e)
-        }
-    }
+    resolve_request(vm, &spec, &from.dir, &arg(args, 1))
 }
 
 fn available_parallelism(_vm: &mut Vm, _this: Value, _args: &[Value]) -> R {

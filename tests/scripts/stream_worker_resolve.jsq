@@ -1,0 +1,72 @@
+import { Transform, Readable, Writable } from "node:stream"
+import { pipeline } from "node:stream/promises"
+import { Worker, MessageChannel } from "node:worker_threads"
+import { createRequire } from "node:module"
+import tty from "node:tty"
+import path from "node:path"
+
+class Sax extends Transform {
+  constructor() {
+    super({ encoding: "utf8", decodeStrings: false })
+    this.pending = ""
+  }
+  _transform(chunk, encoding, cb) {
+    this.pending += chunk
+    const cut = this.pending.lastIndexOf(" ")
+    const ready = cut < 0 ? "" : this.pending.slice(0, cut + 1)
+    this.pending = cut < 0 ? this.pending : this.pending.slice(cut + 1)
+    cb(null, ready.toUpperCase())
+  }
+  _final(cb) {
+    cb(null, this.pushRest())
+  }
+  pushRest() {
+    this.push(this.pending.toUpperCase())
+    this.pending = ""
+  }
+}
+const out = await pipeline(Readable.from(["hello wor", "ld again"]), new Sax(), async function (source) {
+  let text = ""
+  for await (const c of source) text += c
+  return text
+})
+console.log("transform with _final:", out)
+const flushed = []
+const withFlush = new Transform({
+  transform(c, e, cb) { cb(null, c) },
+  flush(cb) { flushed.push("flush"); cb(null, "!") },
+  final(cb) { flushed.push("final"); cb() },
+})
+let collected = ""
+await pipeline(Readable.from(["a", "b"]), withFlush, new Writable({ write(c, e, cb) { collected += c; cb() } }))
+console.log("flush once:", collected, flushed.join(","))
+
+const workerSource = 'const { workerData } = require("node:worker_threads"); workerData.port.postMessage("hi"); if (workerData.stay) setInterval(() => {}, 1000)'
+for (const stay of [false, true]) {
+  const { port1, port2 } = new MessageChannel()
+  const events = []
+  port1.on("message", (m) => events.push("message:" + m))
+  const closed = new Promise((resolve) => port1.on("close", () => {
+    events.push("close")
+    resolve()
+  }))
+  const worker = new Worker(workerSource, { eval: true, workerData: { port: port2, stay }, transferList: [port2] })
+  if (stay) setTimeout(() => worker.terminate(), 100)
+  await closed
+  console.log(stay ? "terminated worker:" : "finished worker:", events.join(" "))
+}
+
+const require = createRequire(import.meta.url)
+const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"))
+const resolved = require.resolve("./fixtures/bin_noext", { paths: [here] })
+console.log("resolve with paths:", path.basename(resolved))
+try {
+  require.resolve("./not-here", { paths: [here] })
+} catch (e) {
+  console.log("missing:", e.code)
+}
+const lookup = require.resolve.paths("some-package")
+console.log("lookup paths:", Array.isArray(lookup), lookup[0].endsWith("node_modules"), require.resolve.paths("node:fs"), require.resolve.paths("fs"))
+
+const W = tty.WriteStream
+console.log("tty:", W.name, typeof W.prototype.hasColors, W.prototype.getColorDepth({ FORCE_COLOR: "2" }), W.prototype.getColorDepth({ TERM: "dumb" }), W.prototype.hasColors(16, { TERM: "xterm-256color" }))
