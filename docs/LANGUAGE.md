@@ -2483,8 +2483,10 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
 - Shared WebAssembly memories, threads and the JavaScript promise integration
 - Native addons built against the V8 C++ API instead of Node-API, and the libuv event loop
   (`napi_get_uv_event_loop`)
-- Locale data beyond `Intl.Locale`: number, plural, list, relative-time, collation and
-  segmentation formatting cover a handful of locales, and dates know the month and weekday
+- Parts of the locale data: plural rules, list and relative-time formatting cover every locale
+  Node knows, display names cover 45 locales and fall back to English, and word segmentation
+  follows the Unicode rules without the dictionaries ICU uses for Chinese, Japanese and Thai.
+  Number formatting and collation cover a handful of locales, and dates know the month and weekday
   names, date orders and separators of English (US, GB, AU, CA), Ukrainian, Russian, German,
   French, Spanish, Italian, Portuguese, Polish, Dutch, Swedish, Turkish, Japanese and Chinese
   and fall back to English elsewhere; every IANA time zone is supported, but

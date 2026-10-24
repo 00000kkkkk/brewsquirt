@@ -44,6 +44,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 unicode-ident = "1"
 unicode-normalization = "0.1"
+unicode-segmentation = "1"
 ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 socket2 = "0.6"
 libloading = "0.8"

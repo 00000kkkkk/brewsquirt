@@ -1,0 +1,97 @@
+{
+const out = []
+const locales = ["en", "en-GB", "uk", "ru", "pl", "de", "fr", "es", "es-MX", "it", "pt", "pt-PT", "ar", "he", "ja", "zh", "zh-TW", "ko", "hi", "cs", "sk", "lt", "lv", "ga", "cy", "sl", "ro", "tr", "sv", "nl", "fi", "da", "nb", "el", "hu", "bg", "sr", "sr-Latn", "hr", "be", "kk", "ka", "hy", "th", "vi", "id", "ms", "ur", "ta", "te", "sw", "zu", "am", "mt", "br", "gd", "is", "et", "mk"]
+const nums = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 19, 20, 21, 22, 23, 25, 99, 100, 101, 102, 103, 111, 1000, 1000000, 2000000, 0.5, 1.5, 2.5, 0.1, 1.1, 1.0, 21.3, 0.01, 1.25, 1e21]
+for (const l of locales) {
+  for (const type of ["cardinal", "ordinal"]) {
+    const pr = new Intl.PluralRules(l, { type })
+    out.push(`${l} ${type} ${pr.resolvedOptions().locale} ${pr.resolvedOptions().pluralCategories.join(",")} ${nums.map((n) => pr.select(n)).join(" ")}`)
+  }
+  const prd = new Intl.PluralRules(l, { minimumFractionDigits: 2 })
+  out.push(`${l} mfd2 ${nums.slice(0, 12).map((n) => prd.select(n)).join(" ")}`)
+  const prs = new Intl.PluralRules(l, { maximumSignificantDigits: 1 })
+  out.push(`${l} sig1 ${[1.5, 15, 150, 0.95].map((n) => prs.select(n)).join(" ")}`)
+  out.push(`${l} range ${[[1, 2], [0, 1], [1, 5], [2, 5], [5, 1], [1.5, 2]].map(([a, b]) => new Intl.PluralRules(l).selectRange(a, b)).join(" ")}`)
+  for (const style of ["long", "short", "narrow"]) {
+    for (const numeric of ["always", "auto"]) {
+      const rtf = new Intl.RelativeTimeFormat(l, { style, numeric })
+      const res = []
+      for (const unit of ["year", "quarter", "month", "week", "day", "hour", "minute", "second"]) {
+        for (const v of [-2, -1, -0, 0, 1, 2, 3, 5, 21, -100]) res.push(rtf.format(v, unit))
+      }
+      out.push(`${l} rtf ${style} ${numeric} ${rtf.resolvedOptions().locale}: ${res.join(" | ")}`)
+    }
+  }
+  for (const type of ["conjunction", "disjunction", "unit"]) {
+    for (const style of ["long", "short", "narrow"]) {
+      const lf = new Intl.ListFormat(l, { type, style })
+      out.push(`${l} list ${type} ${style} ${lf.resolvedOptions().locale}: ${[["A"], ["A", "B"], ["A", "B", "C"], ["A", "B", "C", "D", "E"], ["foo", "iglesia"], ["x", "ocho"], ["a", "ב"]].map((x) => lf.format(x)).join(" | ")}`)
+    }
+  }
+}
+out.push(JSON.stringify(new Intl.RelativeTimeFormat("en").formatToParts(-1234.5, "days")))
+out.push(JSON.stringify(new Intl.RelativeTimeFormat("uk", { numeric: "auto" }).formatToParts(-1, "day")))
+out.push(JSON.stringify(new Intl.RelativeTimeFormat("de").formatToParts(1000000, "second")))
+out.push(JSON.stringify(new Intl.ListFormat("en").formatToParts(["a", "b", "c"])))
+out.push(JSON.stringify(new Intl.ListFormat("zh").formatToParts(["a", "b", "c"])))
+out.push(JSON.stringify(Intl.ListFormat.supportedLocalesOf(["de-AT-u-ca-buddhist", "xx", "en-ZZ", "zh-TW", "sr-Latn-RS"])))
+out.push(JSON.stringify(Intl.PluralRules.supportedLocalesOf(["de-AT", "pt-PT", "xx", "kok-Latn"])))
+out.push(JSON.stringify([new Intl.ListFormat("de-AT").resolvedOptions(), new Intl.RelativeTimeFormat("uk-u-nu-arab").resolvedOptions(), new Intl.RelativeTimeFormat("en", { numberingSystem: "thai" }).resolvedOptions()]))
+out.push(new Intl.RelativeTimeFormat("uk-u-nu-arab").format(12, "day"))
+for (const bad of [() => new Intl.ListFormat("en", "x"), () => new Intl.ListFormat("en", { type: "x" }), () => new Intl.ListFormat("en").format([1]), () => new Intl.RelativeTimeFormat("en").format(1, "decade"), () => new Intl.RelativeTimeFormat("en").format(Infinity, "day"), () => new Intl.PluralRules("en").selectRange(NaN, 1), () => new Intl.PluralRules("en").selectRange(1), () => Intl.PluralRules(), () => new Intl.RelativeTimeFormat("en").format(1, "toString")]) {
+  try {
+    bad()
+    out.push("no error")
+  } catch (e) {
+    out.push(`${e.constructor.name}`)
+  }
+}
+out.push([Intl.ListFormat.length, Intl.RelativeTimeFormat.length, Intl.PluralRules.length, Intl.ListFormat.supportedLocalesOf.length].join(","))
+console.log(out.join("\n"))
+
+}
+{
+const show = (l, g, s) => {
+  const seg = new Intl.Segmenter(l, { granularity: g })
+  const segs = [...seg.segment(s)]
+  console.log(l, g, JSON.stringify(segs.map((x) => (g === "word" ? [x.segment, x.index, x.isWordLike] : [x.segment, x.index]))))
+}
+show("en", "grapheme", "e\u0301👨‍👩‍👧🇺🇦a")
+show("en", "word", "Hello, world! It's 1.23 and 3,000 dogs.")
+show("en", "sentence", "Hello world. How are you? I'm fine! Ok")
+show("uk", "word", "Привіт, світе! Як справи?")
+const s = new Intl.Segmenter("en", { granularity: "word" }).segment("ab cd")
+console.log(JSON.stringify(s.containing(3)), s.containing(5), JSON.stringify(s.containing(-0)), JSON.stringify(s.containing("1")))
+const it = s[Symbol.iterator]()
+console.log(Object.prototype.toString.call(it), typeof it.next, Object.getOwnPropertyNames(Object.getPrototypeOf(s)), new Intl.Segmenter("de").resolvedOptions())
+
+}
+{
+const out = []
+for (const l of ["en", "uk", "de", "fr", "ja", "zh-TW", "pt-BR"]) {
+  for (const style of ["long", "short", "narrow"]) {
+    const lang = new Intl.DisplayNames(l, { type: "language", style })
+    const std = new Intl.DisplayNames(l, { type: "language", style, languageDisplay: "standard" })
+    const reg = new Intl.DisplayNames(l, { type: "region", style })
+    const scr = new Intl.DisplayNames(l, { type: "script", style })
+    const cur = new Intl.DisplayNames(l, { type: "currency", style })
+    const cal = new Intl.DisplayNames(l, { type: "calendar", style })
+    const dtf = new Intl.DisplayNames(l, { type: "dateTimeField", style })
+    out.push([l, style, lang.of("uk"), lang.of("en-US"), lang.of("en-GB"), std.of("en-GB"), lang.of("zh-Hans"), lang.of("zh-Hant-TW"), lang.of("uk-CA"), lang.of("sr-Latn-RS"), lang.of("de-Latn-AQ"), lang.of("xyz"), reg.of("UA"), reg.of("419"), reg.of("US"), scr.of("Cyrl"), scr.of("Latn"), cur.of("UAH"), cur.of("USD"), cal.of("gregory"), cal.of("islamic-civil"), dtf.of("weekOfYear"), dtf.of("dayPeriod")].join(" | "))
+  }
+}
+out.push(JSON.stringify(new Intl.DisplayNames("en", { type: "language" }).resolvedOptions()), JSON.stringify(new Intl.DisplayNames("de", { type: "region", fallback: "none" }).resolvedOptions()), new Intl.DisplayNames("en", { type: "region", fallback: "none" }).of("ZZ"))
+for (const f of [() => new Intl.DisplayNames("en"), () => new Intl.DisplayNames("en", { type: "lang" }), () => new Intl.DisplayNames("en", { type: "region" }).of("a"), () => new Intl.DisplayNames("en", { type: "language" }).of("en-u-ca-gregory"), () => new Intl.DisplayNames("en", { type: "dateTimeField" }).of("week")]) {
+  try { f(); out.push("ok") } catch (e) { out.push(e.constructor.name) }
+}
+console.log(out.join("\n"))
+
+}
+{
+const s = "\udc00\ud800"
+const seg = new Intl.Segmenter()
+console.log(s.length, JSON.stringify([...seg.segment(s)].map((x) => [x.segment.length, x.index, x.segment.charCodeAt(0)])), JSON.stringify(seg.segment(s).containing(0)))
+const t = "a\ud800b"
+console.log(JSON.stringify([...seg.segment(t)].map((x) => [x.segment.length, x.index])), JSON.stringify([...new Intl.Segmenter("en", { granularity: "word" }).segment(t)].map((x) => [x.segment.length, x.index])))
+
+}

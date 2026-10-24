@@ -38,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the new scripts. Properties of strings such as `RGI_Emoji` and `RGI_Emoji_ZWJ_Sequence` match
   exactly the sequences Unicode lists, and `v`-flag classes combine strings with other sets
   through `--`, `&&` and nesting, longest strings first.
+- `Intl.PluralRules`, `Intl.ListFormat` and `Intl.RelativeTimeFormat` use CLDR 48 data, the
+  version Node 24 ships, for every locale Node supports, including regional variants such as
+  `en-GB` and `es-419`, Spanish and Hebrew conjunction forms and Arabic dual phrases.
+  `formatToParts` returns element, literal and number parts, plural rules honour digit options
+  and compact notation, and `selectRange` follows the CLDR plural ranges.
+- `Intl.Segmenter` splits graphemes, words and sentences by the Unicode text segmentation rules,
+  with `containing` and segment iterators, and `Intl.DisplayNames` names languages, dialects,
+  regions, scripts, currencies, calendars and date fields in 45 locales.
+- These constructors read and validate their options in the order ECMA-402 specifies,
+  `supportedLocalesOf` takes options, and methods reject receivers of the wrong type.
 
 ### Fixed
 
