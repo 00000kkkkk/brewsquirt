@@ -1,11 +1,11 @@
 # BrewSquirt Language Reference
 
-This document describes BrewSquirt 1.10.0. BrewSquirt follows JavaScript semantics: for every
+This document describes BrewSquirt 1.11.0. BrewSquirt follows JavaScript semantics: for every
 supported feature, a program should print the same output under `jsq` as under Node.js. Features
 that are not implemented yet are listed in [Not yet supported](#not-yet-supported).
 
 BrewSquirt is checked against [test262](https://github.com/tc39/test262), the official
-ECMAScript conformance suite. BrewSquirt passes 98% of the tests it runs, in both strict and
+ECMAScript conformance suite. BrewSquirt passes 99% of the tests it runs, in both strict and
 sloppy mode (about 43,700 of 44,600). Most remaining failures are edge cases; the larger gaps are
 listed in [Not yet supported](#not-yet-supported).
 

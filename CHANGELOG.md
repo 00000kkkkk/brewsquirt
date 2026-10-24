@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-10-24
+
 ### Added
 
 - `crypto.X509Certificate` parses PEM and DER certificates and reports the subject, issuer,
@@ -70,6 +72,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The x86_64 Linux release binary is built in the same older-glibc environment as the ARM64 one,
+  so it runs on distributions older than glibc 2.34 and no longer warns about `GLIBC_2.39` on
+  systems without it.
 - Instance methods and accessors that a Node-API addon defines with `napi_define_class` throw
   `TypeError: Illegal invocation` when called on an object that is not an instance of the class,
   as in Node, instead of handing the addon a receiver it never wrapped.
@@ -1472,7 +1477,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Continuous integration on Linux, macOS and Windows, MSRV check, cargo-deny, CodeQL, coverage,
   benchmarks, and release archives for five targets.
 
-[Unreleased]: https://github.com/00000kkkkk/brewsquirt/compare/v1.10.0...HEAD
+[Unreleased]: https://github.com/00000kkkkk/brewsquirt/compare/v1.11.0...HEAD
+[1.11.0]: https://github.com/00000kkkkk/brewsquirt/compare/v1.10.0...v1.11.0
 [1.10.0]: https://github.com/00000kkkkk/brewsquirt/compare/v1.9.0...v1.10.0
 [1.9.0]: https://github.com/00000kkkkk/brewsquirt/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/00000kkkkk/brewsquirt/compare/v1.7.0...v1.8.0

@@ -195,7 +195,7 @@ import helpers from "./helpers"
 
 ## Features
 
-BrewSquirt 1.10.0 implements modern JavaScript as specified, passing 98% of test262:
+BrewSquirt 1.11.0 implements modern JavaScript as specified, passing 99% of test262:
 
 - **Values**: `undefined`, `null`, booleans, numbers, strings, arrays, objects, functions, classes, `Map`, `Set`, `Error`
 - **Bindings**: block-scoped `let` and `const`, hoisted function declarations
@@ -334,6 +334,7 @@ typos
 - [x] 95% of test262
 - [x] 97% of test262
 - [x] 98% of test262
+- [x] 99% of test262
 - [x] Mapped `arguments` and the global lexical environment
 - [x] 1.0.0
 - [x] Install without Rust: one-liners, Scoop and Homebrew
@@ -344,10 +345,11 @@ typos
 - [x] TypeScript without a build step
 - [x] Native Node-API addons
 - [x] WebSockets
-- [ ] 99% of test262
-- [ ] Own regular expression engine with lookbehind back-references and the `v` flag
-- [ ] Rope strings for fast `+=` in loops
 - [x] Shapes and inline caches for property access
+- [x] Unicode 17 regular expressions and `v`-flag string sets
+- [x] `Intl` with CLDR data for every locale Node supports
+- [ ] Own regular expression engine with lookbehind back-references
+- [ ] Rope strings for fast `+=` in loops
 - [ ] JIT compiler
 
 ## Contributing

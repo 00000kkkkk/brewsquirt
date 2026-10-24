@@ -55,7 +55,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: taiki-e/install-action@v2
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        if: contains(matrix.target, '-linux-')
         with:
           tool: cross
       - uses: taiki-e/install-action@v2
@@ -67,6 +67,7 @@ jobs:
         with:
           bin: jsq,vrotdaem
           target: ${{ matrix.target }}
+          build-tool: ${{ contains(matrix.target, '-linux-') && 'cross' || 'cargo' }}
           archive: brewsquirt-$tag-$target
           include: LICENSE,NOTICE,THIRD_PARTY_LICENSES,README.md,CHANGELOG.md
           tar: unix
