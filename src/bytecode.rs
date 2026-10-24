@@ -407,6 +407,7 @@ impl Op {
                 | Op::ToNumeric
                 | Op::RequireObject(_)
                 | Op::New(..)
+                | Op::Template(_)
         )
     }
 

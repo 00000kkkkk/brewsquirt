@@ -16,6 +16,16 @@ pub fn install(vm: &mut Vm) {
 }
 
 pub fn quote_json(s: &str, out: &mut String) {
+    if !s
+        .bytes()
+        .any(|b| b < 0x20 || b == b'"' || b == b'\\' || b == 0xF4)
+    {
+        out.reserve(s.len() + 2);
+        out.push('"');
+        out.push_str(s);
+        out.push('"');
+        return;
+    }
     out.push('"');
     for c in s.chars() {
         match c {
@@ -34,6 +44,61 @@ pub fn quote_json(s: &str, out: &mut String) {
         }
     }
     out.push('"');
+}
+
+#[derive(Clone, Copy)]
+enum Key<'a> {
+    Index(usize),
+    Name(&'a str),
+}
+
+impl Key<'_> {
+    fn value(self) -> Value {
+        match self {
+            Key::Index(i) => Value::Str(i.to_string().into()),
+            Key::Name(s) => s.into(),
+        }
+    }
+}
+
+fn to_json_method(vm: &mut Vm, o: &Rc<Obj>) -> Result<Value, Value> {
+    let mut cur = Some(o.clone());
+    while let Some(c) = cur {
+        if !matches!(c.kind, ObjKind::Ordinary | ObjKind::Array(_))
+            || c.props.borrow().contains_key("toJSON")
+        {
+            return vm.get_prop(&Value::Object(o.clone()), "toJSON");
+        }
+        cur = c.proto.borrow().clone();
+    }
+    Ok(Value::Undefined)
+}
+
+fn own_plain(o: &Obj, key: &str) -> Option<Value> {
+    let props = o.props.borrow();
+    match props.get(key) {
+        Some(Value::Uninit) => None,
+        Some(Value::Object(a)) if a.is_accessor() => None,
+        Some(v) => Some(v.clone()),
+        None => None,
+    }
+}
+
+fn plain_keys(o: &Obj) -> Option<Vec<JsStr>> {
+    if !matches!(o.kind, ObjKind::Ordinary) {
+        return None;
+    }
+    let props = o.props.borrow();
+    if props.may_have_accessors() {
+        return None;
+    }
+    Some(
+        props
+            .enumerable()
+            .filter(|(k, _)| !crate::object::is_symbol_key(k))
+            .map(|(k, _)| k.clone())
+            .collect(),
+    )
 }
 
 struct Ser<'a> {
@@ -57,21 +122,23 @@ impl Ser<'_> {
         &mut self,
         vm: &mut Vm,
         holder: &Value,
-        key: &str,
+        key: Key,
         value: Value,
         depth: usize,
         out: &mut String,
     ) -> Result<bool, Value> {
         let mut v = value;
-        if matches!(v, Value::Object(_) | Value::BigInt(_)) {
-            let f = vm.get_prop(&v, "toJSON")?;
-            if f.is_callable() {
-                v = vm.call_value(&f, v.clone(), &[key.into()])?;
-            }
+        let f = match &v {
+            Value::Object(o) => to_json_method(vm, o)?,
+            Value::BigInt(_) => vm.get_prop(&v, "toJSON")?,
+            _ => Value::Undefined,
+        };
+        if f.is_callable() {
+            v = vm.call_value(&f, v.clone(), &[key.value()])?;
         }
         if let Some(r) = &self.replacer {
             let r = r.clone();
-            v = vm.call_value(&r, holder.clone(), &[key.into(), v])?;
+            v = vm.call_value(&r, holder.clone(), &[key.value(), v])?;
         }
         match crate::object::unwrap_primitive(&v) {
             Some(Value::Number(_)) => v = Value::Number(vm.to_number(&v)?),
@@ -102,7 +169,7 @@ impl Ser<'_> {
             }
             Value::Number(n) => {
                 if n.is_finite() {
-                    out.push_str(&number_to_string(*n));
+                    crate::number::push_number(out, *n);
                 } else {
                     out.push_str("null");
                 }
@@ -161,14 +228,13 @@ impl Ser<'_> {
                     out.push(',');
                 }
                 self.newline(out, depth + 1);
-                let key = i.to_string();
                 let item = match &o.kind {
                     ObjKind::Array(a) if o.flags.get() & crate::object::SLOW_ELEMENTS == 0 => {
                         a.borrow().get(i).cloned().unwrap_or_default()
                     }
-                    _ => vm.get_prop(&holder, &key)?,
+                    _ => vm.get_prop(&holder, &i.to_string())?,
                 };
-                if !self.property(vm, &holder, &key, item, depth + 1, out)? {
+                if !self.property(vm, &holder, Key::Index(i), item, depth + 1, out)? {
                     out.push_str("null");
                 }
             }
@@ -176,9 +242,16 @@ impl Ser<'_> {
             out.push(']');
             return Ok(());
         }
-        let keys: Vec<JsStr> = match &self.allow {
-            Some(list) => list.clone(),
-            None => match &o.kind {
+        let fast = if self.allow.is_none() {
+            plain_keys(o)
+        } else {
+            None
+        };
+        let plain = fast.is_some();
+        let keys: Vec<JsStr> = match (plain, &self.allow) {
+            (true, _) => fast.unwrap_or_default(),
+            (false, Some(list)) => list.clone(),
+            (false, None) => match &o.kind {
                 ObjKind::Map(_) | ObjKind::Set(_) | ObjKind::Iter(_) => Vec::new(),
                 _ => vm.op_own_enumerable_keys(o)?,
             },
@@ -186,22 +259,25 @@ impl Ser<'_> {
         out.push('{');
         let mut first = true;
         for k in keys {
-            let v = vm.get_prop(&holder, &k)?;
-            let mut piece = String::new();
-            if !self.property(vm, &holder, &k, v, depth + 1, &mut piece)? {
-                continue;
-            }
+            let v = match plain.then(|| own_plain(o, &k)).flatten() {
+                Some(v) => v,
+                None => vm.get_prop(&holder, &k)?,
+            };
+            let mark = out.len();
             if !first {
                 out.push(',');
             }
-            first = false;
             self.newline(out, depth + 1);
             quote_json(&k, out);
             out.push(':');
             if !self.indent.is_empty() {
                 out.push(' ');
             }
-            out.push_str(&piece);
+            if self.property(vm, &holder, Key::Name(&k), v, depth + 1, out)? {
+                first = false;
+            } else {
+                out.truncate(mark);
+            }
         }
         if !first {
             self.newline(out, depth);
@@ -220,7 +296,7 @@ pub fn json_stringify(vm: &mut Vm, v: &Value, indent: &str) -> Result<Option<Str
     };
     let holder = Value::Object(vm.new_object());
     let mut out = String::new();
-    if ser.property(vm, &holder, "", v.clone(), 0, &mut out)? {
+    if ser.property(vm, &holder, Key::Name(""), v.clone(), 0, &mut out)? {
         Ok(Some(out))
     } else {
         Ok(None)
@@ -284,14 +360,278 @@ fn stringify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let v = arg(args, 0);
     holder.set_own("", v.clone());
     let mut out = String::new();
-    if ser.property(vm, &Value::Object(holder), "", v, 0, &mut out)? {
+    if ser.property(vm, &Value::Object(holder), Key::Name(""), v, 0, &mut out)? {
         Ok(out.into())
     } else {
         Ok(Value::Undefined)
     }
 }
 
+struct Fast<'a> {
+    s: &'a str,
+    b: &'a [u8],
+    i: usize,
+    keys: rustc_hash::FxHashMap<&'a str, JsStr>,
+    buf: String,
+}
+
+fn hex4(b: &[u8]) -> Option<u32> {
+    let mut n = 0;
+    for &c in b {
+        n = n * 16 + (c as char).to_digit(16)?;
+    }
+    Some(n)
+}
+
+impl<'a> Fast<'a> {
+    fn ws(&mut self) {
+        while let Some(b' ' | b'\t' | b'\n' | b'\r') = self.b.get(self.i) {
+            self.i += 1;
+        }
+    }
+
+    fn value(&mut self, vm: &mut Vm, depth: u32) -> Option<Value> {
+        if depth > 512 {
+            return None;
+        }
+        self.ws();
+        match *self.b.get(self.i)? {
+            b'{' => self.object(vm, depth),
+            b'[' => self.array(vm, depth),
+            b'"' => self.string(false).map(Value::Str),
+            b't' => self.word("true", Value::Bool(true)),
+            b'f' => self.word("false", Value::Bool(false)),
+            b'n' => self.word("null", Value::Null),
+            b'-' | b'0'..=b'9' => self.number(),
+            _ => None,
+        }
+    }
+
+    fn word(&mut self, w: &str, v: Value) -> Option<Value> {
+        if self.b[self.i..].starts_with(w.as_bytes()) {
+            self.i += w.len();
+            Some(v)
+        } else {
+            None
+        }
+    }
+
+    fn digits(&mut self) -> usize {
+        let start = self.i;
+        while let Some(b'0'..=b'9') = self.b.get(self.i) {
+            self.i += 1;
+        }
+        self.i - start
+    }
+
+    fn number(&mut self) -> Option<Value> {
+        let start = self.i;
+        let neg = self.b[self.i] == b'-';
+        if neg {
+            self.i += 1;
+        }
+        match self.b.get(self.i)? {
+            b'0' => self.i += 1,
+            b'1'..=b'9' => {
+                self.digits();
+            }
+            _ => return None,
+        }
+        let int_end = self.i;
+        let mut simple = true;
+        if self.b.get(self.i) == Some(&b'.') {
+            simple = false;
+            self.i += 1;
+            if self.digits() == 0 {
+                return None;
+            }
+        }
+        if let Some(b'e' | b'E') = self.b.get(self.i) {
+            simple = false;
+            self.i += 1;
+            if let Some(b'+' | b'-') = self.b.get(self.i) {
+                self.i += 1;
+            }
+            if self.digits() == 0 {
+                return None;
+            }
+        }
+        let first = start + neg as usize;
+        if simple && int_end - first <= 15 {
+            let mut n = 0i64;
+            for &c in &self.b[first..int_end] {
+                n = n * 10 + (c - b'0') as i64;
+            }
+            let x = n as f64;
+            return Some(Value::Number(if neg { -x } else { x }));
+        }
+        self.s[start..self.i].parse::<f64>().ok().map(Value::Number)
+    }
+
+    fn string(&mut self, key: bool) -> Option<JsStr> {
+        let start = self.i + 1;
+        let mut i = start;
+        loop {
+            match *self.b.get(i)? {
+                b'"' => break,
+                b'\\' => return self.escaped(start),
+                c if c < 0x20 => return None,
+                _ => i += 1,
+            }
+        }
+        self.i = i + 1;
+        let text = &self.s[start..i];
+        if key {
+            if let Some(k) = self.keys.get(text) {
+                return Some(k.clone());
+            }
+            let k = JsStr::new(text);
+            self.keys.insert(text, k.clone());
+            return Some(k);
+        }
+        Some(JsStr::new(text))
+    }
+
+    fn escaped(&mut self, start: usize) -> Option<JsStr> {
+        let mut out = std::mem::take(&mut self.buf);
+        out.clear();
+        let mut i = start;
+        let mut seg = start;
+        loop {
+            match *self.b.get(i)? {
+                b'"' => {
+                    crate::value::push16(&mut out, &self.s[seg..i]);
+                    break;
+                }
+                b'\\' => {
+                    crate::value::push16(&mut out, &self.s[seg..i]);
+                    let e = *self.b.get(i + 1)?;
+                    i += 2;
+                    match e {
+                        b'"' => out.push('"'),
+                        b'\\' => out.push('\\'),
+                        b'/' => out.push('/'),
+                        b'b' => out.push('\u{8}'),
+                        b'f' => out.push('\u{c}'),
+                        b'n' => out.push('\n'),
+                        b'r' => out.push('\r'),
+                        b't' => out.push('\t'),
+                        b'u' => {
+                            let u = hex4(self.b.get(i..i + 4)?)?;
+                            i += 4;
+                            let low = if (0xD800..0xDC00).contains(&u)
+                                && self.b.get(i) == Some(&b'\\')
+                                && self.b.get(i + 1) == Some(&b'u')
+                            {
+                                self.b
+                                    .get(i + 2..i + 6)
+                                    .and_then(hex4)
+                                    .filter(|l| (0xDC00..0xE000).contains(l))
+                            } else {
+                                None
+                            };
+                            if let Some(lo) = low {
+                                out.push(char::from_u32(
+                                    0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00),
+                                )?);
+                                i += 6;
+                            } else if (0xD800..0xE000).contains(&u) {
+                                let mut tmp = [0u8; 4];
+                                crate::value::push16(
+                                    &mut out,
+                                    crate::value::lone_char(u as u16).encode_utf8(&mut tmp),
+                                );
+                            } else {
+                                out.push(char::from_u32(u)?);
+                            }
+                        }
+                        _ => return None,
+                    }
+                    seg = i;
+                }
+                c if c < 0x20 => return None,
+                _ => i += 1,
+            }
+        }
+        self.i = i + 1;
+        let s = JsStr::new(&out);
+        self.buf = out;
+        Some(s)
+    }
+
+    fn object(&mut self, vm: &mut Vm, depth: u32) -> Option<Value> {
+        self.i += 1;
+        let o = vm.new_object();
+        self.ws();
+        if self.b.get(self.i) == Some(&b'}') {
+            self.i += 1;
+            return Some(Value::Object(o));
+        }
+        loop {
+            self.ws();
+            if self.b.get(self.i) != Some(&b'"') {
+                return None;
+            }
+            let k = self.string(true)?;
+            self.ws();
+            if self.b.get(self.i) != Some(&b':') {
+                return None;
+            }
+            self.i += 1;
+            let v = self.value(vm, depth + 1)?;
+            o.set_own(k, v);
+            self.ws();
+            match self.b.get(self.i) {
+                Some(b',') => self.i += 1,
+                Some(b'}') => {
+                    self.i += 1;
+                    return Some(Value::Object(o));
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    fn array(&mut self, vm: &mut Vm, depth: u32) -> Option<Value> {
+        self.i += 1;
+        let mut items = Vec::new();
+        self.ws();
+        if self.b.get(self.i) == Some(&b']') {
+            self.i += 1;
+            return Some(vm.new_array(items));
+        }
+        loop {
+            items.push(self.value(vm, depth + 1)?);
+            self.ws();
+            match self.b.get(self.i) {
+                Some(b',') => self.i += 1,
+                Some(b']') => {
+                    self.i += 1;
+                    return Some(vm.new_array(items));
+                }
+                _ => return None,
+            }
+        }
+    }
+}
+
+fn fast_parse(vm: &mut Vm, text: &str) -> Option<Value> {
+    let mut p = Fast {
+        s: text,
+        b: text.as_bytes(),
+        i: 0,
+        keys: Default::default(),
+        buf: String::new(),
+    };
+    let v = p.value(vm, 0)?;
+    p.ws();
+    (p.i == p.b.len()).then_some(v)
+}
+
 pub fn json_parse(vm: &mut Vm, text: &str) -> R {
+    if let Some(v) = fast_parse(vm, text) {
+        return Ok(v);
+    }
     match serde_json::from_str::<serde_json::Value>(text) {
         Ok(j) => Ok(from_json(vm, &j)),
         Err(e) => Err(vm.make_error(ErrorKind::SyntaxError, json_error_message(text, &e))),

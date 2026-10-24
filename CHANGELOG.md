@@ -26,12 +26,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   about twice as fast, function calls about 40% faster, and parsers such as acorn and babel
   12-22% faster.
 - `%` on integers uses integer arithmetic instead of a floating-point remainder.
+- Calls to built-in functions skip the generic call path, `for...of` over arrays reads elements
+  in the dispatch loop, and template literals build their string in one pass with a fast
+  integer formatter, so `array.push`, string building and `Map` keyed by template strings run
+  25-40% faster.
+- `JSON.parse` builds JavaScript values directly instead of going through an intermediate tree,
+  and `JSON.stringify` reads plain objects without generic property lookups or temporary
+  strings, so a parse and stringify round trip is more than twice as fast.
 - `Array.prototype.sort` and `toSorted` without a comparator, or with a comparator of the form
   `(a, b) => a - b`, `(a, b) => b - a` or `(a, b) => a.key - b.key`, sort numbers, strings and
   objects without calling back into JavaScript for every comparison, about nine times faster.
 
 ### Fixed
 
+- `JSON.parse` accepts numbers outside the double range (`1e400` is `Infinity`), lone surrogate
+  escapes such as `"\ud800"`, and arrays and objects nested more than 128 levels deep.
 - In multiline mode `^` and `$` treat `\r`, U+2028 and U+2029 as line ends like `\n`, so
   `/^key=(.*)$/m` matches lines of text with Windows line endings.
 - `\b`, `\B` and `\w` use JavaScript's ASCII word characters, so `/\bcafé\b/` and

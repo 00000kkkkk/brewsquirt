@@ -1,3 +1,29 @@
+pub fn push_integer(buf: &mut String, i: i64) {
+    let mut tmp = [0u8; 20];
+    let mut p = tmp.len();
+    let mut u = i.unsigned_abs();
+    loop {
+        p -= 1;
+        tmp[p] = b'0' + (u % 10) as u8;
+        u /= 10;
+        if u == 0 {
+            break;
+        }
+    }
+    if i < 0 {
+        buf.push('-');
+    }
+    buf.push_str(std::str::from_utf8(&tmp[p..]).unwrap_or("0"));
+}
+
+pub fn push_number(buf: &mut String, n: f64) {
+    if n.fract() == 0.0 && n.abs() < 1e15 {
+        push_integer(buf, n as i64);
+    } else {
+        buf.push_str(&number_to_string(n));
+    }
+}
+
 pub fn number_to_string(n: f64) -> String {
     if n.is_nan() {
         return "NaN".to_string();
@@ -8,11 +34,13 @@ pub fn number_to_string(n: f64) -> String {
     if n.is_infinite() {
         return if n > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
     }
+    if n.fract() == 0.0 && n.abs() < 1e15 {
+        let mut s = String::new();
+        push_integer(&mut s, n as i64);
+        return s;
+    }
     if n < 0.0 {
         return format!("-{}", number_to_string(-n));
-    }
-    if n.fract() == 0.0 && n < 1e15 {
-        return format!("{}", n as i64);
     }
     let sci = format!("{n:e}");
     let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));

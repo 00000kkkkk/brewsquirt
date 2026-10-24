@@ -323,6 +323,7 @@ pub struct Vm {
     arg_buf: Vec<Value>,
     fast_resume: bool,
     builders: Vec<(usize, String)>,
+    scratch: String,
     pub realm: Realm,
     modules: FxHashMap<PathBuf, Value>,
     pub(crate) require_cache: Option<Rc<Obj>>,
@@ -565,6 +566,49 @@ fn number_element(o: &Obj, k: f64) -> Option<f64> {
             _ => None,
         },
         _ => None,
+    }
+}
+
+fn array_iter_step(it: &Value, proto_indices: bool, dst: *mut Value) -> u8 {
+    let Value::Object(o) = it else {
+        return 0;
+    };
+    let ObjKind::Iter(state) = &o.kind else {
+        return 0;
+    };
+    let Ok(mut st) = state.try_borrow_mut() else {
+        return 0;
+    };
+    let IterState::Array(arr, i, 1) = &mut *st else {
+        return 0;
+    };
+    if *i == usize::MAX {
+        return 2;
+    }
+    let ObjKind::Array(a) = &arr.kind else {
+        return 0;
+    };
+    if arr.flags.get() & crate::object::SLOW_ELEMENTS != 0 || (proto_indices && arr.is_hole(*i)) {
+        return 0;
+    }
+    let Ok(a) = a.try_borrow() else {
+        return 0;
+    };
+    match a.get(*i) {
+        Some(v) => {
+            unsafe {
+                match v {
+                    Value::Number(x) => std::ptr::write(dst, Value::Number(*x)),
+                    v => std::ptr::write(dst, v.clone()),
+                }
+            }
+            *i += 1;
+            1
+        }
+        None => {
+            *i = usize::MAX;
+            2
+        }
     }
 }
 
@@ -1055,6 +1099,7 @@ impl Vm {
             arg_buf: Vec::new(),
             fast_resume: false,
             builders: Vec::new(),
+            scratch: String::new(),
             realm: Realm::new(),
             modules: FxHashMap::default(),
             require_cache: None,
@@ -5857,6 +5902,14 @@ impl Vm {
                         self.fast_new_array(n as usize);
                         resync!();
                     }
+                    Op::Template(n) => {
+                        sync!();
+                        let ok = self.fast_template(n as usize);
+                        resync!();
+                        if !ok {
+                            break;
+                        }
+                    }
                     Op::ArrayPush => {
                         let v = pop!();
                         if let Value::Object(o) = top!() {
@@ -5878,6 +5931,24 @@ impl Vm {
                         push!(v);
                     }
                     Op::IterNext(t) => {
+                        let it = pop!();
+                        match array_iter_step(&it, self.proto_indices, sp) {
+                            1 => {
+                                drop(it);
+                                sp = unsafe { sp.add(1) };
+                                ip += 1;
+                                continue;
+                            }
+                            2 => {
+                                drop(it);
+                                ip = t as usize;
+                                continue;
+                            }
+                            _ => unsafe {
+                                std::ptr::write(sp, it);
+                                sp = sp.add(1);
+                            },
+                        }
                         self.frames[fi].ip = ip + 1;
                         sync!();
                         let r = self.fast_iter_next();
@@ -6019,6 +6090,38 @@ impl Vm {
     }
 
     #[inline(never)]
+    fn fast_template(&mut self, n: usize) -> bool {
+        let len = self.stack.len();
+        let parts = &self.stack[len - n..];
+        if !parts.iter().all(|p| {
+            matches!(
+                p,
+                Value::Str(_) | Value::Number(_) | Value::Bool(_) | Value::Undefined | Value::Null
+            )
+        }) {
+            return false;
+        }
+        let mut buf = std::mem::take(&mut self.scratch);
+        buf.clear();
+        for p in parts {
+            match p {
+                Value::Str(x) => crate::value::push16(&mut buf, x),
+                Value::Number(x) => crate::number::push_number(&mut buf, *x),
+                Value::Bool(b) => buf.push_str(if *b { "true" } else { "false" }),
+                Value::Null => buf.push_str("null"),
+                _ => buf.push_str("undefined"),
+            }
+        }
+        let s = JsStr::new(&buf);
+        if buf.capacity() <= 1 << 16 {
+            self.scratch = buf;
+        }
+        self.stack.truncate(len - n);
+        self.stack.push(Value::Str(s));
+        true
+    }
+
+    #[inline(never)]
     fn fast_new_array(&mut self, n: usize) {
         let items = self.stack.split_off(self.stack.len() - n);
         let a = self.new_array(items);
@@ -6057,15 +6160,44 @@ impl Vm {
     #[inline(never)]
     fn fast_native_call(&mut self, ci: usize) -> Result<(), Value> {
         let mut args = std::mem::take(&mut self.arg_buf);
-        args.extend(self.stack.drain(ci + 2..));
+        let len = self.stack.len();
+        args.reserve(len - ci - 2);
+        unsafe {
+            let src = self.stack.as_ptr();
+            for i in ci + 2..len {
+                let v = &*src.add(i);
+                let dst = args.as_mut_ptr().add(args.len());
+                match v {
+                    Value::Number(x) => std::ptr::write(dst, Value::Number(*x)),
+                    _ => std::ptr::copy_nonoverlapping(v, dst, 1),
+                }
+                args.set_len(args.len() + 1);
+            }
+            self.stack.set_len(ci + 2);
+        }
         let this = pop_value(&mut self.stack);
         let f = self.stack.pop().unwrap_or_default();
-        let r = self.call_value(&f, this, &args);
+        let r = match &f {
+            Value::Object(o) => match &o.kind {
+                ObjKind::Native(n) if self.native_depth < MAX_NATIVE_DEPTH => {
+                    self.native_depth += 1;
+                    let r = (n.func)(self, this, &args);
+                    self.native_depth -= 1;
+                    r
+                }
+                _ => self.call_value(&f, this, &args),
+            },
+            _ => self.call_value(&f, this, &args),
+        };
         args.clear();
         if self.arg_buf.capacity() < args.capacity() {
             self.arg_buf = args;
         }
-        self.stack.push(r?);
+        match r {
+            Ok(Value::Number(x)) => push_number(&mut self.stack, x),
+            Ok(v) => self.stack.push(v),
+            Err(e) => return Err(e),
+        }
         Ok(())
     }
 
