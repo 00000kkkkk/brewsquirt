@@ -443,7 +443,7 @@ impl Infer<'_> {
             Some(
                 flow(op, ip, d as i32)?
                     .into_iter()
-                    .map(|(t, nd)| (t, vec![Ty::Any; nd as usize]))
+                    .map(|(t, depth_after)| (t, vec![Ty::Any; depth_after as usize]))
                     .collect(),
             )
         };
