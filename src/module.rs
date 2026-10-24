@@ -800,7 +800,7 @@ fn read_config_chain(file: &Path, depth: u32, out: &mut Vec<(PathBuf, serde_json
             let mut found = None;
             let mut d = Some(dir.clone());
             while let Some(cur) = d {
-                for deps in [DEPS_DIR, NODE_DEPS_DIR] {
+                for deps in [NODE_DEPS_DIR, DEPS_DIR] {
                     let c = cur.join(deps).join(&parent);
                     if c.exists() {
                         found = Some(c);
@@ -1020,7 +1020,7 @@ fn resolve_uncached(spec: &str, from_dir: &Path, cjs: bool) -> Result<PathBuf, S
     }
     let mut dir = Some(from_dir.to_path_buf());
     while let Some(d) = dir {
-        for deps in [DEPS_DIR, NODE_DEPS_DIR] {
+        for deps in [NODE_DEPS_DIR, DEPS_DIR] {
             let candidate = d.join(deps).join(&pkg);
             if candidate.is_dir() {
                 let found = package_subpath(&candidate, sub, cjs);

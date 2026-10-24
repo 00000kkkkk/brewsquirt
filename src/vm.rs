@@ -4364,8 +4364,14 @@ impl Vm {
             }
             Value::Object(o) if self.builtin_iterable(o) => match &o.kind {
                 ObjKind::Array(_) => Ok(self.new_iter(IterState::Array(o.clone(), 0, 1))),
-                ObjKind::Map(_) => Ok(self.new_iter(IterState::MapEntries(o.clone(), 0))),
-                ObjKind::Set(_) => Ok(self.new_iter(IterState::SetValues(o.clone(), 0))),
+                ObjKind::Map(_) => {
+                    let c = crate::object::collection_cursor(o);
+                    Ok(self.new_iter(IterState::MapEntries(o.clone(), c)))
+                }
+                ObjKind::Set(_) => {
+                    let c = crate::object::collection_cursor(o);
+                    Ok(self.new_iter(IterState::SetValues(o.clone(), c)))
+                }
                 ObjKind::Iter(_) => Ok(v.clone()),
                 ObjKind::Coroutine(c) if c.is_generator && !c.is_async => Ok(v.clone()),
                 _ => self.protocol_iterator(v),
@@ -4566,27 +4572,27 @@ impl Vm {
                     return Ok(Some(Value::Str(c.to_string().into())));
                 }
                 IterState::MapKeys(m, i) => {
-                    let Some((k, _)) = map_at(m, *i) else {
-                        *i = usize::MAX;
+                    let Some((k, _)) = map_at(m, i.get()) else {
+                        i.set(usize::MAX);
                         return Ok(None);
                     };
-                    *i += 1;
+                    i.set(i.get() + 1);
                     return Ok(Some(k));
                 }
                 IterState::MapValues(m, i) => {
-                    let Some((_, v)) = map_at(m, *i) else {
-                        *i = usize::MAX;
+                    let Some((_, v)) = map_at(m, i.get()) else {
+                        i.set(usize::MAX);
                         return Ok(None);
                     };
-                    *i += 1;
+                    i.set(i.get() + 1);
                     return Ok(Some(v));
                 }
                 IterState::MapEntries(m, i) => {
-                    let Some((k, v)) = map_at(m, *i) else {
-                        *i = usize::MAX;
+                    let Some((k, v)) = map_at(m, i.get()) else {
+                        i.set(usize::MAX);
                         return Ok(None);
                     };
-                    *i += 1;
+                    i.set(i.get() + 1);
                     drop(st);
                     return Ok(Some(self.new_array(vec![k, v])));
                 }
@@ -4594,10 +4600,10 @@ impl Vm {
                     let ObjKind::Set(set) = &s.kind else {
                         return Ok(None);
                     };
-                    let v = set.borrow().get_index(*i).map(|k| k.to_value());
+                    let v = set.borrow().get_index(i.get()).map(|k| k.to_value());
                     match v {
-                        Some(_) => *i += 1,
-                        None => *i = usize::MAX,
+                        Some(_) => i.set(i.get() + 1),
+                        None => i.set(usize::MAX),
                     }
                     return Ok(v);
                 }
@@ -4605,12 +4611,12 @@ impl Vm {
                     let ObjKind::Set(set) = &s.kind else {
                         return Ok(None);
                     };
-                    let v = set.borrow().get_index(*i).map(|k| k.to_value());
+                    let v = set.borrow().get_index(i.get()).map(|k| k.to_value());
                     let Some(v) = v else {
-                        *i = usize::MAX;
+                        i.set(usize::MAX);
                         return Ok(None);
                     };
-                    *i += 1;
+                    i.set(i.get() + 1);
                     drop(st);
                     return Ok(Some(self.new_array(vec![v.clone(), v])));
                 }

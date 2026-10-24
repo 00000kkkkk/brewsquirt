@@ -60,7 +60,7 @@ pub fn content_decoder(
             inner: Some(std::io::BufReader::new(reader)),
             decoder: None,
         }),
-        Some("br") => Box::new(brotli_decompressor::Decompressor::new(reader, 65536)),
+        Some("br") => Box::new(brotli::Decompressor::new(reader, 65536)),
         _ => reader,
     }
 }

@@ -1,4 +1,4 @@
-use crate::module::DEPS_DIR;
+use super::INSTALL_DIR as DEPS_DIR;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;

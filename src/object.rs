@@ -1242,14 +1242,66 @@ pub struct Bound {
     pub args: Vec<Value>,
 }
 
+type CursorList = Vec<std::rc::Weak<Cell<usize>>>;
+
+thread_local! {
+    static CURSORS: RefCell<rustc_hash::FxHashMap<usize, CursorList>> =
+        RefCell::new(rustc_hash::FxHashMap::default());
+}
+
+pub fn collection_cursor(o: &Obj) -> Rc<Cell<usize>> {
+    let cursor = Rc::new(Cell::new(0));
+    CURSORS.with(|all| {
+        let mut all = all.borrow_mut();
+        let list = all.entry(o as *const Obj as usize).or_default();
+        list.retain(|w| w.strong_count() > 0);
+        list.push(Rc::downgrade(&cursor));
+    });
+    cursor
+}
+
+fn adjust_cursors(o: &Obj, f: impl Fn(usize) -> usize) {
+    CURSORS.with(|all| {
+        let mut all = all.borrow_mut();
+        if all.is_empty() {
+            return;
+        }
+        let key = o as *const Obj as usize;
+        let Some(list) = all.get_mut(&key) else {
+            return;
+        };
+        list.retain(|w| match w.upgrade() {
+            Some(c) => {
+                let v = c.get();
+                if v != usize::MAX {
+                    c.set(f(v));
+                }
+                true
+            }
+            None => false,
+        });
+        if list.is_empty() {
+            all.remove(&key);
+        }
+    });
+}
+
+pub fn collection_removed(o: &Obj, index: usize) {
+    adjust_cursors(o, |v| if v > index { v - 1 } else { v });
+}
+
+pub fn collection_cleared(o: &Obj) {
+    adjust_cursors(o, |_| 0);
+}
+
 pub enum IterState {
     Array(Rc<Obj>, usize, u8),
     Str(JsStr, usize),
-    MapEntries(Rc<Obj>, usize),
-    MapKeys(Rc<Obj>, usize),
-    MapValues(Rc<Obj>, usize),
-    SetValues(Rc<Obj>, usize),
-    SetEntries(Rc<Obj>, usize),
+    MapEntries(Rc<Obj>, Rc<Cell<usize>>),
+    MapKeys(Rc<Obj>, Rc<Cell<usize>>),
+    MapValues(Rc<Obj>, Rc<Cell<usize>>),
+    SetValues(Rc<Obj>, Rc<Cell<usize>>),
+    SetEntries(Rc<Obj>, Rc<Cell<usize>>),
     List(Vec<Value>, usize),
     ForIn(Value, Vec<Value>, usize, Option<u64>),
     Protocol(Value, Value),

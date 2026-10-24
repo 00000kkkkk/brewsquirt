@@ -2406,6 +2406,11 @@ error or an uncaught exception.
 | `vrotdaem run [args...]`       | Runs the manifest's `main` with `jsq` semantics, passing `args` along.    |
 | `vrotdaem test [--filter <t>]` | Runs the package's test files from its root.                              |
 
+In a project without `squirt.json`, `vrotdaem` works from `package.json`: `gluboko` installs its
+`dependencies`, `devDependencies` and `optionalDependencies`, `trustedDependencies` names the
+packages whose install scripts may run, and `add`, `remove` and `trust` edit `package.json` in
+place and keep its other fields. An existing npm project installs with `vrotdaem gluboko`.
+
 Dependency specs:
 
 | Spec               | Meaning                                                                 |
@@ -2421,18 +2426,19 @@ Executable files keep their mode on Linux and macOS. Their `peerDependencies` ar
 too when no other package provides them, except the ones marked optional in
 `peerDependenciesMeta`.
 
-`gluboko` links `node_modules` to `nude_modules` (a junction on Windows, a symbolic link
-elsewhere) when there is no `node_modules` directory yet, so tools that only look there, such as
-Vitest, Jest and bundlers, find the installed packages.
+`gluboko` puts the packages in `node_modules`, where Vite, Rollup, Vitest, Jest and other tools
+expect them, and links `nude_modules` to it (a junction on Windows, a symbolic link elsewhere).
+A project installed by an older `vrotdaem`, with `nude_modules` as a real directory, is
+reinstalled in this layout the next time `gluboko` runs.
 
-The `bin` commands of installed packages are linked into `nude_modules/.bin`, as `.cmd` files on
+The `bin` commands of installed packages are linked into `node_modules/.bin`, as `.cmd` files on
 Windows and shell scripts elsewhere, and JavaScript commands run with `jsq`.
 
 Install scripts (`preinstall`, `install` and `postinstall`) only run for packages listed in
 `trustedDependencies`, because they execute arbitrary code from the registry. `gluboko` names
 every package whose scripts it skipped, and `vrotdaem trust <name>` records the package and runs
 its scripts at once. Scripts run in the package directory through `sh` or `cmd`, with the
-`nude_modules/.bin` directories on `PATH`, `node` resolving to `jsq`, and the usual
+`node_modules/.bin` directories on `PATH`, `node` resolving to `jsq`, and the usual
 `npm_lifecycle_event`, `npm_package_name` and `npm_package_version` variables. A failing script
 stops the installation, unless it belongs to an optional dependency, which is then left out.
 Packages whose only script is `node-gyp-build` and that already ship `prebuilds` need no

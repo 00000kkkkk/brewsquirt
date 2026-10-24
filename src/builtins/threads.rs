@@ -562,6 +562,7 @@ pub struct WorkerInit {
     pub data: Option<Wire>,
     pub env: Option<Wire>,
     pub name: String,
+    pub process_env: Option<Vec<(String, String)>>,
 }
 
 pub struct ThreadState {
@@ -1107,6 +1108,18 @@ fn native_worker_spawn(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         _ => String::new(),
     };
     let handler = arg(args, 7);
+    let process_env = match arg(args, 8) {
+        source @ Value::Object(_) => {
+            let mut pairs = Vec::new();
+            for k in vm.own_keys(&source) {
+                let key = vm.to_string(&k)?.to_string();
+                let v = vm.get_prop(&source, &key)?;
+                pairs.push((key, vm.to_string(&v)?.to_string()));
+            }
+            Some(pairs)
+        }
+        _ => None,
+    };
     let thread_id = THREAD_IDS.fetch_add(1, Ordering::SeqCst);
     let io = crate::io::Io::default();
     let worker_tx = io.tx.clone();
@@ -1137,6 +1150,7 @@ fn native_worker_spawn(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         data: Some(data),
         env: Some(env),
         name,
+        process_env,
     };
     let spawned = std::thread::Builder::new()
         .name(format!("jsq-worker-{thread_id}"))

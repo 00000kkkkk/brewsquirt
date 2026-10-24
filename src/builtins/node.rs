@@ -5847,10 +5847,13 @@ const NODE_SRC: &str = r##"
   }
   const zlibDecodes = new Set(["gunzip", "inflate", "inflateRaw", "unzip"])
   const zlibRun = (op, data, options) => {
-    const level = typeof options === "number" ? options : options?.level ?? -1
+    const brotli = op === "brotliCompress" || op === "brotliDecompress"
+    const params = brotli ? options?.params ?? {} : {}
+    const level = brotli ? params[1] ?? 11 : typeof options === "number" ? options : options?.level ?? -1
+    const window = brotli ? params[2] ?? 22 : -1
     const input = typeof data === "string" ? Buffer.from(data) : cryptoBytes(data, undefined, "buffer")
     try {
-      const out = native.zlib(op, input, level)
+      const out = native.zlib(op, input, level, window)
       return Buffer.from(out.buffer, out.byteOffset, out.byteLength)
     } catch (e) {
       const err = new Error(e?.message ?? String(e))
@@ -5985,7 +5988,7 @@ const NODE_SRC: &str = r##"
     ...zlibConstants,
     crc32: (data, value = 0) => native.crc32(typeof data === "string" ? Buffer.from(data) : cryptoBytes(data, undefined, "data"), value),
   }
-  for (const op of ["gzip", "gunzip", "deflate", "inflate", "deflateRaw", "inflateRaw", "unzip"]) {
+  for (const op of ["gzip", "gunzip", "deflate", "inflate", "deflateRaw", "inflateRaw", "unzip", "brotliCompress", "brotliDecompress"]) {
     const Name = op[0].toUpperCase() + op.slice(1)
     zlib[op + "Sync"] = (data, options) => zlibRun(op, data, options)
     zlib[op] = zlibAsync(op)
@@ -6004,7 +6007,7 @@ const NODE_SRC: &str = r##"
     e.code = "ERR_ZLIB_UNSUPPORTED"
     return e
   }
-  for (const [op, label] of [["brotliCompress", "brotli"], ["brotliDecompress", "brotli"], ["zstdCompress", "zstd"], ["zstdDecompress", "zstd"]]) {
+  for (const [op, label] of [["zstdCompress", "zstd"], ["zstdDecompress", "zstd"]]) {
     const Name = op[0].toUpperCase() + op.slice(1)
     zlib[op + "Sync"] = () => {
       throw unsupportedCodec(label)
@@ -7190,7 +7193,10 @@ const NODE_SRC: &str = r##"
         }
       }
       const argv = Array.isArray(options.argv) ? options.argv.map(String) : []
-      const info = native.workerSpawn(target, isEval, argv, options.workerData, options.transferList, [...environmentData], options.name ?? "", handler)
+      const envSource = options.env === undefined || options.env === null || options.env === SHARE_ENV ? process.env : options.env
+      const processEnv = {}
+      for (const k of Object.keys(envSource)) processEnv[k] = String(envSource[k])
+      const info = native.workerSpawn(target, isEval, argv, options.workerData, options.transferList, [...environmentData], options.name ?? "", handler, processEnv)
       this.threadId = info.threadId
       this.#id = info.threadId
       this.#port = info.port
@@ -9526,8 +9532,25 @@ pub(crate) fn gunzip_members(data: &[u8]) -> std::io::Result<Vec<u8>> {
     }
 }
 
-fn zlib_bytes(op: &str, data: &[u8], level: i32) -> std::io::Result<Vec<u8>> {
+fn zlib_bytes(op: &str, data: &[u8], level: i32, window: i32) -> std::io::Result<Vec<u8>> {
     use std::io::Write;
+    if op == "brotliCompress" {
+        let mut params = brotli::enc::BrotliEncoderParams::default();
+        if (0..=11).contains(&level) {
+            params.quality = level;
+        }
+        if (10..=24).contains(&window) {
+            params.lgwin = window;
+        }
+        let mut out = Vec::new();
+        brotli::BrotliCompress(&mut &data[..], &mut out, &params)?;
+        return Ok(out);
+    }
+    if op == "brotliDecompress" {
+        let mut out = Vec::new();
+        brotli::BrotliDecompress(&mut &data[..], &mut out)?;
+        return Ok(out);
+    }
     let level = if level < 0 {
         flate2::Compression::default()
     } else {
@@ -9562,9 +9585,9 @@ fn zlib_bytes(op: &str, data: &[u8], level: i32) -> std::io::Result<Vec<u8>> {
         }
         "unzip" => {
             if data.starts_with(&[0x1f, 0x8b]) {
-                zlib_bytes("gunzip", data, -1)
+                zlib_bytes("gunzip", data, -1, -1)
             } else {
-                zlib_bytes("inflate", data, -1)
+                zlib_bytes("inflate", data, -1, -1)
             }
         }
         _ => Err(std::io::Error::new(
@@ -9581,7 +9604,11 @@ fn zlib_op(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         Value::Number(n) if n.is_finite() => n as i32,
         _ => -1,
     };
-    match zlib_bytes(&op, &data, level) {
+    let window = match arg(args, 3) {
+        Value::Number(n) if n.is_finite() => n as i32,
+        _ => -1,
+    };
+    match zlib_bytes(&op, &data, level, window) {
         Ok(out) => Ok(super::typed::new_uint8(vm, out)),
         Err(e) => {
             let msg = match e.kind() {

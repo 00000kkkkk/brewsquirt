@@ -1,0 +1,91 @@
+const log = (...a) => console.log(...a)
+
+const m = new Map([[0, new Set([1])], [1, new Set([2])], [2, new Set()]])
+const seen = []
+let rounds = 0
+for (const [key, deps] of m) {
+  m.delete(key)
+  seen.push(key)
+  if (rounds++ < 6) {
+    for (const d of deps) {
+      if (!m.has(d)) m.set(d, new Set())
+      m.get(d).add(key)
+    }
+  }
+}
+log("worklist", seen.join(","), m.size)
+
+const s = new Set([1, 2, 3, 4, 5])
+const visited = []
+for (const v of s) {
+  visited.push(v)
+  if (v === 1) s.delete(2)
+  if (v === 3) s.delete(1)
+  if (v === 4) s.add(9)
+}
+log("set", visited.join(","), [...s].join(","))
+
+const fe = new Map([["a", 1], ["b", 2], ["c", 3], ["d", 4]])
+const order = []
+fe.forEach((v, k) => {
+  order.push(k)
+  if (k === "a") fe.delete("a")
+  if (k === "b") fe.delete("c")
+  if (k === "d") fe.set("e", 5)
+})
+log("forEach", order.join(","))
+
+const sf = new Set(["x", "y", "z"])
+const sorder = []
+sf.forEach((v) => {
+  sorder.push(v)
+  if (v === "x") {
+    sf.delete("x")
+    sf.add("x")
+  }
+  if (sorder.length > 6) sf.clear()
+})
+log("set forEach", sorder.join(","))
+
+const c = new Map([[1, 1], [2, 2], [3, 3]])
+const it = c.keys()
+log("first", it.next().value)
+c.clear()
+c.set(7, 7)
+log("after clear", it.next().value, it.next().done)
+
+const two = new Map([[1, "a"], [2, "b"], [3, "c"], [4, "d"]])
+const i1 = two.entries()
+const i2 = two.values()
+i1.next()
+i2.next()
+i2.next()
+two.delete(1)
+two.delete(3)
+log("two iterators", JSON.stringify(i1.next().value), i2.next().value, i2.next().done)
+
+const done = new Set([1])
+const di = done.values()
+di.next()
+di.next()
+done.add(2)
+log("exhausted stays done", di.next().done)
+
+let o = { name: "old" }
+const n = { name: "new" }
+o.parent = o = n
+log("assign order", n.parent?.name, o === n)
+var g = { x: 1 }
+function swap() {
+  g = { x: 2 }
+  return 5
+}
+g.y = swap()
+log("global target", JSON.stringify(g))
+const keep = { v: 0 }
+let target = keep
+target.v = (target = { v: 9 }, 1)
+log("sequence target", keep.v, target.v)
+const frozen = { k: 0 }
+frozen.k = frozen.k + 1
+log("simple rhs", frozen.k)

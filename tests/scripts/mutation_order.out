@@ -1,0 +1,12 @@
+worklist 0,1,2,0,1,2,0,1 0
+set 1,3,4,5,9 3,4,5,9
+forEach a,b,d,e
+set forEach x,y,z,x,x,x,x
+first 1
+after clear 7 true
+two iterators [2,"b"] d true
+exhausted stays done true
+assign order undefined true
+global target {"x":2}
+sequence target 1 9
+simple rhs 1

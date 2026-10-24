@@ -303,7 +303,8 @@ fn string_iter(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 fn map_entries(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     match &this {
         Value::Object(o) if matches!(o.kind, ObjKind::Map(_)) => {
-            Ok(vm.new_iter(IterState::MapEntries(o.clone(), 0)))
+            let c = crate::object::collection_cursor(o);
+            Ok(vm.new_iter(IterState::MapEntries(o.clone(), c)))
         }
         _ => Err(vm.type_error("Map.prototype[Symbol.iterator] called on incompatible receiver")),
     }
@@ -312,7 +313,8 @@ fn map_entries(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 fn set_values(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     match &this {
         Value::Object(o) if matches!(o.kind, ObjKind::Set(_)) => {
-            Ok(vm.new_iter(IterState::SetValues(o.clone(), 0)))
+            let c = crate::object::collection_cursor(o);
+            Ok(vm.new_iter(IterState::SetValues(o.clone(), c)))
         }
         _ => Err(vm.type_error("Set.prototype[Symbol.iterator] called on incompatible receiver")),
     }

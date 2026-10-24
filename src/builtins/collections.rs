@@ -250,14 +250,20 @@ fn map_has(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 fn map_delete(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let o = this_map(vm, &this, ".delete")?;
     let k = MapKey::from_value(&arg(args, 0));
-    Ok(Value::Bool(
-        map_of!(o).borrow_mut().shift_remove(&k).is_some(),
-    ))
+    let removed = map_of!(o)
+        .borrow_mut()
+        .shift_remove_full(&k)
+        .map(|(i, _, _)| i);
+    if let Some(i) = removed {
+        crate::object::collection_removed(&o, i);
+    }
+    Ok(Value::Bool(removed.is_some()))
 }
 
 fn map_clear(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     let o = this_map(vm, &this, ".clear")?;
     map_of!(o).borrow_mut().clear();
+    crate::object::collection_cleared(&o);
     Ok(Value::Undefined)
 }
 
@@ -265,34 +271,44 @@ fn map_for_each(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let o = this_map(vm, &this, ".forEach")?;
     let f = arg(args, 0);
     expect_fn(vm, &f)?;
-    let mut i = 0;
+    let cursor = crate::object::collection_cursor(&o);
     loop {
         let entry = {
             let m = map_of!(o).borrow();
-            m.get_index(i).map(|(k, v)| (k.to_value(), v.clone()))
+            m.get_index(cursor.get())
+                .map(|(k, v)| (k.to_value(), v.clone()))
         };
         let Some((k, v)) = entry else {
             break;
         };
+        cursor.set(cursor.get() + 1);
         vm.call_value(&f, arg(args, 1), &[v, k, this.clone()])?;
-        i += 1;
     }
     Ok(Value::Undefined)
 }
 
 fn map_keys(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     let o = this_map(vm, &this, ".keys")?;
-    Ok(vm.new_iter(IterState::MapKeys(o, 0)))
+    {
+        let c = crate::object::collection_cursor(&o);
+        Ok(vm.new_iter(IterState::MapKeys(o, c)))
+    }
 }
 
 fn map_values(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     let o = this_map(vm, &this, ".values")?;
-    Ok(vm.new_iter(IterState::MapValues(o, 0)))
+    {
+        let c = crate::object::collection_cursor(&o);
+        Ok(vm.new_iter(IterState::MapValues(o, c)))
+    }
 }
 
 fn map_entries(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     let o = this_map(vm, &this, ".entries")?;
-    Ok(vm.new_iter(IterState::MapEntries(o, 0)))
+    {
+        let c = crate::object::collection_cursor(&o);
+        Ok(vm.new_iter(IterState::MapEntries(o, c)))
+    }
 }
 
 fn set_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
@@ -346,12 +362,20 @@ fn set_has(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 fn set_delete(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let o = this_set(vm, &this, ".delete")?;
     let k = MapKey::from_value(&arg(args, 0));
-    Ok(Value::Bool(set_of!(o).borrow_mut().shift_remove(&k)))
+    let removed = set_of!(o)
+        .borrow_mut()
+        .shift_remove_full(&k)
+        .map(|(i, _)| i);
+    if let Some(i) = removed {
+        crate::object::collection_removed(&o, i);
+    }
+    Ok(Value::Bool(removed.is_some()))
 }
 
 fn set_clear(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     let o = this_set(vm, &this, ".clear")?;
     set_of!(o).borrow_mut().clear();
+    crate::object::collection_cleared(&o);
     Ok(Value::Undefined)
 }
 
@@ -359,26 +383,35 @@ fn set_for_each(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let o = this_set(vm, &this, ".forEach")?;
     let f = arg(args, 0);
     expect_fn(vm, &f)?;
-    let mut i = 0;
+    let cursor = crate::object::collection_cursor(&o);
     loop {
-        let v = set_of!(o).borrow().get_index(i).map(|k| k.to_value());
+        let v = set_of!(o)
+            .borrow()
+            .get_index(cursor.get())
+            .map(|k| k.to_value());
         let Some(v) = v else {
             break;
         };
+        cursor.set(cursor.get() + 1);
         vm.call_value(&f, arg(args, 1), &[v.clone(), v, this.clone()])?;
-        i += 1;
     }
     Ok(Value::Undefined)
 }
 
 fn set_values(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     let o = this_set(vm, &this, ".values")?;
-    Ok(vm.new_iter(IterState::SetValues(o, 0)))
+    {
+        let c = crate::object::collection_cursor(&o);
+        Ok(vm.new_iter(IterState::SetValues(o, c)))
+    }
 }
 
 fn set_entries(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     let o = this_set(vm, &this, ".entries")?;
-    Ok(vm.new_iter(IterState::SetEntries(o, 0)))
+    {
+        let c = crate::object::collection_cursor(&o);
+        Ok(vm.new_iter(IterState::SetEntries(o, c)))
+    }
 }
 
 fn iter_next<const F: usize>(vm: &mut Vm, this: Value, _args: &[Value]) -> R {

@@ -24,7 +24,13 @@ pub fn install(vm: &mut Vm) {
     let argv = vm.new_array(argv);
     process.set_own("argv", argv);
     let env = vm.new_object();
-    for (k, v) in std::env::vars() {
+    let pairs = vm
+        .threads
+        .worker
+        .as_mut()
+        .and_then(|w| w.process_env.take())
+        .unwrap_or_else(|| std::env::vars().collect());
+    for (k, v) in pairs {
         env.set_own(k.as_str(), Value::from(v));
     }
     process.set_own("env", Value::Object(env));

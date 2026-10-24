@@ -62,8 +62,15 @@ fn init_add_gluboko_run() {
 
     let out = vrotdaem(&app, &["add", "leftsquirt", "file:../leftsquirt"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(app.join("node_modules/leftsquirt/lib.jsq").is_file());
     assert!(app.join("nude_modules/leftsquirt/lib.jsq").is_file());
     assert!(app.join("nude_modules/repeat/index.jsq").is_file());
+    assert!(
+        std::fs::symlink_metadata(app.join("nude_modules"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 
     write(
         app.join("index.jsq"),
@@ -448,15 +455,118 @@ fn cyclic_dependencies_resolve_through_ancestors() {
         text(&out.stdout),
         text(&out.stderr)
     );
-    let nested = app.join("nude_modules/bundler/nude_modules/srcmap");
-    assert!(nested.join("nude_modules/symbol/index.js").is_file());
-    assert!(!nested.join("nude_modules/symbol/nude_modules").exists());
+    let nested = app.join("node_modules/bundler/node_modules/srcmap");
+    assert!(nested.join("node_modules/symbol/index.js").is_file());
+    assert!(!nested.join("node_modules/symbol/node_modules").exists());
     assert!(
-        !app.join("nude_modules/bundler/nude_modules/symbol")
+        !app.join("node_modules/bundler/node_modules/symbol")
             .exists()
+    );
+    assert!(
+        app.join("nude_modules/bundler/node_modules/srcmap")
+            .is_dir()
     );
     let out = vrotdaem(&app, &["run"]);
     assert!(out.status.success(), "{}", text(&out.stderr));
     assert_eq!(text(&out.stdout), "2.0.0 2.0.0 1.0.0,1.0.0,1.0.0\n");
     let _ = std::fs::remove_dir_all(&app);
+}
+
+#[test]
+fn old_nude_modules_layout_is_reinstalled_into_node_modules() {
+    let base = temp_dir("layout");
+    write(
+        base.join("dep").join("index.jsq"),
+        "export const answer = 42\n",
+    );
+    let app = base.join("app");
+    write(
+        app.join("squirt.json"),
+        r#"{"name":"app","version":"1.0.0","main":"main.jsq","dependencies":{"dep":"file:../dep"}}"#,
+    );
+    write(
+        app.join("main.jsq"),
+        "import { answer } from \"dep\"\nconsole.log(answer)\n",
+    );
+    write(app.join("nude_modules").join("stale").join("index.js"), "");
+    let out = vrotdaem(&app, &["gluboko"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(app.join("node_modules/dep/index.jsq").is_file());
+    assert!(!app.join("node_modules/stale").exists());
+    assert!(
+        std::fs::symlink_metadata(app.join("nude_modules"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(app.join("nude_modules/dep/index.jsq").is_file());
+    let out = vrotdaem(&app, &["run"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "42\n");
+    let out = vrotdaem(&app, &["gluboko", "--force"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(app.join("nude_modules/dep/index.jsq").is_file());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn package_json_projects_install_and_update() {
+    let base = temp_dir("pkgjson");
+    write(base.join("dep").join("index.js"), "exports.answer = 42\n");
+    write(
+        base.join("dep").join("package.json"),
+        r#"{"name":"dep","version":"1.0.0","main":"index.js"}"#,
+    );
+    write(base.join("tool").join("index.js"), "exports.tool = true\n");
+    write(
+        base.join("tool").join("package.json"),
+        r#"{"name":"tool","version":"1.0.0","main":"index.js"}"#,
+    );
+    write(base.join("extra").join("index.js"), "exports.extra = 1\n");
+    write(
+        base.join("extra").join("package.json"),
+        r#"{"name":"extra","version":"1.0.0","main":"index.js"}"#,
+    );
+    let app = base.join("app");
+    write(
+        app.join("package.json"),
+        r#"{
+  "name": "app",
+  "private": true,
+  "scripts": { "start": "node main.js" },
+  "dependencies": { "dep": "file:../dep" },
+  "devDependencies": { "tool": "file:../tool" }
+}
+"#,
+    );
+    write(
+        app.join("main.js"),
+        "console.log(require(\"dep\").answer, require(\"tool\").tool)\n",
+    );
+    let out = vrotdaem(&app, &["gluboko"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    assert!(app.join("node_modules/dep/index.js").is_file());
+    assert!(app.join("node_modules/tool/index.js").is_file());
+    assert!(!app.join("squirt.json").exists());
+    let run = Command::new(env!("CARGO_BIN_EXE_jsq"))
+        .current_dir(&app)
+        .arg("main.js")
+        .output()
+        .expect("run jsq");
+    assert_eq!(text(&run.stdout), "42 true\n");
+    let out = vrotdaem(&app, &["add", "extra", "file:../extra"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let manifest = std::fs::read_to_string(app.join("package.json")).unwrap();
+    let doc: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+    assert_eq!(doc["dependencies"]["extra"], "file:../extra");
+    assert_eq!(doc["dependencies"]["dep"], "file:../dep");
+    assert_eq!(doc["devDependencies"]["tool"], "file:../tool");
+    assert_eq!(doc["scripts"]["start"], "node main.js");
+    assert!(manifest.find("\"name\"").unwrap() < manifest.find("\"scripts\"").unwrap());
+    let out = vrotdaem(&app, &["remove", "tool"]);
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let doc: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(app.join("package.json")).unwrap()).unwrap();
+    assert!(doc["devDependencies"].get("tool").is_none());
+    let _ = std::fs::remove_dir_all(&base);
 }

@@ -67,7 +67,9 @@ fn cwd() -> PathBuf {
 
 fn root() -> Result<PathBuf, String> {
     pm::find_root(&cwd()).ok_or_else(|| {
-        format!("no {MANIFEST} found here or in any parent directory, run `vrotdaem init` first")
+        format!(
+            "no {MANIFEST} or package.json found here or in any parent directory, run `vrotdaem init` first"
+        )
     })
 }
 

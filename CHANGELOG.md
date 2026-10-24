@@ -21,11 +21,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FileHandle.readv`.
 - `JSQ_SAMPLE_STACKS=<milliseconds>` prints the main thread's JavaScript stack to stderr at that
   interval, to find where a slow or stuck program spends its time.
+- `vrotdaem` works in npm projects that have a `package.json` and no `squirt.json`: `gluboko`
+  installs `dependencies`, `devDependencies` and `optionalDependencies`, `trustedDependencies`
+  allows install scripts, and `add`, `remove` and `trust` update `package.json` in place.
 
 ### Changed
 
 - Stack frames of ES modules show `file://` URLs, as in Node, instead of paths relative to the
   working directory.
+- `vrotdaem gluboko` installs packages into a real `node_modules` directory and makes
+  `nude_modules` a link to it, instead of the other way round. Vite and Rollup only convert
+  CommonJS packages whose resolved path contains `node_modules`, so Astro builds and other Vite
+  SSR builds failed with "default is not exported" before. Projects installed in the old layout
+  are reinstalled automatically, and jsq looks in `node_modules` first.
 - `RegExp.prototype.test` no longer builds a match array when `exec` is the built-in one and runs
   about six times faster. `for...in` loops skip the prototype scan when no prototype has
   enumerable properties and run about twice as fast. Indexing ASCII strings no longer consults the
@@ -86,6 +94,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   getters instead of own properties, so subclasses such as Next.js `NextRequest` can override
   them. `Request` gains `mode`, `credentials`, `cache`, `referrer`, `referrerPolicy`, `integrity`,
   `keepalive` and `duplex`, `Response.error()` exists, and `Response.clone()` copies the headers.
+- Deleting an entry from a `Map` or `Set` while it is being iterated, with `for...of`, an iterator
+  or `forEach`, no longer skips the following entry, and entries added after `clear()` are still
+  visited. Rollup's chunk assignment uses such a work list, so SvelteKit builds now produce the
+  same chunks as under Node.
+- In `obj.prop = value`, the object is evaluated before the value, so `node.parent = node = next`
+  and `x.y = f()` where `f` reassigns `x` set the property on the old object. SvelteKit builds no
+  longer overflow the stack.
+- `zlib` supports brotli: `brotliCompress`, `brotliDecompress`, their `Sync` forms and streams,
+  with the quality and window parameters.
+- A `worker_threads.Worker` gets a copy of the parent's current `process.env`, or the object
+  passed as `env`, instead of the process environment from startup.
 - `util.inspect` passes `inspect` as the third argument to custom inspect functions and no longer
   indents an object returned by one twice. `Request`, `Response`, `ReadableStream` and
   `AbortSignal` print like Node, and `Headers` prints in insertion order with the original names.

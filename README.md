@@ -163,7 +163,10 @@ vrotdaem gluboko --force
 ```
 
 `gluboko` installs every dependency from `squirt.json` into `nude_modules/`. With `--force` it wipes
-`nude_modules/` first and reinstalls everything from scratch, deep and clean.
+`nude_modules/` first and reinstalls everything from scratch, deep and clean. On disk the packages
+live in `node_modules/`, where bundlers and other tools look for them, and `nude_modules/` links
+to it. In an npm project without `squirt.json`, `vrotdaem` reads and updates `package.json`
+instead, so `vrotdaem gluboko` installs an existing project as it is.
 
 A manifest looks like this:
 

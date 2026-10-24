@@ -3847,6 +3847,16 @@ impl Compiler {
         Ok(self.emit(Op::JumpIfFalse(0)))
     }
 
+    fn stable_target(&mut self, obj: &Expr, value: &Expr) -> bool {
+        match &obj.kind {
+            ExprKind::This => true,
+            ExprKind::Ident(n) => {
+                matches!(self.resolve(n), Var::Local(_, true)) || inert_value(value)
+            }
+            _ => false,
+        }
+    }
+
     fn local_slot(&mut self, e: &Expr) -> Option<u32> {
         match &e.kind {
             ExprKind::Ident(n) if self.has_dynamic(n) => None,
@@ -3946,13 +3956,16 @@ impl Compiler {
                 }
                 (ExprKind::Member { obj, name, .. }, None) => {
                     let k = self.str_const(name);
-                    if let Some(slot) = self.local_slot(obj) {
-                        self.expr(value)?;
-                        self.emit(Op::StoreLocalProp(slot, k));
-                    } else {
-                        self.expr(obj)?;
-                        self.expr(value)?;
-                        self.emit(Op::StoreProp(k));
+                    match self.local_slot(obj) {
+                        Some(slot) if self.stable_target(obj, value) => {
+                            self.expr(value)?;
+                            self.emit(Op::StoreLocalProp(slot, k));
+                        }
+                        _ => {
+                            self.expr(obj)?;
+                            self.expr(value)?;
+                            self.emit(Op::StoreProp(k));
+                        }
                     }
                 }
                 _ => {
@@ -4853,5 +4866,39 @@ impl Compiler {
             },
         }
         Ok(())
+    }
+}
+
+fn inert_value(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Number(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Null
+        | ExprKind::BigInt(_)
+        | ExprKind::Regex(..)
+        | ExprKind::This
+        | ExprKind::Ident(_)
+        | ExprKind::Function(_)
+        | ExprKind::NewTarget
+        | ExprKind::ImportMeta => true,
+        ExprKind::Template(_, parts) => parts.iter().all(inert_value),
+        ExprKind::Unary(op, x) => *op != UnaryOp::Delete && inert_value(x),
+        ExprKind::Binary(_, a, b) | ExprKind::Logical(_, a, b) => inert_value(a) && inert_value(b),
+        ExprKind::Cond(a, b, c) => inert_value(a) && inert_value(b) && inert_value(c),
+        ExprKind::Array(items) => items.iter().all(|i| match i {
+            ArrayElem::Expr(x) => inert_value(x),
+            ArrayElem::Hole => true,
+            ArrayElem::Spread(_) => false,
+        }),
+        ExprKind::Object(props) => props.iter().all(|p| match p {
+            PropDef::KeyValue(PropKey::Named(_), x) => inert_value(x),
+            PropDef::Shorthand(_) => true,
+            PropDef::Method(PropKey::Named(_), _)
+            | PropDef::Getter(PropKey::Named(_), _)
+            | PropDef::Setter(PropKey::Named(_), _) => true,
+            _ => false,
+        }),
+        _ => false,
     }
 }

@@ -3,6 +3,8 @@ pub mod scripts;
 pub mod semver;
 
 use crate::module::{DEPS_DIR, MANIFEST, NODE_DEPS_DIR};
+
+pub(crate) const INSTALL_DIR: &str = NODE_DEPS_DIR;
 use indexmap::IndexMap;
 use semver::Range;
 use serde::{Deserialize, Serialize};
@@ -28,7 +30,15 @@ pub struct Manifest {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub trusted: Vec<String>,
+    #[serde(skip)]
+    pub optional: IndexMap<String, String>,
+    #[serde(skip)]
+    pub dev: Vec<String>,
+    #[serde(skip)]
+    pub from_package: bool,
 }
+
+pub const PACKAGE_JSON: &str = "package.json";
 
 fn default_version() -> String {
     "0.1.0".to_string()
@@ -119,7 +129,7 @@ pub struct Report {
 pub fn find_root(start: &Path) -> Option<PathBuf> {
     let mut dir = Some(start.to_path_buf());
     while let Some(d) = dir {
-        if d.join(MANIFEST).is_file() {
+        if d.join(MANIFEST).is_file() || d.join(PACKAGE_JSON).is_file() {
             return Some(d);
         }
         dir = d.parent().map(Path::to_path_buf);
@@ -129,12 +139,128 @@ pub fn find_root(start: &Path) -> Option<PathBuf> {
 
 pub fn read_manifest(root: &Path) -> Result<Manifest, String> {
     let path = root.join(MANIFEST);
+    if !path.is_file() && root.join(PACKAGE_JSON).is_file() {
+        return read_package_manifest(root);
+    }
     let text =
         fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     serde_json::from_str(&text).map_err(|e| format!("invalid {}: {e}", path.display()))
 }
 
+fn string_entries(doc: &serde_json::Value, key: &str) -> IndexMap<String, String> {
+    doc.get(key)
+        .and_then(serde_json::Value::as_object)
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn read_package_manifest(root: &Path) -> Result<Manifest, String> {
+    let path = root.join(PACKAGE_JSON);
+    let text =
+        fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let doc: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("invalid {}: {e}", path.display()))?;
+    let text_of = |key: &str| {
+        doc.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(String::from)
+    };
+    let mut dependencies = string_entries(&doc, "dependencies");
+    let mut dev = Vec::new();
+    for (k, v) in string_entries(&doc, "devDependencies") {
+        if !dependencies.contains_key(&k) {
+            dev.push(k.clone());
+            dependencies.insert(k, v);
+        }
+    }
+    let optional = string_entries(&doc, "optionalDependencies");
+    for k in optional.keys() {
+        dependencies.shift_remove(k);
+    }
+    let trusted = doc
+        .get("trustedDependencies")
+        .and_then(serde_json::Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Manifest {
+        name: text_of("name").unwrap_or_else(|| {
+            root.file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default()
+        }),
+        version: text_of("version").unwrap_or_else(default_version),
+        description: text_of("description"),
+        main: text_of("main").unwrap_or_else(|| "index.js".to_string()),
+        dependencies,
+        trusted,
+        optional,
+        dev,
+        from_package: true,
+    })
+}
+
+fn write_package_manifest(root: &Path, m: &Manifest) -> Result<(), String> {
+    use serde_json::{Map, Value};
+    let path = root.join(PACKAGE_JSON);
+    let mut doc: Value = fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    let Some(obj) = doc.as_object_mut() else {
+        return Err(format!("{} is not a JSON object", path.display()));
+    };
+    let plain = |name: &str, spec: &str| -> String {
+        spec.strip_prefix(&format!("npm:{name}@"))
+            .map(String::from)
+            .unwrap_or_else(|| spec.to_string())
+    };
+    let mut deps = Map::new();
+    let mut devs = Map::new();
+    for (k, v) in &m.dependencies {
+        let target = if m.dev.contains(k) {
+            &mut devs
+        } else {
+            &mut deps
+        };
+        target.insert(k.clone(), Value::String(plain(k, v)));
+    }
+    let optional: Map<String, Value> = m
+        .optional
+        .iter()
+        .map(|(k, v)| (k.clone(), Value::String(plain(k, v))))
+        .collect();
+    for (key, map) in [
+        ("dependencies", deps),
+        ("devDependencies", devs),
+        ("optionalDependencies", optional),
+    ] {
+        if !map.is_empty() || obj.contains_key(key) {
+            obj.insert(key.to_string(), Value::Object(map));
+        }
+    }
+    if !m.trusted.is_empty() || obj.contains_key("trustedDependencies") {
+        obj.insert(
+            "trustedDependencies".to_string(),
+            Value::Array(m.trusted.iter().cloned().map(Value::String).collect()),
+        );
+    }
+    let mut text = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    text.push('\n');
+    fs::write(&path, text).map_err(|e| format!("cannot write {PACKAGE_JSON}: {e}"))
+}
+
 pub fn write_manifest(root: &Path, m: &Manifest) -> Result<(), String> {
+    if m.from_package {
+        return write_package_manifest(root, m);
+    }
     let mut text = serde_json::to_string_pretty(m).map_err(|e| e.to_string())?;
     text.push('\n');
     fs::write(root.join(MANIFEST), text).map_err(|e| format!("cannot write {MANIFEST}: {e}"))
@@ -158,6 +284,9 @@ pub fn init(root: &Path, name: Option<String>) -> Result<Manifest, String> {
         main: default_main(),
         dependencies: IndexMap::new(),
         trusted: Vec::new(),
+        optional: IndexMap::new(),
+        dev: Vec::new(),
+        from_package: false,
     };
     write_manifest(root, &m)?;
     let main = root.join(&m.main);
@@ -174,7 +303,7 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<(), String> {
     for entry in entries {
         let entry = entry.map_err(|e| e.to_string())?;
         let name = entry.file_name();
-        if name == DEPS_DIR || name == ".git" {
+        if name == DEPS_DIR || name == NODE_DEPS_DIR || name == ".git" {
             continue;
         }
         let from = entry.path();
@@ -289,12 +418,12 @@ fn nearest(
     holder: &Path,
     name: &str,
 ) -> Option<(PathBuf, Option<semver::Version>)> {
-    let start = holder.join(DEPS_DIR);
+    let start = holder.join(INSTALL_DIR);
     for dir in start.ancestors() {
         if !dir.starts_with(root) {
             break;
         }
-        if dir.file_name().is_none_or(|n| n != DEPS_DIR) {
+        if dir.file_name().is_none_or(|n| n != INSTALL_DIR) {
             continue;
         }
         let candidate = dir.join(name);
@@ -330,11 +459,12 @@ fn enqueue(
 
 pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Report, String> {
     let manifest = read_manifest(root)?;
-    let nude = root.join(DEPS_DIR);
+    let nude = root.join(INSTALL_DIR);
+    retire_old_layout(root);
     if force && nude.exists() {
-        fs::remove_dir_all(&nude).map_err(|e| format!("cannot wipe {DEPS_DIR}: {e}"))?;
+        fs::remove_dir_all(&nude).map_err(|e| format!("cannot wipe {INSTALL_DIR}: {e}"))?;
     }
-    fs::create_dir_all(&nude).map_err(|e| format!("cannot create {DEPS_DIR}: {e}"))?;
+    fs::create_dir_all(&nude).map_err(|e| format!("cannot create {INSTALL_DIR}: {e}"))?;
     let registry = npm::Registry::new();
     let mut queue: VecDeque<QueueItem> = VecDeque::new();
     let mut peers: VecDeque<QueueItem> = VecDeque::new();
@@ -342,6 +472,12 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
         .dependencies
         .iter()
         .map(|(n, s)| (n.clone(), (s.clone(), DepKind::Regular)))
+        .chain(
+            manifest
+                .optional
+                .iter()
+                .map(|(n, s)| (n.clone(), (s.clone(), DepKind::Optional))),
+        )
         .collect();
     enqueue(
         &registry, &mut queue, &mut peers, root, top_deps, root, root,
@@ -364,7 +500,9 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
         let (dest, satisfied) = match &spec {
             Spec::Npm { range, .. } => match nearest(&placed, root, &holder, &name) {
                 Some((found, Some(v))) if range.matches(&v) => (found, true),
-                Some(_) if holder.as_path() != root => (holder.join(DEPS_DIR).join(&name), false),
+                Some(_) if holder.as_path() != root => {
+                    (holder.join(INSTALL_DIR).join(&name), false)
+                }
                 _ => (top.clone(), false),
             },
             _ => {
@@ -466,10 +604,9 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
     for (name, dest) in &all {
         if dest.is_dir() {
             scripts::link_bins(name, dest)?;
-            link_node_modules(dest);
         }
     }
-    link_node_modules(root);
+    link_alias(root);
     for (name, dest, optional) in fresh.iter().rev() {
         if !dest.is_dir() || !scripts::needs_scripts(dest) {
             continue;
@@ -492,15 +629,38 @@ pub fn gluboko(root: &Path, force: bool, mut log: impl FnMut(&str)) -> Result<Re
     Ok(report)
 }
 
-pub fn link_node_modules(dir: &Path) {
-    let nude = dir.join(DEPS_DIR);
-    let node = dir.join(NODE_DEPS_DIR);
-    if !nude.is_dir() || node.symlink_metadata().is_ok() {
+fn is_link(path: &Path) -> bool {
+    path.symlink_metadata()
+        .is_ok_and(|m| m.file_type().is_symlink())
+}
+
+fn remove_link(path: &Path) {
+    if fs::remove_dir(path).is_err() {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn retire_old_layout(root: &Path) {
+    let alias = root.join(DEPS_DIR);
+    if is_link(&alias) || !alias.is_dir() {
+        return;
+    }
+    let real = root.join(INSTALL_DIR);
+    if is_link(&real) {
+        remove_link(&real);
+    }
+    let _ = fs::remove_dir_all(&alias);
+}
+
+pub fn link_alias(dir: &Path) {
+    let real = dir.join(INSTALL_DIR);
+    let alias = dir.join(DEPS_DIR);
+    if !real.is_dir() || alias.symlink_metadata().is_ok() {
         return;
     }
     #[cfg(unix)]
     {
-        let _ = std::os::unix::fs::symlink(DEPS_DIR, &node);
+        let _ = std::os::unix::fs::symlink(INSTALL_DIR, &alias);
     }
     #[cfg(windows)]
     {
@@ -508,8 +668,8 @@ pub fn link_node_modules(dir: &Path) {
         let _ = Command::new(std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into()))
             .raw_arg(format!(
                 "/d /c mklink /J \"{}\" \"{}\"",
-                node.display(),
-                nude.display()
+                alias.display(),
+                real.display()
             ))
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -558,9 +718,11 @@ pub fn add(root: &Path, name: &str, spec: Option<&str>) -> Result<(String, Strin
 
 pub fn remove(root: &Path, name: &str) -> Result<bool, String> {
     let mut m = read_manifest(root)?;
-    let existed = m.dependencies.shift_remove(name).is_some();
+    let existed =
+        m.dependencies.shift_remove(name).is_some() | m.optional.shift_remove(name).is_some();
+    m.dev.retain(|d| d != name);
     write_manifest(root, &m)?;
-    let dir = root.join(DEPS_DIR).join(name);
+    let dir = root.join(INSTALL_DIR).join(name);
     if dir.exists() {
         fs::remove_dir_all(&dir).map_err(|e| format!("cannot remove {}: {e}", dir.display()))?;
     }
