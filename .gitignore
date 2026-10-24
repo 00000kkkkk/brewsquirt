@@ -4,6 +4,7 @@ nude_modules/
 *.profraw
 *.profdata
 lcov.info
+THIRD_PARTY_LICENSES
 bench.md
 .idea/
 .vscode/

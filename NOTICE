@@ -77,5 +77,10 @@ The jsq and vrotdaem binaries are built from Rust crates and C libraries that
 keep their own licenses, among them SQLite (public domain), Zstandard
 (BSD-3-Clause) and crates under the MIT, Apache-2.0, BSD-2-Clause,
 BSD-3-Clause, ISC, Zlib, Unicode-3.0 and CDLA-Permissive-2.0 licenses. Every
-dependency and its exact version is listed in Cargo.lock, and each one's
-license text ships with its source.
+release archive carries a THIRD_PARTY_LICENSES file with the full license text
+of each of them and the crates it covers. In a source checkout the same file
+is produced by running:
+
+    cargo about generate about.hbs -o THIRD_PARTY_LICENSES
+
+Every dependency and its exact version is listed in Cargo.lock.

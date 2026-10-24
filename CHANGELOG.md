@@ -65,7 +65,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `squirt.json` keep their names, and the install scripts still find archives of earlier
   releases.
 - A NOTICE file with the copyright, trademark, Unicode data and third-party notices ships with
-  the source and in every release archive.
+  the source and in every release archive, and release archives also carry THIRD_PARTY_LICENSES
+  with the full license text of every crate and C library in the binaries.
 
 ### Fixed
 

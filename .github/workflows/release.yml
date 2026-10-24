@@ -58,12 +58,17 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         with:
           tool: cross
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - name: Collect third-party licenses
+        run: cargo about generate about.hbs -o THIRD_PARTY_LICENSES
       - uses: taiki-e/upload-rust-binary-action@v1
         with:
           bin: jsq,vrotdaem
           target: ${{ matrix.target }}
           archive: brewsquirt-$tag-$target
-          include: LICENSE,NOTICE,README.md,CHANGELOG.md
+          include: LICENSE,NOTICE,THIRD_PARTY_LICENSES,README.md,CHANGELOG.md
           tar: unix
           zip: windows
           checksum: sha256

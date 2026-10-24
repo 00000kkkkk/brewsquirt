@@ -1,0 +1,22 @@
+Third-party licenses for BrewSquirt
+===================================
+
+The jsq and vrotdaem binaries are built from the crates listed below. Each
+license text follows together with the crates that use it. BrewSquirt itself
+is licensed under the Apache License, Version 2.0; see LICENSE and NOTICE.
+{{#each licenses}}
+{{#unless (and (eq (len used_by) 1) (eq used_by.[0].crate.name "brewsquirt"))}}
+
+--------------------------------------------------------------------------------
+{{{name}}}
+
+Used by:
+{{#each used_by}}
+{{#unless (eq crate.name "brewsquirt")}}
+  {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} ({{{crate.repository}}}){{/if}}
+{{/unless}}
+{{/each}}
+
+{{{text}}}
+{{/unless}}
+{{/each}}

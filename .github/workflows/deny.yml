@@ -7,12 +7,16 @@ on:
       - Cargo.toml
       - Cargo.lock
       - deny.toml
+      - about.toml
+      - about.hbs
       - .github/workflows/deny.yml
   pull_request:
     paths:
       - Cargo.toml
       - Cargo.lock
       - deny.toml
+      - about.toml
+      - about.hbs
       - .github/workflows/deny.yml
   schedule:
     - cron: "17 5 * * *"
@@ -44,3 +48,19 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check ${{ matrix.checks }}
+
+  third-party-licenses:
+    name: third-party licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - name: Collect third-party licenses
+        run: cargo about generate about.hbs -o THIRD_PARTY_LICENSES
+      - name: Check the listing
+        run: |
+          test "$(grep -c '^Used by:' THIRD_PARTY_LICENSES)" -gt 50
+          if grep -q '&quot;' THIRD_PARTY_LICENSES; then exit 1; fi
