@@ -2407,6 +2407,7 @@ impl Parser {
         }
         let id = fresh_class_id();
         let declared = self.prescan_private();
+        let private_id = if declared.is_empty() { 0 } else { id };
         self.class_ids.push((id, Rc::new(declared)));
         if self.ts {
             self.ts_class_stack
@@ -2434,6 +2435,7 @@ impl Parser {
             members,
             line,
             span: (start, self.prev_end()),
+            private_id,
         });
         if let Some(st) = std_class {
             if !class_decorators.is_empty() || st.wrap {

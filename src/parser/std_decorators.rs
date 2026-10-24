@@ -658,6 +658,7 @@ impl Parser {
             members,
             line,
             span: def.span,
+            private_id: def.private_id,
         });
         let class_expr = Expr {
             kind: ExprKind::Class(class),

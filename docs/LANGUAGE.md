@@ -2489,8 +2489,6 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
   additions to `\p{...}` properties, and some early errors for invalid patterns
 - Arrays are dense: writing an index far beyond the end or setting `length` to a huge value
   throws a `RangeError` instead of creating a sparse array
-- Private names are shared by all evaluations of a class body, so instances of two classes made
-  by the same factory can access each other's private members
 - Several realms in one thread (`vm` contexts share one realm)
 - `Temporal`, `ShadowRealm`, and decorators on private methods and private accessors
 - Tracing garbage collection

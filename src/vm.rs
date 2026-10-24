@@ -303,6 +303,7 @@ pub(crate) struct Frame {
     pub(crate) construct: bool,
     pub(crate) co: Option<Rc<Obj>>,
     pub(crate) new_target: Option<Rc<Obj>>,
+    pub(crate) brands: Vec<(u32, u32)>,
 }
 
 pub(crate) struct Handler {
@@ -349,6 +350,7 @@ pub struct Vm {
     pub(crate) global_obj: Option<Rc<Obj>>,
     pub(crate) co_signal: Option<Signal>,
     pub accessors_used: bool,
+    pub(crate) next_brand: u32,
     pub(crate) readonly_used: bool,
     pub(crate) proxies_used: bool,
     pub(crate) global_accessors: bool,
@@ -1023,6 +1025,7 @@ impl Vm {
             global_obj: None,
             co_signal: None,
             accessors_used: false,
+            next_brand: 0,
             readonly_used: false,
             proxies_used: false,
             global_accessors: false,
@@ -1396,6 +1399,7 @@ impl Vm {
             upvalues: Box::new([]),
             home: RefCell::new(None),
             new_target: RefCell::new(None),
+            brands: None,
         });
         let f = Value::Object(Obj::new(
             ObjKind::Function(closure),
@@ -1436,6 +1440,7 @@ impl Vm {
             upvalues: Box::new([]),
             home: RefCell::new(None),
             new_target: RefCell::new(None),
+            brands: None,
         });
         let f = Value::Object(Obj::new(
             ObjKind::Function(closure),
@@ -1662,6 +1667,7 @@ impl Vm {
             upvalues: ups.into_boxed_slice(),
             home: RefCell::new(cl.home.borrow().clone()),
             new_target: RefCell::new(Some(nt)),
+            brands: self.closure_brands(self.frames.len() - 1, cl),
         });
         let f = Value::Object(Obj::new(
             ObjKind::Function(c),
@@ -1690,6 +1696,7 @@ impl Vm {
             upvalues: Box::new([]),
             home: RefCell::new(None),
             new_target: RefCell::new(None),
+            brands: None,
         });
         let f = Value::Object(Obj::new(
             ObjKind::Function(closure),
@@ -2777,6 +2784,62 @@ impl Vm {
         Rc::as_ptr(holder)
     }
 
+    fn closure_brands(&self, fi: usize, cl: &Closure) -> Option<Rc<[(u32, u32)]>> {
+        let pending = &self.frames[fi].brands;
+        if pending.is_empty() {
+            return cl.brands.clone();
+        }
+        let mut all: Vec<(u32, u32)> = cl.brands.as_deref().unwrap_or_default().to_vec();
+        all.extend_from_slice(pending);
+        Some(all.into())
+    }
+
+    fn private_key(&self, fi: usize, cl: &Closure, proto: &FunctionProto, k: u32) -> JsStr {
+        let Value::Str(base) = &proto.consts[k as usize] else {
+            return JsStr::from("");
+        };
+        let mut cache = proto.private_keys.borrow_mut();
+        if cache.len() <= k as usize {
+            cache.resize(proto.consts.len().max(k as usize + 1), None);
+        }
+        let slot = &mut cache[k as usize];
+        let id = match slot {
+            Some((id, _, _)) => *id,
+            None => {
+                let id = if base.starts_with("\u{0}#%") {
+                    0
+                } else {
+                    base.rsplit_once('@')
+                        .and_then(|(_, n)| n.parse::<u32>().ok())
+                        .unwrap_or(0)
+                };
+                *slot = Some((id, 0, base.clone()));
+                id
+            }
+        };
+        if id == 0 {
+            return base.clone();
+        }
+        let brand = self.frames[fi]
+            .brands
+            .iter()
+            .rev()
+            .chain(cl.brands.as_deref().unwrap_or_default().iter().rev())
+            .find(|(c, _)| *c == id)
+            .map(|(_, b)| *b);
+        let Some(brand) = brand else {
+            return base.clone();
+        };
+        if let Some((_, b, key)) = slot {
+            if *b == brand {
+                return key.clone();
+            }
+        }
+        let key: JsStr = format!("{base}:{brand}").into();
+        *slot = Some((id, brand, key.clone()));
+        key
+    }
+
     #[inline(always)]
     fn flush_builder(&mut self, abs: usize) {
         if !self.builders.is_empty() {
@@ -2972,6 +3035,7 @@ impl Vm {
             } else {
                 None
             },
+            brands: Vec::new(),
         });
         Ok(())
     }
@@ -6107,20 +6171,20 @@ impl Vm {
                 }
                 Op::GetPrivate(k) => {
                     let obj = pop!();
-                    let key = name!(k);
+                    let key = self.private_key(fi, cl, proto, k);
                     let v = tri!(self.get_private(&obj, &key));
                     self.stack.push(v);
                 }
                 Op::SetPrivate(k) => {
                     let val = pop!();
                     let obj = pop!();
-                    let key = name!(k);
+                    let key = self.private_key(fi, cl, proto, k);
                     tri!(self.set_private(&obj, &key, val.clone()));
                     self.stack.push(val);
                 }
                 Op::InitPrivate(k) => {
                     let val = pop!();
-                    let key = name!(k);
+                    let key = self.private_key(fi, cl, proto, k);
                     name_anonymous(&val, &key, "");
                     if let Some(Value::Object(o)) = self.stack.last().cloned() {
                         if o.props.borrow().contains_key(&key) {
@@ -6779,6 +6843,7 @@ impl Vm {
                         upvalues: ups.into_boxed_slice(),
                         home: RefCell::new(home),
                         new_target: RefCell::new(nt),
+                        brands: self.closure_brands(fi, cl),
                     });
                     let fproto = match (c.proto.is_generator, c.proto.is_async) {
                         (true, true) => &self.realm.async_generator_function_proto,
@@ -7096,7 +7161,20 @@ impl Vm {
                 Op::DefineMethod(k, is_static) => {
                     let m = pop!();
                     let class = peek!();
-                    tri!(self.define_method(&class, name!(k), m, is_static));
+                    let key = self.private_key(fi, cl, proto, k);
+                    tri!(self.define_method(&class, key, m, is_static));
+                }
+                Op::ClassBrand(id) => {
+                    self.next_brand += 1;
+                    let brand = self.next_brand;
+                    self.frames[fi].brands.push((id, brand));
+                }
+                Op::EndClassBrand => {
+                    self.frames[fi].brands.pop();
+                }
+                Op::PrivateKey(k) => {
+                    let key = self.private_key(fi, cl, proto, k);
+                    self.stack.push(Value::Str(key));
                 }
                 Op::DefineMethodComputed(is_static) => {
                     let m = pop!();
@@ -7380,7 +7458,8 @@ impl Vm {
                 Op::DefineAccessor(k, setter, is_static) => {
                     let f = pop!();
                     let class = peek!();
-                    tri!(self.define_class_accessor(&class, name!(k), f, setter, is_static));
+                    let key = self.private_key(fi, cl, proto, k);
+                    tri!(self.define_class_accessor(&class, key, f, setter, is_static));
                 }
                 Op::DefineAccessorComputed(setter, is_static) => {
                     let f = pop!();

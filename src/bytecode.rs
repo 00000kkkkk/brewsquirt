@@ -189,6 +189,9 @@ pub enum Op {
     TemplateStore(u32),
     ToNumeric,
     RequireObject(u32),
+    ClassBrand(u32),
+    EndClassBrand,
+    PrivateKey(u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -269,6 +272,7 @@ pub struct FunctionProto {
     pub templates: Box<[std::cell::RefCell<Option<Value>>]>,
     pub evals: Vec<Rc<EvalScope>>,
     pub link: Option<Rc<ModuleLink>>,
+    pub private_keys: std::cell::RefCell<Vec<Option<(u32, u32, JsStr)>>>,
 }
 
 pub const IC_WAYS: usize = 4;

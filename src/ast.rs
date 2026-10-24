@@ -266,6 +266,7 @@ pub struct ClassDef {
     pub members: Vec<ClassMember>,
     pub line: u32,
     pub span: (u32, u32),
+    pub private_id: u32,
 }
 
 #[derive(Clone, Debug)]

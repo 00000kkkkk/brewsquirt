@@ -1,0 +1,63 @@
+const Counter = (Base) =>
+  class extends Base {
+    #count = 0
+    #step() {
+      this.#count++
+    }
+    get #doubled() {
+      return this.#count * 2
+    }
+    bump() {
+      this.#step()
+      return this.#doubled
+    }
+    static owns(o) {
+      return #count in o
+    }
+  }
+const One = Counter(Object)
+const Two = Counter(One)
+const t = new Two()
+console.log(t.bump(), One.owns(t), Two.owns(t), Two.owns(new One()), One.owns({}))
+const factory = () =>
+  class {
+    #secret = Math.random()
+    static #instances = 0
+    static make() {
+      this.#instances++
+      return new this()
+    }
+    static count() {
+      return this.#instances
+    }
+    static peek(o) {
+      return o.#secret
+    }
+  }
+const A = factory()
+const B = factory()
+A.make()
+A.make()
+B.make()
+console.log(A.count(), B.count())
+try {
+  A.peek(new B())
+} catch (e) {
+  console.log(e.constructor.name)
+}
+const make = async () => {
+  const C = class {
+    #v = 1;
+    [await Promise.resolve("go")]() {
+      return this.#v
+    }
+    static has(o) {
+      return #v in o
+    }
+  }
+  return C
+}
+Promise.all([make(), make()]).then(([C1, C2]) => {
+  const inst = new C1()
+  console.log(inst.go(), C1.has(inst), C2.has(inst), C2.has(new C2()))
+})

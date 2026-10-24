@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Array.from` on an array-like with an impossible length throws `RangeError` instead of
   crashing the process. `replace` and `replaceAll` stop with the same error while expanding a
   replacement that would grow past the limit.
+- Private names belong to each evaluation of a class body. Classes made by the same factory, and
+  a mixin with private fields applied twice in one prototype chain, get their own private
+  fields, methods, accessors and `#x in obj` brand checks instead of sharing them, which made
+  `new (Mixin(Mixin(Base)))()` fail with "Cannot initialize #x twice".
 - The `WeakMap` and `WeakSet` constructors step through their iterable, call the instance's
   `set` and `add`, and close the iterator when an entry is rejected, so an endless iterable no
   longer hangs and symbols are accepted as keys.

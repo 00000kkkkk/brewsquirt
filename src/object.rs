@@ -1176,6 +1176,7 @@ pub struct SavedFrame {
     pub handlers: Vec<(usize, usize, bool)>,
     pub upvalues: Vec<(Rc<UpCell>, usize)>,
     pub started: bool,
+    pub brands: Vec<(u32, u32)>,
 }
 
 pub struct AsyncRequest {
@@ -1200,6 +1201,7 @@ pub struct Closure {
     pub upvalues: Box<[Rc<UpCell>]>,
     pub home: RefCell<Option<Rc<Obj>>>,
     pub new_target: RefCell<Option<Value>>,
+    pub brands: Option<Rc<[(u32, u32)]>>,
 }
 
 pub struct UpCell {

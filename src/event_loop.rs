@@ -68,6 +68,7 @@ impl Vm {
             handlers: Vec::new(),
             upvalues: Vec::new(),
             started: false,
+            brands: Vec::new(),
         };
         if c.proto.is_generator {
             let is_async = c.proto.is_async;
@@ -138,6 +139,7 @@ impl Vm {
                 stack,
                 handlers,
                 upvalues,
+                brands: frame.brands,
                 started: true,
             });
             c.state.set(CoState::Suspended);
@@ -203,6 +205,7 @@ impl Vm {
             construct: false,
             co: Some(co_obj.clone()),
             new_target: None,
+            brands: saved.brands,
         });
         for (rel, catch_ip, guard) in saved.handlers {
             self.handlers.push(Handler {

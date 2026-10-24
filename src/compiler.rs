@@ -826,6 +826,7 @@ impl Compiler {
             ics: (0..ic_count).map(|_| PropIc::default()).collect(),
             evals: st.evals,
             link: None,
+            private_keys: Default::default(),
         }
     }
 
@@ -3371,6 +3372,9 @@ impl Compiler {
             }
             None => None,
         };
+        if c.private_id != 0 {
+            self.emit(Op::ClassBrand(c.private_id));
+        }
         let has_super = c.superclass.is_some();
         if let Some(sup) = &c.superclass {
             self.expr(sup)?;
@@ -3603,6 +3607,9 @@ impl Compiler {
                 Var::Global => {}
             }
             self.mark_init(n);
+        }
+        if c.private_id != 0 {
+            self.emit(Op::EndClassBrand);
         }
         self.line = saved_line;
         Ok(())
@@ -4003,7 +4010,11 @@ impl Compiler {
             }
             ExprKind::Str(s) => {
                 let k = self.str_const(s);
-                self.emit(Op::Const(k));
+                if s.starts_with("\u{0}#") {
+                    self.emit(Op::PrivateKey(k));
+                } else {
+                    self.emit(Op::Const(k));
+                }
             }
             ExprKind::Regex(pattern, flags) => {
                 if let Err(msg) = crate::regexp::compile(pattern, flags) {
