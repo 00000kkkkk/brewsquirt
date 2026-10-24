@@ -714,14 +714,23 @@ fn replace_all(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     replace_impl(vm, this, args, true)
 }
 
+pub const MAX_STRING_LENGTH: usize = (1 << 29) - 24;
+
+fn string_too_long(vm: &mut Vm) -> Value {
+    vm.range_error("Invalid string length")
+}
+
 fn repeat(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let s = this_str(vm, &this)?;
     let n = to_integer(vm, &arg(args, 0))?;
-    if n < 0.0 || n.is_infinite() || n * s.len() as f64 > 512.0 * 1024.0 * 1024.0 {
+    if n < 0.0 || n.is_infinite() {
         return Err(vm.range_error(format!(
             "Invalid count value: {}",
             crate::number::number_to_string(n)
         )));
+    }
+    if n * len16_rc(&s) as f64 > MAX_STRING_LENGTH as f64 {
+        return Err(string_too_long(vm));
     }
     let n = n as usize;
     let mut out = String::with_capacity(s.len() * n);
@@ -733,7 +742,14 @@ fn repeat(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 
 fn pad(vm: &mut Vm, this: Value, args: &[Value], start: bool) -> R {
     let s = this_str(vm, &this)?;
-    let target = to_integer(vm, &arg(args, 0))?.max(0.0) as usize;
+    let target = to_integer(vm, &arg(args, 0))?.max(0.0);
+    if target > MAX_STRING_LENGTH as f64 && target > len16_rc(&s) as f64 {
+        let fill_empty = matches!(arg(args, 1), Value::Str(ref f) if f.is_empty());
+        if !fill_empty {
+            return Err(string_too_long(vm));
+        }
+    }
+    let target = target as usize;
     let fill = match arg(args, 1) {
         Value::Undefined => JsStr::from(" "),
         v => vm.to_string(&v)?,
@@ -767,6 +783,9 @@ fn concat(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     for a in args {
         let x = vm.to_string(a)?;
         crate::value::push16(&mut s, &x);
+        if s.len() > MAX_STRING_LENGTH && crate::value::len16(&s) > MAX_STRING_LENGTH {
+            return Err(string_too_long(vm));
+        }
     }
     Ok(s.into())
 }

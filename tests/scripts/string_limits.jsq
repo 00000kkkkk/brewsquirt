@@ -1,0 +1,13 @@
+try {
+  Array.from({ length: Infinity })
+} catch (e) {
+  console.log(e.name, e.message)
+}
+for (const f of [() => "a".padStart(2 ** 31), () => "x".padEnd(1e10), () => "a".repeat(2 ** 40), () => "ab".repeat(2 ** 29), () => "a".repeat(-1), () => "a".repeat(Infinity), () => "abc".padStart(2 ** 31, ""), () => Array.prototype.join.call({ length: 2 ** 40 }), () => "x".padEnd(5, "ab")]) {
+  try {
+    const r = f()
+    console.log("ok", typeof r === "string" ? r.length : r)
+  } catch (e) {
+    console.log(e.name, e.message)
+  }
+}

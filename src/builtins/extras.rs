@@ -2670,11 +2670,13 @@ const ArrayGeneric = {
     const O = toObj(this, "join")
     const len = lenOf(O)
     const sep = separator === undefined ? "," : String(separator)
+    if (len > 4294967295) throw new TypeError("Invalid array length")
     let out = ""
     for (let k = 0; k < len; k++) {
       if (k > 0) out += sep
       const v = O[k]
       if (v !== undefined && v !== null) out += String(v)
+      if (out.length > 536870888) throw new RangeError("Invalid string length")
     }
     return out
   },

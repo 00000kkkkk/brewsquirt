@@ -20,6 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on `req.socket`, and `authorized` reports whether it was verified. Rejected handshakes carry
   Node's `ERR_SSL_*_ALERT_*` codes.
 
+### Fixed
+
+- Strings are capped at Node's maximum length: `repeat`, `padStart`, `padEnd`, `concat` and
+  `join` throw `RangeError: Invalid string length` instead of exhausting memory, and
+  `Array.from` on an array-like with an impossible length throws `RangeError` instead of
+  crashing the process.
+
 ## [1.10.0] - 2026-10-24
 
 ### Added

@@ -1,0 +1,10 @@
+RangeError Invalid array length
+RangeError Invalid string length
+RangeError Invalid string length
+RangeError Invalid string length
+RangeError Invalid string length
+RangeError Invalid count value: -1
+RangeError Invalid count value: Infinity
+ok 3
+TypeError Invalid array length
+ok 5

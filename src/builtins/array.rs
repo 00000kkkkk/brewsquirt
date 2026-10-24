@@ -278,8 +278,12 @@ fn from(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let list = match &src {
         Value::Object(_) if array_like => {
             let n = vm.get_prop(&src, "length")?;
-            let n = to_integer(vm, &n)?.max(0.0) as usize;
-            let mut out = Vec::with_capacity(n);
+            let n = to_integer(vm, &n)?.max(0.0);
+            if n > u32::MAX as f64 {
+                return Err(vm.range_error("Invalid array length"));
+            }
+            let n = n as usize;
+            let mut out = Vec::with_capacity(n.min(1 << 16));
             for i in 0..n {
                 out.push(vm.get_prop(&src, &i.to_string())?);
             }
