@@ -5342,13 +5342,13 @@ impl Vm {
                     let at = base + s as usize;
                     self.flush_builder(at);
                     if matches!(self.stack[at], Value::Uninit) {
-                        throw!(self.tdz_error(&proto, k));
+                        throw!(self.tdz_error(proto, k));
                     }
                     self.stack.extend_from_within(at..=at);
                 }
                 Op::SetLocalChecked(s, k) => {
                     if matches!(self.stack[base + s as usize], Value::Uninit) {
-                        throw!(self.tdz_error(&proto, k));
+                        throw!(self.tdz_error(proto, k));
                     }
                     self.drop_builder(base + s as usize);
                     let v = peek!();
@@ -5364,7 +5364,7 @@ impl Vm {
                     }
                     if matches!(self.stack.last(), Some(Value::Uninit)) {
                         self.stack.pop();
-                        throw!(self.tdz_error(&proto, k));
+                        throw!(self.tdz_error(proto, k));
                     }
                 }
                 Op::SetUpvalChecked(i, k) => {
@@ -5373,7 +5373,7 @@ impl Vm {
                         Upvalue::Closed(v) => matches!(v, Value::Uninit),
                     };
                     if uninit {
-                        throw!(self.tdz_error(&proto, k));
+                        throw!(self.tdz_error(proto, k));
                     }
                     let v = peek!();
                     let mut u = cl.upvalues[i as usize].borrow_mut();
@@ -5532,7 +5532,7 @@ impl Vm {
                     if cached != u32::MAX && !self.global_accessors {
                         let v = self.globals.at(cached).clone();
                         if matches!(v, Value::Uninit) {
-                            throw!(self.tdz_error(&proto, k));
+                            throw!(self.tdz_error(proto, k));
                         }
                         self.stack.push(v);
                         continue;
@@ -5560,7 +5560,7 @@ impl Vm {
                             proto.global_cache[k as usize].set(slot);
                             let mut v = self.globals.at(slot).clone();
                             if matches!(v, Value::Uninit) {
-                                throw!(self.tdz_error(&proto, k));
+                                throw!(self.tdz_error(proto, k));
                             }
                             if self.global_accessors {
                                 if let Value::Object(a) = &v {
@@ -5621,7 +5621,7 @@ impl Vm {
                     match self.globals.resolve(&n) {
                         Some(slot) => {
                             if matches!(self.globals.at(slot), Value::Uninit) {
-                                throw!(self.tdz_error(&proto, k));
+                                throw!(self.tdz_error(proto, k));
                             }
                             if self.globals.is_lex_slot(slot) {
                                 if self.globals.is_const_slot(slot) {
@@ -5735,7 +5735,7 @@ impl Vm {
                         tri!(self.load_lazy_global(&n));
                     }
                     if matches!(self.globals.lookup(&n), Some(Value::Uninit)) {
-                        throw!(self.tdz_error(&proto, k));
+                        throw!(self.tdz_error(proto, k));
                     }
                     let mut found = self.globals.lookup(&n).cloned();
                     if found.is_none() {
@@ -5944,13 +5944,13 @@ impl Vm {
                 Op::SuperGet(k, is_static) => {
                     let this = pop!();
                     let n = name!(k);
-                    let v = tri!(self.super_lookup(&cl, &n, is_static, &this));
+                    let v = tri!(self.super_lookup(cl, &n, is_static, &this));
                     self.stack.push(v);
                 }
                 Op::SuperGetMethod(k, is_static) => {
                     let this = pop!();
                     let n = name!(k);
-                    let v = tri!(self.super_lookup(&cl, &n, is_static, &this));
+                    let v = tri!(self.super_lookup(cl, &n, is_static, &this));
                     self.stack.push(v);
                     self.stack.push(this);
                 }
@@ -6172,7 +6172,7 @@ impl Vm {
                 Op::SuperGetIndex(is_static) => {
                     let key = pop!();
                     let this = pop!();
-                    let base = tri!(self.super_base(&cl, is_static));
+                    let base = tri!(self.super_base(cl, is_static));
                     let n = tri!(self.to_property_key(&key));
                     let v = tri!(self.super_get_from(base, &n, &this));
                     self.stack.push(v);
@@ -6180,7 +6180,7 @@ impl Vm {
                 Op::SuperGetIndexMethod(is_static) => {
                     let key = pop!();
                     let this = pop!();
-                    let base = tri!(self.super_base(&cl, is_static));
+                    let base = tri!(self.super_base(cl, is_static));
                     let n = tri!(self.to_property_key(&key));
                     let v = tri!(self.super_get_from(base, &n, &this));
                     self.stack.push(v);
@@ -6192,7 +6192,7 @@ impl Vm {
                     let n = name!(k);
                     self.silent_fail = false;
                     self.frames[fi].ip = ip;
-                    if let Err(e) = self.super_store(&cl, n, is_static, &this, val.clone()) {
+                    if let Err(e) = self.super_store(cl, n, is_static, &this, val.clone()) {
                         if !(proto.sloppy && self.silent_fail) {
                             throw!(e);
                         }
@@ -6203,7 +6203,7 @@ impl Vm {
                     let val = pop!();
                     let key = pop!();
                     let this = pop!();
-                    let base = tri!(self.super_base(&cl, is_static));
+                    let base = tri!(self.super_base(cl, is_static));
                     let n = tri!(self.to_property_key(&key));
                     self.silent_fail = false;
                     self.frames[fi].ip = ip;
@@ -6235,7 +6235,7 @@ impl Vm {
                     } else {
                         argc as usize
                     };
-                    let home = tri!(self.super_home(&cl));
+                    let home = tri!(self.super_home(cl));
                     let sup = home.proto.borrow().clone();
                     let Some(sup) = sup else {
                         throw!(self.type_error("Super constructor is not a constructor"));
@@ -6726,7 +6726,7 @@ impl Vm {
                     let (home, nt) = if p.kind == ProtoKind::Arrow {
                         (
                             cl.home.borrow().clone(),
-                            Some(self.frame_new_target(fi, base, &cl)),
+                            Some(self.frame_new_target(fi, base, cl)),
                         )
                     } else {
                         (None, None)
@@ -6845,7 +6845,7 @@ impl Vm {
                     }
                 }
                 Op::NewTarget => {
-                    let v = self.frame_new_target(fi, base, &cl);
+                    let v = self.frame_new_target(fi, base, cl);
                     self.stack.push(v);
                 }
                 Op::DirectEval(argc, idx) => {
@@ -6874,7 +6874,7 @@ impl Vm {
                                 let nt = if scope.ctx.field_init {
                                     Value::Undefined
                                 } else {
-                                    self.frame_new_target(fi, base, &cl)
+                                    self.frame_new_target(fi, base, cl)
                                 };
                                 let c = self.frames[fi].closure.clone();
                                 tri!(self.direct_eval(src, &scope, &c, base, nt))
