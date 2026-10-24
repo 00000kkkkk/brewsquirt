@@ -6018,17 +6018,35 @@ const NODE_SRC: &str = r##"
     Z_MIN_LEVEL: -1, Z_MAX_LEVEL: 9, Z_DEFAULT_LEVEL: -1,
   }
   const zlibDecodes = new Set(["gunzip", "inflate", "inflateRaw", "unzip"])
+  const ZSTD_ERRORS = {
+    "Unknown frame descriptor": ["ZSTD_error_prefix_unknown", 10],
+    "Version not supported": ["ZSTD_error_version_unsupported", 12],
+    "Unsupported frame parameter": ["ZSTD_error_frameParameter_unsupported", 14],
+    "Frame requires too much memory for decoding": ["ZSTD_error_frameParameter_windowTooLarge", 16],
+    "Data corruption detected": ["ZSTD_error_corruption_detected", 20],
+    "Restored data doesn't match checksum": ["ZSTD_error_checksum_wrong", 22],
+    "Destination buffer is too small": ["ZSTD_error_dstSize_tooSmall", 70],
+    "Src size is incorrect": ["ZSTD_error_srcSize_wrong", 72],
+  }
   const zlibRun = (op, data, options) => {
     const brotli = op === "brotliCompress" || op === "brotliDecompress"
-    const params = brotli ? options?.params ?? {} : {}
-    const level = brotli ? params[1] ?? 11 : typeof options === "number" ? options : options?.level ?? -1
+    const zstd = op === "zstdCompress" || op === "zstdDecompress"
+    const params = brotli || zstd ? options?.params ?? {} : {}
+    const level = brotli ? params[1] ?? 11 : zstd ? params[100] ?? 3 : typeof options === "number" ? options : options?.level ?? -1
     const window = brotli ? params[2] ?? 22 : -1
     const input = typeof data === "string" ? Buffer.from(data) : cryptoBytes(data, undefined, "buffer")
     try {
       const out = native.zlib(op, input, level, window)
       return Buffer.from(out.buffer, out.byteOffset, out.byteLength)
     } catch (e) {
-      const err = new Error(e?.message ?? String(e))
+      const message = e?.message ?? String(e)
+      const err = new Error(message)
+      if (zstd) {
+        const [code, errno] = ZSTD_ERRORS[message] ?? ["ZSTD_error_GENERIC", 1]
+        err.code = code
+        err.errno = errno
+        throw err
+      }
       err.code = zlibDecodes.has(op) ? "Z_DATA_ERROR" : "Z_STREAM_ERROR"
       err.errno = zlibDecodes.has(op) ? -3 : -2
       throw err
@@ -6160,7 +6178,7 @@ const NODE_SRC: &str = r##"
     ...zlibConstants,
     crc32: (data, value = 0) => native.crc32(typeof data === "string" ? Buffer.from(data) : cryptoBytes(data, undefined, "data"), value),
   }
-  for (const op of ["gzip", "gunzip", "deflate", "inflate", "deflateRaw", "inflateRaw", "unzip", "brotliCompress", "brotliDecompress"]) {
+  for (const op of ["gzip", "gunzip", "deflate", "inflate", "deflateRaw", "inflateRaw", "unzip", "brotliCompress", "brotliDecompress", "zstdCompress", "zstdDecompress"]) {
     const Name = op[0].toUpperCase() + op.slice(1)
     zlib[op + "Sync"] = (data, options) => zlibRun(op, data, options)
     zlib[op] = zlibAsync(op)
@@ -6174,29 +6192,6 @@ const NODE_SRC: &str = r##"
     zlib[Name] = Ctor
     zlib["create" + Name] = (options) => new Ctor(options)
   }
-  const unsupportedCodec = (name) => {
-    const e = new Error(`${name} compression is not supported in this runtime`)
-    e.code = "ERR_ZLIB_UNSUPPORTED"
-    return e
-  }
-  for (const [op, label] of [["zstdCompress", "zstd"], ["zstdDecompress", "zstd"]]) {
-    const Name = op[0].toUpperCase() + op.slice(1)
-    zlib[op + "Sync"] = () => {
-      throw unsupportedCodec(label)
-    }
-    zlib[op] = (data, options, cb) => {
-      if (typeof options === "function") cb = options
-      queueMicrotask(() => cb(unsupportedCodec(label)))
-    }
-    zlib[Name] = class extends Transform {
-      constructor(options) {
-        super(options)
-        queueMicrotask(() => this.destroy(unsupportedCodec(label)))
-      }
-    }
-    Object.defineProperty(zlib[Name], "name", { value: Name })
-    zlib["create" + Name] = (options) => new zlib[Name](options)
-  }
   Object.assign(zlibConstants, {
     BROTLI_OPERATION_PROCESS: 0, BROTLI_OPERATION_FLUSH: 1, BROTLI_OPERATION_FINISH: 2, BROTLI_OPERATION_EMIT_METADATA: 3,
     BROTLI_PARAM_MODE: 0, BROTLI_MODE_GENERIC: 0, BROTLI_MODE_TEXT: 1, BROTLI_MODE_FONT: 2, BROTLI_DEFAULT_MODE: 0,
@@ -6205,9 +6200,19 @@ const NODE_SRC: &str = r##"
     BROTLI_PARAM_LGBLOCK: 3, BROTLI_MIN_INPUT_BLOCK_BITS: 16, BROTLI_MAX_INPUT_BLOCK_BITS: 24,
     BROTLI_PARAM_SIZE_HINT: 5, BROTLI_PARAM_LARGE_WINDOW: 6, BROTLI_DECODER_PARAM_LARGE_WINDOW: 1,
     BROTLI_DECODER_RESULT_ERROR: 0, BROTLI_DECODER_RESULT_SUCCESS: 1, BROTLI_DECODER_RESULT_NEEDS_MORE_INPUT: 2, BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT: 3,
-    ZSTD_e_continue: 0, ZSTD_e_flush: 1, ZSTD_e_end: 2,
-    ZSTD_c_compressionLevel: 100, ZSTD_c_windowLog: 101, ZSTD_c_strategy: 107, ZSTD_c_checksumFlag: 201, ZSTD_c_nbWorkers: 400,
-    ZSTD_d_windowLogMax: 100, ZSTD_CLEVEL_DEFAULT: 3,
+    ZSTD_DECOMPRESS: 11, ZSTD_COMPRESS: 10, ZSTD_e_continue: 0, ZSTD_e_flush: 1, ZSTD_e_end: 2,
+    ZSTD_fast: 1, ZSTD_dfast: 2, ZSTD_greedy: 3, ZSTD_lazy: 4, ZSTD_lazy2: 5,
+    ZSTD_btlazy2: 6, ZSTD_btopt: 7, ZSTD_btultra: 8, ZSTD_btultra2: 9, ZSTD_c_compressionLevel: 100,
+    ZSTD_c_windowLog: 101, ZSTD_c_hashLog: 102, ZSTD_c_chainLog: 103, ZSTD_c_searchLog: 104, ZSTD_c_minMatch: 105,
+    ZSTD_c_targetLength: 106, ZSTD_c_strategy: 107, ZSTD_c_enableLongDistanceMatching: 160, ZSTD_c_ldmHashLog: 161, ZSTD_c_ldmMinMatch: 162,
+    ZSTD_c_ldmBucketSizeLog: 163, ZSTD_c_ldmHashRateLog: 164, ZSTD_c_contentSizeFlag: 200, ZSTD_c_checksumFlag: 201, ZSTD_c_dictIDFlag: 202,
+    ZSTD_c_nbWorkers: 400, ZSTD_c_jobSize: 401, ZSTD_c_overlapLog: 402, ZSTD_d_windowLogMax: 100, ZSTD_CLEVEL_DEFAULT: 3,
+    ZSTD_error_no_error: 0, ZSTD_error_GENERIC: 1, ZSTD_error_prefix_unknown: 10, ZSTD_error_version_unsupported: 12, ZSTD_error_frameParameter_unsupported: 14,
+    ZSTD_error_frameParameter_windowTooLarge: 16, ZSTD_error_corruption_detected: 20, ZSTD_error_checksum_wrong: 22, ZSTD_error_literals_headerWrong: 24, ZSTD_error_dictionary_corrupted: 30,
+    ZSTD_error_dictionary_wrong: 32, ZSTD_error_dictionaryCreation_failed: 34, ZSTD_error_parameter_unsupported: 40, ZSTD_error_parameter_combination_unsupported: 41, ZSTD_error_parameter_outOfBound: 42,
+    ZSTD_error_tableLog_tooLarge: 44, ZSTD_error_maxSymbolValue_tooLarge: 46, ZSTD_error_maxSymbolValue_tooSmall: 48, ZSTD_error_stabilityCondition_notRespected: 50, ZSTD_error_stage_wrong: 60,
+    ZSTD_error_init_missing: 62, ZSTD_error_memory_allocation: 64, ZSTD_error_workSpace_tooSmall: 66, ZSTD_error_dstSize_tooSmall: 70, ZSTD_error_srcSize_wrong: 72,
+    ZSTD_error_dstBuffer_null: 74, ZSTD_error_noForwardProgress_destFull: 80, ZSTD_error_noForwardProgress_inputEmpty: 82,
   })
   Object.assign(zlib, zlibConstants)
   zlib.constants = zlibConstants
@@ -9730,6 +9735,16 @@ fn zlib_bytes(op: &str, data: &[u8], level: i32, window: i32) -> std::io::Result
     if op == "brotliDecompress" {
         let mut out = Vec::new();
         brotli::BrotliDecompress(&mut &data[..], &mut out)?;
+        return Ok(out);
+    }
+    if op == "zstdCompress" {
+        return zstd::bulk::compress(data, level);
+    }
+    if op == "zstdDecompress" {
+        let mut out = Vec::new();
+        zstd::stream::read::Decoder::new(data)?
+            .single_frame()
+            .read_to_end(&mut out)?;
         return Ok(out);
     }
     let level = if level < 0 {

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- Method and property lookups on strings, numbers, arrays, functions, maps, sets, promises,
+  dates and other builtin objects use the per-site inline caches that ordinary objects use.
+  Each cache site holds four shapes, and a cached holder can sit at any depth of the prototype
+  chain, so methods inherited through long class hierarchies are found without a lookup at
+  every level. The interpreter loop no longer adjusts reference counts on every call and
+  return. Parsers such as acorn and babel run 10 to 15 percent faster.
+
 ### Added
 
 - `Intl.Locale` follows the current specification and CLDR data. It parses and canonicalizes
@@ -16,6 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `getHourCycles`, `getNumberingSystems`, `getTimeZones`, `getTextInfo` and `getWeekInfo`,
   which honour the `rg` and `sd` keywords. `Intl.getCanonicalLocales` and every `Intl`
   constructor share the same canonicalization. Docusaurus builds.
+- `zlib` has zstd: `zstdCompress`, `zstdDecompress`, their sync forms, `createZstdCompress`,
+  `createZstdDecompress` and the `ZSTD_*` constants, through libzstd, so the output matches Node
+  byte for byte. Decoding stops after the first frame, as in Node.
 - `v8.serialize` and `v8.deserialize` use V8's wire format and produce the same bytes as Node,
   so data written by one runtime reads in the other. webpack's persistent cache is shared
   between Node and jsq.
