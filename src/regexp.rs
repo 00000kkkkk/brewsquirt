@@ -38,9 +38,32 @@ fn hex_digits(chars: &[char], i: usize, n: usize) -> Option<u32> {
 fn group_defined_before(chars: &[char], open: usize, close: usize) -> bool {
     let name: String = chars[open + 2..close].iter().collect();
     let pat: Vec<char> = format!("(?<{name}>").chars().collect();
-    chars[..open]
+    let Some(start) = chars[..open]
         .windows(pat.len())
-        .any(|w| w == pat.as_slice())
+        .position(|w| w == pat.as_slice())
+    else {
+        return false;
+    };
+    let mut depth = 0usize;
+    let mut in_class = false;
+    let mut i = start;
+    while i < open {
+        match chars[i] {
+            '\\' => i += 1,
+            '[' if !in_class => in_class = true,
+            ']' if in_class => in_class = false,
+            '(' if !in_class => depth += 1,
+            ')' if !in_class => {
+                depth -= 1;
+                if depth == 0 {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
 }
 
 fn push_code_point(out: &mut String, cp: u32) {
@@ -327,6 +350,50 @@ fn astral_class(highs: &[(u32, u32)], lows: &[(u32, u32)]) -> String {
     out
 }
 
+fn group_name_at(chars: &[char], open: usize) -> Option<(String, usize)> {
+    let mut name = String::new();
+    let mut i = open + 1;
+    loop {
+        let c = *chars.get(i)?;
+        if c == '>' {
+            return Some((name, i));
+        }
+        if c != '\\' {
+            name.push(c);
+            i += 1;
+            continue;
+        }
+        if chars.get(i + 1) != Some(&'u') {
+            return None;
+        }
+        let unit = |at: usize| hex_digits(chars, at, 4);
+        let v = if chars.get(i + 2) == Some(&'{') {
+            let end = chars[i + 3..].iter().position(|&ch| ch == '}')? + i + 3;
+            let hex: String = chars[i + 3..end].iter().collect();
+            i = end + 1;
+            u32::from_str_radix(&hex, 16).ok()?
+        } else {
+            let hi = unit(i + 2)?;
+            i += 6;
+            if (0xd800..0xdc00).contains(&hi)
+                && chars.get(i) == Some(&'\\')
+                && chars.get(i + 1) == Some(&'u')
+            {
+                match unit(i + 2) {
+                    Some(lo) if (0xdc00..0xe000).contains(&lo) => {
+                        i += 6;
+                        0x10000 + ((hi - 0xd800) << 10) + (lo - 0xdc00)
+                    }
+                    _ => hi,
+                }
+            } else {
+                hi
+            }
+        };
+        name.push(char::from_u32(v)?);
+    }
+}
+
 pub fn translate(source: &str, flags: &str) -> Result<String, String> {
     let vmode = flags.contains('v');
     let mut chars: Vec<char> = source.chars().collect();
@@ -440,6 +507,11 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                         {
                             out.push_str("(?:)");
                             i = c;
+                        } else if let Some((name, end)) = group_name_at(&chars, i + 1) {
+                            out.push_str("\\k<");
+                            out.push_str(&name);
+                            out.push('>');
+                            i = end;
                         } else {
                             out.push_str("\\k");
                         }
@@ -654,6 +726,15 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                     && matches!(chars.get(i + 2), Some('=') | Some('!'));
                 groups_open.push(if lookahead { Some(out.len()) } else { None });
                 out.push('(');
+                let named = chars.get(i + 1) == Some(&'?')
+                    && chars.get(i + 2) == Some(&'<')
+                    && !matches!(chars.get(i + 3), Some('=') | Some('!'));
+                if let Some((name, end)) = named.then(|| group_name_at(&chars, i + 2)).flatten() {
+                    out.push_str("?<");
+                    out.push_str(&name);
+                    out.push('>');
+                    i = end;
+                }
             }
             ')' if !in_class => {
                 out.push(')');
