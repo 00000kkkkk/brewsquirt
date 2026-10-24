@@ -6,6 +6,7 @@ version = 2
 yanked = "deny"
 ignore = [
     { id = "RUSTSEC-2023-0071", reason = "rsa has no constant-time release yet; node:crypto exposes RSA like Node and the timing side channel needs an attacker measuring many local decryptions" },
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 comes with the 0.13 curve crates; the fix needs the 0.14 RustCrypto stack, which moves together with rsa 0.10, still a release candidate" },
 ]
 
 [licenses]
