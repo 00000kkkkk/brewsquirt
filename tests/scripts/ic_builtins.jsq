@@ -1,0 +1,59 @@
+const read = (o) => [o.length, o.name, o.size, o.lastIndex, o.byteLength, o.foo]
+const subjects = [
+  "hello",
+  [1, 2, 3],
+  function named(a, b) {},
+  class K {},
+  Math.max,
+  new Map([[1, 2]]),
+  new Set([1]),
+  /x/g,
+  new Uint16Array(4),
+  { length: 7, name: "plain", size: 1, foo: "bar" },
+  Object.create([9, 9]),
+  new String("wrapped"),
+]
+for (let round = 0; round < 3; round++) {
+  for (const s of subjects) console.log(JSON.stringify(read(s)))
+}
+const call = (o, x) => o.indexOf(x)
+console.log(call("abcabc", "c"), call([5, 6, 7], 7), call("x", "y"))
+String.prototype.shout = function () {
+  return this.toUpperCase() + "!"
+}
+const shout = (s) => s.shout()
+console.log(shout("a"), shout("b"))
+String.prototype.shout = function () {
+  return "<" + this + ">"
+}
+console.log(shout("c"))
+delete String.prototype.shout
+try {
+  shout("d")
+} catch (e) {
+  console.log(e.constructor.name)
+}
+const m = new Map()
+const getter = (x) => x.get(1)
+m.set(1, "one")
+console.log(getter(m), getter(new Map([[1, "uno"]])), getter({ get: () => "own" }))
+Map.prototype.get = function () {
+  return "patched"
+}
+console.log(getter(m))
+const proto = (f) => f.prototype
+function Ctor() {}
+console.log(typeof proto(Ctor), proto(() => 1), proto(class {}) !== undefined)
+const fnName = (f) => [f.name, f.length]
+console.log(fnName(function abc(x, y) {}), fnName(Math.min), fnName(fnName.bind(null)))
+Object.defineProperty(Array.prototype, "second", { get() { return this[1] }, configurable: true })
+const second = (a) => a.second
+console.log(second([1, 2]), second([3, 4]))
+delete Array.prototype.second
+console.log(second([1, 2]))
+const num = (n) => n.toFixed(2)
+console.log(num(1), num(2.555), (5).toString(2))
+const re = /a/g
+const last = (r) => r.lastIndex
+re.test("aaa")
+console.log(last(re), last(/b/))

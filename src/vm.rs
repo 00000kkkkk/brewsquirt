@@ -518,20 +518,24 @@ fn ic_plain(v: &Value, accessors: bool) -> bool {
 }
 
 #[inline(always)]
+fn push_fast(stack: &mut Vec<Value>, v: Value) {
+    stack.reserve(1);
+    unsafe {
+        let n = stack.len();
+        std::ptr::write(stack.as_mut_ptr().add(n), v);
+        stack.set_len(n + 1);
+    }
+}
+
+#[inline(always)]
 fn push_plain(stack: &mut Vec<Value>, v: Option<&Value>, accessors: bool) -> bool {
     match v {
         Some(Value::Number(x)) => {
-            let x = *x;
-            stack.reserve(1);
-            unsafe {
-                let n = stack.len();
-                std::ptr::write(stack.as_mut_ptr().add(n), Value::Number(x));
-                stack.set_len(n + 1);
-            }
+            push_fast(stack, Value::Number(*x));
             true
         }
         Some(v) if ic_plain(v, accessors) => {
-            stack.push(v.clone());
+            push_fast(stack, v.clone());
             true
         }
         _ => false,
@@ -599,6 +603,69 @@ fn ic_read(o: &Obj, key: &str, ic: &crate::bytecode::PropIc) -> Option<Value> {
     ic_fill_read(o, key, ic)
 }
 
+fn virtual_key(key: &str) -> bool {
+    matches!(
+        key,
+        "length"
+            | "name"
+            | "prototype"
+            | "caller"
+            | "callee"
+            | "arguments"
+            | "size"
+            | "lastIndex"
+            | "byteLength"
+            | "byteOffset"
+            | "buffer"
+            | "Infinity"
+            | "NaN"
+    ) || key
+        .as_bytes()
+        .first()
+        .is_some_and(|b| b.is_ascii_digit() || *b == b'-')
+}
+
+#[inline(always)]
+fn fast_length(v: &Value, key: &Value) -> Option<f64> {
+    let Value::Str(key) = key else {
+        return None;
+    };
+    match v {
+        Value::Str(s) if key.as_str() == "length" => Some(len16_rc(s) as f64),
+        Value::Object(o) if key.as_str() == "length" => match &o.kind {
+            ObjKind::Array(a) => Some(a.borrow().len() as f64),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn ic_kind(o: &Obj) -> bool {
+    matches!(
+        o.kind,
+        ObjKind::Ordinary
+            | ObjKind::Array(_)
+            | ObjKind::Function(_)
+            | ObjKind::Native(_)
+            | ObjKind::Bound(_)
+            | ObjKind::Error
+            | ObjKind::Map(_)
+            | ObjKind::Set(_)
+            | ObjKind::Iter(_)
+            | ObjKind::Promise(_)
+            | ObjKind::Coroutine(_)
+            | ObjKind::RegExp(_)
+            | ObjKind::Date(_)
+            | ObjKind::WeakMap(_)
+            | ObjKind::WeakSet(_)
+            | ObjKind::WeakRef(_)
+            | ObjKind::ArrayBuffer(_)
+            | ObjKind::Typed(_)
+            | ObjKind::DataView(_)
+            | ObjKind::Primitive(_)
+    )
+}
+
 fn ic_fill_read(o: &Obj, key: &str, ic: &crate::bytecode::PropIc) -> Option<Value> {
     let props = o.props.borrow();
     if let Some(i) = props.find_index(key) {
@@ -614,7 +681,7 @@ fn ic_fill_read(o: &Obj, key: &str, ic: &crate::bytecode::PropIc) -> Option<Valu
     let Some(p) = p else {
         return Some(Value::Undefined);
     };
-    if !matches!(p.kind, ObjKind::Ordinary) {
+    if !matches!(p.kind, ObjKind::Ordinary) && (virtual_key(key) || !ic_kind(&p)) {
         return None;
     }
     let pp = p.props.borrow();
@@ -2648,6 +2715,24 @@ impl Vm {
         let u = UpCell::new(Upvalue::Open(idx));
         self.open_upvalues.insert(idx, u.clone());
         u
+    }
+
+    #[inline]
+    fn method_holder(&self, v: &Value, key: &Value) -> *const Obj {
+        let Value::Str(key) = key else {
+            return std::ptr::null();
+        };
+        let holder = match v {
+            Value::Object(o) if ic_kind(o) => o,
+            Value::Str(_) => &self.realm.string_proto,
+            Value::Number(_) => &self.realm.number_proto,
+            Value::Bool(_) => &self.realm.boolean_proto,
+            _ => return std::ptr::null(),
+        };
+        if virtual_key(key) {
+            return std::ptr::null();
+        }
+        Rc::as_ptr(holder)
     }
 
     #[inline(always)]
@@ -5328,7 +5413,13 @@ impl Vm {
                     let ic = &proto.ics[proto.ic_index[ip - 1] as usize];
                     let optr = match &self.stack[abs] {
                         Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => Rc::as_ptr(o),
-                        _ => std::ptr::null(),
+                        v => {
+                            if let Some(n) = fast_length(v, &proto.consts[k as usize]) {
+                                push_fast(&mut self.stack, Value::Number(n));
+                                continue;
+                            }
+                            self.method_holder(v, &proto.consts[k as usize])
+                        }
                     };
                     if !optr.is_null() && ic_push(&mut self.stack, unsafe { &*optr }, ic) {
                         continue;
@@ -5357,10 +5448,11 @@ impl Vm {
                     let ic = &proto.ics[proto.ic_index[ip - 1] as usize];
                     let optr = match &self.stack[abs] {
                         Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => Rc::as_ptr(o),
-                        _ => std::ptr::null(),
+                        v => self.method_holder(v, &proto.consts[k as usize]),
                     };
                     if !optr.is_null() && ic_push(&mut self.stack, unsafe { &*optr }, ic) {
-                        self.stack.extend_from_within(abs..=abs);
+                        let this = self.stack[abs].clone();
+                        push_fast(&mut self.stack, this);
                         continue;
                     }
                     let fast = if optr.is_null() {
@@ -5661,35 +5753,37 @@ impl Vm {
                 }
                 Op::GetProp(k) => {
                     let top = self.stack.len() - 1;
-                    if let Value::Object(o) = &self.stack[top] {
-                        if matches!(o.kind, ObjKind::Ordinary) {
-                            let optr = Rc::as_ptr(o);
-                            let ic = &proto.ics[proto.ic_index[ip - 1] as usize];
-                            if ic_push(&mut self.stack, unsafe { &*optr }, ic) {
-                                self.stack.swap_remove(top);
+                    let ic = &proto.ics[proto.ic_index[ip - 1] as usize];
+                    let optr = match &self.stack[top] {
+                        Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => Rc::as_ptr(o),
+                        v => match fast_length(v, &proto.consts[k as usize]) {
+                            Some(n) => {
+                                self.stack[top] = Value::Number(n);
                                 continue;
                             }
-                        }
+                            None => self.method_holder(v, &proto.consts[k as usize]),
+                        },
+                    };
+                    if !optr.is_null() && ic_push(&mut self.stack, unsafe { &*optr }, ic) {
+                        self.stack.swap_remove(top);
+                        continue;
                     }
                     let obj = pop!();
-                    let v = match &obj {
-                        Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => {
-                            let key = &proto.consts[k as usize];
-                            let Value::Str(key) = key else { unreachable!() };
-                            match ic_read(o, key, &proto.ics[proto.ic_index[ip - 1] as usize]) {
-                                Some(v)
-                                    if matches!(&v, Value::Object(a) if a.is_accessor())
-                                        || matches!(v, Value::Uninit) =>
-                                {
-                                    tri!(self.resolve_accessor(v, &obj))
-                                }
-                                Some(v) => v,
-                                None => tri!(self.get_prop(&obj, key)),
+                    let v = if optr.is_null() {
+                        let n = name!(k);
+                        tri!(self.get_prop(&obj, &n))
+                    } else {
+                        let key = &proto.consts[k as usize];
+                        let Value::Str(key) = key else { unreachable!() };
+                        match ic_read(unsafe { &*optr }, key, ic) {
+                            Some(v)
+                                if matches!(&v, Value::Object(a) if a.is_accessor())
+                                    || matches!(v, Value::Uninit) =>
+                            {
+                                tri!(self.resolve_accessor(v, &obj))
                             }
-                        }
-                        _ => {
-                            let n = name!(k);
-                            tri!(self.get_prop(&obj, &n))
+                            Some(v) => v,
+                            None => tri!(self.get_prop(&obj, key)),
                         }
                     };
                     self.stack.push(v);
@@ -5809,26 +5903,23 @@ impl Vm {
                 }
                 Op::GetMethod(k) => {
                     let top = self.stack.len() - 1;
-                    if let Value::Object(o) = &self.stack[top] {
-                        if matches!(o.kind, ObjKind::Ordinary) {
-                            let optr = Rc::as_ptr(o);
-                            let ic = &proto.ics[proto.ic_index[ip - 1] as usize];
-                            if ic_push(&mut self.stack, unsafe { &*optr }, ic) {
-                                self.stack.swap(top, top + 1);
-                                continue;
-                            }
-                        }
+                    let optr = match &self.stack[top] {
+                        Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => Rc::as_ptr(o),
+                        v => self.method_holder(v, &proto.consts[k as usize]),
+                    };
+                    let ic = &proto.ics[proto.ic_index[ip - 1] as usize];
+                    if !optr.is_null() && ic_push(&mut self.stack, unsafe { &*optr }, ic) {
+                        self.stack.swap(top, top + 1);
+                        continue;
                     }
                     let obj = pop!();
-                    let fast = match &obj {
-                        Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => {
-                            let Value::Str(key) = &proto.consts[k as usize] else {
-                                unreachable!()
-                            };
-                            ic_read(o, key, &proto.ics[proto.ic_index[ip - 1] as usize])
-                                .filter(plain_property)
-                        }
-                        _ => None,
+                    let fast = if optr.is_null() {
+                        None
+                    } else {
+                        let Value::Str(key) = &proto.consts[k as usize] else {
+                            unreachable!()
+                        };
+                        ic_read(unsafe { &*optr }, key, ic).filter(plain_property)
                     };
                     let f = match fast {
                         Some(f) => f,

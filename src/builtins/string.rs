@@ -63,6 +63,9 @@ pub fn install(vm: &mut Vm) {
 }
 
 fn this_str(vm: &mut Vm, this: &Value) -> Result<JsStr, Value> {
+    if let Value::Str(s) = this {
+        return Ok(s.clone());
+    }
     if let Some(Value::Str(s)) = crate::object::unwrap_primitive(this) {
         return Ok(s);
     }
@@ -153,6 +156,16 @@ fn char_at(vm: &mut Vm, this: Value, args: &[Value]) -> R {
 }
 
 fn char_code_at(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    if let (Value::Str(s), Some(Value::Number(i))) = (&this, args.first()) {
+        let i = *i;
+        if i >= 0.0 && i < u32::MAX as f64 {
+            return Ok(Value::Number(
+                code_unit_at_rc(s, i as usize)
+                    .map(|u| u as f64)
+                    .unwrap_or(f64::NAN),
+            ));
+        }
+    }
     let s = this_str(vm, &this)?;
     let i = to_integer(vm, &arg(args, 0))?;
     if i < 0.0 {
