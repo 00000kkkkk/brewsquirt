@@ -1,0 +1,148 @@
+const show = (...xs) => console.log(xs.map((x) => (Object.is(x, -0) ? "-0" : String(x))).join(" "))
+
+const sum = (n) => {
+  let s = 0
+  for (let i = 0; i < n; i++) s = s + i
+  return s
+}
+show(sum(10), sum(100000), sum(70000))
+
+const overflow = () => {
+  let x = 2147483600
+  for (let i = 0; i < 100; i++) x = x + 1
+  let y = -2147483600
+  for (let i = 0; i < 100; i++) y = y - 1
+  let z = 1
+  for (let i = 0; i < 40; i++) z = z * 3
+  return [x, y, z]
+}
+show(...overflow())
+
+const negZero = () => {
+  const out = []
+  for (let i = 0; i < 3; i++) {
+    let a = 0
+    a = a * -1
+    let b = -4
+    b = b % 2
+    let c = i - i
+    c = -c
+    let d = 5
+    d = d % 0
+    out.push(a, b, c, d)
+  }
+  return out
+}
+show(...negZero())
+
+const mixed = () => {
+  let s = 0
+  for (let i = 0; i < 1000; i++) {
+    s += i / 3
+    if (i === 500) s = Math.floor(s)
+  }
+  let t = 0
+  for (let i = 0; i < 10; i++) t = t + (i % 2 === 0 ? 0.5 : 1)
+  return [s, t]
+}
+show(...mixed())
+
+const typeChange = () => {
+  let s = 0
+  for (let i = 0; i < 1000; i++) {
+    if (i === 900) s = "x"
+    s = s + 1
+  }
+  let n = 0
+  for (let i = 0; i < 2000; i++) n = i < 1500 ? n + 1 : n + 0.25
+  return [s.length, s.slice(0, 5), n]
+}
+show(...typeChange())
+
+const bits = () => {
+  let a = 0
+  let b = 0
+  let c = 0
+  for (let i = 0; i < 1000; i++) {
+    a = (a * 31 + i) | 0
+    b = (b + 2654435761 * i) >>> 0
+    c = c ^ (i << 13) ^ (i >> 3) ^ (-i >>> 28)
+  }
+  return [a, b, c, 1 << 31, (1 << 31) >>> 0, -1 >>> 0, 2 ** 40 | 0, 1e21 | 0, NaN | 0]
+}
+show(...bits())
+
+const compares = () => {
+  const out = []
+  let nan = 0 / 0
+  for (let i = 0; i < 3; i++) {
+    out.push(nan < 1, nan >= 1, nan === nan, nan !== nan, -0 === 0, 1 / 0 > 1e308, -1 < -0)
+    nan = nan + 1
+  }
+  let count = 0
+  for (let i = 10; i > -10; i -= 3) if (i >= 0 && i <= 5) count++
+  out.push(count)
+  return out
+}
+show(...compares())
+
+const floats = () => {
+  let x = 0.1
+  for (let i = 0; i < 100; i++) x = x * 1.1 - 0.05
+  let y = 1
+  for (let i = 0; i < 2000; i++) y = y / 1.5
+  let z = 1
+  for (let i = 0; i < 2000; i++) z = z * 1.5
+  return [x, y, z, -z]
+}
+show(...floats())
+
+const counters = () => {
+  let i = 0
+  let w = 0
+  while (i < 100000) {
+    i++
+    if (i % 7 === 3) continue
+    w += i % 13
+  }
+  let k = 2147483640
+  let steps = 0
+  do {
+    k++
+    steps++
+  } while (k < 2147483660)
+  return [i, w, k, steps]
+}
+show(...counters())
+
+const rec = (n) => (n < 2 ? n : rec(n - 1) + rec(n - 2))
+show(rec(20))
+
+const upv = () => {
+  let total = 0
+  const add = (v) => {
+    total += v
+  }
+  for (let i = 0; i < 5000; i++) add(i & 7)
+  return total
+}
+show(upv())
+
+const builders = () => {
+  let a = ""
+  let b = ""
+  for (let i = 0; i < 300; i++) {
+    a += "x"
+    b += "AB"
+  }
+  const first = a === "x".repeat(300) && b.length === 600
+  let c = ""
+  for (let i = 0; i < 300; i++) c += "yz"
+  const len = c.length
+  c = 5
+  for (let i = 0; i < 3; i++) c = c + 1
+  let d = ""
+  for (let i = 0; i < 200; i++) d += i
+  return [first, a.length, b.slice(0, 4), len, c, d.length, d.slice(-6)]
+}
+show(...builders())

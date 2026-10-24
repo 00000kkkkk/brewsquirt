@@ -5484,7 +5484,24 @@ impl Vm {
         let f: crate::jit::JitFn = unsafe { std::mem::transmute(info.code.get()) };
         let r = unsafe { f(&mut ctx, ip as u32) };
         self.jit_stop = prev;
-        if r >> 32 == 0 {
+        let kind = r >> 32;
+        if kind == 4 || kind == 5 {
+            let at = (r & 0xffff_ffff) as u32;
+            if kind == 4 {
+                info.banned.borrow_mut().push(at);
+            } else {
+                info.no_int.set(true);
+            }
+            let n = info.compiles.get() + 1;
+            info.compiles.set(n);
+            info.state.set(if n > 8 {
+                crate::jit::REJECTED
+            } else {
+                crate::jit::COLD
+            });
+            info.hot.set(0);
+        }
+        if kind == 0 || kind == 4 || kind == 5 {
             let nip = (r & 0xffff_ffff) as usize;
             let fi = self.frames.len() - 1;
             let d = info.depth_at(nip).unwrap_or(self.stack.len() - base);
@@ -5775,7 +5792,7 @@ impl Vm {
         }
         let r = self.enter_jit(proto, base, 0, self.jit_stop);
         match r >> 32 {
-            0 => {
+            0 | 4 | 5 => {
                 let nip = (r & 0xffff_ffff) as usize;
                 if proto.code.get(nip) == Some(&Op::Return)
                     && !self.frames[frame].construct
@@ -5861,7 +5878,7 @@ impl Vm {
                     {
                         let r = self.enter_jit(proto, base, ip0, stop);
                         match r >> 32 {
-                            0 => {}
+                            0 | 4 | 5 => {}
                             1 => continue 'frame,
                             2 => return Err(self.jit_error.take().unwrap_or_default()),
                             _ => return Ok(self.jit_value.take().unwrap_or_default()),

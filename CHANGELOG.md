@@ -13,8 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   into machine code. Local variables and temporaries live in registers, numeric arithmetic,
   comparisons and branches run inline, and a running loop switches to compiled code without
   waiting for the function to be called again. Anything the compiled code does not handle
-  falls back to the interpreter at that instruction, so behaviour is unchanged; numeric loops
-  run two to five times faster. Set `JSQ_NOJIT=1` to run with the interpreter only.
+  falls back to the interpreter at that instruction, so behaviour is unchanged. Set
+  `JSQ_NOJIT=1` to run with the interpreter only.
+- The JIT infers which local variables always hold 32-bit integers and keeps them as machine
+  integers, with overflow checks that send the loop back to the interpreter and recompile it
+  with doubles for that operation. Remainders and products by constants become multiplications
+  and shifts. Integer loops such as `for (let i = 0; i < n; i++) s = (s + i * 7) % m` run
+  about five times faster than in the interpreter and as fast as in Node.
 - `Uint8Array.prototype.setFromBase64` and `setFromHex` decode into an existing array and report
   how much they read and wrote, and `Uint8Array.fromBase64` honours `lastChunkHandling`
   (`loose`, `strict` and `stop-before-partial`). Every base64 and hex method validates its
