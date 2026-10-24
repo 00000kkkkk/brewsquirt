@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them. `getPeerCertificate()` returns the peer's certificate on client and server sockets and
   on `req.socket`, and `authorized` reports whether it was verified. Rejected handshakes carry
   Node's `ERR_SSL_*_ALERT_*` codes.
+- The `secp256k1` and P-521 (`secp521r1`) curves in `node:crypto`: key generation, import and
+  export in every key format, ECDSA signatures, `createECDH` and `diffieHellman`, and P-521 in
+  WebCrypto's ECDSA and ECDH.
 
 ### Fixed
 
@@ -44,6 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Regular expression group names written with `\u` escapes, such as `(?<\u{1d453}>...)`, keep
   their decoded name in `groups`, `$<name>` and `\k<name>`, and a `\k<name>` reference inside
   the group it names, or before it, matches the empty string as the specification requires.
+- EC keys exported as SEC1 carry the curve parameters, JWK exports list their members in Node's
+  order, signing with an EC key and no digest uses SHA-256 as Node does, and digests shorter than
+  the curve are accepted when signing and verifying.
 
 ## [1.10.0] - 2026-10-24
 

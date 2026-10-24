@@ -1,0 +1,18 @@
+secp256k1 ec {"namedCurve":"secp256k1"} {"namedCurve":"secp256k1"}
+roundtrip true true true true
+verify foreign true true false
+own,true,true,secp256k1
+ecdh,true,66
+ecdh shared,true
+diffieHellman,true
+secp521r1 ec {"namedCurve":"secp521r1"} {"namedCurve":"secp521r1"}
+roundtrip true true true true
+verify foreign true true false
+own,true,true,P-521
+ecdh,true,134
+ecdh shared,true
+diffieHellman,true
+prime256v1,secp256k1,secp521r1
+subtle P-521 132 true
+P-521 88
+subtle ECDH P-521 66 true

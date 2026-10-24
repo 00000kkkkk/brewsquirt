@@ -1,0 +1,43 @@
+import crypto from "node:crypto"
+import fs from "node:fs"
+import path from "node:path"
+const theirs = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, "fixtures", "ec_keys.json"), "utf8"))
+const data = Buffer.from("payload to sign")
+const lines = []
+for (const curve of ["secp256k1", "secp521r1"]) {
+  const t = theirs[curve]
+  const priv = crypto.createPrivateKey(t.pkcs8)
+  const pub = crypto.createPublicKey(t.spki)
+  const fromSec1 = crypto.createPrivateKey(t.sec1)
+  const fromJwk = crypto.createPrivateKey({ key: t.jwk, format: "jwk" })
+  lines.push([curve, priv.asymmetricKeyType, JSON.stringify(priv.asymmetricKeyDetails), JSON.stringify(pub.asymmetricKeyDetails)].join(" "))
+  lines.push(["roundtrip", priv.export({ type: "pkcs8", format: "pem" }) === t.pkcs8, fromSec1.export({ type: "sec1", format: "pem" }) === t.sec1, JSON.stringify(fromJwk.export({ format: "jwk" })) === JSON.stringify(t.jwk), crypto.createPublicKey(priv).export({ type: "spki", format: "pem" }) === t.spki].join(" "))
+  lines.push(["verify foreign", crypto.verify(null, data, pub, Buffer.from(t.sigDer, "base64")), crypto.verify("sha256", data, { key: pub, dsaEncoding: "ieee-p1363" }, Buffer.from(t.sigP1363, "base64")), crypto.verify(null, Buffer.from("other"), pub, Buffer.from(t.sigDer, "base64"))].join(" "))
+  const mine = crypto.generateKeyPairSync("ec", { namedCurve: curve })
+  const sig = crypto.sign(null, data, mine.privateKey)
+  lines.push(["own", crypto.verify(null, data, mine.publicKey, sig), JSON.stringify(mine.publicKey.export({ format: "jwk" })).length > 50, mine.privateKey.export({ format: "jwk" }).crv])
+  const ecdh = crypto.createECDH(curve)
+  ecdh.setPrivateKey(t.ecdhPriv, "hex")
+  lines.push(["ecdh", ecdh.getPublicKey("hex") === t.ecdhPub, ecdh.getPublicKey("hex", "compressed").length])
+  const other = crypto.createECDH(curve)
+  other.generateKeys()
+  lines.push(["ecdh shared", ecdh.computeSecret(other.getPublicKey()).equals(other.computeSecret(ecdh.getPublicKey()))])
+  const a = crypto.generateKeyPairSync("ec", { namedCurve: curve })
+  const b = crypto.generateKeyPairSync("ec", { namedCurve: curve })
+  lines.push(["diffieHellman", crypto.diffieHellman({ privateKey: a.privateKey, publicKey: b.publicKey }).equals(crypto.diffieHellman({ privateKey: b.privateKey, publicKey: a.publicKey }))])
+}
+lines.push(crypto.getCurves().filter((c) => ["secp256k1", "secp521r1", "prime256v1"].includes(c)).join(","))
+console.log(lines.join("\n"))
+;(async () => {
+  const subtle = crypto.webcrypto.subtle
+  const kp = await subtle.generateKey({ name: "ECDSA", namedCurve: "P-521" }, true, ["sign", "verify"])
+  const s = await subtle.sign({ name: "ECDSA", hash: "SHA-512" }, kp.privateKey, data)
+  console.log("subtle P-521", s.byteLength, await subtle.verify({ name: "ECDSA", hash: "SHA-512" }, kp.publicKey, s, data))
+  const jwk = await subtle.exportKey("jwk", kp.publicKey)
+  console.log(jwk.crv, jwk.x.length)
+  const e1 = await subtle.generateKey({ name: "ECDH", namedCurve: "P-521" }, true, ["deriveBits"])
+  const e2 = await subtle.generateKey({ name: "ECDH", namedCurve: "P-521" }, true, ["deriveBits"])
+  const bits1 = await subtle.deriveBits({ name: "ECDH", public: e2.publicKey }, e1.privateKey, 528)
+  const bits2 = await subtle.deriveBits({ name: "ECDH", public: e1.publicKey }, e2.privateKey, 528)
+  console.log("subtle ECDH P-521", bits1.byteLength, Buffer.from(bits1).equals(Buffer.from(bits2)))
+})()

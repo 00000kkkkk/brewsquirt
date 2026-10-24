@@ -2483,8 +2483,8 @@ const NODE_SRC: &str = r##"
     e.code = code
     return e
   }
-  const curveNames = { "P-256": "prime256v1", "P-384": "secp384r1" }
-  const curveAlias = (name) => ({ prime256v1: "P-256", secp256r1: "P-256", "P-256": "P-256", secp384r1: "P-384", "P-384": "P-384" })[name]
+  const curveNames = { "P-256": "prime256v1", "P-384": "secp384r1", secp256k1: "secp256k1", "P-521": "secp521r1" }
+  const curveAlias = (name) => ({ prime256v1: "P-256", secp256r1: "P-256", "P-256": "P-256", secp384r1: "P-384", "P-384": "P-384", secp256k1: "secp256k1", secp521r1: "P-521", "P-521": "P-521" })[name]
   class KeyObject {
     #type
     #bytes
@@ -3074,7 +3074,7 @@ const NODE_SRC: &str = r##"
         out.modulus = undefined
         out.exponent = undefined
         out.pubkey = Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x, "base64url"), Buffer.from(jwk.y, "base64url")])
-        out.bits = { prime256v1: 256, secp384r1: 384, secp521r1: 521 }[curve]
+        out.bits = { prime256v1: 256, secp256k1: 256, secp384r1: 384, secp521r1: 521 }[curve]
       } else {
         out.pubkey = Buffer.from(p.spki)
       }
@@ -3179,7 +3179,7 @@ const NODE_SRC: &str = r##"
     createDecipheriv: (algorithm, key, iv, options) => new Decipheriv(algorithm, key, iv, options),
     getCiphers: () => [...CIPHER_LIST].sort(),
     getCipherInfo,
-    getCurves: () => ["prime256v1", "secp256r1", "secp384r1"],
+    getCurves: () => ["prime256v1", "secp256k1", "secp256r1", "secp384r1", "secp521r1"],
     publicEncrypt: (key, buffer) => rsaOp("publicEncrypt", key, buffer),
     privateDecrypt: (key, buffer) => rsaOp("privateDecrypt", key, buffer),
     privateEncrypt: (key, buffer) => rsaOp("privateEncrypt", key, buffer),

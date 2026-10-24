@@ -3,6 +3,7 @@ use crate::object::Obj;
 use crate::value::Value;
 use crate::vm::{ErrorKind, Vm};
 use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+use p256::elliptic_curve::sec1::ToEncodedPoint;
 use pkcs8::der::{Decode, Encode};
 use pkcs8::{DecodePrivateKey, EncodePrivateKey};
 use rand_core::OsRng;
@@ -23,6 +24,8 @@ const OID_RSA_PSS: &str = "1.2.840.113549.1.1.10";
 const OID_EC: &str = "1.2.840.10045.2.1";
 const OID_P256: &str = "1.2.840.10045.3.1.7";
 const OID_P384: &str = "1.3.132.0.34";
+const OID_K256: &str = "1.3.132.0.10";
+const OID_P521: &str = "1.3.132.0.35";
 const OID_ED25519: &str = "1.3.101.112";
 const OID_X25519: &str = "1.3.101.110";
 
@@ -62,6 +65,8 @@ enum Private {
     Rsa(RsaPrivateKey, bool),
     P256(p256::SecretKey),
     P384(p384::SecretKey),
+    K256(k256::SecretKey),
+    P521(p521::SecretKey),
     Ed25519(ed25519_dalek::SigningKey),
     X25519([u8; 32]),
 }
@@ -70,6 +75,8 @@ enum Public {
     Rsa(RsaPublicKey, bool),
     P256(p256::PublicKey),
     P384(p384::PublicKey),
+    K256(k256::PublicKey),
+    P521(p521::PublicKey),
     Ed25519(ed25519_dalek::VerifyingKey),
     X25519([u8; 32]),
 }
@@ -79,6 +86,8 @@ fn curve_of(params: Option<pkcs8::der::asn1::AnyRef<'_>>) -> Option<&'static str
     match oid.to_string().as_str() {
         OID_P256 => Some("P-256"),
         OID_P384 => Some("P-384"),
+        OID_K256 => Some("secp256k1"),
+        OID_P521 => Some("P-521"),
         _ => None,
     }
 }
@@ -99,6 +108,12 @@ fn parse_private(der: &[u8]) -> Result<Private, String> {
                 .map_err(|e| e.to_string()),
             Some("P-384") => p384::SecretKey::from_pkcs8_der(der)
                 .map(Private::P384)
+                .map_err(|e| e.to_string()),
+            Some("secp256k1") => k256::SecretKey::from_pkcs8_der(der)
+                .map(Private::K256)
+                .map_err(|e| e.to_string()),
+            Some("P-521") => p521::SecretKey::from_pkcs8_der(der)
+                .map(Private::P521)
                 .map_err(|e| e.to_string()),
             _ => Err("Unsupported elliptic curve".into()),
         },
@@ -135,6 +150,12 @@ fn parse_public(der: &[u8]) -> Result<Public, String> {
                 .map_err(|e| e.to_string()),
             Some("P-384") => p384::PublicKey::from_sec1_bytes(bits)
                 .map(Public::P384)
+                .map_err(|e| e.to_string()),
+            Some("secp256k1") => k256::PublicKey::from_sec1_bytes(bits)
+                .map(Public::K256)
+                .map_err(|e| e.to_string()),
+            Some("P-521") => p521::PublicKey::from_sec1_bytes(bits)
+                .map(Public::P521)
                 .map_err(|e| e.to_string()),
             _ => Err("Unsupported elliptic curve".into()),
         },
@@ -219,6 +240,8 @@ fn public_of(key: &Private) -> Result<Public, String> {
         Private::Rsa(k, pss) => Public::Rsa(k.to_public_key(), *pss),
         Private::P256(k) => Public::P256(k.public_key()),
         Private::P384(k) => Public::P384(k.public_key()),
+        Private::K256(k) => Public::K256(k.public_key()),
+        Private::P521(k) => Public::P521(k.public_key()),
         Private::Ed25519(k) => Public::Ed25519(k.verifying_key()),
         Private::X25519(raw) => {
             let secret = x25519_dalek::StaticSecret::from(*raw);
@@ -239,6 +262,14 @@ fn private_der(key: &Private) -> Result<Vec<u8>, String> {
             .map(|d| d.as_bytes().to_vec())
             .map_err(|e| e.to_string()),
         Private::P384(k) => k
+            .to_pkcs8_der()
+            .map(|d| d.as_bytes().to_vec())
+            .map_err(|e| e.to_string()),
+        Private::K256(k) => k
+            .to_pkcs8_der()
+            .map(|d| d.as_bytes().to_vec())
+            .map_err(|e| e.to_string()),
+        Private::P521(k) => k
             .to_pkcs8_der()
             .map(|d| d.as_bytes().to_vec())
             .map_err(|e| e.to_string()),
@@ -265,6 +296,14 @@ fn public_der(key: &Public) -> Result<Vec<u8>, String> {
             .to_public_key_der()
             .map(|d| d.as_bytes().to_vec())
             .map_err(|e| e.to_string()),
+        Public::K256(k) => k
+            .to_public_key_der()
+            .map(|d| d.as_bytes().to_vec())
+            .map_err(|e| e.to_string()),
+        Public::P521(k) => k
+            .to_public_key_der()
+            .map(|d| d.as_bytes().to_vec())
+            .map_err(|e| e.to_string()),
         Public::Ed25519(k) => okp_spki(OID_ED25519, k.as_bytes()),
         Public::X25519(raw) => okp_spki(OID_X25519, raw),
     }
@@ -278,6 +317,8 @@ fn describe(vm: &mut Vm, kind: &str, der: Vec<u8>, public: &Public) -> R {
         Public::Rsa(_, true) => ("rsa-pss", None),
         Public::P256(_) => ("ec", Some("P-256")),
         Public::P384(_) => ("ec", Some("P-384")),
+        Public::K256(_) => ("ec", Some("secp256k1")),
+        Public::P521(_) => ("ec", Some("P-521")),
         Public::Ed25519(_) => ("ed25519", None),
         Public::X25519(_) => ("x25519", None),
     };
@@ -363,11 +404,14 @@ fn import_der(
             Ok(("private".into(), private_der(&key)?, public))
         }
         "sec1" | "EC PRIVATE KEY" => {
-            let key = match p256::SecretKey::from_sec1_der(der) {
-                Ok(k) => Private::P256(k),
-                Err(_) => {
-                    Private::P384(p384::SecretKey::from_sec1_der(der).map_err(|e| e.to_string())?)
-                }
+            let key = if let Ok(k) = p256::SecretKey::from_sec1_der(der) {
+                Private::P256(k)
+            } else if let Ok(k) = k256::SecretKey::from_sec1_der(der) {
+                Private::K256(k)
+            } else if let Ok(k) = p521::SecretKey::from_sec1_der(der) {
+                Private::P521(k)
+            } else {
+                Private::P384(p384::SecretKey::from_sec1_der(der).map_err(|e| e.to_string())?)
             };
             let public = public_of(&key)?;
             Ok(("private".into(), private_der(&key)?, public))
@@ -507,17 +551,35 @@ fn native_key_export_jwk(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
                 Private::P256(k) => {
                     let point = k.public_key().to_sec1_bytes();
                     fields.push(("kty", "EC".into()));
-                    fields.push(("crv", "P-256".into()));
                     fields.push(("x", b64url(&point[1..33])));
                     fields.push(("y", b64url(&point[33..65])));
+                    fields.push(("crv", "P-256".into()));
                     fields.push(("d", b64url(&k.to_bytes())));
                 }
                 Private::P384(k) => {
                     let point = k.public_key().to_sec1_bytes();
                     fields.push(("kty", "EC".into()));
-                    fields.push(("crv", "P-384".into()));
                     fields.push(("x", b64url(&point[1..49])));
                     fields.push(("y", b64url(&point[49..97])));
+                    fields.push(("crv", "P-384".into()));
+                    fields.push(("d", b64url(&k.to_bytes())));
+                }
+                Private::K256(k) => {
+                    let point = k.public_key().to_encoded_point(false);
+                    let point = point.as_bytes();
+                    fields.push(("kty", "EC".into()));
+                    fields.push(("x", b64url(&point[1..33])));
+                    fields.push(("y", b64url(&point[33..65])));
+                    fields.push(("crv", "secp256k1".into()));
+                    fields.push(("d", b64url(&k.to_bytes())));
+                }
+                Private::P521(k) => {
+                    let point = k.public_key().to_encoded_point(false);
+                    let point = point.as_bytes();
+                    fields.push(("kty", "EC".into()));
+                    fields.push(("x", b64url(&point[1..67])));
+                    fields.push(("y", b64url(&point[67..133])));
+                    fields.push(("crv", "P-521".into()));
                     fields.push(("d", b64url(&k.to_bytes())));
                 }
                 Private::Ed25519(k) => {
@@ -543,18 +605,36 @@ fn native_key_export_jwk(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
                     fields.push(("e", big(k.e())));
                 }
                 Public::P256(k) => {
-                    let point = k.to_sec1_bytes();
+                    let point = k.to_encoded_point(false);
+                    let point = point.as_bytes();
                     fields.push(("kty", "EC".into()));
-                    fields.push(("crv", "P-256".into()));
                     fields.push(("x", b64url(&point[1..33])));
                     fields.push(("y", b64url(&point[33..65])));
+                    fields.push(("crv", "P-256".into()));
                 }
                 Public::P384(k) => {
-                    let point = k.to_sec1_bytes();
+                    let point = k.to_encoded_point(false);
+                    let point = point.as_bytes();
                     fields.push(("kty", "EC".into()));
-                    fields.push(("crv", "P-384".into()));
                     fields.push(("x", b64url(&point[1..49])));
                     fields.push(("y", b64url(&point[49..97])));
+                    fields.push(("crv", "P-384".into()));
+                }
+                Public::K256(k) => {
+                    let point = k.to_encoded_point(false);
+                    let point = point.as_bytes();
+                    fields.push(("kty", "EC".into()));
+                    fields.push(("x", b64url(&point[1..33])));
+                    fields.push(("y", b64url(&point[33..65])));
+                    fields.push(("crv", "secp256k1".into()));
+                }
+                Public::P521(k) => {
+                    let point = k.to_encoded_point(false);
+                    let point = point.as_bytes();
+                    fields.push(("kty", "EC".into()));
+                    fields.push(("x", b64url(&point[1..67])));
+                    fields.push(("y", b64url(&point[67..133])));
+                    fields.push(("crv", "P-521".into()));
                 }
                 Public::Ed25519(k) => {
                     fields.push(("crv", "Ed25519".into()));
@@ -649,6 +729,18 @@ fn native_key_import_jwk(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
                         let key = Private::P384(k);
                         Ok(("private".into(), private_der(&key)?, public_of(&key)?))
                     }),
+                ("secp256k1", true) => k256::SecretKey::from_slice(&d.unwrap_or_default())
+                    .map_err(|e| e.to_string())
+                    .and_then(|k| {
+                        let key = Private::K256(k);
+                        Ok(("private".into(), private_der(&key)?, public_of(&key)?))
+                    }),
+                ("P-521", true) => p521::SecretKey::from_slice(&d.unwrap_or_default())
+                    .map_err(|e| e.to_string())
+                    .and_then(|k| {
+                        let key = Private::P521(k);
+                        Ok(("private".into(), private_der(&key)?, public_of(&key)?))
+                    }),
                 ("P-256", false) => p256::PublicKey::from_sec1_bytes(&point)
                     .map_err(|e| e.to_string())
                     .and_then(|k| {
@@ -659,6 +751,18 @@ fn native_key_import_jwk(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
                     .map_err(|e| e.to_string())
                     .and_then(|k| {
                         let p = Public::P384(k);
+                        Ok(("public".into(), public_der(&p)?, p))
+                    }),
+                ("secp256k1", false) => k256::PublicKey::from_sec1_bytes(&point)
+                    .map_err(|e| e.to_string())
+                    .and_then(|k| {
+                        let p = Public::K256(k);
+                        Ok(("public".into(), public_der(&p)?, p))
+                    }),
+                ("P-521", false) => p521::PublicKey::from_sec1_bytes(&point)
+                    .map_err(|e| e.to_string())
+                    .and_then(|k| {
+                        let p = Public::P521(k);
                         Ok(("public".into(), public_der(&p)?, p))
                     }),
                 _ => Err("Unsupported JWK curve".into()),
@@ -736,16 +840,9 @@ fn native_key_export(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
                     )),
                     _ => Err("pkcs1 export requires an RSA key".into()),
                 },
-                "sec1" => match &key {
-                    Private::P256(k) => Ok((
-                        "EC PRIVATE KEY".into(),
-                        k.to_sec1_der().map_err(|e| e.to_string())?.to_vec(),
-                    )),
-                    Private::P384(k) => Ok((
-                        "EC PRIVATE KEY".into(),
-                        k.to_sec1_der().map_err(|e| e.to_string())?.to_vec(),
-                    )),
-                    _ => Err("sec1 export requires an EC key".into()),
+                "sec1" => match ec_sec1(&key) {
+                    Some(der) => Ok(("EC PRIVATE KEY".into(), der)),
+                    None => Err("sec1 export requires an EC key".into()),
                 },
                 _ => match passphrase {
                     Some(pass) => {
@@ -809,6 +906,8 @@ fn native_key_generate(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
                 Ok(Private::P256(p256::SecretKey::random(&mut OsRng)))
             }
             "P-384" | "secp384r1" => Ok(Private::P384(p384::SecretKey::random(&mut OsRng))),
+            "secp256k1" => Ok(Private::K256(k256::SecretKey::random(&mut OsRng))),
+            "P-521" | "secp521r1" => Ok(Private::P521(p521::SecretKey::random(&mut OsRng))),
             _ => Err(format!("Invalid EC curve name {curve}")),
         },
         "ed25519" => Ok(Private::Ed25519(ed25519_dalek::SigningKey::generate(
@@ -936,7 +1035,7 @@ fn native_sign(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             } else {
                 hash.clone()
             };
-            let digest = digest_with(&hash, &data).ok_or("Invalid digest")?;
+            let digest = pad_prehash(digest_with(&hash, &data).ok_or("Invalid digest")?, 32);
             let sk = p256::ecdsa::SigningKey::from(k);
             let sig: p256::ecdsa::Signature =
                 sk.sign_prehash(&digest).map_err(|e| e.to_string())?;
@@ -949,13 +1048,48 @@ fn native_sign(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         Private::P384(k) => {
             use p384::ecdsa::signature::hazmat::PrehashSigner;
             let hash = if hash.is_empty() {
-                "sha384".to_string()
+                "sha256".to_string()
             } else {
                 hash.clone()
             };
-            let digest = digest_with(&hash, &data).ok_or("Invalid digest")?;
+            let digest = pad_prehash(digest_with(&hash, &data).ok_or("Invalid digest")?, 48);
             let sk = p384::ecdsa::SigningKey::from(k);
             let sig: p384::ecdsa::Signature =
+                sk.sign_prehash(&digest).map_err(|e| e.to_string())?;
+            Ok(if p1363 {
+                sig.to_bytes().to_vec()
+            } else {
+                sig.to_der().as_bytes().to_vec()
+            })
+        }
+        Private::K256(k) => {
+            use k256::ecdsa::signature::hazmat::PrehashSigner;
+            let hash = if hash.is_empty() {
+                "sha256".to_string()
+            } else {
+                hash.clone()
+            };
+            let digest = pad_prehash(digest_with(&hash, &data).ok_or("Invalid digest")?, 32);
+            let sk = k256::ecdsa::SigningKey::from(k);
+            let sig: k256::ecdsa::Signature =
+                sk.sign_prehash(&digest).map_err(|e| e.to_string())?;
+            Ok(if p1363 {
+                sig.to_bytes().to_vec()
+            } else {
+                sig.to_der().as_bytes().to_vec()
+            })
+        }
+        Private::P521(k) => {
+            use p521::ecdsa::signature::hazmat::PrehashSigner;
+            let hash = if hash.is_empty() {
+                "sha256".to_string()
+            } else {
+                hash.clone()
+            };
+            let digest = pad_prehash(digest_with(&hash, &data).ok_or("Invalid digest")?, 66);
+            let sk =
+                p521::ecdsa::SigningKey::from_bytes(&k.to_bytes()).map_err(|e| e.to_string())?;
+            let sig: p521::ecdsa::Signature =
                 sk.sign_prehash(&digest).map_err(|e| e.to_string())?;
             Ok(if p1363 {
                 sig.to_bytes().to_vec()
@@ -1030,7 +1164,7 @@ fn native_verify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             } else {
                 hash.clone()
             };
-            let digest = digest_with(&hash, &data).unwrap_or_default();
+            let digest = pad_prehash(digest_with(&hash, &data).unwrap_or_default(), 32);
             let parsed = if p1363 {
                 p256::ecdsa::Signature::from_slice(&sig)
             } else {
@@ -1046,11 +1180,11 @@ fn native_verify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         Public::P384(k) => {
             use p384::ecdsa::signature::hazmat::PrehashVerifier;
             let hash = if hash.is_empty() {
-                "sha384".to_string()
+                "sha256".to_string()
             } else {
                 hash.clone()
             };
-            let digest = digest_with(&hash, &data).unwrap_or_default();
+            let digest = pad_prehash(digest_with(&hash, &data).unwrap_or_default(), 48);
             let parsed = if p1363 {
                 p384::ecdsa::Signature::from_slice(&sig)
             } else {
@@ -1063,6 +1197,45 @@ fn native_verify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
                 Err(_) => false,
             }
         }
+        Public::K256(k) => {
+            use k256::ecdsa::signature::hazmat::PrehashVerifier;
+            let hash = if hash.is_empty() {
+                "sha256".to_string()
+            } else {
+                hash.clone()
+            };
+            let digest = pad_prehash(digest_with(&hash, &data).unwrap_or_default(), 32);
+            let parsed = if p1363 {
+                k256::ecdsa::Signature::from_slice(&sig)
+            } else {
+                k256::ecdsa::Signature::from_der(&sig)
+            };
+            match parsed {
+                Ok(s) => k256::ecdsa::VerifyingKey::from(k)
+                    .verify_prehash(&digest, &s.normalize_s().unwrap_or(s))
+                    .is_ok(),
+                Err(_) => false,
+            }
+        }
+        Public::P521(k) => {
+            use p521::ecdsa::signature::hazmat::PrehashVerifier;
+            let hash = if hash.is_empty() {
+                "sha256".to_string()
+            } else {
+                hash.clone()
+            };
+            let digest = pad_prehash(digest_with(&hash, &data).unwrap_or_default(), 66);
+            let parsed = if p1363 {
+                p521::ecdsa::Signature::from_slice(&sig)
+            } else {
+                p521::ecdsa::Signature::from_der(&sig)
+            };
+            match parsed {
+                Ok(s) => p521::ecdsa::VerifyingKey::from_affine(*k.as_affine())
+                    .is_ok_and(|v| v.verify_prehash(&digest, &s).is_ok()),
+                Err(_) => false,
+            }
+        }
         Public::Ed25519(k) => match ed25519_dalek::Signature::from_slice(&sig) {
             Ok(s) => k.verify_strict(&data, &s).is_ok(),
             Err(_) => false,
@@ -1070,6 +1243,63 @@ fn native_verify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         Public::X25519(_) => false,
     };
     Ok(Value::Bool(ok))
+}
+
+fn der_tlv(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    if body.len() < 0x80 {
+        out.push(body.len() as u8);
+    } else {
+        let len = body.len().to_be_bytes();
+        let first = len.iter().position(|b| *b != 0).unwrap_or(len.len() - 1);
+        out.push(0x80 | (len.len() - first) as u8);
+        out.extend_from_slice(&len[first..]);
+    }
+    out.extend_from_slice(body);
+    out
+}
+
+fn ec_sec1(key: &Private) -> Option<Vec<u8>> {
+    let (oid, d, point) = match key {
+        Private::P256(k) => (
+            OID_P256,
+            k.to_bytes().to_vec(),
+            k.public_key().to_encoded_point(false).as_bytes().to_vec(),
+        ),
+        Private::P384(k) => (
+            OID_P384,
+            k.to_bytes().to_vec(),
+            k.public_key().to_encoded_point(false).as_bytes().to_vec(),
+        ),
+        Private::K256(k) => (
+            OID_K256,
+            k.to_bytes().to_vec(),
+            k.public_key().to_encoded_point(false).as_bytes().to_vec(),
+        ),
+        Private::P521(k) => (
+            OID_P521,
+            k.to_bytes().to_vec(),
+            k.public_key().to_encoded_point(false).as_bytes().to_vec(),
+        ),
+        _ => return None,
+    };
+    let oid = pkcs8::ObjectIdentifier::new(oid).ok()?.to_der().ok()?;
+    let mut bits = vec![0u8];
+    bits.extend_from_slice(&point);
+    let mut body = der_tlv(0x02, &[1]);
+    body.extend(der_tlv(0x04, &d));
+    body.extend(der_tlv(0xa0, &oid));
+    body.extend(der_tlv(0xa1, &der_tlv(0x03, &bits)));
+    Some(der_tlv(0x30, &body))
+}
+
+fn pad_prehash(digest: Vec<u8>, field: usize) -> Vec<u8> {
+    if digest.len() >= field {
+        return digest;
+    }
+    let mut out = vec![0u8; field - digest.len()];
+    out.extend(digest);
+    out
 }
 
 fn native_derive(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
@@ -1085,6 +1315,18 @@ fn native_derive(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         .raw_secret_bytes()
         .to_vec()),
         (Private::P384(a), Public::P384(b)) => Ok(p384::ecdh::diffie_hellman(
+            a.to_nonzero_scalar(),
+            b.as_affine(),
+        )
+        .raw_secret_bytes()
+        .to_vec()),
+        (Private::K256(a), Public::K256(b)) => Ok(k256::ecdh::diffie_hellman(
+            a.to_nonzero_scalar(),
+            b.as_affine(),
+        )
+        .raw_secret_bytes()
+        .to_vec()),
+        (Private::P521(a), Public::P521(b)) => Ok(p521::ecdh::diffie_hellman(
             a.to_nonzero_scalar(),
             b.as_affine(),
         )
@@ -1147,6 +1389,8 @@ fn native_ecdh(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let result: Result<Vec<u8>, &str> = match curve.as_str() {
         "prime256v1" | "secp256r1" | "P-256" => run!(p256),
         "secp384r1" | "P-384" => run!(p384),
+        "secp256k1" => run!(k256),
+        "secp521r1" | "P-521" => run!(p521),
         "x25519" | "X25519" => match op.as_str() {
             "generate" => Ok(x25519_dalek::StaticSecret::random_from_rng(OsRng)
                 .to_bytes()
@@ -1188,6 +1432,8 @@ fn native_key_raw(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             .map(|p| match p {
                 Public::P256(k) => k.to_sec1_bytes().to_vec(),
                 Public::P384(k) => k.to_sec1_bytes().to_vec(),
+                Public::K256(k) => k.to_encoded_point(false).as_bytes().to_vec(),
+                Public::P521(k) => k.to_encoded_point(false).as_bytes().to_vec(),
                 Public::Ed25519(k) => k.as_bytes().to_vec(),
                 Public::X25519(raw) => raw.to_vec(),
                 Public::Rsa(k, _) => k
@@ -1203,6 +1449,12 @@ fn native_key_raw(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
                     .map_err(|e| e.to_string()),
                 "P-384" => p384::PublicKey::from_sec1_bytes(&data)
                     .map(Public::P384)
+                    .map_err(|e| e.to_string()),
+                "secp256k1" => k256::PublicKey::from_sec1_bytes(&data)
+                    .map(Public::K256)
+                    .map_err(|e| e.to_string()),
+                "P-521" => p521::PublicKey::from_sec1_bytes(&data)
+                    .map(Public::P521)
                     .map_err(|e| e.to_string()),
                 "Ed25519" => <[u8; 32]>::try_from(data.as_slice())
                     .map_err(|_| "Invalid key length".to_string())
