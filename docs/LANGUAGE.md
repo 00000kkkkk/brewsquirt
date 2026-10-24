@@ -1902,8 +1902,10 @@ uploads. The WHATWG streams are available as `ReadableStream`, `WritableStream` 
 `TransformStream` with default readers and writers, `pipeTo`, `pipeThrough`, `tee`, `cancel`,
 `abort`, backpressure through `highWaterMark`, `ReadableStream.from(iterable)` and async
 iteration, plus `TextEncoderStream`, `TextDecoderStream`, `CompressionStream` and
-`DecompressionStream` (`gzip`, `deflate`, `deflate-raw`) and the two queuing strategies. BYOB
-readers are not supported.
+`DecompressionStream` (`gzip`, `deflate`, `deflate-raw`) and the two queuing strategies. Byte
+streams (`type: "bytes"`) have a `ReadableByteStreamController` with `byobRequest`, and
+`getReader({ mode: "byob" })` returns a `ReadableStreamBYOBReader` whose `read(view, { min })`
+fills the caller's buffer; `fetch` and `Blob` bodies are byte streams.
 
 ```js
 const upper = new TransformStream({ transform: (chunk, c) => c.enqueue(chunk.toUpperCase()) })
@@ -2473,7 +2475,6 @@ scripts, and packages that have to be compiled with `node-gyp` are not built.
 
 These are on the roadmap and currently produce a `SyntaxError` or are absent:
 
-- BYOB stream readers
 - Windows named pipes in `node:net`, PFX certificate bundles, DSA and Diffie-Hellman groups in
   `node:crypto`, and the `secp256k1`, P-521, Ed448 and X448 curves
 - Shared WebAssembly memories, threads and the JavaScript promise integration

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 type R = Result<Value, Value>;
 
-pub const LAZY_GLOBALS: [&str; 30] = [
+pub const LAZY_GLOBALS: [&str; 38] = [
     "fetch",
     "MessageEvent",
     "CloseEvent",
@@ -22,6 +22,14 @@ pub const LAZY_GLOBALS: [&str; 30] = [
     "ReadableStream",
     "WritableStream",
     "TransformStream",
+    "ReadableStreamDefaultReader",
+    "ReadableStreamBYOBReader",
+    "ReadableStreamDefaultController",
+    "ReadableByteStreamController",
+    "ReadableStreamBYOBRequest",
+    "WritableStreamDefaultWriter",
+    "WritableStreamDefaultController",
+    "TransformStreamDefaultController",
     "TextEncoderStream",
     "TextDecoderStream",
     "CompressionStream",
@@ -1090,10 +1098,223 @@ const WEB_SRC: &str = r##"
     }
   }
 
+  const elementSize = (view) => view.BYTES_PER_ELEMENT ?? 1
+  const filledView = (r, done) => {
+    const usable = r.filled - (r.filled % r.elementSize)
+    const view = r.ctor === DataView ? new DataView(r.buffer, r.byteOffset, usable) : new r.ctor(r.buffer, r.byteOffset, usable / r.elementSize)
+    return { value: view, done }
+  }
+  const settleIntoReads = (st, done) => {
+    for (const r of st.byobReads.splice(0)) r.d.resolve(filledView(r, done))
+    st.byobRequest = null
+  }
+  const fillFromQueue = (st, r) => {
+    while (st.queue.length && r.filled < r.byteLength) {
+      const head = st.queue[0]
+      const n = Math.min(head.chunk.byteLength, r.byteLength - r.filled)
+      new Uint8Array(r.buffer, r.byteOffset + r.filled, n).set(head.chunk.subarray(0, n))
+      r.filled += n
+      st.queueSize -= n
+      if (n === head.chunk.byteLength) st.queue.shift()
+      else st.queue[0] = { chunk: head.chunk.subarray(n), size: head.chunk.byteLength - n }
+    }
+  }
+  const commitRead = (st, r) => {
+    const extra = r.filled % r.elementSize
+    if (extra) {
+      const rest = new Uint8Array(r.buffer, r.byteOffset + r.filled - extra, extra).slice()
+      st.queue.unshift({ chunk: rest, size: extra })
+      st.queueSize += extra
+      r.filled -= extra
+    }
+    r.d.resolve(filledView(r, false))
+  }
+  function byteEnqueue(st, bytes) {
+    let offset = 0
+    while (offset < bytes.length && st.byobReads.length) {
+      const r = st.byobReads[0]
+      const n = Math.min(r.byteLength - r.filled, bytes.length - offset)
+      new Uint8Array(r.buffer, r.byteOffset + r.filled, n).set(bytes.subarray(offset, offset + n))
+      r.filled += n
+      offset += n
+      if (r.filled < r.minBytes) break
+      st.byobReads.shift()
+      st.byobRequest = null
+      commitRead(st, r)
+    }
+    const rest = offset === 0 ? bytes : bytes.subarray(offset)
+    if (!rest.length) return
+    const pending = st.reads.shift()
+    if (pending) pending.resolve({ value: rest.slice(), done: false })
+    else {
+      st.queue.push({ chunk: rest.slice(), size: rest.length })
+      st.queueSize += rest.length
+    }
+  }
+  function respondInto(st, bytesWritten) {
+    const r = st.byobReads[0]
+    if (!r) throw new TypeError("There is no pending BYOB read to respond to")
+    if (st.state === "closed" || st.closeRequested) {
+      if (bytesWritten !== 0) throw new TypeError("bytesWritten must be 0 when calling respond() on a closed stream")
+      st.byobReads.shift()
+      st.byobRequest = null
+      r.d.resolve(filledView(r, true))
+      return
+    }
+    if (bytesWritten <= 0 || r.filled + bytesWritten > r.byteLength) throw new RangeError("bytesWritten out of range")
+    r.filled += bytesWritten
+    st.byobRequest = null
+    if (r.filled >= r.minBytes) {
+      st.byobReads.shift()
+      commitRead(st, r)
+    }
+    pullIfNeeded(st)
+  }
+  class ReadableStreamBYOBRequest {
+    #st
+    #r
+    constructor(st, r, key) {
+      if (key !== kStream) throw new TypeError("Illegal constructor")
+      this.#st = st
+      this.#r = r
+    }
+    get view() {
+      const r = this.#r
+      if (this.#st.byobRequest !== this) return null
+      return new Uint8Array(r.buffer, r.byteOffset + r.filled, r.byteLength - r.filled)
+    }
+    respond(bytesWritten) {
+      if (this.#st.byobRequest !== this) throw new TypeError("This BYOB request has been invalidated")
+      respondInto(this.#st, Number(bytesWritten))
+    }
+    respondWithNewView(view) {
+      if (this.#st.byobRequest !== this) throw new TypeError("This BYOB request has been invalidated")
+      if (!ArrayBuffer.isView(view)) throw new TypeError("The provided value is not of type 'ArrayBufferView'")
+      const r = this.#r
+      if (view.byteOffset !== r.byteOffset + r.filled) throw new RangeError("The region specified by view does not match byobRequest")
+      if (view.buffer !== r.buffer) r.buffer = view.buffer
+      respondInto(this.#st, view.byteLength)
+    }
+  }
+  class ReadableByteStreamController {
+    #st
+    constructor(st, key) {
+      if (key !== kStream) throw new TypeError("Illegal constructor")
+      this.#st = st
+    }
+    get byobRequest() {
+      const st = this.#st
+      if (!st.byobReads.length) return null
+      if (!st.byobRequest) st.byobRequest = new ReadableStreamBYOBRequest(st, st.byobReads[0], kStream)
+      return st.byobRequest
+    }
+    get desiredSize() {
+      const st = this.#st
+      if (st.state === "errored") return null
+      if (st.state === "closed") return 0
+      return st.highWaterMark - st.queueSize
+    }
+    enqueue(chunk) {
+      const st = this.#st
+      if (!ArrayBuffer.isView(chunk)) throw new TypeError("The provided value is not of type 'ArrayBufferView'")
+      if (chunk.byteLength === 0) throw new TypeError("chunk must have non-zero byteLength")
+      if (st.closeRequested || st.state !== "readable") throw new TypeError("The stream is not in a state that permits enqueue")
+      byteEnqueue(st, viewBytes(chunk))
+      pullIfNeeded(st)
+    }
+    close() {
+      const st = this.#st
+      if (st.closeRequested || st.state !== "readable") throw new TypeError("The stream is not in a state that permits close")
+      const r = st.byobReads[0]
+      if (r && r.filled % r.elementSize) {
+        const e = new TypeError("Insufficient bytes to fill elements in the given buffer")
+        errorStream(st, e)
+        throw e
+      }
+      st.closeRequested = true
+      if (st.queue.length === 0) finishClose(st)
+    }
+    error(e) {
+      errorStream(this.#st, e)
+    }
+  }
+  class ReadableStreamBYOBReader {
+    constructor(stream) {
+      if (!(stream instanceof ReadableStream)) throw new TypeError("ReadableStreamBYOBReader constructor argument must be a ReadableStream")
+      const st = stream[kStream]
+      if (st.type !== "bytes") throw new TypeError("Cannot construct a ReadableStreamBYOBReader for a stream not constructed with a byte source")
+      if (st.reader) throw new TypeError("ReadableStream is locked")
+      this[kStream] = { stream, st, closed: defer() }
+      st.reader = this
+      if (st.state === "closed") this[kStream].closed.resolve()
+      if (st.state === "errored") this[kStream].closed.reject(st.storedError)
+    }
+    get closed() {
+      return this[kStream].closed.promise
+    }
+    read(view, options) {
+      const { st } = this[kStream]
+      if (!ArrayBuffer.isView(view)) return Promise.reject(new TypeError("view must be an ArrayBufferView"))
+      if (view.byteLength === 0) return Promise.reject(new TypeError("view must have non-zero byteLength"))
+      if (view.buffer.byteLength === 0) return Promise.reject(new TypeError("view's buffer must have non-zero byteLength"))
+      const size = elementSize(view)
+      const length = view.byteLength / size
+      const min = options?.min === undefined ? 1 : Number(options.min)
+      if (!(min > 0)) return Promise.reject(new TypeError("options.min must be greater than 0"))
+      if (min > length) return Promise.reject(new RangeError("options.min must be less than or equal to view's length"))
+      if (!st || st.reader !== this) return Promise.reject(new TypeError("This readable stream reader has been released"))
+      st.disturbed = true
+      if (st.state === "errored") return Promise.reject(st.storedError)
+      const { byteOffset, byteLength } = view
+      const buffer = typeof view.buffer.transfer === "function" ? view.buffer.transfer() : view.buffer
+      const r = { ctor: view.constructor, buffer, byteOffset, byteLength, filled: 0, elementSize: size, minBytes: min * size, d: defer() }
+      if (st.state === "closed") {
+        r.d.resolve(filledView(r, true))
+        return r.d.promise
+      }
+      fillFromQueue(st, r)
+      if (r.filled >= r.minBytes) {
+        commitRead(st, r)
+        if (st.closeRequested && st.queue.length === 0) finishClose(st)
+        else pullIfNeeded(st)
+        return r.d.promise
+      }
+      if (st.closeRequested) {
+        if (r.filled % r.elementSize) {
+          const e = new TypeError("Insufficient bytes to fill elements in the given buffer")
+          errorStream(st, e)
+          return Promise.reject(e)
+        }
+        r.d.resolve(filledView(r, true))
+        finishClose(st)
+        return r.d.promise
+      }
+      st.byobReads.push(r)
+      pullIfNeeded(st)
+      return r.d.promise
+    }
+    releaseLock() {
+      const { st } = this[kStream]
+      if (!st || st.reader !== this) return
+      const e = new TypeError("Reader was released")
+      for (const r of st.byobReads.splice(0)) r.d.reject(e)
+      st.byobRequest = null
+      if (st.state === "readable") this[kStream].closed.reject(e)
+      st.reader = null
+      this[kStream].st = null
+    }
+    cancel(reason) {
+      const { st } = this[kStream]
+      if (!st || st.reader !== this) return Promise.reject(new TypeError("This readable stream reader has been released"))
+      return cancelStream(st, reason)
+    }
+  }
+
   function finishClose(st) {
     if (st.state !== "readable") return
     st.state = "closed"
     for (const r of st.reads.splice(0)) r.resolve({ value: undefined, done: true })
+    if (st.byobReads) settleIntoReads(st, true)
     if (st.reader) st.reader[kStream].closed.resolve()
   }
   function errorStream(st, e) {
@@ -1103,11 +1324,15 @@ const WEB_SRC: &str = r##"
     st.queue = []
     st.queueSize = 0
     for (const r of st.reads.splice(0)) r.reject(e)
+    if (st.byobReads) {
+      for (const r of st.byobReads.splice(0)) r.d.reject(e)
+      st.byobRequest = null
+    }
     if (st.reader) st.reader[kStream].closed.reject(e)
   }
   function pullIfNeeded(st) {
     if (!st.started || st.closeRequested || st.state !== "readable") return
-    if (st.reads.length === 0 && st.highWaterMark - st.queueSize <= 0) return
+    if (st.reads.length === 0 && !st.byobReads?.length && st.highWaterMark - st.queueSize <= 0) return
     if (st.pulling) {
       st.pullAgain = true
       return
@@ -1135,6 +1360,10 @@ const WEB_SRC: &str = r##"
     if (st.state === "errored") return Promise.reject(st.storedError)
     st.queue = []
     st.queueSize = 0
+    if (st.byobReads) {
+      for (const r of st.byobReads.splice(0)) r.d.resolve({ value: undefined, done: true })
+      st.byobRequest = null
+    }
     finishClose(st)
     return Promise.resolve()
       .then(() => st.source.cancel?.(reason))
@@ -1209,8 +1438,10 @@ const WEB_SRC: &str = r##"
         pullAgain: false,
         closeRequested: false,
         disturbed: false,
+        byobReads: type === "bytes" ? [] : null,
+        byobRequest: null,
       }
-      st.controller = new ReadableStreamDefaultController(st, kStream)
+      st.controller = type === "bytes" ? new ReadableByteStreamController(st, kStream) : new ReadableStreamDefaultController(st, kStream)
       this[kStream] = st
       const startResult = underlyingSource.start?.(st.controller)
       Promise.resolve(startResult)
@@ -1234,7 +1465,7 @@ const WEB_SRC: &str = r##"
     getReader(options) {
       if (options?.mode !== undefined) {
         if (String(options.mode) !== "byob") throw new TypeError(`'${options.mode}' is not a valid enumeration value for ReadableStreamReaderMode`)
-        throw new TypeError("BYOB readers are not supported")
+        return new ReadableStreamBYOBReader(this)
       }
       return new ReadableStreamDefaultReader(this)
     }
@@ -1830,15 +2061,13 @@ const WEB_SRC: &str = r##"
     return concatBytes(chunks)
   }
   const bytesToStream = (bytes) =>
-    new ReadableStream(
-      {
-        start(c) {
-          if (bytes.length) c.enqueue(bytes)
-          c.close()
-        },
+    new ReadableStream({
+      type: "bytes",
+      start(c) {
+        if (bytes.length) c.enqueue(bytes)
+        c.close()
       },
-      { type: "bytes" },
-    )
+    })
 
   const kBytes = Symbol("bytes")
   const concatBytes = (chunks) => {
@@ -2486,6 +2715,7 @@ const WEB_SRC: &str = r##"
         } catch {}
       }
       body = new ReadableStream({
+        type: "bytes",
         start(c) {
           controller = c
         },
@@ -2499,7 +2729,7 @@ const WEB_SRC: &str = r##"
       native.fetchBody(
         id,
         (chunk) => {
-          if (!finished) controller.enqueue(chunk)
+          if (!finished && chunk.byteLength) controller.enqueue(chunk)
         },
         (error) => {
           if (finished) return
@@ -3701,6 +3931,14 @@ const WEB_SRC: &str = r##"
     ReadableStream,
     WritableStream,
     TransformStream,
+    ReadableStreamDefaultReader,
+    ReadableStreamBYOBReader,
+    ReadableStreamDefaultController,
+    ReadableByteStreamController,
+    ReadableStreamBYOBRequest,
+    WritableStreamDefaultWriter,
+    WritableStreamDefaultController,
+    TransformStreamDefaultController,
     TextEncoderStream,
     TextDecoderStream,
     CompressionStream,

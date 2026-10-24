@@ -1,0 +1,90 @@
+const show = (r) => `${r.done} ${r.value === undefined ? "undefined" : `${r.value.constructor.name}(${r.value.length ?? r.value.byteLength})[${Array.from(r.value instanceof DataView ? new Uint8Array(r.value.buffer, r.value.byteOffset, r.value.byteLength) : r.value).join(",")}]`}`
+
+{
+  let n = 0
+  const s = new ReadableStream({
+    type: "bytes",
+    pull(c) {
+      const req = c.byobRequest
+      if (n >= 3) {
+        c.close()
+        if (req) req.respond(0)
+        return
+      }
+      const v = req.view
+      for (let i = 0; i < Math.min(v.length, 3); i++) v[i] = n * 10 + i
+      n++
+      req.respond(Math.min(v.length, 3))
+    },
+  })
+  const r = s.getReader({ mode: "byob" })
+  console.log(r.constructor.name, s.locked)
+  console.log(show(await r.read(new Uint8Array(8))))
+  console.log(show(await r.read(new Uint8Array(2))))
+  console.log(show(await r.read(new Uint8Array(8))))
+  console.log(show(await r.read(new Uint8Array(8))))
+  console.log(show(await r.read(new Uint8Array(8))))
+}
+
+{
+  const s = new ReadableStream({
+    type: "bytes",
+    start(c) {
+      console.log(c.constructor.name, c.byobRequest)
+      c.enqueue(new Uint8Array([1, 2, 3, 4, 5]))
+      c.enqueue(new Uint8Array([6, 7]))
+      c.close()
+    },
+  })
+  const r = s.getReader({ mode: "byob" })
+  const buf = new Uint8Array(3)
+  const first = await r.read(buf)
+  console.log(show(first), buf.byteLength, first.value.buffer.byteLength)
+  console.log(show(await r.read(new Uint16Array(2))))
+  console.log(show(await r.read(new Uint8Array(4))))
+  console.log(show(await r.read(new Uint8Array(4))))
+}
+
+{
+  const s = new ReadableStream({
+    type: "bytes",
+    async pull(c) {
+      await new Promise((res) => setTimeout(res, 5))
+      c.enqueue(new Uint8Array([9, 9]))
+    },
+  })
+  const r = s.getReader({ mode: "byob" })
+  console.log(show(await r.read(new Uint8Array(6), { min: 5 })))
+  await r.cancel("enough")
+  console.log(show(await r.read(new Uint8Array(1))))
+}
+
+{
+  const blob = new Blob(["hello world"])
+  const r = blob.stream().getReader({ mode: "byob" })
+  console.log(show(await r.read(new Uint8Array(5))))
+  console.log(show(await r.read(new DataView(new ArrayBuffer(4)))))
+  const res = await fetch("data:,abcdef")
+  const br = res.body.getReader({ mode: "byob" })
+  console.log(show(await br.read(new Uint8Array(4))))
+}
+
+{
+  const plain = new ReadableStream({ start(c) { c.enqueue("x") } })
+  try { plain.getReader({ mode: "byob" }) } catch (e) { console.log(e.constructor.name) }
+  const s = new ReadableStream({ type: "bytes" })
+  const r = s.getReader({ mode: "byob" })
+  await r.read(new Uint8Array(0)).catch((e) => console.log(e.constructor.name))
+  await r.read(new Uint8Array(2), { min: 3 }).catch((e) => console.log(e.constructor.name))
+  const pending = r.read(new Uint8Array(2))
+  r.releaseLock()
+  await pending.catch((e) => console.log("released", e.constructor.name))
+  const def = s.getReader()
+  console.log(def.constructor.name, typeof ReadableStreamBYOBReader, typeof ReadableByteStreamController, typeof ReadableStreamBYOBRequest)
+}
+
+{
+  const s = new ReadableStream({ type: "bytes", start(c) { c.enqueue(new Uint8Array([1, 2, 3])); c.close() } })
+  const d = s.getReader()
+  console.log(show(await d.read()), show(await d.read()))
+}

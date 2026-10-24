@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alternative names, authority information access, validity dates, fingerprints, serial number,
   extended key usage and public key, with `checkHost`, `checkIP`, `checkEmail`, `checkIssued`,
   `checkPrivateKey`, `verify` and `toLegacyObject`, in the formats Node prints.
+- Readable byte streams: `type: "bytes"` sources get a `ReadableByteStreamController` with
+  `byobRequest`, `respond` and `respondWithNewView`, and `getReader({ mode: "byob" })` returns a
+  `ReadableStreamBYOBReader` that reads into the caller's buffer, honouring `min`. `fetch`
+  response bodies and `Blob.stream()` are byte streams, and the reader and controller classes
+  are globals.
 - `URL.createObjectURL`, `URL.revokeObjectURL` and `buffer.resolveObjectURL`, and `fetch` reads
   `blob:` URLs made by them as well as `data:` URLs, with the content types Node reports.
 - TLS client certificates: `tls.connect`, `https.request` and `https.Agent` take `cert`, `key`

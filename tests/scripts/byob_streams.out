@@ -1,0 +1,22 @@
+ReadableStreamBYOBReader true
+false Uint8Array(3)[0,1,2]
+false Uint8Array(2)[10,11]
+false Uint8Array(3)[20,21,22]
+true Uint8Array(0)[]
+true Uint8Array(0)[]
+ReadableByteStreamController null
+false Uint8Array(3)[1,2,3] 0 3
+false Uint16Array(2)[1284,1798]
+true Uint8Array(0)[]
+true Uint8Array(0)[]
+false Uint8Array(6)[9,9,9,9,9,9]
+true Uint8Array(0)[]
+false Uint8Array(5)[104,101,108,108,111]
+false DataView(4)[32,119,111,114]
+false Uint8Array(4)[97,98,99,100]
+TypeError
+TypeError
+RangeError
+released TypeError
+ReadableStreamDefaultReader function function function
+false Uint8Array(3)[1,2,3] true undefined
