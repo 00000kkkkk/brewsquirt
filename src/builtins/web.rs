@@ -552,6 +552,7 @@ const WEB_SRC: &str = r##"
   }
 
   const kHeaderList = Symbol("headerList")
+  const kWireList = Symbol("wireList")
   class Headers {
     #map = new Map()
     #names = new Map()
@@ -610,6 +611,15 @@ const WEB_SRC: &str = r##"
     [kHeaderList]() {
       const out = []
       for (const [k, v] of this.#map) out.push([this.#names.get(k) ?? k, k === "set-cookie" ? v.split("\n").join(", ") : v])
+      return out
+    }
+    [kWireList]() {
+      const out = []
+      for (const [k, v] of this.#map) {
+        const name = this.#names.get(k) ?? k
+        if (k === "set-cookie") for (const c of v.split("\n")) out.push([name, c])
+        else out.push([name, v])
+      }
       return out
     }
     forEach(fn, thisArg) {
@@ -2438,9 +2448,9 @@ const WEB_SRC: &str = r##"
       native.replyEnd(replyId, true)
     }
   }
-  const sendReply = (replyId, status, headers, body) => {
+  const sendReply = (replyId, status, headers, body, chunked = false) => {
     if (body instanceof ReadableStream) return pump(replyId, status, headers, body)
-    native.reply(replyId, status, headers, typeof body === "string" ? body : toBytes(body))
+    native.reply(replyId, status, headers, typeof body === "string" ? body : toBytes(body), chunked)
   }
   const nativeListen = (options, dispatch) => {
     const tls = options.tls ?? null
@@ -2949,8 +2959,9 @@ const WEB_SRC: &str = r##"
     state.controller = controller
     for (const c of state.chunks) controller.enqueue(responseBytes(c))
     state.chunks = []
-    state.done(res.statusCode, [...state.headers], stream)
+    state.done(res.statusCode, wireHeaders(state), stream)
   }
+  const wireHeaders = (state) => state.headers[kWireList]()
   const rememberName = (state, name) => {
     const key = String(name).toLowerCase()
     state.names ??= new Map()
@@ -3078,9 +3089,13 @@ const WEB_SRC: &str = r##"
     },
     setHeader(name, value) {
       const state = responseState(this)
-      state.headers.delete(name)
       rememberName(state, name)
-      for (const v of Array.isArray(value) ? value : [value]) state.headers.append(name, v)
+      if (Array.isArray(value)) {
+        state.headers.delete(name)
+        for (const v of value) state.headers.append(name, v)
+      } else {
+        state.headers.set(name, value)
+      }
       return this
     },
     appendHeader(name, value) {
@@ -3107,6 +3122,8 @@ const WEB_SRC: &str = r##"
       if (key === "date") state.noDate = true
       if (key === "connection") state.noConnection = true
       state.headers.delete(name)
+      state.names?.delete(key)
+      if (state.order) state.order = state.order.filter((k) => k !== key)
     },
     writeHead(status, message, headers) {
       if (typeof message === "object" && message !== null) [message, headers] = [undefined, message]
@@ -3116,6 +3133,7 @@ const WEB_SRC: &str = r##"
         if (headers.length && Array.isArray(headers[0])) for (const [k, v] of headers) this.appendHeader(k, v)
         else for (let i = 0; i + 1 < headers.length; i += 2) this.appendHeader(headers[i], headers[i + 1])
       } else if (headers) for (const k of Object.keys(headers)) this.setHeader(k, headers[k])
+      responseState(this).explicitHead = true
       sendHeaders(this)
       return this
     },
@@ -3205,7 +3223,7 @@ const WEB_SRC: &str = r##"
           at += p.length
         }
       }
-      if (state.done) state.done(this.statusCode, [...state.headers], body)
+      if (state.done) state.done(this.statusCode, wireHeaders(state), body, state.explicitHead === true && !state.headers.has("content-length"))
       if (typeof cb === "function") queueMicrotask(cb)
       queueMicrotask(() => {
         this.writableFinished = true
@@ -3376,11 +3394,11 @@ const WEB_SRC: &str = r##"
               return
             }
             let replied = false
-            const reply = (status, headers, body) => {
+            const reply = (status, headers, body, chunked) => {
               if (replied) return
               replied = true
               closers.delete(replyId)
-              sendReply(replyId, status, headers, body)
+              sendReply(replyId, status, headers, body, chunked)
             }
             const hasBody = raw.body.length > 0 && raw.method !== "GET" && raw.method !== "HEAD"
             const message = new IncomingMessage({ [kRawRequest]: raw, [kRaw]: hasBody ? raw.body : null })
@@ -3954,11 +3972,13 @@ fn native_reply(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         Some(b) => b,
         None => vm.to_string(&arg(args, 3))?.as_bytes().to_vec(),
     };
+    let chunked = arg(args, 4).truthy();
     if let Some(tx) = vm.io_replies.remove(&id) {
         let _ = tx.send(ReplyMsg::Full(HttpReply {
             status,
             headers,
             body,
+            chunked,
         }));
     }
     Ok(Value::Undefined)

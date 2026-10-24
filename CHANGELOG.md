@@ -101,6 +101,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In `obj.prop = value`, the object is evaluated before the value, so `node.parent = node = next`
   and `x.y = f()` where `f` reassigns `x` set the property on the old object. SvelteKit builds no
   longer overflow the stack.
+- `http` servers send response headers with the names and in the order the application set them,
+  followed by `Date`, `Connection`, `Keep-Alive` and `Content-Length` as Node writes them, and
+  a response whose headers were sent with `writeHead()` before `end()` uses chunked encoding
+  unless it sets `Content-Length`, as in Node.
 - `zlib` supports brotli: `brotliCompress`, `brotliDecompress`, their `Sync` forms and streams,
   with the quality and window parameters.
 - A `worker_threads.Worker` gets a copy of the parent's current `process.env`, or the object

@@ -1,0 +1,22 @@
+import http from "node:http"
+import net from "node:net"
+const server = http.createServer((req, res) => {
+  res.setHeader("X-Custom-Thing", "a")
+  res.setHeader("content-Type", "text/plain")
+  res.setHeader("Set-Cookie", ["a=1", "b=2"])
+  if (req.url === "/head") {
+    res.writeHead(201, { "X-Written": "w", "ETag": "e1" })
+  }
+  res.end("ok")
+})
+await new Promise((r) => server.listen(0, "127.0.0.1", r))
+const raw = (path) => new Promise((resolve) => {
+  const s = net.connect(server.address().port, "127.0.0.1", () => s.write(`GET ${path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`))
+  let data = ""
+  s.on("data", (d) => (data += d))
+  s.on("end", () => resolve(data.split("\r\n\r\n")[0].split("\r\n").filter((l) => !/^date:/i.test(l)).join("\n")))
+})
+console.log(await raw("/"))
+console.log("--")
+console.log(await raw("/head"))
+server.close()

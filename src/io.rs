@@ -92,6 +92,7 @@ pub struct HttpReply {
     pub status: u16,
     pub headers: Headers,
     pub body: Vec<u8>,
+    pub chunked: bool,
 }
 
 pub enum ReplyMsg {
@@ -1965,18 +1966,30 @@ fn write_reply(
         let _ = write!(out, "{k}: {v}\r\n");
     }
     if !has_date {
-        let _ = write!(out, "date: {}\r\n", http_date());
-    }
-    let no_body = reply.status == 204 || reply.status == 304 || (100..200).contains(&reply.status);
-    if !no_body {
-        let _ = write!(out, "content-length: {}\r\n", reply.body.len());
+        let _ = write!(out, "Date: {}\r\n", http_date());
     }
     if keep_alive {
-        out.extend_from_slice(b"connection: keep-alive\r\nkeep-alive: timeout=5\r\n\r\n");
+        out.extend_from_slice(b"Connection: keep-alive\r\nKeep-Alive: timeout=5\r\n");
     } else {
-        out.extend_from_slice(b"connection: close\r\n\r\n");
+        out.extend_from_slice(b"Connection: close\r\n");
     }
-    if !head && !no_body {
+    let no_body = reply.status == 204 || reply.status == 304 || (100..200).contains(&reply.status);
+    let chunked = reply.chunked && !no_body;
+    if chunked {
+        out.extend_from_slice(b"Transfer-Encoding: chunked\r\n\r\n");
+    } else if !no_body {
+        let _ = write!(out, "Content-Length: {}\r\n\r\n", reply.body.len());
+    } else {
+        out.extend_from_slice(b"\r\n");
+    }
+    if !head && chunked {
+        if !reply.body.is_empty() {
+            let _ = write!(out, "{:x}\r\n", reply.body.len());
+            out.extend_from_slice(&reply.body);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+    } else if !head && !no_body {
         out.extend_from_slice(&reply.body);
     }
     w.write_all(&out)?;
@@ -2005,16 +2018,17 @@ fn write_head(
         let _ = write!(out, "{k}: {v}\r\n");
     }
     if !has_date {
-        let _ = write!(out, "date: {}\r\n", http_date());
-    }
-    if chunked {
-        out.extend_from_slice(b"transfer-encoding: chunked\r\n");
+        let _ = write!(out, "Date: {}\r\n", http_date());
     }
     if keep_alive {
-        out.extend_from_slice(b"connection: keep-alive\r\nkeep-alive: timeout=5\r\n\r\n");
+        out.extend_from_slice(b"Connection: keep-alive\r\nKeep-Alive: timeout=5\r\n");
     } else {
-        out.extend_from_slice(b"connection: close\r\n\r\n");
+        out.extend_from_slice(b"Connection: close\r\n");
     }
+    if chunked {
+        out.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
+    }
+    out.extend_from_slice(b"\r\n");
     w.write_all(&out)?;
     w.flush()
 }
