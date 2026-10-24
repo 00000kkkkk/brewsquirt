@@ -19,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parse5's `RewritingStream`, which Angular uses for `index.html`, no longer hangs a pipeline.
 - When a worker thread exits or is terminated, the message ports it owned are closed and their
   partners emit `close`, so they no longer keep the process alive. Angular CLI builds exit when
-  they are done.
+  they are done. Terminating a worker before it has started no longer crashes its thread and
+  leaves the parent waiting; the worker exits with code 0, as in Node.
 - `console.log`, `console.error` and the other console methods write through
   `process.stdout.write` and `process.stderr.write` when a program has replaced them, as in Node,
   so output capture in test runners and terminal UIs sees console output.

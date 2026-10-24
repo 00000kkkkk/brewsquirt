@@ -42,7 +42,7 @@ await pipeline(Readable.from(["a", "b"]), withFlush, new Writable({ write(c, e, 
 console.log("flush once:", collected, flushed.join(","))
 
 const workerSource = 'const { workerData } = require("node:worker_threads"); workerData.port.postMessage("hi"); if (workerData.stay) setInterval(() => {}, 1000)'
-for (const stay of [false, true]) {
+for (const stay of [false, true, "now"]) {
   const { port1, port2 } = new MessageChannel()
   const events = []
   port1.on("message", (m) => events.push("message:" + m))
@@ -51,9 +51,13 @@ for (const stay of [false, true]) {
     resolve()
   }))
   const worker = new Worker(workerSource, { eval: true, workerData: { port: port2, stay }, transferList: [port2] })
-  if (stay) setTimeout(() => worker.terminate(), 100)
+  const exited = new Promise((resolve) => worker.on("exit", resolve))
+  if (stay === "now") worker.terminate()
+  else if (stay) port1.once("message", () => worker.terminate())
   await closed
-  console.log(stay ? "terminated worker:" : "finished worker:", events.join(" "))
+  await exited
+  if (stay === "now") events.length = 0
+  console.log(stay === "now" ? "terminated at once:" : stay ? "terminated worker:" : "finished worker:", events.join(" ") || "-")
 }
 
 const require = createRequire(import.meta.url)

@@ -874,6 +874,74 @@ fn close_local(vm: &mut Vm, id: u64, notify: bool) -> Result<(), Value> {
     Ok(())
 }
 
+fn wire_ports(w: &Wire, out: &mut Vec<u64>) {
+    match w {
+        Wire::Port(id) => out.push(*id),
+        Wire::Array(items) => {
+            for x in items.iter().flatten() {
+                wire_ports(x, out);
+            }
+        }
+        Wire::Object(fields) => {
+            for (_, x) in fields {
+                wire_ports(x, out);
+            }
+        }
+        Wire::Map(pairs) => {
+            for (k, v) in pairs {
+                wire_ports(k, out);
+                wire_ports(v, out);
+            }
+        }
+        Wire::Set(items) => {
+            for x in items {
+                wire_ports(x, out);
+            }
+        }
+        Wire::View(_, inner, ..) | Wire::Boxed(inner) => wire_ports(inner, out),
+        Wire::Error { cause: Some(c), .. } => wire_ports(c, out),
+        _ => {}
+    }
+}
+
+fn close_registered(ids: &[u64]) {
+    let mut ports = PORTS.lock().unwrap_or_else(|e| e.into_inner());
+    for id in ids {
+        let peer = ports.get(id).map(|s| s.peer);
+        if let Some(st) = ports.get_mut(id) {
+            if st.closed {
+                continue;
+            }
+            st.closed = true;
+            st.owner = None;
+        }
+        if let Some(peer) = peer {
+            if let Some(st) = ports.get(&peer) {
+                if !st.closed {
+                    let _ = send_to(&st.owner, peer, PortEvent::Close);
+                }
+            }
+        }
+    }
+}
+
+fn shutdown_ports(vm: &mut Vm) {
+    let mut pending = Vec::new();
+    if let Some(wire) = vm.threads.worker.as_mut().and_then(|w| w.data.take()) {
+        wire_ports(&wire, &mut pending);
+    }
+    let port = vm.threads.worker.as_ref().map(|w| w.port);
+    if let Some(port) = port {
+        if vm.threads.ports.contains_key(&port) {
+            let _ = close_local(vm, port, true);
+        } else {
+            pending.push(port);
+        }
+    }
+    close_owned_ports(vm);
+    close_registered(&pending);
+}
+
 fn close_owned_ports(vm: &mut Vm) {
     let local: Vec<u64> = vm.threads.ports.keys().copied().collect();
     for id in local {
@@ -1206,7 +1274,18 @@ fn run_worker(
     let send = |event: WorkerEvent| {
         let _ = parent.send(IoEvent::Worker { id, event });
     };
-    let mut vm = Vm::for_worker(argv, io, init, interrupt);
+    let mut vm = Vm::for_worker(argv, io, init, Arc::new(AtomicBool::new(false)));
+    vm.threads.interrupt = interrupt.clone();
+    if interrupt.load(Ordering::SeqCst) {
+        shutdown_ports(&mut vm);
+        drop(vm);
+        WORKERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
+        send(WorkerEvent::Exit(0));
+        return;
+    }
     send(WorkerEvent::Online);
     let r = if is_eval {
         vm.eval("[worker eval]", &target, crate::compiler::Mode::Repl)
@@ -1237,11 +1316,7 @@ fn run_worker(
     };
     vm.flush();
     super::netio::flush_sockets(&mut vm);
-    let port = vm.threads.worker.as_ref().map(|w| w.port);
-    if let Some(port) = port {
-        let _ = close_local(&mut vm, port, true);
-    }
-    close_owned_ports(&mut vm);
+    shutdown_ports(&mut vm);
     drop(vm);
     WORKERS
         .lock()
