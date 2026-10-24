@@ -271,12 +271,46 @@ pub struct FunctionProto {
     pub link: Option<Rc<ModuleLink>>,
 }
 
-#[derive(Debug, Default)]
-pub struct PropIc {
+pub const IC_WAYS: usize = 4;
+
+#[derive(Debug)]
+pub struct IcEntry {
     pub shape: std::cell::Cell<u64>,
     pub holder: std::cell::Cell<usize>,
     pub holder_shape: std::cell::Cell<u64>,
     pub index: std::cell::Cell<u32>,
+    pub depth: std::cell::Cell<u32>,
+    pub chain: std::cell::Cell<u64>,
+}
+
+impl Default for IcEntry {
+    fn default() -> Self {
+        IcEntry {
+            shape: std::cell::Cell::new(u64::MAX),
+            holder: std::cell::Cell::new(0),
+            holder_shape: std::cell::Cell::new(0),
+            index: std::cell::Cell::new(0),
+            depth: std::cell::Cell::new(0),
+            chain: std::cell::Cell::new(0),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct PropIc {
+    pub entries: [IcEntry; IC_WAYS],
+    pub next: std::cell::Cell<u8>,
+}
+
+impl PropIc {
+    pub fn victim(&self, shape: u64) -> &IcEntry {
+        if let Some(e) = self.entries.iter().find(|e| e.shape.get() == shape) {
+            return e;
+        }
+        let i = self.next.get() as usize;
+        self.next.set(((i + 1) % IC_WAYS) as u8);
+        &self.entries[i]
+    }
 }
 
 impl Op {

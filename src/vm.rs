@@ -542,59 +542,85 @@ fn push_plain(stack: &mut Vec<Value>, v: Option<&Value>, accessors: bool) -> boo
     }
 }
 
+const IC_MAX_DEPTH: u32 = 32;
+
+#[inline(always)]
+fn chain_mix(h: u64, shape: u64) -> u64 {
+    (h.rotate_left(17) ^ shape).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+}
+
+#[inline(always)]
+fn ic_holder<'a>(o: &'a Obj, e: &crate::bytecode::IcEntry) -> Option<&'a Obj> {
+    let mut p: *const Obj = Rc::as_ptr(o.proto.borrow().as_ref()?);
+    let depth = e.depth.get();
+    if depth > 1 {
+        let mut h = 0u64;
+        for _ in 1..depth {
+            let po = unsafe { &*p };
+            h = chain_mix(h, po.props.borrow().shape_id());
+            p = Rc::as_ptr(po.proto.borrow().as_ref()?);
+        }
+        if h != e.chain.get() {
+            return None;
+        }
+    }
+    if p as usize != e.holder.get() {
+        return None;
+    }
+    let holder = unsafe { &*p };
+    (holder.props.borrow().shape_id() == e.holder_shape.get()).then_some(holder)
+}
+
 #[inline(always)]
 fn ic_push(stack: &mut Vec<Value>, o: &Obj, ic: &crate::bytecode::PropIc) -> bool {
     let props = o.props.borrow();
-    if props.shape_id() != ic.shape.get() {
-        return false;
-    }
-    let holder = ic.holder.get();
-    if holder == 0 {
+    let sid = props.shape_id();
+    for e in &ic.entries {
+        if e.shape.get() != sid {
+            continue;
+        }
+        if e.holder.get() == 0 {
+            return push_plain(
+                stack,
+                props.value_at(e.index.get() as usize),
+                props.may_have_accessors(),
+            );
+        }
+        let Some(h) = ic_holder(o, e) else {
+            continue;
+        };
+        let pp = h.props.borrow();
         return push_plain(
             stack,
-            props.value_at(ic.index.get() as usize),
-            props.may_have_accessors(),
+            pp.value_at(e.index.get() as usize),
+            pp.may_have_accessors(),
         );
     }
-    let proto = o.proto.borrow();
-    let Some(p) = &*proto else {
-        return false;
-    };
-    if Rc::as_ptr(p) as usize != holder {
-        return false;
-    }
-    let pp = p.props.borrow();
-    if pp.shape_id() != ic.holder_shape.get() {
-        return false;
-    }
-    push_plain(
-        stack,
-        pp.value_at(ic.index.get() as usize),
-        pp.may_have_accessors(),
-    )
+    false
 }
 
 #[inline(always)]
 fn ic_read(o: &Obj, key: &str, ic: &crate::bytecode::PropIc) -> Option<Value> {
     {
         let props = o.props.borrow();
-        if props.shape_id() == ic.shape.get() {
-            let holder = ic.holder.get();
-            if holder == 0 {
-                if let Some(v) = props.value_at(ic.index.get() as usize) {
+        let sid = props.shape_id();
+        for e in &ic.entries {
+            if e.shape.get() != sid {
+                continue;
+            }
+            if e.holder.get() == 0 {
+                if let Some(v) = props.value_at(e.index.get() as usize) {
                     if ic_plain(v, props.may_have_accessors()) {
                         return Some(v.clone());
                     }
                 }
-            } else if let Some(p) = &*o.proto.borrow() {
-                if Rc::as_ptr(p) as usize == holder {
-                    let pp = p.props.borrow();
-                    if pp.shape_id() == ic.holder_shape.get() {
-                        if let Some(v) = pp.value_at(ic.index.get() as usize) {
-                            if ic_plain(v, pp.may_have_accessors()) {
-                                return Some(v.clone());
-                            }
-                        }
+                break;
+            }
+            if let Some(h) = ic_holder(o, e) {
+                let pp = h.props.borrow();
+                if let Some(v) = pp.value_at(e.index.get() as usize) {
+                    if ic_plain(v, pp.may_have_accessors()) {
+                        return Some(v.clone());
                     }
                 }
             }
@@ -671,40 +697,55 @@ fn ic_fill_read(o: &Obj, key: &str, ic: &crate::bytecode::PropIc) -> Option<Valu
     if let Some(i) = props.find_index(key) {
         let v = props.value_at(i)?.clone();
         if plain_property(&v) {
-            ic.shape.set(props.shape_id());
-            ic.holder.set(0);
-            ic.index.set(i as u32);
+            let e = ic.victim(props.shape_id());
+            e.shape.set(props.shape_id());
+            e.holder.set(0);
+            e.index.set(i as u32);
         }
         return Some(v);
     }
-    let p = o.proto.borrow().clone();
-    let Some(p) = p else {
-        return Some(Value::Undefined);
-    };
-    if !matches!(p.kind, ObjKind::Ordinary) && (virtual_key(key) || !ic_kind(&p)) {
-        return None;
-    }
-    let pp = p.props.borrow();
-    if let Some(i) = pp.find_index(key) {
-        let v = pp.value_at(i)?.clone();
-        if plain_property(&v) {
-            ic.shape.set(props.shape_id());
-            ic.holder.set(Rc::as_ptr(&p) as usize);
-            ic.holder_shape.set(pp.shape_id());
-            ic.index.set(i as u32);
+    let sid = props.shape_id();
+    drop(props);
+    let mut cur = o.proto.borrow().clone();
+    let mut depth = 1u32;
+    let mut chain = 0u64;
+    while let Some(p) = cur {
+        if !matches!(p.kind, ObjKind::Ordinary) && (virtual_key(key) || !ic_kind(&p)) {
+            return None;
         }
-        return Some(v);
+        let pp = p.props.borrow();
+        if let Some(i) = pp.find_index(key) {
+            let v = pp.value_at(i)?.clone();
+            if plain_property(&v) && depth <= IC_MAX_DEPTH {
+                let e = ic.victim(sid);
+                e.shape.set(sid);
+                e.holder.set(Rc::as_ptr(&p) as usize);
+                e.holder_shape.set(pp.shape_id());
+                e.index.set(i as u32);
+                e.depth.set(depth);
+                e.chain.set(chain);
+            }
+            return Some(v);
+        }
+        chain = chain_mix(chain, pp.shape_id());
+        drop(pp);
+        depth += 1;
+        cur = p.proto.borrow().clone();
     }
-    drop(pp);
-    p.get_chain_plain(key)
+    Some(Value::Undefined)
 }
 
 #[inline(always)]
 fn ic_write(o: &Obj, key: &Value, ic: &crate::bytecode::PropIc, val: &Value) -> bool {
     let mut props = o.props.borrow_mut();
-    if props.shape_id() != ic.shape.get() || ic.holder.get() != 0 {
+    let sid = props.shape_id();
+    let Some(e) = ic
+        .entries
+        .iter()
+        .find(|e| e.shape.get() == sid && e.holder.get() == 0)
+    else {
         return false;
-    }
+    };
     if props.has_attrs() {
         let Value::Str(key) = key else {
             return false;
@@ -713,7 +754,7 @@ fn ic_write(o: &Obj, key: &Value, ic: &crate::bytecode::PropIc, val: &Value) -> 
             return false;
         }
     }
-    let i = ic.index.get() as usize;
+    let i = e.index.get() as usize;
     match props.value_at(i) {
         Some(old) if ic_plain(old, props.may_have_accessors()) => {}
         _ => return false,
@@ -739,9 +780,10 @@ fn ic_fill_write(o: &Obj, key: &Value, ic: &crate::bytecode::PropIc) {
     if !props.value_at(i).is_some_and(plain_property) {
         return;
     }
-    ic.shape.set(props.shape_id());
-    ic.holder.set(0);
-    ic.index.set(i as u32);
+    let e = ic.victim(props.shape_id());
+    e.shape.set(props.shape_id());
+    e.holder.set(0);
+    e.index.set(i as u32);
 }
 
 #[inline(always)]
