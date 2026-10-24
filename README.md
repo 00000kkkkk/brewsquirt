@@ -347,7 +347,7 @@ typos
 - [ ] 99% of test262
 - [ ] Own regular expression engine with lookbehind back-references and the `v` flag
 - [ ] Rope strings for fast `+=` in loops
-- [ ] Shapes and inline caches for property access
+- [x] Shapes and inline caches for property access
 - [ ] JIT compiler
 
 ## Contributing

@@ -850,6 +850,7 @@ dependencies = [
  "pem-rfc7468",
  "pkcs8",
  "rand_core",
+ "regex-syntax",
  "rsa",
  "rustc-hash",
  "rustls",

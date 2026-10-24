@@ -1313,7 +1313,10 @@ character classes, quantifiers (greedy and lazy), anchors, alternation, capture 
 groups `(?<name>...)`, backreferences `\1` and `\k<name>`, lookahead `(?=...)`, `(?!...)` and
 lookbehind `(?<=...)`, `(?<!...)`. Flags: `g` global, `i` ignore case, `m` multiline, `s` dot
 matches newlines, `u` and `v` unicode, `y` sticky, `d` indices. Positions such as `index` and
-`lastIndex` count UTF-16 code units, exactly like JavaScript.
+`lastIndex` count UTF-16 code units, exactly like JavaScript. Property escapes `\p{...}` and
+`\P{...}` use Unicode 17 data for binary properties, `General_Category`, `Script` and
+`Script_Extensions`; with `v` they also accept properties of strings such as `RGI_Emoji`, and
+classes support `--` difference, `&&` intersection and `\q{...}` string literals.
 
 ```js
 const date = /(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})/
@@ -2486,8 +2489,8 @@ These are on the roadmap and currently produce a `SyntaxError` or are absent:
   French, Spanish, Italian, Portuguese, Polish, Dutch, Swedish, Turkish, Japanese and Chinese
   and fall back to English elsewhere; every IANA time zone is supported, but
   `timeZoneName: "long"` falls back to GMT offsets
-- Regular expressions: `v`-flag set operations that combine strings with other sets, Unicode 17
-  additions to `\p{...}` properties, and some early errors for invalid patterns
+- Regular expressions: lone surrogates in strings matched with the `u` or `v` flag,
+  back-references inside lookbehind, and some early errors for invalid patterns
 - Arrays are dense: writing an index far beyond the end or setting `length` to a huge value
   throws a `RangeError` instead of creating a sparse array
 - Several realms in one thread (`vm` contexts share one realm)

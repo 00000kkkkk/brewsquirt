@@ -18,9 +18,11 @@ pub mod parser;
 pub mod pm;
 pub mod props;
 pub mod regexp;
+pub mod regexp_sets;
 pub mod regexp_syntax;
 pub mod runner;
 pub mod token;
+pub mod unicode_props;
 pub mod value;
 pub mod vm;
 

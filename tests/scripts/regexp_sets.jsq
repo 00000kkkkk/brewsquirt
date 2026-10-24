@@ -1,0 +1,46 @@
+const cases = [
+  [/^[[0-9]--\q{0|2|4|9\uFE0F\u20E3}]$/v, ["9", "0", "1", "9\uFE0F\u20E3"]],
+  [/^[\q{0|2|4|9\uFE0F\u20E3}--\d]$/v, ["9\uFE0F\u20E3", "0", "2"]],
+  [/^[\d\p{Emoji_Keycap_Sequence}]$/v, ["#\uFE0F\u20E3", "5", "#"]],
+  [/^[\p{Emoji_Keycap_Sequence}&&\q{0|2|4|9\uFE0F\u20E3}]$/v, ["9\uFE0F\u20E3", "0"]],
+  [/^\p{RGI_Emoji}$/v, ["👨🏻‍🫯‍👨🏼", "😀", "🇺🇦", "🇨", "a", "☝🏻", "🏴󠁧󠁢󠁷󠁬󠁳󠁿"]],
+  [/^\p{RGI_Emoji_Flag_Sequence}+$/v, ["🇺🇦🇵🇱", "🇨"]],
+  [/^[\q{abc|ab|a|}]$/v, ["abc", "ab", "a", "", "b"]],
+  [/^[\q{abc|ab|a|}]+$/v, ["abcab", "aaa"]],
+  [/[\q{ABC}--\q{abc}]/iv, ["abc", "ABC"]],
+  [/^[\q{ABC}a-z]$/iv, ["abc", "ABC", "Q"]],
+  [/^[\p{L}--[a-z]]$/v, ["a", "A", "é"]],
+  [/^[\p{L}--[a-z]]$/iv, ["a", "A", "é"]],
+  [/^[\p{Lu}&&[A-F]]$/iv, ["a", "B", "g"]],
+  [/^[^\d\s]$/v, ["1", " ", "x", "\uFEFF", "\u0085"]],
+  [/^\s$/u, ["\uFEFF", "\u0085", "\u00A0"]],
+  [/^[\s]$/, ["\uFEFF", "\u0085"]],
+  [/^\S$/, ["\uFEFF", "\u0085"]],
+  [/^[\S]$/u, ["\uFEFF", "\u0085", "a"]],
+  [/^[\W]$/u, ["é", "a", "_"]],
+  [/a[]/v, ["a"]],
+  [/^[\q{}]$/v, ["", "a"]],
+  [/^\p{Basic_Emoji}$/v, ["🛘", "⌚", "©\uFE0F", "©"]],
+  [/^[\p{RGI_Emoji}--\q{😀}]$/v, ["😀", "😁"]],
+  [/^[[\q{xy}a]&&[\q{xy}b]]$/v, ["xy", "a", "b"]],
+  [/\p{RGI_Emoji}/gv, ["a😀b👨🏻‍🫯‍👨🏼c"]],
+]
+for (const [re, inputs] of cases) {
+  console.log(String(re).slice(0, 40), inputs.map((s) => (re.global ? JSON.stringify(s.match(re)) : re.test(s))).join(" "))
+}
+console.log(/\p{L}/.test("p{L}"), /\p{L}/.test("a"), /[\p{L}]/.test("p"), /\P{L}/u.test("1"), /[^\p{L}\d]/u.test("_"), /\p{Lu}/iu.test("a"), /\P{Ll}/iu.test("a"), /[\p{Script=Greek}--[α-γ]]/v.test("δ"), /[\p{Script=Greek}--[α-γ]]/v.test("β"))
+const props = ["Alphabetic", "Cased", "Emoji", "gc=Lu", "General_Category=Decimal_Number", "Script=Latin", "sc=Arabic", "Script_Extensions=Han", "scx=Hira", "Script=Beria_Erfe", "Script=Sidetic", "Script=Tai_Yo", "Script=Tolong_Siki", "Lowercase", "ID_Start", "Any", "ASCII", "Assigned", "Extended_Pictographic"]
+const samples = ["꟎", "\u{1FAC8}", "\u{11DE0}", "࢏", "\u{16FF2}", "\u{10EC5}", "A", "a", "١", "あ", "☡"]
+for (const p of props) {
+  const re = new RegExp(`^\\p{${p}}$`, "u")
+  const neg = new RegExp(`^\\P{${p}}$`, "u")
+  console.log(p, samples.map((s) => `${+re.test(s)}${+neg.test(s)}`).join(" "))
+}
+for (const bad of ["Latin", "Script=Foo", "gc=Latin", "RGI_Emoji"]) {
+  try {
+    new RegExp(`\\p{${bad}}`, "u")
+    console.log(bad, "ok")
+  } catch (e) {
+    console.log(bad, e.name)
+  }
+}

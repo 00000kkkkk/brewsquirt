@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   groups from `modp1` to `modp18`, `verifyError` computed the way OpenSSL checks parameters, and
   `dh` key objects from `generateKeyPair` that import, export and work with `diffieHellman`.
   `crypto.constants` lists every constant Node does.
+- Regular expression property escapes use Unicode 17 data, the version Node 24 ships, including
+  the new scripts. Properties of strings such as `RGI_Emoji` and `RGI_Emoji_ZWJ_Sequence` match
+  exactly the sequences Unicode lists, and `v`-flag classes combine strings with other sets
+  through `--`, `&&` and nesting, longest strings first.
 
 ### Fixed
 
@@ -52,6 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Regular expression group names written with `\u` escapes, such as `(?<\u{1d453}>...)`, keep
   their decoded name in `groups`, `$<name>` and `\k<name>`, and a `\k<name>` reference inside
   the group it names, or before it, matches the empty string as the specification requires.
+- `\p{...}` without the `u` or `v` flag is the literal text `p{...}`, `\P{...}` with the `i` and
+  `u` flags complements before case folding, and `\s`, `\S`, `\D` and `\W` use JavaScript's
+  character sets, so `\s` matches U+FEFF and not U+0085.
 - EC keys exported as SEC1 carry the curve parameters, JWK exports list their members in Node's
   order, signing with an EC key and no digest uses SHA-256 as Node does, and digests shorter than
   the curve are accepted when signing and verifying.
