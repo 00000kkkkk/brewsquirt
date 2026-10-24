@@ -5413,8 +5413,9 @@ impl Vm {
             let code: *const Op = proto.code.as_ptr();
             let consts: *const Value = proto.consts.as_ptr();
             let base = self.frames[fi].base;
-            let mut ip = self.frames[fi].ip;
+            let mut pc: *const Op = unsafe { code.add(self.frames[fi].ip) };
             let mut stk: *mut Value = self.stack.as_mut_ptr();
+            let mut bp: *mut Value = unsafe { stk.add(base) };
             let mut sp: *mut Value = unsafe { stk.add(self.stack.len()) };
             let mut lim: *mut Value = unsafe { stk.add(self.stack.capacity()) };
             macro_rules! sync {
@@ -5427,7 +5428,13 @@ impl Vm {
                     stk = self.stack.as_mut_ptr();
                     sp = unsafe { stk.add(self.stack.len()) };
                     lim = unsafe { stk.add(self.stack.capacity()) };
+                    bp = unsafe { stk.add(base) };
                 }};
+            }
+            macro_rules! ip {
+                () => {
+                    unsafe { pc.offset_from(code) as usize }
+                };
             }
             macro_rules! room {
                 ($n:expr) => {
@@ -5445,7 +5452,7 @@ impl Vm {
             }
             macro_rules! local {
                 ($s:expr) => {
-                    unsafe { &mut *stk.add(base + $s as usize) }
+                    unsafe { &mut *bp.add($s as usize) }
                 };
             }
             macro_rules! top {
@@ -5544,7 +5551,7 @@ impl Vm {
                 }};
             }
             loop {
-                let op = unsafe { *code.add(ip) };
+                let op = unsafe { *pc };
                 match op {
                     Op::Const(i) => match unsafe { &*consts.add(i as usize) } {
                         Value::Number(x) => push_num!(*x),
@@ -5614,7 +5621,7 @@ impl Vm {
                         if let Value::Number(x) = *top!() {
                             if let Value::Number(d) = local!(s) {
                                 *d = x;
-                                ip += 1;
+                                pc = unsafe { pc.add(1) };
                                 continue;
                             }
                         }
@@ -5630,7 +5637,7 @@ impl Vm {
                             if let Value::Number(d) = local!(s) {
                                 *d = x;
                                 sp = unsafe { sp.sub(1) };
-                                ip += 1;
+                                pc = unsafe { pc.add(1) };
                                 continue;
                             }
                         }
@@ -5754,10 +5761,10 @@ impl Vm {
                         }
                     }
                     Op::Jump(t) => {
-                        if t as usize <= ip && self.threads.interrupted() {
+                        if unsafe { code.add(t as usize) } <= pc && self.threads.interrupted() {
                             break;
                         }
-                        ip = t as usize;
+                        pc = unsafe { code.add(t as usize) };
                         continue;
                     }
                     Op::JumpIfFalse(t) | Op::JumpIfTrue(t) => {
@@ -5766,7 +5773,7 @@ impl Vm {
                         };
                         sp = unsafe { sp.sub(1) };
                         if truthy == matches!(op, Op::JumpIfTrue(_)) {
-                            ip = t as usize;
+                            pc = unsafe { code.add(t as usize) };
                             continue;
                         }
                     }
@@ -5782,7 +5789,7 @@ impl Vm {
                             _ => !v.is_undefined(),
                         };
                         if jump {
-                            ip = t as usize;
+                            pc = unsafe { code.add(t as usize) };
                             continue;
                         }
                         discard!();
@@ -5790,7 +5797,7 @@ impl Vm {
                     Op::JumpIfNullish(t) => {
                         if top!().is_nullish() {
                             unsafe { std::ptr::write(sp.sub(1), Value::Undefined) };
-                            ip = t as usize;
+                            pc = unsafe { code.add(t as usize) };
                             continue;
                         }
                     }
@@ -5806,7 +5813,7 @@ impl Vm {
                             break;
                         };
                         if !ok {
-                            ip = t as usize;
+                            pc = unsafe { code.add(t as usize) };
                             continue;
                         }
                     }
@@ -5824,7 +5831,7 @@ impl Vm {
                             _ => break,
                         };
                         if !ok {
-                            ip = t as usize;
+                            pc = unsafe { code.add(t as usize) };
                             continue;
                         }
                     }
@@ -5867,7 +5874,7 @@ impl Vm {
                         }
                     }
                     Op::GetProp(k) | Op::GetMethod(k) => {
-                        let ic = &proto.ics[proto.ic_index[ip] as usize];
+                        let ic = &proto.ics[proto.ic_index[ip!()] as usize];
                         sync!();
                         let ok = self.fast_get(unsafe { &*consts.add(k as usize) }, ic, op);
                         resync!();
@@ -5876,7 +5883,7 @@ impl Vm {
                         }
                     }
                     Op::GetLocalProp(s, k) | Op::GetLocalMethod(s, k) => {
-                        let ic = &proto.ics[proto.ic_index[ip] as usize];
+                        let ic = &proto.ics[proto.ic_index[ip!()] as usize];
                         sync!();
                         self.flush_builder(base + s as usize);
                         let ok = self.fast_get_local(
@@ -5910,7 +5917,7 @@ impl Vm {
                             Op::StoreLocalProp(s, _) => base + s as usize,
                             _ => (unsafe { sp.offset_from(stk) as usize }) - 2,
                         };
-                        let ic = &proto.ics[proto.ic_index[ip] as usize];
+                        let ic = &proto.ics[proto.ic_index[ip!()] as usize];
                         sync!();
                         if !self.fast_put(at, unsafe { &*consts.add(k as usize) }, ic) {
                             break;
@@ -5984,12 +5991,12 @@ impl Vm {
                             1 => {
                                 drop(it);
                                 sp = unsafe { sp.add(1) };
-                                ip += 1;
+                                pc = unsafe { pc.add(1) };
                                 continue;
                             }
                             2 => {
                                 drop(it);
-                                ip = t as usize;
+                                pc = unsafe { code.add(t as usize) };
                                 continue;
                             }
                             _ => unsafe {
@@ -5997,14 +6004,14 @@ impl Vm {
                                 sp = sp.add(1);
                             },
                         }
-                        self.frames[fi].ip = ip + 1;
+                        self.frames[fi].ip = ip!() + 1;
                         sync!();
                         let r = self.fast_iter_next();
                         resync!();
                         match r {
                             Ok(true) => {}
                             Ok(false) => {
-                                ip = t as usize;
+                                pc = unsafe { code.add(t as usize) };
                                 continue;
                             }
                             Err(e) => fail!(e),
@@ -6036,12 +6043,12 @@ impl Vm {
                                 } else if argc > np {
                                     self.stack.truncate(ci + 2 + np);
                                 }
-                                self.frames[fi].ip = ip + 1;
+                                self.frames[fi].ip = ip!() + 1;
                                 self.push_plain_frame(c, ci + 1);
                                 continue 'frame;
                             }
                             ObjKind::Native(_) => {
-                                self.frames[fi].ip = ip + 1;
+                                self.frames[fi].ip = ip!() + 1;
                                 sync!();
                                 let r = self.fast_native_call(ci);
                                 resync!();
@@ -6053,7 +6060,7 @@ impl Vm {
                         }
                     }
                     Op::New(argc, _) => {
-                        self.frames[fi].ip = ip + 1;
+                        self.frames[fi].ip = ip!() + 1;
                         sync!();
                         match self.fast_new(argc as usize) {
                             Ok(true) => continue 'frame,
@@ -6098,10 +6105,10 @@ impl Vm {
                     }
                     _ => break,
                 }
-                ip += 1;
+                pc = unsafe { pc.add(1) };
             }
             sync!();
-            self.frames[fi].ip = ip;
+            self.frames[fi].ip = ip!();
             let r = self.run_full(stop)?;
             if !std::mem::take(&mut self.fast_resume) {
                 return Ok(r);
