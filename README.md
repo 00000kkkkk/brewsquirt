@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/00000kkkkk/brewsquirt/actions/workflows/ci.yml/badge.svg)](https://github.com/00000kkkkk/brewsquirt/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.86-orange.svg)](https://blog.rust-lang.org/2025/04/03/Rust-1.86.0/)
+[![MSRV](https://img.shields.io/badge/MSRV-1.97-orange.svg)](https://blog.rust-lang.org/2026/07/09/Rust-1.97.0/)
 [![Rust edition](https://img.shields.io/badge/edition-2024-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/)
 
 > High-performance language with JS semantics and Rust speed.
@@ -98,7 +98,7 @@ brew install jsq
 
 ### From source
 
-Requires Rust 1.86 or newer.
+Requires Rust 1.97 or newer.
 
 ```sh
 cargo install --git https://github.com/00000kkkkk/brewsquirt

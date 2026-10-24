@@ -348,20 +348,21 @@ impl Vm {
             return self.define_global_prop(key, d, throw);
         }
         let mut d = d;
-        if matches!(o.kind, ObjKind::Array(_)) && &*key == "length" {
-            if let Some(v) = d.value.clone() {
-                let num = self.to_number(&v)?;
-                let uint = if num.is_finite() {
-                    num.trunc().rem_euclid(4294967296.0)
-                } else {
-                    0.0
-                };
-                let again = self.to_number(&v)?;
-                if uint != again {
-                    return Err(self.range_error("Invalid array length"));
-                }
-                d.value = Some(Value::Number(uint));
+        if matches!(o.kind, ObjKind::Array(_))
+            && &*key == "length"
+            && let Some(v) = d.value.clone()
+        {
+            let num = self.to_number(&v)?;
+            let uint = if num.is_finite() {
+                num.trunc().rem_euclid(4294967296.0)
+            } else {
+                0.0
+            };
+            let again = self.to_number(&v)?;
+            if uint != again {
+                return Err(self.range_error("Invalid array length"));
             }
+            d.value = Some(Value::Number(uint));
         }
         self.define_own(o, key, d, throw)
     }
@@ -376,12 +377,11 @@ impl Vm {
                         Value::Object(h),
                         &[Value::Object(t.clone()), key_value(key)],
                     )?;
-                    if !r.truthy() {
-                        if let Some(td) = self.op_get_own_property(&t, key)? {
-                            if td.configurable == Some(false) || !self.op_is_extensible(&t)? {
-                                return Err(self.proxy_invariant("has", key));
-                            }
-                        }
+                    if !r.truthy()
+                        && let Some(td) = self.op_get_own_property(&t, key)?
+                        && (td.configurable == Some(false) || !self.op_is_extensible(&t)?)
+                    {
+                        return Err(self.proxy_invariant("has", key));
                     }
                     Ok(r.truthy())
                 }
@@ -393,10 +393,10 @@ impl Vm {
             if is_proxy(&c) {
                 return self.op_has_property(&c, key);
             }
-            if let ObjKind::Typed(t) = &c.kind {
-                if let Some(n) = crate::builtins::typed::canonical_numeric(key) {
-                    return Ok(crate::builtins::typed::valid_index(t, n).is_some());
-                }
+            if let ObjKind::Typed(t) = &c.kind
+                && let Some(n) = crate::builtins::typed::canonical_numeric(key)
+            {
+                return Ok(crate::builtins::typed::valid_index(t, n).is_some());
             }
             if self.has_own_any(&c, key) {
                 return Ok(true);
@@ -423,22 +423,21 @@ impl Vm {
                         Value::Object(h),
                         &[Value::Object(t.clone()), key_value(key), receiver.clone()],
                     )?;
-                    if let Some(td) = self.op_get_own_property(&t, key)? {
-                        if td.configurable == Some(false) {
-                            if td.is_accessor() {
-                                if td.get.as_ref().is_none_or(|g| g.is_undefined())
-                                    && !r.is_undefined()
-                                {
-                                    return Err(self.proxy_invariant("get", key));
-                                }
-                            } else if td.writable == Some(false)
-                                && !crate::props::same_value(
-                                    &r,
-                                    td.value.as_ref().unwrap_or(&Value::Undefined),
-                                )
+                    if let Some(td) = self.op_get_own_property(&t, key)?
+                        && td.configurable == Some(false)
+                    {
+                        if td.is_accessor() {
+                            if td.get.as_ref().is_none_or(|g| g.is_undefined()) && !r.is_undefined()
                             {
                                 return Err(self.proxy_invariant("get", key));
                             }
+                        } else if td.writable == Some(false)
+                            && !crate::props::same_value(
+                                &r,
+                                td.value.as_ref().unwrap_or(&Value::Undefined),
+                            )
+                        {
+                            return Err(self.proxy_invariant("get", key));
                         }
                     }
                     Ok(r)
@@ -487,20 +486,20 @@ impl Vm {
                     if !r.truthy() {
                         return Ok(false);
                     }
-                    if let Some(td) = self.op_get_own_property(&t, &key)? {
-                        if td.configurable == Some(false) {
-                            if td.is_accessor() {
-                                if td.set.as_ref().is_none_or(|s| s.is_undefined()) {
-                                    return Err(self.proxy_invariant("set", &key));
-                                }
-                            } else if td.writable == Some(false)
-                                && !crate::props::same_value(
-                                    &val,
-                                    td.value.as_ref().unwrap_or(&Value::Undefined),
-                                )
-                            {
+                    if let Some(td) = self.op_get_own_property(&t, &key)?
+                        && td.configurable == Some(false)
+                    {
+                        if td.is_accessor() {
+                            if td.set.as_ref().is_none_or(|s| s.is_undefined()) {
                                 return Err(self.proxy_invariant("set", &key));
                             }
+                        } else if td.writable == Some(false)
+                            && !crate::props::same_value(
+                                &val,
+                                td.value.as_ref().unwrap_or(&Value::Undefined),
+                            )
+                        {
+                            return Err(self.proxy_invariant("set", &key));
                         }
                     }
                     Ok(true)
@@ -516,30 +515,28 @@ impl Vm {
             if is_proxy(&c) && !Rc::ptr_eq(&c, o) {
                 return self.op_set(&c, key, val, receiver);
             }
-            if &*key == "prototype" {
-                if let ObjKind::Function(f) = &c.kind {
-                    if c.get_own("prototype").is_none()
-                        && (f.proto.is_constructor() || f.proto.is_generator)
-                    {
-                        let _ = self.get_obj(&c, "prototype");
-                    }
-                }
+            if &*key == "prototype"
+                && let ObjKind::Function(f) = &c.kind
+                && c.get_own("prototype").is_none()
+                && (f.proto.is_constructor() || f.proto.is_generator)
+            {
+                let _ = self.get_obj(&c, "prototype");
             }
-            if let ObjKind::Typed(t) = &c.kind {
-                if let Some(n) = crate::builtins::typed::canonical_numeric(&key) {
-                    let same = matches!(receiver, Value::Object(r) if Rc::ptr_eq(r, &c));
-                    if same {
-                        let x = crate::builtins::typed::coerce(self, t.kind, &val)?;
-                        if let Some(i) = crate::builtins::typed::valid_index(t, n) {
-                            t.set(i, &x);
-                        }
-                        return Ok(true);
+            if let ObjKind::Typed(t) = &c.kind
+                && let Some(n) = crate::builtins::typed::canonical_numeric(&key)
+            {
+                let same = matches!(receiver, Value::Object(r) if Rc::ptr_eq(r, &c));
+                if same {
+                    let x = crate::builtins::typed::coerce(self, t.kind, &val)?;
+                    if let Some(i) = crate::builtins::typed::valid_index(t, n) {
+                        t.set(i, &x);
                     }
-                    if crate::builtins::typed::valid_index(t, n).is_none() {
-                        return Ok(true);
-                    }
-                    break;
+                    return Ok(true);
                 }
+                if crate::builtins::typed::valid_index(t, n).is_none() {
+                    return Ok(true);
+                }
+                break;
             }
             if let Some((raw, attrs)) = self.own_property(&c, &key) {
                 if let Some((_, setter)) = accessor_parts(&raw) {
@@ -623,10 +620,10 @@ impl Vm {
                     if !r.truthy() {
                         return Ok(false);
                     }
-                    if let Some(td) = self.op_get_own_property(&t, key)? {
-                        if td.configurable == Some(false) || !self.op_is_extensible(&t)? {
-                            return Err(self.proxy_invariant("deleteProperty", key));
-                        }
+                    if let Some(td) = self.op_get_own_property(&t, key)?
+                        && (td.configurable == Some(false) || !self.op_is_extensible(&t)?)
+                    {
+                        return Err(self.proxy_invariant("deleteProperty", key));
                     }
                     Ok(true)
                 }
@@ -752,10 +749,10 @@ impl Vm {
             if is_symbol_key(&k) {
                 continue;
             }
-            if let Some(d) = self.op_get_own_property(o, &k)? {
-                if d.enumerable == Some(true) {
-                    out.push(k);
-                }
+            if let Some(d) = self.op_get_own_property(o, &k)?
+                && d.enumerable == Some(true)
+            {
+                out.push(k);
             }
         }
         Ok(out)
@@ -855,10 +852,10 @@ fn reflect_apply(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 pub fn array_like(vm: &mut Vm, v: &Value) -> Result<Vec<Value>, Value> {
-    if let Value::Object(o) = v {
-        if let ObjKind::Array(a) = &o.kind {
-            return Ok(a.borrow().clone());
-        }
+    if let Value::Object(o) = v
+        && let ObjKind::Array(a) = &o.kind
+    {
+        return Ok(a.borrow().clone());
     }
     let len = vm.get_prop(v, "length")?;
     let len = super::to_integer(vm, &len)?.max(0.0) as usize;
@@ -1028,11 +1025,11 @@ fn proxy_revocable(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 fn proxy_revoke(_vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    if let Value::Object(p) = arg(args, 0) {
-        if let ObjKind::Proxy(d) = &p.kind {
-            *d.target.borrow_mut() = None;
-            *d.handler.borrow_mut() = None;
-        }
+    if let Value::Object(p) = arg(args, 0)
+        && let ObjKind::Proxy(d) = &p.kind
+    {
+        *d.target.borrow_mut() = None;
+        *d.handler.borrow_mut() = None;
     }
     Ok(Value::Undefined)
 }
@@ -1047,10 +1044,10 @@ fn compatible(extensible: bool, desc: &PropDesc, current: &Option<PropDesc>) -> 
     if desc.configurable == Some(true) {
         return false;
     }
-    if let Some(e) = desc.enumerable {
-        if Some(e) != cur.enumerable {
-            return false;
-        }
+    if let Some(e) = desc.enumerable
+        && Some(e) != cur.enumerable
+    {
+        return false;
     }
     let generic = !desc.is_accessor() && desc.value.is_none() && desc.writable.is_none();
     if !generic && desc.is_accessor() != cur.is_accessor() {
@@ -1072,10 +1069,10 @@ fn compatible(extensible: bool, desc: &PropDesc, current: &Option<PropDesc>) -> 
         if desc.writable == Some(true) {
             return false;
         }
-        if let (Some(v), Some(c)) = (&desc.value, &cur.value) {
-            if !crate::props::same_value(v, c) {
-                return false;
-            }
+        if let (Some(v), Some(c)) = (&desc.value, &cur.value)
+            && !crate::props::same_value(v, c)
+        {
+            return false;
         }
     }
     true

@@ -538,10 +538,10 @@ fn make_error_value(
 ) -> Result<Value, Value> {
     let text = env.vm().to_string(&msg)?;
     let err = env.vm().make_error(kind, text.to_string());
-    if !code.is_nullish() {
-        if let Value::Object(o) = &err {
-            o.set_own("code", code);
-        }
+    if !code.is_nullish()
+        && let Value::Object(o) = &err
+    {
+        o.set_own("code", code);
     }
     Ok(err)
 }

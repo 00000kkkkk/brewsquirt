@@ -304,10 +304,10 @@ pub fn serialize(vm: &mut Vm, v: &Value, transfer: &[Value]) -> Result<Wire, Val
         super::typed::detach(&b);
     }
     for t in transfer {
-        if let Value::Object(o) = t {
-            if let Some(id) = vm.threads.port_id_of(o) {
-                detach_port(vm, id);
-            }
+        if let Value::Object(o) = t
+            && let Some(id) = vm.threads.port_id_of(o)
+        {
+            detach_port(vm, id);
         }
     }
     Ok(wire)
@@ -406,23 +406,23 @@ fn decode(vm: &mut Vm, w: &Wire, memo: &mut Vec<Value>) -> R {
         }
         Wire::Buffer(bytes, max) => {
             let o = super::typed::new_buffer(vm, bytes.clone());
-            if let ObjKind::ArrayBuffer(b) = &o.kind {
-                if max.is_some() {
-                    let data = BufferData {
-                        bytes: RefCell::new(std::mem::take(&mut *b.bytes.borrow_mut())),
-                        max: *max,
-                        shared: false,
-                        external: false,
-                        shared_mem: None,
-                    };
-                    let rebuilt = Obj::new(
-                        ObjKind::ArrayBuffer(Box::new(data)),
-                        o.proto.borrow().clone(),
-                    );
-                    let out = Value::Object(rebuilt);
-                    memo.push(out.clone());
-                    return Ok(out);
-                }
+            if let ObjKind::ArrayBuffer(b) = &o.kind
+                && max.is_some()
+            {
+                let data = BufferData {
+                    bytes: RefCell::new(std::mem::take(&mut *b.bytes.borrow_mut())),
+                    max: *max,
+                    shared: false,
+                    external: false,
+                    shared_mem: None,
+                };
+                let rebuilt = Obj::new(
+                    ObjKind::ArrayBuffer(Box::new(data)),
+                    o.proto.borrow().clone(),
+                );
+                let out = Value::Object(rebuilt);
+                memo.push(out.clone());
+                return Ok(out);
             }
             let out = Value::Object(o);
             memo.push(out.clone());
@@ -818,11 +818,10 @@ pub fn handle_port(vm: &mut Vm, port: u64, event: PortEvent) -> Result<(), Value
             if mine {
                 st.owner = None;
             }
-            if let PortEvent::Message(w) = event {
-                if let Err(PortEvent::Message(w)) = send_to(&st.owner, port, PortEvent::Message(w))
-                {
-                    st.queue.push(w);
-                }
+            if let PortEvent::Message(w) = event
+                && let Err(PortEvent::Message(w)) = send_to(&st.owner, port, PortEvent::Message(w))
+            {
+                st.queue.push(w);
             }
         }
         return Ok(());
@@ -852,20 +851,18 @@ fn close_local(vm: &mut Vm, id: u64, notify: bool) -> Result<(), Value> {
         if let Some(st) = ports.get_mut(&id) {
             st.closed = true;
         }
-        if notify {
-            if let Some(peer) = peer {
-                if let Some(st) = ports.get(&peer) {
-                    if !st.closed {
-                        let _ = send_to(&st.owner, peer, PortEvent::Close);
-                    }
-                }
-            }
+        if notify
+            && let Some(peer) = peer
+            && let Some(st) = ports.get(&peer)
+            && !st.closed
+        {
+            let _ = send_to(&st.owner, peer, PortEvent::Close);
         }
-        if let Some(peer) = peer {
-            if ports.get(&peer).is_none_or(|s| s.closed) {
-                ports.remove(&peer);
-                ports.remove(&id);
-            }
+        if let Some(peer) = peer
+            && ports.get(&peer).is_none_or(|s| s.closed)
+        {
+            ports.remove(&peer);
+            ports.remove(&id);
         }
     }
     if p.closed.is_callable() {
@@ -915,12 +912,11 @@ fn close_registered(ids: &[u64]) {
             st.closed = true;
             st.owner = None;
         }
-        if let Some(peer) = peer {
-            if let Some(st) = ports.get(&peer) {
-                if !st.closed {
-                    let _ = send_to(&st.owner, peer, PortEvent::Close);
-                }
-            }
+        if let Some(peer) = peer
+            && let Some(st) = ports.get(&peer)
+            && !st.closed
+        {
+            let _ = send_to(&st.owner, peer, PortEvent::Close);
         }
     }
 }
@@ -960,12 +956,11 @@ fn close_owned_ports(vm: &mut Vm) {
             st.closed = true;
             st.owner = None;
         }
-        if let Some(peer) = peer {
-            if let Some(st) = ports.get(&peer) {
-                if !st.closed {
-                    let _ = send_to(&st.owner, peer, PortEvent::Close);
-                }
-            }
+        if let Some(peer) = peer
+            && let Some(st) = ports.get(&peer)
+            && !st.closed
+        {
+            let _ = send_to(&st.owner, peer, PortEvent::Close);
         }
     }
 }
@@ -1339,10 +1334,10 @@ pub fn handle_worker(vm: &mut Vm, id: u64, event: WorkerEvent) -> Result<(), Val
             vm.call_value(&handler, Value::Undefined, &["error".into(), e])?;
         }
         WorkerEvent::Exit(code) => {
-            if let Some(w) = vm.threads.workers.remove(&id) {
-                if w.counted {
-                    vm.io.pending = vm.io.pending.saturating_sub(1);
-                }
+            if let Some(w) = vm.threads.workers.remove(&id)
+                && w.counted
+            {
+                vm.io.pending = vm.io.pending.saturating_sub(1);
             }
             vm.call_value(
                 &handler,
@@ -1356,11 +1351,11 @@ pub fn handle_worker(vm: &mut Vm, id: u64, event: WorkerEvent) -> Result<(), Val
 
 fn native_worker_terminate(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let id = vm.to_number(&arg(args, 0))? as u64;
-    if let Some(w) = vm.threads.workers.get_mut(&id) {
-        if !w.counted {
-            w.counted = true;
-            vm.io.pending += 1;
-        }
+    if let Some(w) = vm.threads.workers.get_mut(&id)
+        && !w.counted
+    {
+        w.counted = true;
+        vm.io.pending += 1;
     }
     let workers = WORKERS.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(w) = workers.get(&id) {

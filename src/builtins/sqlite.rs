@@ -178,10 +178,10 @@ fn native_close(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let db = database(vm, id)?;
     STATEMENTS.with(|s| {
         for slot in s.borrow_mut().iter_mut() {
-            if slot.as_ref().is_some_and(|st| st.db == id) {
-                if let Some(st) = slot.take() {
-                    unsafe { ffi::sqlite3_finalize(st.handle) };
-                }
+            if slot.as_ref().is_some_and(|st| st.db == id)
+                && let Some(st) = slot.take()
+            {
+                unsafe { ffi::sqlite3_finalize(st.handle) };
             }
         }
     });

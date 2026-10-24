@@ -156,15 +156,15 @@ fn pick<'a>(doc: &'a Packument, name: &str, range: &Range) -> Result<(Version, &
         let v = doc.dist_tags.get(t)?.as_str()?;
         Some((Version::parse(v)?, doc.versions.get(v)?))
     };
-    if tag.is_empty() || tag == "latest" || Range::parse(tag).is_none() {
-        if let Some(found) = tagged(if tag.is_empty() { "latest" } else { tag }) {
-            return Ok(found);
-        }
+    if (tag.is_empty() || tag == "latest" || Range::parse(tag).is_none())
+        && let Some(found) = tagged(if tag.is_empty() { "latest" } else { tag })
+    {
+        return Ok(found);
     }
-    if let Some((ver, entry)) = tagged("latest") {
-        if range.matches(&ver) {
-            return Ok((ver, entry));
-        }
+    if let Some((ver, entry)) = tagged("latest")
+        && range.matches(&ver)
+    {
+        return Ok((ver, entry));
     }
     doc.versions
         .iter()

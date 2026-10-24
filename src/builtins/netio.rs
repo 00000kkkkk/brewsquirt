@@ -82,11 +82,11 @@ pub fn watch_ref(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let id = id_arg(vm, args)?;
     let want = arg(args, 1).truthy();
     let mut delta = 0i64;
-    if let Some(e) = vm.io_watchers.get_mut(&id) {
-        if e.refed != want {
-            e.refed = want;
-            delta = if want { 1 } else { -1 };
-        }
+    if let Some(e) = vm.io_watchers.get_mut(&id)
+        && e.refed != want
+    {
+        e.refed = want;
+        delta = if want { 1 } else { -1 };
     }
     adjust_pending(vm, delta);
     Ok(Value::Undefined)
@@ -133,17 +133,17 @@ pub fn pem_bytes(vm: &mut Vm, v: &Value) -> Result<Option<Vec<u8>>, Value> {
     if v.is_nullish() {
         return Ok(None);
     }
-    if let Value::Object(o) = v {
-        if matches!(o.kind, crate::object::ObjKind::Array(_)) {
-            let mut out = Vec::new();
-            for item in vm.iterate(v)? {
-                if let Some(bytes) = pem_bytes(vm, &item)? {
-                    out.extend_from_slice(&bytes);
-                    out.push(b'\n');
-                }
+    if let Value::Object(o) = v
+        && matches!(o.kind, crate::object::ObjKind::Array(_))
+    {
+        let mut out = Vec::new();
+        for item in vm.iterate(v)? {
+            if let Some(bytes) = pem_bytes(vm, &item)? {
+                out.extend_from_slice(&bytes);
+                out.push(b'\n');
             }
-            return Ok(Some(out));
         }
+        return Ok(Some(out));
     }
     Ok(Some(bytes_arg(vm, v)?))
 }
@@ -346,11 +346,11 @@ pub fn net_ref(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let id = id_arg(vm, args)?;
     let want = arg(args, 1).truthy();
     let mut delta = 0i64;
-    if let Some(e) = vm.io_sockets.get_mut(&id) {
-        if e.refed != want {
-            e.refed = want;
-            delta = if want { 1 } else { -1 };
-        }
+    if let Some(e) = vm.io_sockets.get_mut(&id)
+        && e.refed != want
+    {
+        e.refed = want;
+        delta = if want { 1 } else { -1 };
     }
     adjust_pending(vm, delta);
     Ok(Value::Undefined)
@@ -428,11 +428,11 @@ pub fn net_server_ref(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let id = id_arg(vm, args)?;
     let want = arg(args, 1).truthy();
     let mut delta = 0i64;
-    if let Some(e) = vm.io_net_servers.get_mut(&id) {
-        if e.refed != want {
-            e.refed = want;
-            delta = if want { 1 } else { -1 };
-        }
+    if let Some(e) = vm.io_net_servers.get_mut(&id)
+        && e.refed != want
+    {
+        e.refed = want;
+        delta = if want { 1 } else { -1 };
     }
     adjust_pending(vm, delta);
     Ok(Value::Undefined)
@@ -589,11 +589,11 @@ pub fn child_ref(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let id = id_arg(vm, args)?;
     let want = arg(args, 1).truthy();
     let mut delta = 0i64;
-    if let Some(e) = vm.io_children.get_mut(&id) {
-        if e.refed != want {
-            e.refed = want;
-            delta = if want { 1 } else { -1 };
-        }
+    if let Some(e) = vm.io_children.get_mut(&id)
+        && e.refed != want
+    {
+        e.refed = want;
+        delta = if want { 1 } else { -1 };
     }
     adjust_pending(vm, delta);
     Ok(Value::Undefined)
@@ -668,10 +668,10 @@ pub fn handle_socket(vm: &mut Vm, id: u64, event: SocketEvent) -> Result<(), Val
             &["error".into(), message.into(), code.into()],
         ),
         SocketEvent::Closed => {
-            if let Some(e) = vm.io_sockets.remove(&id) {
-                if e.refed {
-                    adjust_pending(vm, -1);
-                }
+            if let Some(e) = vm.io_sockets.remove(&id)
+                && e.refed
+            {
+                adjust_pending(vm, -1);
             }
             call_handler(vm, &handler, &frame, &["close".into()])
         }
@@ -736,10 +736,10 @@ pub fn handle_child(vm: &mut Vm, id: u64, event: ChildEvent) -> Result<(), Value
             call_handler(vm, &handler, &frame, &["error".into(), message.into()])
         }
         ChildEvent::Exit { code, signal } => {
-            if let Some(e) = vm.io_children.remove(&id) {
-                if e.refed {
-                    adjust_pending(vm, -1);
-                }
+            if let Some(e) = vm.io_children.remove(&id)
+                && e.refed
+            {
+                adjust_pending(vm, -1);
             }
             let code = code.map(|c| Value::Number(c as f64)).unwrap_or(Value::Null);
             let signal = signal.map(Value::from).unwrap_or(Value::Null);

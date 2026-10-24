@@ -281,10 +281,10 @@ fn invoke(vm: &mut Vm, _this: Value, args: &[Value]) -> Result<Value, Value> {
     let rec = unsafe { &*ptr };
     let new_target = args.get(1).cloned().unwrap_or_default();
     let this = args.get(2).cloned().unwrap_or_default();
-    if let Some(holder) = &rec.holder {
-        if !holds(vm, &this, holder)? {
-            return Err(vm.type_error("Illegal invocation"));
-        }
+    if let Some(holder) = &rec.holder
+        && !holds(vm, &this, holder)?
+    {
+        return Err(vm.type_error("Illegal invocation"));
     }
     let list = match args.get(3) {
         Some(Value::Object(o)) => match &o.kind {
@@ -528,15 +528,14 @@ pub unsafe extern "C" fn napi_get_last_error_info(
 ) -> napi_status {
     let env = env!(env);
     let code = env.error.error_code as usize;
-    if env.error.error_message.is_null() {
-        if let Some(m) = ERROR_MESSAGES.get(code) {
-            if let Ok(c) = CString::new(*m) {
-                env.error.error_message = c.as_ptr();
-                env.messages.push(c);
-                if env.messages.len() > 32 {
-                    env.messages.remove(0);
-                }
-            }
+    if env.error.error_message.is_null()
+        && let Some(m) = ERROR_MESSAGES.get(code)
+        && let Ok(c) = CString::new(*m)
+    {
+        env.error.error_message = c.as_ptr();
+        env.messages.push(c);
+        if env.messages.len() > 32 {
+            env.messages.remove(0);
         }
     }
     if result.is_null() {

@@ -403,7 +403,7 @@ fn from_hex(units: &[u16], max: usize) -> Decoded {
         bytes: Vec::new(),
         error: false,
     };
-    if units.len() % 2 != 0 {
+    if !units.len().is_multiple_of(2) {
         res.error = true;
         return res;
     }
@@ -775,12 +775,11 @@ pub fn base64_decode(s: &str, url: bool) -> Option<Vec<u8>> {
 
 pub(crate) fn dom_error(vm: &mut Vm, name: &str, msg: &str) -> Value {
     let _ = vm.load_lazy_global("DOMException");
-    if let Some(ctor) = vm.globals.get("DOMException").cloned() {
-        if ctor.is_callable() {
-            if let Ok(e) = vm.construct(&ctor, &[msg.into(), name.into()]) {
-                return e;
-            }
-        }
+    if let Some(ctor) = vm.globals.get("DOMException").cloned()
+        && ctor.is_callable()
+        && let Ok(e) = vm.construct(&ctor, &[msg.into(), name.into()])
+    {
+        return e;
     }
     let e = vm.make_error(ErrorKind::Error, msg);
     if let Value::Object(o) = &e {

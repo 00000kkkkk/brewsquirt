@@ -331,12 +331,12 @@ pub fn species_constructor(vm: &mut Vm, o: &Value, default: Value) -> R {
 fn create_from_ctor(vm: &mut Vm, c: &Value, args: &[Value]) -> Result<Rc<Obj>, Value> {
     let r = vm.construct(c, args)?;
     let o = validate(vm, &r, "constructor")?;
-    if let [Value::Number(n)] = args {
-        if (view_of(&o).len() as f64) < *n {
-            return Err(vm.type_error(
-                "Derived TypedArray constructor created an array which was too small",
-            ));
-        }
+    if let [Value::Number(n)] = args
+        && (view_of(&o).len() as f64) < *n
+    {
+        return Err(
+            vm.type_error("Derived TypedArray constructor created an array which was too small")
+        );
     }
     Ok(o)
 }
@@ -345,10 +345,10 @@ fn species_create(vm: &mut Vm, exemplar: &Rc<Obj>, args: &[Value]) -> Result<Rc<
     let kind = view_of(exemplar).kind;
     let default = default_ctor(vm, kind);
     let c = species_constructor(vm, &Value::Object(exemplar.clone()), default.clone())?;
-    if c.strict_eq(&default) {
-        if let [Value::Number(n)] = args {
-            return allocate(vm, kind, *n as usize, None);
-        }
+    if c.strict_eq(&default)
+        && let [Value::Number(n)] = args
+    {
+        return allocate(vm, kind, *n as usize, None);
     }
     let r = create_from_ctor(vm, &c, args)?;
     if view_of(&r).kind.is_big() != kind.is_big() {
@@ -1244,10 +1244,10 @@ fn ta_index_of(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     }
     let t = view_of(&o);
     for k in start..len.min(t.len()) {
-        if let Some(v) = t.get(k) {
-            if v.strict_eq(&target) {
-                return Ok(Value::Number(k as f64));
-            }
+        if let Some(v) = t.get(k)
+            && v.strict_eq(&target)
+        {
+            return Ok(Value::Number(k as f64));
         }
     }
     Ok(Value::Number(-1.0))
@@ -1275,10 +1275,10 @@ fn ta_last_index_of(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let target = arg(args, 0);
     let t = view_of(&o);
     while k >= 0.0 {
-        if let Some(v) = t.get(k as usize).filter(|_| (k as usize) < t.len()) {
-            if v.strict_eq(&target) {
-                return Ok(Value::Number(k as usize as f64));
-            }
+        if let Some(v) = t.get(k as usize).filter(|_| (k as usize) < t.len())
+            && v.strict_eq(&target)
+        {
+            return Ok(Value::Number(k as usize as f64));
         }
         k -= 1.0;
     }
@@ -1389,38 +1389,38 @@ fn ta_set(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let detached_error = |vm: &mut Vm| {
         vm.type_error("Cannot perform %TypedArray%.prototype.set on a detached ArrayBuffer")
     };
-    if let Value::Object(s) = &source {
-        if let ObjKind::Typed(st) = &s.kind {
-            let t = view_of(&o);
-            if t.out_of_bounds() || st.out_of_bounds() {
-                return Err(detached_error(vm));
-            }
-            if st.kind.is_big() != t.kind.is_big() {
-                return Err(
-                    vm.type_error("Cannot mix BigInt and other types, use explicit conversions")
-                );
-            }
-            let src_len = st.len();
-            if off == f64::INFINITY || src_len as f64 + off > t.len() as f64 {
-                return Err(vm.range_error("offset is out of bounds"));
-            }
-            let off = off as usize;
-            if st.kind == t.kind {
-                let bytes = st.bytes();
-                let size = t.kind.size();
-                let start = t.offset + off * size;
-                let mut b = t.store().borrow_mut();
-                if let Some(d) = b.get_mut(start..start + bytes.len()) {
-                    d.copy_from_slice(&bytes);
-                }
-            } else {
-                let values = st.values();
-                for (i, v) in values.iter().enumerate() {
-                    t.set(off + i, v);
-                }
-            }
-            return Ok(Value::Undefined);
+    if let Value::Object(s) = &source
+        && let ObjKind::Typed(st) = &s.kind
+    {
+        let t = view_of(&o);
+        if t.out_of_bounds() || st.out_of_bounds() {
+            return Err(detached_error(vm));
         }
+        if st.kind.is_big() != t.kind.is_big() {
+            return Err(
+                vm.type_error("Cannot mix BigInt and other types, use explicit conversions")
+            );
+        }
+        let src_len = st.len();
+        if off == f64::INFINITY || src_len as f64 + off > t.len() as f64 {
+            return Err(vm.range_error("offset is out of bounds"));
+        }
+        let off = off as usize;
+        if st.kind == t.kind {
+            let bytes = st.bytes();
+            let size = t.kind.size();
+            let start = t.offset + off * size;
+            let mut b = t.store().borrow_mut();
+            if let Some(d) = b.get_mut(start..start + bytes.len()) {
+                d.copy_from_slice(&bytes);
+            }
+        } else {
+            let values = st.values();
+            for (i, v) in values.iter().enumerate() {
+                t.set(off + i, v);
+            }
+        }
+        return Ok(Value::Undefined);
     }
     if view_of(&o).out_of_bounds() {
         return Err(detached_error(vm));
@@ -1432,16 +1432,15 @@ fn ta_set(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         return Err(vm.range_error("offset is out of bounds"));
     }
     let off = off as usize;
-    if let Value::Object(s) = &src {
-        if let ObjKind::Array(a) = &s.kind {
-            if !s.has_holes() {
-                for k in 0..src_len {
-                    let v = a.borrow().get(k).cloned().unwrap_or_default();
-                    set_el(vm, &o, off + k, &v)?;
-                }
-                return Ok(Value::Undefined);
-            }
+    if let Value::Object(s) = &src
+        && let ObjKind::Array(a) = &s.kind
+        && !s.has_holes()
+    {
+        for k in 0..src_len {
+            let v = a.borrow().get(k).cloned().unwrap_or_default();
+            set_el(vm, &o, off + k, &v)?;
         }
+        return Ok(Value::Undefined);
     }
     for k in 0..src_len {
         let v = vm.get_prop(&src, &k.to_string())?;

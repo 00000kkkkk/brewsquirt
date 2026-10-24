@@ -449,14 +449,14 @@ pub fn dirname(path: &str) -> String {
     if is_sep(code) {
         root_end = 1;
         offset = 1;
-        if is_sep(chars[1]) {
-            if let Some((_, _, j, only)) = unc_root(&chars) {
-                if only {
-                    return path.to_string();
-                }
-                root_end = j as isize + 1;
-                offset = j + 1;
+        if is_sep(chars[1])
+            && let Some((_, _, j, only)) = unc_root(&chars)
+        {
+            if only {
+                return path.to_string();
             }
+            root_end = j as isize + 1;
+            offset = j + 1;
         }
     } else if is_device_root(code) && chars[1] == ':' {
         root_end = if len > 2 && is_sep(chars[2]) { 3 } else { 2 };
@@ -644,10 +644,10 @@ pub fn parse(path: &str) -> Parsed {
     }
     if is_sep(code) {
         root_end = 1;
-        if is_sep(chars[1]) {
-            if let Some((_, _, j, only)) = unc_root(&chars) {
-                root_end = if only { j } else { j + 1 };
-            }
+        if is_sep(chars[1])
+            && let Some((_, _, j, only)) = unc_root(&chars)
+        {
+            root_end = if only { j } else { j + 1 };
         }
     } else if is_device_root(code) && chars[1] == ':' {
         if len <= 2 {

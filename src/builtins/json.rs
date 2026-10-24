@@ -327,34 +327,34 @@ fn stringify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     };
     if replacer.is_callable() {
         ser.replacer = Some(replacer.clone());
-    } else if let Value::Object(r) = &replacer {
-        if Ser::is_array(r) {
-            let mut list: Vec<JsStr> = Vec::new();
-            let len = vm.get_prop(&replacer, "length")?;
-            let len = to_integer(vm, &len)?.clamp(0.0, 9007199254740991.0) as usize;
-            for i in 0..len {
-                let item = vm.get_prop(&replacer, &i.to_string())?;
-                let key = match &item {
-                    Value::Str(s) => Some(s.clone()),
-                    Value::Number(n) => Some(number_to_string(*n).into()),
-                    Value::Object(_)
-                        if matches!(
-                            crate::object::unwrap_primitive(&item),
-                            Some(Value::Str(_) | Value::Number(_))
-                        ) =>
-                    {
-                        Some(vm.to_string(&item)?)
-                    }
-                    _ => None,
-                };
-                if let Some(k) = key {
-                    if !list.contains(&k) {
-                        list.push(k);
-                    }
+    } else if let Value::Object(r) = &replacer
+        && Ser::is_array(r)
+    {
+        let mut list: Vec<JsStr> = Vec::new();
+        let len = vm.get_prop(&replacer, "length")?;
+        let len = to_integer(vm, &len)?.clamp(0.0, 9007199254740991.0) as usize;
+        for i in 0..len {
+            let item = vm.get_prop(&replacer, &i.to_string())?;
+            let key = match &item {
+                Value::Str(s) => Some(s.clone()),
+                Value::Number(n) => Some(number_to_string(*n).into()),
+                Value::Object(_)
+                    if matches!(
+                        crate::object::unwrap_primitive(&item),
+                        Some(Value::Str(_) | Value::Number(_))
+                    ) =>
+                {
+                    Some(vm.to_string(&item)?)
                 }
+                _ => None,
+            };
+            if let Some(k) = key
+                && !list.contains(&k)
+            {
+                list.push(k);
             }
-            ser.allow = Some(list);
         }
+        ser.allow = Some(list);
     }
     let holder = vm.new_object();
     let v = arg(args, 0);

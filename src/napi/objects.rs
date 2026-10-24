@@ -645,10 +645,10 @@ pub unsafe extern "C" fn napi_remove_wrap(
         },
         _ => return env.status(INVALID_ARG),
     };
-    if let Value::Object(h) = &v {
-        if let ObjKind::Host(data) = &h.kind {
-            data.fin.borrow_mut().take();
-        }
+    if let Value::Object(h) = &v
+        && let ObjKind::Host(data) = &h.kind
+    {
+        data.fin.borrow_mut().take();
     }
     o.props.borrow_mut().shift_remove(&key);
     if !result.is_null() {
@@ -738,10 +738,10 @@ pub unsafe extern "C" fn napi_reference_ref(
     let Some(slot) = (unsafe { r.as_mut() }) else {
         return env.status(INVALID_ARG);
     };
-    if slot.count == 0 {
-        if let Some(o) = slot.weak.as_ref().and_then(|w| w.upgrade()) {
-            slot.strong = Some(Value::Object(o));
-        }
+    if slot.count == 0
+        && let Some(o) = slot.weak.as_ref().and_then(|w| w.upgrade())
+    {
+        slot.strong = Some(Value::Object(o));
     }
     slot.count += 1;
     if !result.is_null() {
@@ -764,11 +764,11 @@ pub unsafe extern "C" fn napi_reference_unref(
         return env.status(GENERIC_FAILURE);
     }
     slot.count -= 1;
-    if slot.count == 0 {
-        if let Some(Value::Object(o)) = &slot.strong {
-            slot.weak = Some(Rc::downgrade(o));
-            slot.strong = None;
-        }
+    if slot.count == 0
+        && let Some(Value::Object(o)) = &slot.strong
+    {
+        slot.weak = Some(Rc::downgrade(o));
+        slot.strong = None;
     }
     if !result.is_null() {
         unsafe { *result = slot.count };

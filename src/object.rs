@@ -121,21 +121,20 @@ impl Shape {
 
     #[inline]
     fn cached_child(&self, key: &JsStr) -> Option<Rc<Shape>> {
-        if let Some((k, w)) = &*self.last.borrow() {
-            if JsStr::ptr_eq(k, key) || k == key {
-                return w.upgrade();
-            }
+        if let Some((k, w)) = &*self.last.borrow()
+            && (JsStr::ptr_eq(k, key) || k == key)
+        {
+            return w.upgrade();
         }
         None
     }
 
     fn child(self: &Rc<Self>, key: &JsStr) -> Rc<Shape> {
-        if let Some((k, w)) = &*self.last.borrow() {
-            if JsStr::ptr_eq(k, key) || k == key {
-                if let Some(s) = w.upgrade() {
-                    return s;
-                }
-            }
+        if let Some((k, w)) = &*self.last.borrow()
+            && (JsStr::ptr_eq(k, key) || k == key)
+            && let Some(s) = w.upgrade()
+        {
+            return s;
         }
         let found = self.transitions.borrow().get(key).and_then(|w| w.upgrade());
         if let Some(s) = found {
@@ -510,10 +509,10 @@ impl PropMap {
 
     pub fn set_hole(&mut self, i: usize, on: bool) {
         if !on {
-            if let Some(x) = &mut self.extra {
-                if let Some(w) = x.holes.get_mut(i / 64) {
-                    *w &= !(1u64 << (i % 64));
-                }
+            if let Some(x) = &mut self.extra
+                && let Some(w) = x.holes.get_mut(i / 64)
+            {
+                *w &= !(1u64 << (i % 64));
             }
             return;
         }
@@ -541,10 +540,10 @@ impl PropMap {
         if let Some(x) = &mut self.extra {
             let words = len.div_ceil(64);
             x.holes.truncate(words);
-            if len % 64 != 0 {
-                if let Some(w) = x.holes.last_mut() {
-                    *w &= (1u64 << (len % 64)) - 1;
-                }
+            if !len.is_multiple_of(64)
+                && let Some(w) = x.holes.last_mut()
+            {
+                *w &= (1u64 << (len % 64)) - 1;
             }
         }
     }
@@ -654,10 +653,10 @@ impl ArgMap {
     }
 
     pub fn unmap(&self, key: &str) {
-        if let Some(i) = array_index(key) {
-            if let Some(slot) = self.cells.borrow_mut().get_mut(i) {
-                *slot = None;
-            }
+        if let Some(i) = array_index(key)
+            && let Some(slot) = self.cells.borrow_mut().get_mut(i)
+        {
+            *slot = None;
         }
     }
 }
@@ -949,10 +948,11 @@ impl BufferData {
     pub fn sync_shared(&self) {
         if let Some(m) = &self.shared_mem {
             let n = m.len.load(std::sync::atomic::Ordering::Acquire);
-            if let Ok(mut v) = self.bytes.try_borrow_mut() {
-                if v.len() < n && n <= v.capacity() {
-                    unsafe { v.set_len(n) };
-                }
+            if let Ok(mut v) = self.bytes.try_borrow_mut()
+                && v.len() < n
+                && n <= v.capacity()
+            {
+                unsafe { v.set_len(n) };
             }
         }
     }

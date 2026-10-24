@@ -194,16 +194,16 @@ fn own_property_names(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     if v.is_nullish() {
         return Err(vm.type_error("Cannot convert undefined or null to object"));
     }
-    if let Value::Object(o) = &v {
-        if crate::builtins::reflect::is_exotic(o) || matches!(o.kind, ObjKind::Global) {
-            let keys = vm.op_own_keys(o)?;
-            let list = keys
-                .into_iter()
-                .filter(|k| !crate::object::is_symbol_key(k))
-                .map(Value::Str)
-                .collect();
-            return Ok(vm.new_array(list));
-        }
+    if let Value::Object(o) = &v
+        && (crate::builtins::reflect::is_exotic(o) || matches!(o.kind, ObjKind::Global))
+    {
+        let keys = vm.op_own_keys(o)?;
+        let list = keys
+            .into_iter()
+            .filter(|k| !crate::object::is_symbol_key(k))
+            .map(Value::Str)
+            .collect();
+        return Ok(vm.new_array(list));
     }
     let k = vm.own_property_names(&v);
     Ok(vm.new_array(k))
@@ -364,12 +364,12 @@ fn keys(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     if v.is_nullish() {
         return Err(vm.type_error("Cannot convert undefined or null to object"));
     }
-    if let Value::Object(o) = &v {
-        if crate::builtins::reflect::is_exotic(o) {
-            let keys = vm.op_own_enumerable_keys(o)?;
-            let list = keys.into_iter().map(Value::Str).collect();
-            return Ok(vm.new_array(list));
-        }
+    if let Value::Object(o) = &v
+        && crate::builtins::reflect::is_exotic(o)
+    {
+        let keys = vm.op_own_enumerable_keys(o)?;
+        let list = keys.into_iter().map(Value::Str).collect();
+        return Ok(vm.new_array(list));
     }
     let k = vm.own_keys(&v);
     Ok(vm.new_array(k))
@@ -506,12 +506,11 @@ fn integrity_via_ops(vm: &mut Vm, o: &Rc<Obj>, frozen: bool) -> Result<(), Value
             configurable: Some(false),
             ..Default::default()
         };
-        if frozen {
-            if let Some(cur) = vm.op_get_own_property(o, &k)? {
-                if !cur.is_accessor() {
-                    d.writable = Some(false);
-                }
-            }
+        if frozen
+            && let Some(cur) = vm.op_get_own_property(o, &k)?
+            && !cur.is_accessor()
+        {
+            d.writable = Some(false);
         }
         vm.op_define_own_property(o, k, d, true)?;
     }
@@ -532,10 +531,10 @@ fn seal(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 
 fn prevent_extensions(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let v = arg(args, 0);
-    if let Value::Object(o) = &v {
-        if !vm.op_prevent_extensions(o)? {
-            return Err(vm.type_error("Cannot prevent extensions"));
-        }
+    if let Value::Object(o) = &v
+        && !vm.op_prevent_extensions(o)?
+    {
+        return Err(vm.type_error("Cannot prevent extensions"));
     }
     Ok(v)
 }
@@ -629,10 +628,10 @@ fn set_prototype_of(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             )));
         }
     };
-    if let Value::Object(o) = &target {
-        if !vm.op_set_prototype_of(o, proto)? {
-            return Err(proto_set_error(vm, o));
-        }
+    if let Value::Object(o) = &target
+        && !vm.op_set_prototype_of(o, proto)?
+    {
+        return Err(proto_set_error(vm, o));
     }
     Ok(target)
 }
@@ -681,14 +680,14 @@ fn get_own_property_descriptor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
                 );
                 return Ok(vm.from_prop_desc(&d));
             }
-            if let Some(i) = crate::object::array_index(&k) {
-                if let Some(c) = crate::value::char_at16(s, i) {
-                    let d = crate::props::PropDesc::data(
-                        Value::from(c),
-                        crate::object::READ_ONLY | crate::object::NON_CONFIG,
-                    );
-                    return Ok(vm.from_prop_desc(&d));
-                }
+            if let Some(i) = crate::object::array_index(&k)
+                && let Some(c) = crate::value::char_at16(s, i)
+            {
+                let d = crate::props::PropDesc::data(
+                    Value::from(c),
+                    crate::object::READ_ONLY | crate::object::NON_CONFIG,
+                );
+                return Ok(vm.from_prop_desc(&d));
             }
             return Ok(Value::Undefined);
         }
@@ -779,16 +778,16 @@ fn fn_bind(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let proto = vm.op_get_prototype_of(target)?;
     let bound_args: Vec<Value> = args.iter().skip(1).cloned().collect();
     let mut length = 0.0;
-    if vm.op_get_own_property(target, "length")?.is_some() {
-        if let Value::Number(n) = vm.get_prop(&this, "length")? {
-            length = if n == f64::INFINITY {
-                n
-            } else if n == f64::NEG_INFINITY || n.is_nan() {
-                0.0
-            } else {
-                (n.trunc() - bound_args.len() as f64).max(0.0)
-            };
-        }
+    if vm.op_get_own_property(target, "length")?.is_some()
+        && let Value::Number(n) = vm.get_prop(&this, "length")?
+    {
+        length = if n == f64::INFINITY {
+            n
+        } else if n == f64::NEG_INFINITY || n.is_nan() {
+            0.0
+        } else {
+            (n.trunc() - bound_args.len() as f64).max(0.0)
+        };
     }
     let name: JsStr = match vm.get_prop(&this, "name")? {
         Value::Str(s) => s,
@@ -826,10 +825,11 @@ fn fn_to_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
         }
         let (a, b) = c.proto.span;
         let src = &c.proto.module.source;
-        if b > a && (b as usize) <= src.len() {
-            if let Some(text) = src.get(a as usize..b as usize) {
-                return Ok(text.into());
-            }
+        if b > a
+            && (b as usize) <= src.len()
+            && let Some(text) = src.get(a as usize..b as usize)
+        {
+            return Ok(text.into());
         }
         if c.proto.is_class() {
             return Ok(format!("class {name} {{ }}").into());
@@ -980,47 +980,47 @@ fn error_stack(
         }
         frames.push(vm.frame_site(f));
     }
-    if let (Some(prepare), Some(make)) = (prepare, make) {
-        if !PREPARING.with(|p| p.get()) {
-            PREPARING.with(|p| p.set(true));
-            let mut sites = Vec::new();
-            let mut failed = None;
-            for f in &frames {
-                let r = vm.call_value(
-                    &make,
-                    Value::Undefined,
-                    &[
-                        Value::Str(f.file.clone()),
-                        Value::Number(f.line as f64),
-                        Value::Str(f.name.clone()),
-                        Value::Bool(f.top),
-                        Value::Bool(f.construct),
-                        Value::Bool(f.eval),
-                        Value::Number(f.col as f64),
-                        f.type_name.clone().map(Value::Str).unwrap_or(Value::Null),
-                        f.method.clone().map(Value::Str).unwrap_or(Value::Null),
-                        Value::Str(f.label().into()),
-                    ],
-                );
-                match r {
-                    Ok(v) => sites.push(v),
-                    Err(e) => {
-                        failed = Some(e);
-                        break;
-                    }
+    if let (Some(prepare), Some(make)) = (prepare, make)
+        && !PREPARING.with(|p| p.get())
+    {
+        PREPARING.with(|p| p.set(true));
+        let mut sites = Vec::new();
+        let mut failed = None;
+        for f in &frames {
+            let r = vm.call_value(
+                &make,
+                Value::Undefined,
+                &[
+                    Value::Str(f.file.clone()),
+                    Value::Number(f.line as f64),
+                    Value::Str(f.name.clone()),
+                    Value::Bool(f.top),
+                    Value::Bool(f.construct),
+                    Value::Bool(f.eval),
+                    Value::Number(f.col as f64),
+                    f.type_name.clone().map(Value::Str).unwrap_or(Value::Null),
+                    f.method.clone().map(Value::Str).unwrap_or(Value::Null),
+                    Value::Str(f.label().into()),
+                ],
+            );
+            match r {
+                Ok(v) => sites.push(v),
+                Err(e) => {
+                    failed = Some(e);
+                    break;
                 }
             }
-            let result = match failed {
-                Some(e) => Err(e),
-                None => {
-                    let list = vm.new_array(sites);
-                    let error_ctor = vm.globals.get("Error").cloned().unwrap_or_default();
-                    vm.call_value(&prepare, error_ctor, &[Value::Object(target.clone()), list])
-                }
-            };
-            PREPARING.with(|p| p.set(false));
-            return result;
         }
+        let result = match failed {
+            Some(e) => Err(e),
+            None => {
+                let list = vm.new_array(sites);
+                let error_ctor = vm.globals.get("Error").cloned().unwrap_or_default();
+                vm.call_value(&prepare, error_ctor, &[Value::Object(target.clone()), list])
+            }
+        };
+        PREPARING.with(|p| p.set(false));
+        return result;
     }
     let mut s = String::from(header);
     for f in &frames {

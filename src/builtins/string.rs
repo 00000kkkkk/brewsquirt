@@ -111,10 +111,10 @@ fn string_raw(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     for i in 0..len {
         let part = vm.get_prop(&raw, &i.to_string())?;
         out.push_str(&vm.to_string(&part)?);
-        if i + 1 < len {
-            if let Some(sub) = args.get(i + 1) {
-                out.push_str(&vm.to_string(sub)?);
-            }
+        if i + 1 < len
+            && let Some(sub) = args.get(i + 1)
+        {
+            out.push_str(&vm.to_string(sub)?);
         }
     }
     Ok(out.into())
@@ -188,13 +188,12 @@ fn code_point_at(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     let Some(hi) = code_unit_at_rc(&s, i) else {
         return Ok(Value::Undefined);
     };
-    if (0xd800..0xdc00).contains(&hi) {
-        if let Some(lo) = code_unit_at_rc(&s, i + 1) {
-            if (0xdc00..0xe000).contains(&lo) {
-                let cp = 0x10000 + ((hi as u32 - 0xd800) << 10) + (lo as u32 - 0xdc00);
-                return Ok(Value::Number(cp as f64));
-            }
-        }
+    if (0xd800..0xdc00).contains(&hi)
+        && let Some(lo) = code_unit_at_rc(&s, i + 1)
+        && (0xdc00..0xe000).contains(&lo)
+    {
+        let cp = 0x10000 + ((hi as u32 - 0xd800) << 10) + (lo as u32 - 0xdc00);
+        return Ok(Value::Number(cp as f64));
     }
     Ok(Value::Number(hi as f64))
 }

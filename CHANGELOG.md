@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A just-in-time compiler built on Cranelift turns hot functions and loops that work on numbers
+  into machine code. Local variables and temporaries live in registers, numeric arithmetic,
+  comparisons and branches run inline, and a running loop switches to compiled code without
+  waiting for the function to be called again. Anything the compiled code does not handle
+  falls back to the interpreter at that instruction, so behaviour is unchanged; numeric loops
+  run two to five times faster. Set `JSQ_NOJIT=1` to run with the interpreter only.
 - `Uint8Array.prototype.setFromBase64` and `setFromHex` decode into an existing array and report
   how much they read and wrote, and `Uint8Array.fromBase64` honours `lastChunkHandling`
   (`loose`, `strict` and `stop-before-partial`). Every base64 and hex method validates its
@@ -16,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Building from source requires Rust 1.97 or newer.
 - Objects built from the same literal or constructor share one hidden class even after the
   objects that first used it are collected, so code that creates many short-lived objects runs
   more than twice as fast.

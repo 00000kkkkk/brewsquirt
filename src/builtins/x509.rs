@@ -45,7 +45,9 @@ fn attr_value(any: &Any) -> String {
     match any.tag() {
         Tag::BmpString => {
             let units: Vec<u16> = bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|c| u16::from_be_bytes([c[0], c[1]]))
                 .collect();
             String::from_utf16_lossy(&units)
@@ -79,7 +81,9 @@ fn ip_text(bytes: &[u8]) -> String {
             .collect::<Vec<_>>()
             .join("."),
         16 => bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| format!("{:X}", u16::from_be_bytes([c[0], c[1]])))
             .collect::<Vec<_>>()
             .join(":"),

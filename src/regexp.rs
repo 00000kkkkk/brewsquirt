@@ -500,23 +500,22 @@ fn translate_with(source: &str, flags: &str, fast: bool) -> Result<String, Strin
                             if (0xd800..0xdc00).contains(&v)
                                 && chars.get(i + 1) == Some(&'\\')
                                 && chars.get(i + 2) == Some(&'u')
+                                && let Some(low) = hex_digits(&chars, i + 3, 4)
+                                && (0xdc00..0xe000).contains(&low)
                             {
-                                if let Some(low) = hex_digits(&chars, i + 3, 4) {
-                                    if (0xdc00..0xe000).contains(&low) {
-                                        cp = 0x10000 + ((v - 0xd800) << 10) + (low - 0xdc00);
-                                        i += 6;
-                                    }
-                                }
+                                cp = 0x10000 + ((v - 0xd800) << 10) + (low - 0xdc00);
+                                i += 6;
                             }
-                            if !in_class && !unicode && (0xd800..0xdc00).contains(&cp) {
-                                if let Some((lows, close)) =
+                            if !in_class
+                                && !unicode
+                                && (0xd800..0xdc00).contains(&cp)
+                                && let Some((lows, close)) =
                                     surrogate_class(&chars, i + 1, 0xdc00, 0xdfff)
-                                {
-                                    out.push_str(&astral_class(&[(cp, cp)], &lows));
-                                    i = close;
-                                    i += 1;
-                                    continue;
-                                }
+                            {
+                                out.push_str(&astral_class(&[(cp, cp)], &lows));
+                                i = close;
+                                i += 1;
+                                continue;
                             }
                             if (0xd800..0xe000).contains(&cp) {
                                 cp = crate::value::LONE_BASE + (cp - 0xd800);
@@ -596,16 +595,13 @@ fn translate_with(source: &str, flags: &str, fast: bool) -> Result<String, Strin
                 }
             }
             '[' if !in_class => {
-                if !unicode {
-                    if let Some((highs, close)) = surrogate_class(&chars, i, 0xd800, 0xdbff) {
-                        if let Some((lows, close2)) =
-                            surrogate_class(&chars, close + 1, 0xdc00, 0xdfff)
-                        {
-                            out.push_str(&astral_class(&highs, &lows));
-                            i = close2 + 1;
-                            continue;
-                        }
-                    }
+                if !unicode
+                    && let Some((highs, close)) = surrogate_class(&chars, i, 0xd800, 0xdbff)
+                    && let Some((lows, close2)) = surrogate_class(&chars, close + 1, 0xdc00, 0xdfff)
+                {
+                    out.push_str(&astral_class(&highs, &lows));
+                    i = close2 + 1;
+                    continue;
                 }
                 if chars.get(i + 1) == Some(&']') {
                     out.push_str("(?:[^\\x00-\\x{10FFFF}])");
@@ -728,26 +724,26 @@ fn translate_with(source: &str, flags: &str, fast: bool) -> Result<String, Strin
                     }
                 }
                 out.push(')');
-                if let Some(Some(start)) = groups_open.pop() {
-                    if !unicode {
-                        let q_end = match chars.get(i + 1) {
-                            Some('*') | Some('+') | Some('?') => Some(i + 1),
-                            Some('{') => is_quantifier(&chars, i + 1),
-                            _ => None,
-                        };
-                        if let Some(mut q_end) = q_end {
-                            let q: String = chars[i + 1..=q_end].iter().collect();
-                            if chars.get(q_end + 1) == Some(&'?') {
-                                q_end += 1;
-                            }
-                            let optional =
-                                q.starts_with('*') || q.starts_with('?') || q.starts_with("{0");
-                            if optional {
-                                out.insert_str(start, "(?:");
-                                out.push_str("|)");
-                            }
-                            i = q_end;
+                if let Some(Some(start)) = groups_open.pop()
+                    && !unicode
+                {
+                    let q_end = match chars.get(i + 1) {
+                        Some('*') | Some('+') | Some('?') => Some(i + 1),
+                        Some('{') => is_quantifier(&chars, i + 1),
+                        _ => None,
+                    };
+                    if let Some(mut q_end) = q_end {
+                        let q: String = chars[i + 1..=q_end].iter().collect();
+                        if chars.get(q_end + 1) == Some(&'?') {
+                            q_end += 1;
                         }
+                        let optional =
+                            q.starts_with('*') || q.starts_with('?') || q.starts_with("{0");
+                        if optional {
+                            out.insert_str(start, "(?:");
+                            out.push_str("|)");
+                        }
+                        i = q_end;
                     }
                 }
             }

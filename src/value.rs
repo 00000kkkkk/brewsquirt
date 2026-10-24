@@ -6,6 +6,7 @@ use std::fmt;
 use std::rc::Rc;
 
 #[derive(Default)]
+#[repr(u8)]
 pub enum Value {
     #[default]
     Undefined,
@@ -20,6 +21,7 @@ pub enum Value {
 }
 
 const _: () = assert!(std::mem::size_of::<Value>() == 16);
+const _: () = assert!(std::mem::size_of::<Option<Value>>() == 16);
 
 impl Clone for Value {
     #[inline(always)]
@@ -245,18 +247,20 @@ pub fn from16(u: &[u16]) -> String {
 
 pub fn push16(dst: &mut String, src: &str) {
     let b = dst.as_bytes();
-    if src.as_bytes().first() == Some(&0xF4) && b.len() >= 4 && b[b.len() - 4] == 0xF4 {
-        if let (Some(l), Some(f)) = (dst.chars().next_back(), src.chars().next()) {
-            if is_lone(l) && is_lone(f) {
-                let (hi, lo) = (lone_unit(l), lone_unit(f));
-                if (0xD800..0xDC00).contains(&hi) && (0xDC00..0xE000).contains(&lo) {
-                    let cp = 0x10000 + (((hi - 0xD800) as u32) << 10) + (lo - 0xDC00) as u32;
-                    dst.truncate(dst.len() - l.len_utf8());
-                    dst.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
-                    dst.push_str(&src[f.len_utf8()..]);
-                    return;
-                }
-            }
+    if src.as_bytes().first() == Some(&0xF4)
+        && b.len() >= 4
+        && b[b.len() - 4] == 0xF4
+        && let (Some(l), Some(f)) = (dst.chars().next_back(), src.chars().next())
+        && is_lone(l)
+        && is_lone(f)
+    {
+        let (hi, lo) = (lone_unit(l), lone_unit(f));
+        if (0xD800..0xDC00).contains(&hi) && (0xDC00..0xE000).contains(&lo) {
+            let cp = 0x10000 + (((hi - 0xD800) as u32) << 10) + (lo - 0xDC00) as u32;
+            dst.truncate(dst.len() - l.len_utf8());
+            dst.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
+            dst.push_str(&src[f.len_utf8()..]);
+            return;
         }
     }
     dst.push_str(src);
@@ -319,10 +323,10 @@ fn build_index(s: &str) -> StrIndex {
 pub fn str_index(s: &JsStr) -> Rc<StrIndex> {
     STR_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if let Some((k, idx)) = cache.first() {
-            if JsStr::ptr_eq(k, s) {
-                return idx.clone();
-            }
+        if let Some((k, idx)) = cache.first()
+            && JsStr::ptr_eq(k, s)
+        {
+            return idx.clone();
         }
         if let Some(pos) = cache.iter().position(|(k, _)| JsStr::ptr_eq(k, s)) {
             let entry = cache.remove(pos);

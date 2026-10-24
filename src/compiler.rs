@@ -219,16 +219,17 @@ fn annexb_list(list: &[&Stmt], enclosing: &mut Vec<JsStr>, nested: bool, out: &m
     }
     let mark = enclosing.len();
     for s in list {
-        if let StmtKind::Function(f) = &s.kind {
-            if nested && !f.is_async && !f.is_generator {
-                if let Some(n) = &f.name {
-                    let conflict = enclosing[..mark].contains(n)
-                        || lex.contains(n)
-                        || fns.iter().filter(|m| *m == n).count() > 1;
-                    if !conflict {
-                        out.push((n.clone(), Rc::as_ptr(f)));
-                    }
-                }
+        if let StmtKind::Function(f) = &s.kind
+            && nested
+            && !f.is_async
+            && !f.is_generator
+            && let Some(n) = &f.name
+        {
+            let conflict = enclosing[..mark].contains(n)
+                || lex.contains(n)
+                || fns.iter().filter(|m| *m == n).count() > 1;
+            if !conflict {
+                out.push((n.clone(), Rc::as_ptr(f)));
             }
         }
     }
@@ -260,13 +261,12 @@ fn annexb_stmt(s: &Stmt, enclosing: &mut Vec<JsStr>, out: &mut AnnexB) {
         | StmtKind::Labeled(_, b) => annexb_stmt(b, enclosing, out),
         StmtKind::For { init, body, .. } => {
             let mark = enclosing.len();
-            if let Some(i) = init {
-                if let StmtKind::Decl(k, decls) = &i.kind {
-                    if *k != DeclKind::Var {
-                        for (p, _) in decls {
-                            p.bound_names(enclosing);
-                        }
-                    }
+            if let Some(i) = init
+                && let StmtKind::Decl(k, decls) = &i.kind
+                && *k != DeclKind::Var
+            {
+                for (p, _) in decls {
+                    p.bound_names(enclosing);
                 }
             }
             annexb_stmt(body, enclosing, out);
@@ -300,10 +300,10 @@ fn annexb_stmt(s: &Stmt, enclosing: &mut Vec<JsStr>, out: &mut AnnexB) {
             annexb_block(block, enclosing, out);
             if let Some(h) = handler {
                 let mark = enclosing.len();
-                if let Some(p) = param {
-                    if !matches!(p, Pattern::Ident(_)) {
-                        p.bound_names(enclosing);
-                    }
+                if let Some(p) = param
+                    && !matches!(p, Pattern::Ident(_))
+                {
+                    p.bound_names(enclosing);
                 }
                 annexb_block(h, enclosing, out);
                 enclosing.truncate(mark);
@@ -489,12 +489,11 @@ pub fn compile_eval(
             }
         }
         for s in stmts {
-            if let StmtKind::Function(f) = &s.kind {
-                if let Some(n) = &f.name {
-                    if !vars.contains(n) {
-                        vars.push(n.clone());
-                    }
-                }
+            if let StmtKind::Function(f) = &s.kind
+                && let Some(n) = &f.name
+                && !vars.contains(n)
+            {
+                vars.push(n.clone());
             }
         }
         if scope.ctx.in_params && !scope.in_arrow && vars.iter().any(|n| &**n == "arguments") {
@@ -524,14 +523,14 @@ pub fn compile_eval(
                 c.emit(Op::CheckGlobalVar(k));
             }
             for s in stmts {
-                if let StmtKind::Function(f) = &s.kind {
-                    if let Some(n) = &f.name {
-                        let k = c.str_const(n);
-                        if !vars.contains(n) {
-                            c.emit(Op::CheckGlobalVar(k));
-                        }
-                        c.emit(Op::CanDeclareGlobalFn(k));
+                if let StmtKind::Function(f) = &s.kind
+                    && let Some(n) = &f.name
+                {
+                    let k = c.str_const(n);
+                    if !vars.contains(n) {
+                        c.emit(Op::CheckGlobalVar(k));
                     }
+                    c.emit(Op::CanDeclareGlobalFn(k));
                 }
             }
         }
@@ -797,10 +796,10 @@ impl Compiler {
             .collect();
         let mut code = st.code;
         for i in 0..code.len() {
-            if let Op::Jump(t) = code[i] {
-                if code.get(t as usize) == Some(&Op::Return) {
-                    code[i] = Op::Return;
-                }
+            if let Op::Jump(t) = code[i]
+                && code.get(t as usize) == Some(&Op::Return)
+            {
+                code[i] = Op::Return;
             }
         }
         let plain = !st.is_async
@@ -824,6 +823,7 @@ impl Compiler {
             sloppy: !st.strict,
             sloppy_this: !st.strict && st.reads_this,
             plain,
+            jit: Default::default(),
             code,
             lines: st.lines,
             cols: st.cols,
@@ -1660,11 +1660,12 @@ impl Compiler {
             };
             self.st().vars.insert(n.clone());
             if exists {
-                if self.st_ref().param_exprs && self.st_ref().param_names.contains(&n) {
-                    if let Some((slot, _)) = self.resolve_local(self.states.len() - 1, &n) {
-                        self.emit(Op::GetLocal(slot));
-                        self.add_local(n, false);
-                    }
+                if self.st_ref().param_exprs
+                    && self.st_ref().param_names.contains(&n)
+                    && let Some((slot, _)) = self.resolve_local(self.states.len() - 1, &n)
+                {
+                    self.emit(Op::GetLocal(slot));
+                    self.add_local(n, false);
                 }
                 continue;
             }
@@ -2029,8 +2030,8 @@ impl Compiler {
         self.line = s.line;
         self.col = 0;
         let hidden_try = matches!(&s.kind, StmtKind::Try { param: Some(Pattern::Ident(p)), .. } if p.starts_with("%using"));
-        if let Some(slot) = self.completion_slot().filter(|_| !hidden_try) {
-            if matches!(
+        if let Some(slot) = self.completion_slot().filter(|_| !hidden_try)
+            && matches!(
                 s.kind,
                 StmtKind::If(..)
                     | StmtKind::While(..)
@@ -2041,11 +2042,11 @@ impl Compiler {
                     | StmtKind::Switch(..)
                     | StmtKind::Try { .. }
                     | StmtKind::With(..)
-            ) {
-                self.emit(Op::Undefined);
-                self.emit(Op::SetLocal(slot));
-                self.emit(Op::Pop);
-            }
+            )
+        {
+            self.emit(Op::Undefined);
+            self.emit(Op::SetLocal(slot));
+            self.emit(Op::Pop);
         }
         match &s.kind {
             StmtKind::Expr(e) => match self.completion_slot() {
@@ -2063,17 +2064,17 @@ impl Compiler {
                             Pattern::Ident(n) => Some(n.clone()),
                             _ => None,
                         };
-                        if let Some(n) = &name {
-                            if !self.dynamic_scopes(n).is_empty() {
-                                let target = AssignTarget::Simple(Box::new(Expr {
-                                    kind: ExprKind::Ident(n.clone()),
-                                    line: s.line,
-                                    col: 0,
-                                }));
-                                self.assign(None, &target, e)?;
-                                self.emit(Op::Pop);
-                                continue;
-                            }
+                        if let Some(n) = &name
+                            && !self.dynamic_scopes(n).is_empty()
+                        {
+                            let target = AssignTarget::Simple(Box::new(Expr {
+                                kind: ExprKind::Ident(n.clone()),
+                                line: s.line,
+                                col: 0,
+                            }));
+                            self.assign(None, &target, e)?;
+                            self.emit(Op::Pop);
+                            continue;
                         }
                         self.expr_named(e, name.as_ref())?;
                         self.bind_pattern(pattern, BindMode::Assign)?;
@@ -2224,10 +2225,10 @@ impl Compiler {
                 if let Some(u) = update {
                     self.expr_discard(u)?;
                 }
-                if let (Some(at), Some(b)) = (close_at, loop_base) {
-                    if self.st_ref().locals[b..].iter().any(|l| l.captured) {
-                        self.st().code[at] = Op::CloseUpvalues(b as u32);
-                    }
+                if let (Some(at), Some(b)) = (close_at, loop_base)
+                    && self.st_ref().locals[b..].iter().any(|l| l.captured)
+                {
+                    self.st().code[at] = Op::CloseUpvalues(b as u32);
                 }
                 self.emit(Op::Jump(start));
                 if let Some(exit) = exit {
@@ -2763,28 +2764,25 @@ impl Compiler {
                 let mut bound = Vec::new();
                 p.bound_names(&mut bound);
                 for s in h {
-                    if let StmtKind::Function(f) = &s.kind {
-                        if let Some(n) = &f.name {
-                            if bound.contains(n) {
-                                return Err(
-                                    self.err(format!("Identifier '{n}' has already been declared"))
-                                );
-                            }
-                        }
+                    if let StmtKind::Function(f) = &s.kind
+                        && let Some(n) = &f.name
+                        && bound.contains(n)
+                    {
+                        return Err(self.err(format!("Identifier '{n}' has already been declared")));
                     }
                 }
             }
-            if let Some(p) = param {
-                if !matches!(p, Pattern::Ident(_)) {
-                    let mut names = Vec::new();
-                    p.bound_names(&mut names);
-                    for n in names {
-                        self.emit(Op::Undefined);
-                        self.add_local(n, false);
-                    }
-                    self.emit(Op::GetLocal(exc_slot));
-                    self.bind_pattern(p, BindMode::Init)?;
+            if let Some(p) = param
+                && !matches!(p, Pattern::Ident(_))
+            {
+                let mut names = Vec::new();
+                p.bound_names(&mut names);
+                for n in names {
+                    self.emit(Op::Undefined);
+                    self.add_local(n, false);
                 }
+                self.emit(Op::GetLocal(exc_slot));
+                self.bind_pattern(p, BindMode::Init)?;
             }
             let tb2 = if finally.is_some() {
                 Some(self.emit(Op::TryBegin(0, base)))
@@ -3190,11 +3188,11 @@ impl Compiler {
             let mut mapped = vec![false; f.params.len()];
             let mut seen: Vec<&JsStr> = Vec::new();
             for (i, p) in f.params.iter().enumerate().rev() {
-                if let Pattern::Ident(n) = &p.pattern {
-                    if !seen.contains(&n) {
-                        seen.push(n);
-                        mapped[i] = true;
-                    }
+                if let Pattern::Ident(n) = &p.pattern
+                    && !seen.contains(&n)
+                {
+                    seen.push(n);
+                    mapped[i] = true;
                 }
             }
             self.st().mapped = mapped;
@@ -3229,12 +3227,13 @@ impl Compiler {
                 return Err(self.err(format!("Duplicate parameter name '{n}'")));
             }
         }
-        if let Some(n) = self_name {
-            if !names.contains(&n) && self.resolve_local(self.states.len() - 1, &n).is_none() {
-                self.emit(Op::GetCallee);
-                let s = self.add_local(n, true);
-                self.st().self_slot = Some(s);
-            }
+        if let Some(n) = self_name
+            && !names.contains(&n)
+            && self.resolve_local(self.states.len() - 1, &n).is_none()
+        {
+            self.emit(Op::GetCallee);
+            let s = self.add_local(n, true);
+            self.st().self_slot = Some(s);
         }
         self.st().param_exprs = true;
         self.st().param_names = names.clone();
@@ -3294,12 +3293,12 @@ impl Compiler {
             self.emit_yield()?;
             self.emit(Op::Pop);
         }
-        if let Some(n) = self_name {
-            if self.resolve_local(self.states.len() - 1, &n).is_none() {
-                self.emit(Op::GetCallee);
-                let s = self.add_local(n, true);
-                self.st().self_slot = Some(s);
-            }
+        if let Some(n) = self_name
+            && self.resolve_local(self.states.len() - 1, &n).is_none()
+        {
+            self.emit(Op::GetCallee);
+            let s = self.add_local(n, true);
+            self.st().self_slot = Some(s);
         }
         if kind == ProtoKind::ClassConstructor {
             self.emit_field_inits()?;
@@ -3937,19 +3936,19 @@ impl Compiler {
     fn expr_discard_inner(&mut self, e: &Expr) -> R<()> {
         match &e.kind {
             ExprKind::Update { inc, target, .. } => {
-                if let ExprKind::Ident(n) = &target.kind {
-                    if let (Var::Local(s, false), false, false) = (
+                if let ExprKind::Ident(n) = &target.kind
+                    && let (Var::Local(s, false), false, false) = (
                         self.resolve(n),
                         self.is_export_binding(n),
                         self.has_dynamic(n),
-                    ) {
-                        self.emit(if *inc {
-                            Op::IncLocal(s)
-                        } else {
-                            Op::DecLocal(s)
-                        });
-                        return Ok(());
-                    }
+                    )
+                {
+                    self.emit(if *inc {
+                        Op::IncLocal(s)
+                    } else {
+                        Op::DecLocal(s)
+                    });
+                    return Ok(());
                 }
                 let as_prefix = Expr {
                     kind: ExprKind::Update {

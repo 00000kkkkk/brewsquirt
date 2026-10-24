@@ -449,13 +449,14 @@ impl Parser {
             return Ok(None);
         };
         self.pos += 4;
-        if (0xD800..0xDC00).contains(&v) && self.peek() == Some('\\') && self.at(1) == Some('u') {
-            if let Some(low) = self.hex(self.pos + 2, 4) {
-                if (0xDC00..0xE000).contains(&low) {
-                    self.pos += 6;
-                    return Ok(Some(0x10000 + ((v - 0xD800) << 10) + (low - 0xDC00)));
-                }
-            }
+        if (0xD800..0xDC00).contains(&v)
+            && self.peek() == Some('\\')
+            && self.at(1) == Some('u')
+            && let Some(low) = self.hex(self.pos + 2, 4)
+            && (0xDC00..0xE000).contains(&low)
+        {
+            self.pos += 6;
+            return Ok(Some(0x10000 + ((v - 0xD800) << 10) + (low - 0xDC00)));
         }
         if strict && (0xD800..0xE000).contains(&v) && self.unicode {
             return Ok(Some(v));

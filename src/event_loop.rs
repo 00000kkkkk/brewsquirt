@@ -258,11 +258,12 @@ impl Vm {
     }
 
     pub(crate) fn async_step(&mut self, co: &Rc<Obj>, value: Value, mode: ResumeMode) {
-        if let ObjKind::Coroutine(c) = &co.kind {
-            if c.is_generator && c.is_async {
-                self.async_gen_resume(co, value, mode);
-                return;
-            }
+        if let ObjKind::Coroutine(c) = &co.kind
+            && c.is_generator
+            && c.is_async
+        {
+            self.async_gen_resume(co, value, mode);
+            return;
         }
         let promise = match &co.kind {
             ObjKind::Coroutine(c) => c.promise.clone(),
@@ -371,10 +372,11 @@ impl Vm {
     }
 
     pub fn to_promise(&mut self, v: Value) -> Rc<Obj> {
-        if let Value::Object(o) = &v {
-            if matches!(o.kind, ObjKind::Promise(_)) && self.has_intrinsic_promise_ctor(&v) {
-                return o.clone();
-            }
+        if let Value::Object(o) = &v
+            && matches!(o.kind, ObjKind::Promise(_))
+            && self.has_intrinsic_promise_ctor(&v)
+        {
+            return o.clone();
         }
         let p = self.new_promise();
         self.resolve_promise(&p, v);
@@ -754,10 +756,10 @@ impl Vm {
         self.flush();
         let url = self.main_url.clone().unwrap_or_default();
         eprintln!("Warning: Detected unsettled top-level await at {url}");
-        if crate::builtins::exit_code(self) == 0 {
-            if let Some(process) = self.globals.get("process").cloned() {
-                let _ = self.set_prop(&process, "exitCode".into(), Value::Number(13.0));
-            }
+        if crate::builtins::exit_code(self) == 0
+            && let Some(process) = self.globals.get("process").cloned()
+        {
+            let _ = self.set_prop(&process, "exitCode".into(), Value::Number(13.0));
         }
     }
 

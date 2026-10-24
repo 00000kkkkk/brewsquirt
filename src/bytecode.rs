@@ -263,6 +263,7 @@ pub struct FunctionProto {
     pub sloppy: bool,
     pub sloppy_this: bool,
     pub plain: bool,
+    pub jit: crate::jit::JitInfo,
     pub code: Vec<Op>,
     pub lines: Vec<u32>,
     pub cols: Vec<u32>,

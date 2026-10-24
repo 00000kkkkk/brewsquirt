@@ -282,10 +282,10 @@ pub fn hide_builtin_members(vm: &mut Vm) {
             }
         }
     }
-    if let Some(Value::Object(i8)) = vm.globals.get("Int8Array") {
-        if let Some(ta) = i8.proto.borrow().clone() {
-            hide(&ta);
-        }
+    if let Some(Value::Object(i8)) = vm.globals.get("Int8Array")
+        && let Some(ta) = i8.proto.borrow().clone()
+    {
+        hide(&ta);
     }
 }
 

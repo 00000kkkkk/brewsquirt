@@ -539,16 +539,15 @@ impl<'a> Lexer<'a> {
         if !regex_allowed_after(out, self.close_head) {
             return false;
         }
-        if let [.., before, last] = out {
-            if matches!(last.tok, Tok::Punct(P::Bang))
-                && last.start == before.end
-                && matches!(
-                    before.tok,
-                    Tok::Ident(_) | Tok::Punct(P::RParen | P::RBracket)
-                )
-            {
-                return false;
-            }
+        if let [.., before, last] = out
+            && matches!(last.tok, Tok::Punct(P::Bang))
+            && last.start == before.end
+            && matches!(
+                before.tok,
+                Tok::Ident(_) | Tok::Punct(P::RParen | P::RBracket)
+            )
+        {
+            return false;
         }
         let mut i = self.pos + 1;
         while self.chars.get(i).is_some_and(|c| *c == ' ' || *c == '\t') {

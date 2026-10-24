@@ -266,10 +266,11 @@ fn test_command(args: &[String]) -> ExitCode {
 }
 
 fn run(cli: Cli, flags: NodeFlags) -> ExitCode {
-    if let Some(f) = &cli.file {
-        if f.as_os_str() == "test" && !f.is_file() {
-            return test_command(&cli.args);
-        }
+    if let Some(f) = &cli.file
+        && f.as_os_str() == "test"
+        && !f.is_file()
+    {
+        return test_command(&cli.args);
     }
     let mut argv = vec!["jsq".to_string()];
     if let Some(f) = &cli.file {

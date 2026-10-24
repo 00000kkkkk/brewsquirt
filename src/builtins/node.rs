@@ -9886,16 +9886,16 @@ pub fn module(vm: &mut Vm, name: &str) -> Option<Result<Value, Value>> {
                         o.set_own(k, x);
                     }
                 }
-                if let Some(Value::Object(inspect)) = o.get_own("inspect") {
-                    if inspect.get_own("custom").is_none() {
-                        inspect.set_own("custom", custom);
-                        let defaults = vm.new_object();
-                        inspect.set_own("defaultOptions", Value::Object(defaults));
-                        let colors = vm.new_object();
-                        inspect.set_own("colors", Value::Object(colors));
-                        let styles = vm.new_object();
-                        inspect.set_own("styles", Value::Object(styles));
-                    }
+                if let Some(Value::Object(inspect)) = o.get_own("inspect")
+                    && inspect.get_own("custom").is_none()
+                {
+                    inspect.set_own("custom", custom);
+                    let defaults = vm.new_object();
+                    inspect.set_own("defaultOptions", Value::Object(defaults));
+                    let colors = vm.new_object();
+                    inspect.set_own("colors", Value::Object(colors));
+                    let styles = vm.new_object();
+                    inspect.set_own("styles", Value::Object(styles));
                 }
                 let te = vm.globals.get("TextEncoder").cloned().unwrap_or_default();
                 let td = vm.globals.get("TextDecoder").cloned().unwrap_or_default();
@@ -10753,15 +10753,15 @@ fn path_of(vm: &mut Vm, args: &[Value], i: usize) -> Result<String, Value> {
 }
 
 fn fs_read(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    if let Value::Number(fd) = arg(args, 0) {
-        if fd == 0.0 {
-            vm.flush();
-            let mut buf = Vec::new();
-            std::io::stdin()
-                .read_to_end(&mut buf)
-                .map_err(|e| fs_error(vm, &e, "read", "<stdin>", None))?;
-            return Ok(new_uint8(vm, buf));
-        }
+    if let Value::Number(fd) = arg(args, 0)
+        && fd == 0.0
+    {
+        vm.flush();
+        let mut buf = Vec::new();
+        std::io::stdin()
+            .read_to_end(&mut buf)
+            .map_err(|e| fs_error(vm, &e, "read", "<stdin>", None))?;
+        return Ok(new_uint8(vm, buf));
     }
     let p = path_of(vm, args, 0)?;
     if Path::new(&p).is_dir() {

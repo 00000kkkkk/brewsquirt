@@ -2,7 +2,7 @@
 name = "brewsquirt"
 version = "1.11.0"
 edition = "2024"
-rust-version = "1.86"
+rust-version = "1.97"
 description = "High-performance language with JS semantics and Rust speed"
 license = "Apache-2.0"
 repository = "https://github.com/00000kkkkk/brewsquirt"
@@ -74,6 +74,11 @@ x509-cert = { version = "0.2", default-features = false, features = ["pem", "std
 rand_core = { version = "0.6", features = ["getrandom"] }
 scrypt = { version = "0.11", default-features = false }
 wasmi = { version = "0.47.1", default-features = false, features = ["std", "simd"] }
+cranelift-codegen = "0.137"
+cranelift-frontend = "0.137"
+cranelift-jit = "0.137"
+cranelift-module = "0.137"
+cranelift-native = "0.137"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

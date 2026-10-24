@@ -466,10 +466,10 @@ fn needs_expansion(body: &[char]) -> bool {
             match body.get(i + 1) {
                 Some('q') if body.get(i + 2) == Some(&'{') => return true,
                 Some('p') => {
-                    if let Some((name, _)) = property_name_at(body, i + 1) {
-                        if string_property(&name).is_some() {
-                            return true;
-                        }
+                    if let Some((name, _)) = property_name_at(body, i + 1)
+                        && string_property(&name).is_some()
+                    {
+                        return true;
                     }
                 }
                 _ => {}
@@ -509,20 +509,19 @@ pub fn expand(chars: Vec<char>, icase: bool) -> Vec<char> {
     while i < chars.len() {
         let c = chars[i];
         if c == '\\' {
-            if chars.get(i + 1) == Some(&'p') {
-                if let Some((name, end)) = property_name_at(&chars, i + 1) {
-                    if string_property(&name).is_some() {
-                        let mut p = Parser {
-                            c: &chars,
-                            pos: i + 2,
-                            icase,
-                        };
-                        emit(&p.property(false), &mut out);
-                        changed = true;
-                        i = end + 1;
-                        continue;
-                    }
-                }
+            if chars.get(i + 1) == Some(&'p')
+                && let Some((name, end)) = property_name_at(&chars, i + 1)
+                && string_property(&name).is_some()
+            {
+                let mut p = Parser {
+                    c: &chars,
+                    pos: i + 2,
+                    icase,
+                };
+                emit(&p.property(false), &mut out);
+                changed = true;
+                i = end + 1;
+                continue;
             }
             out.push(c);
             if let Some(&n) = chars.get(i + 1) {
@@ -531,22 +530,22 @@ pub fn expand(chars: Vec<char>, icase: bool) -> Vec<char> {
             i += 2;
             continue;
         }
-        if c == '[' {
-            if let Some(end) = class_end(&chars, i) {
-                if needs_expansion(&chars[i..=end]) {
-                    let mut p = Parser {
-                        c: &chars[..=end],
-                        pos: i,
-                        icase,
-                    };
-                    emit(&p.class(), &mut out);
-                    changed = true;
-                } else {
-                    out.extend_from_slice(&chars[i..=end]);
-                }
-                i = end + 1;
-                continue;
+        if c == '['
+            && let Some(end) = class_end(&chars, i)
+        {
+            if needs_expansion(&chars[i..=end]) {
+                let mut p = Parser {
+                    c: &chars[..=end],
+                    pos: i,
+                    icase,
+                };
+                emit(&p.class(), &mut out);
+                changed = true;
+            } else {
+                out.extend_from_slice(&chars[i..=end]);
             }
+            i = end + 1;
+            continue;
         }
         out.push(c);
         i += 1;

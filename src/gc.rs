@@ -152,10 +152,10 @@ fn obj_edges(o: &Obj, f: &mut dyn FnMut(Edge<'_>)) {
             value_edge(v, f);
         }
     }
-    if let Ok(proto) = o.proto.try_borrow() {
-        if let Some(p) = &*proto {
-            f(Edge::Obj(p));
-        }
+    if let Ok(proto) = o.proto.try_borrow()
+        && let Some(p) = &*proto
+    {
+        f(Edge::Obj(p));
     }
     match &o.kind {
         ObjKind::Ordinary
@@ -172,15 +172,15 @@ fn obj_edges(o: &Obj, f: &mut dyn FnMut(Edge<'_>)) {
         ObjKind::Typed(t) | ObjKind::DataView(t) => f(Edge::Obj(&t.buffer)),
         ObjKind::Global => {}
         ObjKind::Proxy(p) => {
-            if let Ok(t) = p.target.try_borrow() {
-                if let Some(t) = &*t {
-                    f(Edge::Obj(t));
-                }
+            if let Ok(t) = p.target.try_borrow()
+                && let Some(t) = &*t
+            {
+                f(Edge::Obj(t));
             }
-            if let Ok(h) = p.handler.try_borrow() {
-                if let Some(h) = &*h {
-                    f(Edge::Obj(h));
-                }
+            if let Ok(h) = p.handler.try_borrow()
+                && let Some(h) = &*h
+            {
+                f(Edge::Obj(h));
             }
         }
         ObjKind::WeakMap(m) => {
@@ -281,10 +281,10 @@ fn obj_edges(o: &Obj, f: &mut dyn FnMut(Edge<'_>)) {
             }
         }
         ObjKind::Coroutine(co) => {
-            if let Ok(saved) = co.saved.try_borrow() {
-                if let Some(sf) = &*saved {
-                    saved_edges(sf, f);
-                }
+            if let Ok(saved) = co.saved.try_borrow()
+                && let Some(sf) = &*saved
+            {
+                saved_edges(sf, f);
             }
             if let Some(p) = &co.promise {
                 f(Edge::Obj(p));
@@ -306,22 +306,22 @@ fn node_edges(n: &Node, f: &mut dyn FnMut(Edge<'_>)) {
             for u in c.upvalues.iter() {
                 f(Edge::Cell(u));
             }
-            if let Ok(h) = c.home.try_borrow() {
-                if let Some(h) = &*h {
-                    f(Edge::Obj(h));
-                }
+            if let Ok(h) = c.home.try_borrow()
+                && let Some(h) = &*h
+            {
+                f(Edge::Obj(h));
             }
-            if let Ok(t) = c.new_target.try_borrow() {
-                if let Some(t) = &*t {
-                    value_edge(t, f);
-                }
+            if let Ok(t) = c.new_target.try_borrow()
+                && let Some(t) = &*t
+            {
+                value_edge(t, f);
             }
         }
         Node::Cell(c) => {
-            if let Ok(u) = c.value.try_borrow() {
-                if let Upvalue::Closed(v) = &*u {
-                    value_edge(v, f);
-                }
+            if let Ok(u) = c.value.try_borrow()
+                && let Upvalue::Closed(v) = &*u
+            {
+                value_edge(v, f);
             }
         }
     }
@@ -342,10 +342,10 @@ fn clear(n: &Node, grave: &mut Graveyard) {
                 let taken = std::mem::take(&mut *props);
                 grave.values.extend(taken.into_values());
             }
-            if let Ok(mut proto) = o.proto.try_borrow_mut() {
-                if let Some(p) = proto.take() {
-                    grave.objs.push(p);
-                }
+            if let Ok(mut proto) = o.proto.try_borrow_mut()
+                && let Some(p) = proto.take()
+            {
+                grave.objs.push(p);
             }
             match &o.kind {
                 ObjKind::Array(a) => {
@@ -392,22 +392,22 @@ fn clear(n: &Node, grave: &mut Graveyard) {
                     }
                 }
                 ObjKind::Proxy(p) => {
-                    if let Ok(mut t) = p.target.try_borrow_mut() {
-                        if let Some(t) = t.take() {
-                            grave.objs.push(t);
-                        }
+                    if let Ok(mut t) = p.target.try_borrow_mut()
+                        && let Some(t) = t.take()
+                    {
+                        grave.objs.push(t);
                     }
-                    if let Ok(mut h) = p.handler.try_borrow_mut() {
-                        if let Some(h) = h.take() {
-                            grave.objs.push(h);
-                        }
+                    if let Ok(mut h) = p.handler.try_borrow_mut()
+                        && let Some(h) = h.take()
+                    {
+                        grave.objs.push(h);
                     }
                 }
                 ObjKind::Coroutine(co) => {
-                    if let Ok(mut saved) = co.saved.try_borrow_mut() {
-                        if let Some(sf) = saved.take() {
-                            grave.frames.push(sf);
-                        }
+                    if let Ok(mut saved) = co.saved.try_borrow_mut()
+                        && let Some(sf) = saved.take()
+                    {
+                        grave.frames.push(sf);
                     }
                     if let Ok(mut q) = co.queue.try_borrow_mut() {
                         grave.maps.push(Box::new(std::mem::take(&mut *q)));
@@ -417,22 +417,22 @@ fn clear(n: &Node, grave: &mut Graveyard) {
             }
         }
         Node::Closure(c) => {
-            if let Ok(mut h) = c.home.try_borrow_mut() {
-                if let Some(h) = h.take() {
-                    grave.objs.push(h);
-                }
+            if let Ok(mut h) = c.home.try_borrow_mut()
+                && let Some(h) = h.take()
+            {
+                grave.objs.push(h);
             }
-            if let Ok(mut t) = c.new_target.try_borrow_mut() {
-                if let Some(t) = t.take() {
-                    grave.values.push(t);
-                }
+            if let Ok(mut t) = c.new_target.try_borrow_mut()
+                && let Some(t) = t.take()
+            {
+                grave.values.push(t);
             }
         }
         Node::Cell(c) => {
-            if let Ok(mut u) = c.value.try_borrow_mut() {
-                if let Upvalue::Closed(v) = &mut *u {
-                    grave.values.push(std::mem::take(v));
-                }
+            if let Ok(mut u) = c.value.try_borrow_mut()
+                && let Upvalue::Closed(v) = &mut *u
+            {
+                grave.values.push(std::mem::take(v));
             }
         }
     }

@@ -997,12 +997,12 @@ impl Parser {
         } else {
             self.word()
         };
-        if self.ts && !single {
-            if let Some(w) = word.clone() {
-                if let Some(kind) = self.ts_statement(&w)? {
-                    return Ok(kind);
-                }
-            }
+        if self.ts
+            && !single
+            && let Some(w) = word.clone()
+            && let Some(kind) = self.ts_statement(&w)?
+        {
+            return Ok(kind);
         }
         match word.as_deref() {
             Some("using") | Some("await") if self.using_head(false).is_some() => {
@@ -2198,10 +2198,8 @@ impl Parser {
                     self.advance();
                 }
                 self.ts_param_type()?;
-                if is_prop {
-                    if let Pattern::Ident(n) = &pattern {
-                        self.ts_props.push(n.clone());
-                    }
+                if is_prop && let Pattern::Ident(n) = &pattern {
+                    self.ts_props.push(n.clone());
                 }
                 for d in param_decs {
                     self.ts_param_decs.push((params.len(), d));
@@ -2442,11 +2440,10 @@ impl Parser {
                 self.ts_class_iife =
                     Some(self.std_decorated_class(def.clone(), class_decorators, st, default_name));
             }
-        } else if let Some(d) = decorations {
-            if !class_decorators.is_empty() || !d.members.is_empty() || !d.ctor_params.is_empty() {
-                self.ts_class_iife =
-                    Some(self.ts_decorated_class(def.clone(), class_decorators, d));
-            }
+        } else if let Some(d) = decorations
+            && (!class_decorators.is_empty() || !d.members.is_empty() || !d.ctor_params.is_empty())
+        {
+            self.ts_class_iife = Some(self.ts_decorated_class(def.clone(), class_decorators, d));
         }
         Ok(def)
     }
@@ -3037,10 +3034,11 @@ impl Parser {
         if let Some(op) = self.assign_op() {
             let (line, col) = if op.is_some() { start } else { self.pos() };
             let parenthesized = self.last_paren == (lhs_start, self.pos);
-            if let ExprKind::Ident(n) = &lhs.kind {
-                if self.strict && matches!(&**n, "eval" | "arguments") {
-                    return Err(self.error("Unexpected eval or arguments in strict mode"));
-                }
+            if let ExprKind::Ident(n) = &lhs.kind
+                && self.strict
+                && matches!(&**n, "eval" | "arguments")
+            {
+                return Err(self.error("Unexpected eval or arguments in strict mode"));
             }
             if parenthesized && matches!(lhs.kind, ExprKind::Array(_) | ExprKind::Object(_)) {
                 return Err(self.error("Invalid left-hand side in assignment"));
@@ -3315,10 +3313,10 @@ impl Parser {
             }
             unary_left = false;
             let (line, col) = self.pos();
-            if let BinKind::Logical(l) = op {
-                if built.is_some_and(|b| mixes_nullish(b, l)) {
-                    return Err(self.error("Cannot mix '??' with '||' or '&&' without parentheses"));
-                }
+            if let BinKind::Logical(l) = op
+                && built.is_some_and(|b| mixes_nullish(b, l))
+            {
+                return Err(self.error("Cannot mix '??' with '||' or '&&' without parentheses"));
             }
             self.advance();
             let right_start = self.pos;
@@ -3329,12 +3327,13 @@ impl Parser {
             };
             match op {
                 BinKind::Logical(l) => {
-                    if let ExprKind::Logical(r, ..) = &right.kind {
-                        if mixes_nullish(*r, l) && self.last_paren != (right_start, self.pos) {
-                            return Err(
-                                self.error("Cannot mix '??' with '||' or '&&' without parentheses")
-                            );
-                        }
+                    if let ExprKind::Logical(r, ..) = &right.kind
+                        && mixes_nullish(*r, l)
+                        && self.last_paren != (right_start, self.pos)
+                    {
+                        return Err(
+                            self.error("Cannot mix '??' with '||' or '&&' without parentheses")
+                        );
                     }
                     built = Some(l);
                 }
@@ -3451,14 +3450,14 @@ impl Parser {
                 return Err(self.error("Delete of an unqualified identifier in strict mode."));
             }
         }
-        if op == UnaryOp::Neg {
-            if let ExprKind::Number(n) = operand.kind {
-                return Ok(Expr {
-                    kind: ExprKind::Number(-n),
-                    line,
-                    col,
-                });
-            }
+        if op == UnaryOp::Neg
+            && let ExprKind::Number(n) = operand.kind
+        {
+            return Ok(Expr {
+                kind: ExprKind::Number(-n),
+                line,
+                col,
+            });
         }
         Ok(Expr {
             kind: ExprKind::Unary(op, Box::new(operand)),
@@ -3599,10 +3598,10 @@ impl Parser {
                 let args = self.arguments()?;
                 let direct = matches!(&e.kind, ExprKind::Ident(n) if &**n == "eval");
                 e = if direct {
-                    if self.field_init == 0 {
-                        if let Some(top) = self.args_used.last_mut() {
-                            *top = true;
-                        }
+                    if self.field_init == 0
+                        && let Some(top) = self.args_used.last_mut()
+                    {
+                        *top = true;
                     }
                     self.saw_eval = true;
                     let ctx = Rc::new(EvalCtx {
@@ -3845,10 +3844,10 @@ impl Parser {
                     if !sub.is_eof() {
                         return Err(sub.unexpected());
                     }
-                    if sub.args_used.first() == Some(&true) {
-                        if let Some(top) = self.args_used.last_mut() {
-                            *top = true;
-                        }
+                    if sub.args_used.first() == Some(&true)
+                        && let Some(top) = self.args_used.last_mut()
+                    {
+                        *top = true;
                     }
                     exprs.push(e);
                 }
@@ -4087,10 +4086,10 @@ impl Parser {
                     _ => {
                         self.check_ident_ref(&name)?;
                         self.advance();
-                        if &*name == "arguments" {
-                            if let Some(top) = self.args_used.last_mut() {
-                                *top = true;
-                            }
+                        if &*name == "arguments"
+                            && let Some(top) = self.args_used.last_mut()
+                        {
+                            *top = true;
                         }
                         if self.ts {
                             self.ts_refs.insert(name.clone());
@@ -4181,10 +4180,10 @@ impl Parser {
                         if self.reserved(&n) {
                             return Err(self.error(format!("Unexpected reserved word '{n}'")));
                         }
-                        if &*n == "arguments" {
-                            if let Some(top) = self.args_used.last_mut() {
-                                *top = true;
-                            }
+                        if &*n == "arguments"
+                            && let Some(top) = self.args_used.last_mut()
+                        {
+                            *top = true;
                         }
                         if self.ts {
                             self.ts_refs.insert(n.clone());

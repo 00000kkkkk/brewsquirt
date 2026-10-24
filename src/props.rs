@@ -150,10 +150,10 @@ impl Vm {
                         NON_ENUM | READ_ONLY | NON_CONFIG,
                     ));
                 }
-                if let Some(i) = array_index(key) {
-                    if let Some(c) = crate::value::char_at16(s, i) {
-                        return Some((Value::from(c), READ_ONLY | NON_CONFIG));
-                    }
+                if let Some(i) = array_index(key)
+                    && let Some(c) = crate::value::char_at16(s, i)
+                {
+                    return Some((Value::from(c), READ_ONLY | NON_CONFIG));
                 }
             }
             ObjKind::Typed(t) => {
@@ -436,35 +436,35 @@ impl Vm {
         d: PropDesc,
         throw: bool,
     ) -> Result<bool, Value> {
-        if let ObjKind::Arguments(m) = &o.kind {
-            if let Some(c) = m.cell(&key) {
-                let current = match &*c.borrow() {
-                    crate::object::Upvalue::Open(idx) => self.stack[*idx].clone(),
-                    crate::object::Upvalue::Closed(v) => v.clone(),
-                };
-                let mut d = d;
-                if d.is_data() && d.value.is_none() && d.writable == Some(false) {
-                    d.value = Some(current);
-                }
-                let value = d.value.clone();
-                let accessor = d.is_accessor();
-                let frozen = d.writable == Some(false);
-                let ok = self.define_own_ordinary(o, key.clone(), d, throw)?;
-                if !ok {
-                    return Ok(false);
-                }
-                if accessor {
-                    m.unmap(&key);
-                } else {
-                    if let Some(v) = &value {
-                        self.set_mapped_arg(m, &key, v);
-                    }
-                    if frozen {
-                        m.unmap(&key);
-                    }
-                }
-                return Ok(true);
+        if let ObjKind::Arguments(m) = &o.kind
+            && let Some(c) = m.cell(&key)
+        {
+            let current = match &*c.borrow() {
+                crate::object::Upvalue::Open(idx) => self.stack[*idx].clone(),
+                crate::object::Upvalue::Closed(v) => v.clone(),
+            };
+            let mut d = d;
+            if d.is_data() && d.value.is_none() && d.writable == Some(false) {
+                d.value = Some(current);
             }
+            let value = d.value.clone();
+            let accessor = d.is_accessor();
+            let frozen = d.writable == Some(false);
+            let ok = self.define_own_ordinary(o, key.clone(), d, throw)?;
+            if !ok {
+                return Ok(false);
+            }
+            if accessor {
+                m.unmap(&key);
+            } else {
+                if let Some(v) = &value {
+                    self.set_mapped_arg(m, &key, v);
+                }
+                if frozen {
+                    m.unmap(&key);
+                }
+            }
+            return Ok(true);
         }
         self.define_own_ordinary(o, key, d, throw)
     }
@@ -477,28 +477,29 @@ impl Vm {
         throw: bool,
     ) -> Result<bool, Value> {
         self.note_proto_index(o, &key);
-        if let ObjKind::Typed(t) = &o.kind {
-            if let Some(n) = crate::builtins::typed::canonical_numeric(&key) {
-                let ok = crate::builtins::typed::valid_index(t, n).is_some()
-                    && d.configurable != Some(false)
-                    && d.enumerable != Some(false)
-                    && !d.is_accessor()
-                    && d.writable != Some(false);
-                if !ok {
-                    if throw {
-                        return Err(self
-                            .type_error(format!("Cannot redefine property: {}", key_text(&key))));
-                    }
-                    return Ok(false);
+        if let ObjKind::Typed(t) = &o.kind
+            && let Some(n) = crate::builtins::typed::canonical_numeric(&key)
+        {
+            let ok = crate::builtins::typed::valid_index(t, n).is_some()
+                && d.configurable != Some(false)
+                && d.enumerable != Some(false)
+                && !d.is_accessor()
+                && d.writable != Some(false);
+            if !ok {
+                if throw {
+                    return Err(
+                        self.type_error(format!("Cannot redefine property: {}", key_text(&key)))
+                    );
                 }
-                if let Some(v) = &d.value {
-                    let x = crate::builtins::typed::coerce(self, t.kind, v)?;
-                    if let Some(i) = crate::builtins::typed::valid_index(t, n) {
-                        t.set(i, &x);
-                    }
-                }
-                return Ok(true);
+                return Ok(false);
             }
+            if let Some(v) = &d.value {
+                let x = crate::builtins::typed::coerce(self, t.kind, v)?;
+                if let Some(i) = crate::builtins::typed::valid_index(t, n) {
+                    t.set(i, &x);
+                }
+            }
+            return Ok(true);
         }
         let current = self.own_property(o, &key);
         let Some((raw, attrs)) = current else {
@@ -543,10 +544,10 @@ impl Vm {
             if d.configurable == Some(true) {
                 return fail(self);
             }
-            if let Some(e) = d.enumerable {
-                if e == (attrs & NON_ENUM != 0) {
-                    return fail(self);
-                }
+            if let Some(e) = d.enumerable
+                && e == (attrs & NON_ENUM != 0)
+            {
+                return fail(self);
             }
             if (current_acc.is_some() && d.is_data()) || (current_acc.is_none() && d.is_accessor())
             {
@@ -558,23 +559,23 @@ impl Vm {
                         if d.writable == Some(true) {
                             return fail(self);
                         }
-                        if let Some(v) = &d.value {
-                            if !same_value(v, &raw) {
-                                return fail(self);
-                            }
+                        if let Some(v) = &d.value
+                            && !same_value(v, &raw)
+                        {
+                            return fail(self);
                         }
                     }
                 }
                 Some((g, s)) => {
-                    if let Some(ng) = &d.get {
-                        if !same_value(ng, g) {
-                            return fail(self);
-                        }
+                    if let Some(ng) = &d.get
+                        && !same_value(ng, g)
+                    {
+                        return fail(self);
                     }
-                    if let Some(ns) = &d.set {
-                        if !same_value(ns, s) {
-                            return fail(self);
-                        }
+                    if let Some(ns) = &d.set
+                        && !same_value(ns, s)
+                    {
+                        return fail(self);
                     }
                 }
             }
@@ -709,12 +710,13 @@ impl Vm {
         }
         let mut limit = n;
         for (k, bits) in o.props.borrow().attr_entries() {
-            if bits & NON_CONFIG != 0 {
-                if let Some(i) = array_index(k) {
-                    if i >= n && i < len && !o.is_hole(i) {
-                        limit = limit.max(i + 1);
-                    }
-                }
+            if bits & NON_CONFIG != 0
+                && let Some(i) = array_index(k)
+                && i >= n
+                && i < len
+                && !o.is_hole(i)
+            {
+                limit = limit.max(i + 1);
             }
         }
         limit
@@ -731,10 +733,10 @@ impl Vm {
     }
 
     pub fn freeze(&mut self, o: &Rc<Obj>) -> Result<(), Value> {
-        if let ObjKind::Typed(t) = &o.kind {
-            if !t.is_empty() {
-                return Err(self.type_error("Cannot freeze array buffer views with elements"));
-            }
+        if let ObjKind::Typed(t) = &o.kind
+            && !t.is_empty()
+        {
+            return Err(self.type_error("Cannot freeze array buffer views with elements"));
         }
         o.flags
             .set(o.flags.get() | NOT_EXTENSIBLE | ELEMENTS_SEALED | ELEMENTS_FROZEN);

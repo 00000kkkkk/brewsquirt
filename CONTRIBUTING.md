@@ -51,7 +51,7 @@ Individual commit messages on your branch are not checked, since they disappear 
 A pull request can be merged only when all of these pass:
 
 - `ci-ok`: aggregates formatting, clippy, tests on Linux, macOS and Windows, beta toolchain,
-  MSRV (Rust 1.86), docs and examples.
+  MSRV (Rust 1.97), docs and examples.
 - `pr-title`: the title is a valid Conventional Commit.
 - `changelog`: `CHANGELOG.md` was changed in the PR.
 - An approving review from the code owner (@00000kkkkk), as defined in `.github/CODEOWNERS`.
@@ -81,7 +81,7 @@ asking a maintainer to apply the `no-changelog` label. Dependabot pull requests 
 - Format with `cargo fmt`. The configuration is in `rustfmt.toml` (edition 2024, max width 100).
 - `cargo clippy --all-targets --all-features -- -D warnings` must be clean. Do not silence lints
   with `allow` attributes unless there is no reasonable alternative.
-- Keep the MSRV at Rust 1.86. Do not use newer standard library APIs or language features.
+- Keep the MSRV at Rust 1.97. Do not use newer standard library APIs or language features.
 - New dependencies must use a license allowed in `deny.toml` and come from crates.io.
 - Prefer returning errors over panicking. A `.jsq` program must never be able to crash the VM.
 
@@ -131,7 +131,7 @@ Run the same checks as CI before pushing:
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features --locked
-cargo +1.86 check --all-targets --locked
+cargo +1.97 check --all-targets --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 ```
 

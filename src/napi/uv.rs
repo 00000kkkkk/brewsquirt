@@ -42,10 +42,10 @@ pub unsafe extern "C" fn uv_sem_init(sem: *mut c_void, value: c_uint) -> c_int {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn uv_sem_destroy(sem: *mut c_void) {
     let i = unsafe { *(sem as *const u32) } as usize;
-    if let (Ok(mut all), Some(i)) = (SEMAPHORES.lock(), i.checked_sub(1)) {
-        if let Some(slot) = all.get_mut(i) {
-            *slot = None;
-        }
+    if let (Ok(mut all), Some(i)) = (SEMAPHORES.lock(), i.checked_sub(1))
+        && let Some(slot) = all.get_mut(i)
+    {
+        *slot = None;
     }
 }
 

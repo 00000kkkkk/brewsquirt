@@ -429,10 +429,10 @@ fn to_exponential(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     if !n.is_finite() {
         return Ok(crate::number::number_to_string(n).into());
     }
-    if let Some(f) = digits {
-        if !(0.0..=100.0).contains(&f) {
-            return Err(vm.range_error("toExponential() argument must be between 0 and 100"));
-        }
+    if let Some(f) = digits
+        && !(0.0..=100.0).contains(&f)
+    {
+        return Err(vm.range_error("toExponential() argument must be between 0 and 100"));
     }
     Ok(exponential(n, digits.map(|f| f as usize)).into())
 }

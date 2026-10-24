@@ -475,11 +475,11 @@ pub fn expand_template(
             '<' if !named.is_undefined() => match chars[i + 2..].iter().position(|&ch| ch == '>') {
                 Some(end) => {
                     let name: String = chars[i + 2..i + 2 + end].iter().collect();
-                    if let Value::Object(g) = named {
-                        if let Some(Value::Str(v)) = g.get_own(&name) {
-                            out.push_str(&v);
-                            units += len16(&v);
-                        }
+                    if let Value::Object(g) = named
+                        && let Some(Value::Str(v)) = g.get_own(&name)
+                    {
+                        out.push_str(&v);
+                        units += len16(&v);
                     }
                     i += 3 + end;
                 }

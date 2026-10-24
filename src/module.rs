@@ -325,10 +325,10 @@ fn export_target(value: &serde_json::Value, cjs: bool) -> Option<String> {
         serde_json::Value::Object(map) => {
             let active = conditions(cjs);
             for (key, v) in map {
-                if active.contains(&key.as_str()) {
-                    if let Some(t) = export_target(v, cjs) {
-                        return Some(t);
-                    }
+                if active.contains(&key.as_str())
+                    && let Some(t) = export_target(v, cjs)
+                {
+                    return Some(t);
                 }
             }
             None
@@ -357,14 +357,13 @@ fn exports_lookup(exports: &serde_json::Value, sub: &str, cjs: bool) -> Option<S
                 return export_target(v, cjs);
             }
             for (pattern, v) in map {
-                if let Some((prefix, suffix)) = pattern.split_once('*') {
-                    if key.starts_with(prefix)
-                        && key.ends_with(suffix)
-                        && key.len() >= prefix.len() + suffix.len()
-                    {
-                        let star = &key[prefix.len()..key.len() - suffix.len()];
-                        return export_target(v, cjs).map(|t| t.replace('*', star));
-                    }
+                if let Some((prefix, suffix)) = pattern.split_once('*')
+                    && key.starts_with(prefix)
+                    && key.ends_with(suffix)
+                    && key.len() >= prefix.len() + suffix.len()
+                {
+                    let star = &key[prefix.len()..key.len() - suffix.len()];
+                    return export_target(v, cjs).map(|t| t.replace('*', star));
                 }
             }
             None
@@ -381,10 +380,10 @@ fn exports_lookup(exports: &serde_json::Value, sub: &str, cjs: bool) -> Option<S
 
 fn package_json(dir: &Path) -> Option<serde_json::Value> {
     for manifest in [MANIFEST, "package.json"] {
-        if let Ok(text) = std::fs::read_to_string(dir.join(manifest)) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                return Some(v);
-            }
+        if let Ok(text) = std::fs::read_to_string(dir.join(manifest))
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
+        {
+            return Some(v);
         }
     }
     None
@@ -408,14 +407,12 @@ fn resolve_in_package(dir: &Path, target: &str) -> Option<PathBuf> {
 }
 
 pub fn package_subpath(dir: &Path, sub: &str, cjs: bool) -> Option<PathBuf> {
-    if let Some(v) = package_json(dir) {
-        if let Some(exports) = v.get("exports") {
-            if let Some(target) = exports_lookup(exports, sub, cjs) {
-                if let Some(found) = resolve_in_package(dir, &target) {
-                    return Some(found);
-                }
-            }
-        }
+    if let Some(v) = package_json(dir)
+        && let Some(exports) = v.get("exports")
+        && let Some(target) = exports_lookup(exports, sub, cjs)
+        && let Some(found) = resolve_in_package(dir, &target)
+    {
+        return Some(found);
     }
     if sub.is_empty() {
         package_main(dir, cjs)
@@ -536,13 +533,13 @@ fn has_module_syntax_in(src: &str, jsx: bool, ts: bool) -> bool {
             if punct(next, P::LBrace) || punct(next, P::Star) {
                 return true;
             }
-            if let Tok::Ident(n) = &next.tok {
-                if matches!(
+            if let Tok::Ident(n) = &next.tok
+                && matches!(
                     &**n,
                     "default" | "const" | "let" | "var" | "function" | "class" | "async"
-                ) {
-                    return true;
-                }
+                )
+            {
+                return true;
             }
         }
     }
@@ -670,14 +667,13 @@ fn imports_lookup(imports: &serde_json::Value, spec: &str, cjs: bool) -> Option<
         return export_target(v, cjs);
     }
     for (pattern, v) in map {
-        if let Some((prefix, suffix)) = pattern.split_once('*') {
-            if spec.starts_with(prefix)
-                && spec.ends_with(suffix)
-                && spec.len() >= prefix.len() + suffix.len()
-            {
-                let star = &spec[prefix.len()..spec.len() - suffix.len()];
-                return export_target(v, cjs).map(|t| t.replace('*', star));
-            }
+        if let Some((prefix, suffix)) = pattern.split_once('*')
+            && spec.starts_with(prefix)
+            && spec.ends_with(suffix)
+            && spec.len() >= prefix.len() + suffix.len()
+        {
+            let star = &spec[prefix.len()..spec.len() - suffix.len()];
+            return export_target(v, cjs).map(|t| t.replace('*', star));
         }
     }
     None
@@ -838,30 +834,30 @@ fn load_path_config(file: &Path) -> Option<PathConfig> {
         let Some(opts) = v.get("compilerOptions") else {
             continue;
         };
-        if base_url.is_none() {
-            if let Some(b) = opts.get("baseUrl").and_then(|b| b.as_str()) {
-                base_url = Some(dir.join(b));
-            }
+        if base_url.is_none()
+            && let Some(b) = opts.get("baseUrl").and_then(|b| b.as_str())
+        {
+            base_url = Some(dir.join(b));
         }
-        if paths.is_none() {
-            if let Some(map) = opts.get("paths").and_then(|p| p.as_object()) {
-                let list: Vec<(String, Vec<String>)> = map
-                    .iter()
-                    .map(|(k, v)| {
-                        let targets = v
-                            .as_array()
-                            .map(|a| {
-                                a.iter()
-                                    .filter_map(|t| t.as_str().map(str::to_string))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        (k.clone(), targets)
-                    })
-                    .collect();
-                paths = Some(list);
-                paths_base = Some(dir.clone());
-            }
+        if paths.is_none()
+            && let Some(map) = opts.get("paths").and_then(|p| p.as_object())
+        {
+            let list: Vec<(String, Vec<String>)> = map
+                .iter()
+                .map(|(k, v)| {
+                    let targets = v
+                        .as_array()
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|t| t.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (k.clone(), targets)
+                })
+                .collect();
+            paths = Some(list);
+            paths_base = Some(dir.clone());
         }
     }
     if paths.is_none() && base_url.is_none() {
@@ -923,10 +919,10 @@ fn config_paths_resolve(spec: &str, from_dir: &Path) -> Option<PathBuf> {
             }
             None => (pattern == spec).then_some((usize::MAX, "")),
         };
-        if let Some((rank, cap)) = captured {
-            if best.is_none_or(|(r, _, _)| rank > r) {
-                best = Some((rank, cap, targets));
-            }
+        if let Some((rank, cap)) = captured
+            && best.is_none_or(|(r, _, _)| rank > r)
+        {
+            best = Some((rank, cap, targets));
         }
     }
     if let Some((_, cap, targets)) = best {
@@ -1009,10 +1005,10 @@ fn resolve_uncached(spec: &str, from_dir: &Path, cjs: bool) -> Result<PathBuf, S
     }
     let mut parts = spec.splitn(if spec.starts_with('@') { 3 } else { 2 }, '/');
     let mut pkg = parts.next().unwrap_or_default().to_string();
-    if spec.starts_with('@') {
-        if let Some(scope_name) = parts.next() {
-            pkg = format!("{pkg}/{scope_name}");
-        }
+    if spec.starts_with('@')
+        && let Some(scope_name) = parts.next()
+    {
+        pkg = format!("{pkg}/{scope_name}");
     }
     let sub = parts.next().unwrap_or("");
     if let Some(found) = config_paths_resolve(spec, from_dir) {

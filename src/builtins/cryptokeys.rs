@@ -1776,7 +1776,7 @@ fn kw_xor(a: &mut [u8; 8], t: u64) {
 }
 
 fn aes_key_wrap(key: &AesKey, data: &[u8]) -> Option<Vec<u8>> {
-    if data.len() % 8 != 0 || data.len() < 16 {
+    if !data.len().is_multiple_of(8) || data.len() < 16 {
         return None;
     }
     let n = data.len() / 8;
@@ -1801,7 +1801,7 @@ fn aes_key_wrap(key: &AesKey, data: &[u8]) -> Option<Vec<u8>> {
 }
 
 fn aes_key_unwrap(key: &AesKey, data: &[u8]) -> Option<Vec<u8>> {
-    if data.len() % 8 != 0 || data.len() < 24 {
+    if !data.len().is_multiple_of(8) || data.len() < 24 {
         return None;
     }
     let n = data.len() / 8 - 1;
@@ -1998,11 +1998,11 @@ fn block_process(ctx: &mut CipherCtx, data: &[u8], last: bool) -> Result<Vec<u8>
         if ctx.pad {
             let n = 16 - work.len() % 16;
             work.extend(std::iter::repeat_n(n as u8, n));
-        } else if work.len() % 16 != 0 {
+        } else if !work.len().is_multiple_of(16) {
             return Err("wrong final block length");
         }
     }
-    if last && !ctx.encrypt && work.len() % 16 != 0 {
+    if last && !ctx.encrypt && !work.len().is_multiple_of(16) {
         return Err("wrong final block length");
     }
     for chunk in work.chunks(16) {

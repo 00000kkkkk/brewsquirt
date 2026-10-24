@@ -375,10 +375,10 @@ pub fn handle_event(vm: &mut Vm, ev: NapiEvent) -> Result<(), Value> {
                     unsafe { cb(t.env, h, t.context, data as *mut c_void) };
                 }
                 None => {
-                    if f.is_callable() {
-                        if let Err(e) = vm.call_value(&f, Value::Undefined, &[]) {
-                            env.pending = Some(e);
-                        }
+                    if f.is_callable()
+                        && let Err(e) = vm.call_value(&f, Value::Undefined, &[])
+                    {
+                        env.pending = Some(e);
                     }
                 }
             }

@@ -196,7 +196,7 @@ pub unsafe extern "C" fn napi_create_typedarray(
     if !matches!(ab.kind, ObjKind::ArrayBuffer(_)) {
         return env.status(ARRAYBUFFER_EXPECTED);
     }
-    if byte_offset % k.size() != 0 {
+    if !byte_offset.is_multiple_of(k.size()) {
         let e = env.vm().range_error(format!(
             "start offset of {} should be a multiple of {}",
             k.name(),

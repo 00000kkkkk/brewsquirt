@@ -1451,10 +1451,10 @@ pub fn child_spawn(
         while let Ok(cmd) = crx.recv() {
             match cmd {
                 ChildCmd::Write(data) => {
-                    if let Some(s) = stdin.as_mut() {
-                        if s.write_all(&data).and_then(|_| s.flush()).is_err() {
-                            stdin = None;
-                        }
+                    if let Some(s) = stdin.as_mut()
+                        && s.write_all(&data).and_then(|_| s.flush()).is_err()
+                    {
+                        stdin = None;
                     }
                 }
                 ChildCmd::EndStdin => {
@@ -1555,12 +1555,11 @@ impl ureq::unversioned::resolver::Resolver for LoopbackResolver {
         let mut addrs = self.inner.resolve(uri, config, timeout)?;
         if addrs.len() > 1 && addrs.iter().all(|a| a.ip().is_loopback()) {
             let list: Vec<SocketAddr> = addrs.iter().copied().collect();
-            if let Ok(stream) = connect_any(&list, Duration::from_secs(2)) {
-                if let Ok(peer) = stream.peer_addr() {
-                    if let Some(i) = addrs.iter().position(|a| *a == peer) {
-                        addrs.swap(0, i);
-                    }
-                }
+            if let Ok(stream) = connect_any(&list, Duration::from_secs(2))
+                && let Ok(peer) = stream.peer_addr()
+                && let Some(i) = addrs.iter().position(|a| *a == peer)
+            {
+                addrs.swap(0, i);
             }
         }
         Ok(addrs)

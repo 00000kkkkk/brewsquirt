@@ -263,14 +263,12 @@ pub fn function_desc(o: &Obj) -> String {
             } else {
                 format!("[class {name}")
             };
-            if let Some(parent) = o.proto.borrow().as_ref() {
-                if let ObjKind::Function(_) | ObjKind::Native(_) = parent.kind {
-                    if let Some(parent_name) = parent.function_name() {
-                        if !parent_name.is_empty() {
-                            s.push_str(&format!(" extends {parent_name}"));
-                        }
-                    }
-                }
+            if let Some(parent) = o.proto.borrow().as_ref()
+                && let ObjKind::Function(_) | ObjKind::Native(_) = parent.kind
+                && let Some(parent_name) = parent.function_name()
+                && !parent_name.is_empty()
+            {
+                s.push_str(&format!(" extends {parent_name}"));
             }
             s.push(']');
             s
@@ -358,17 +356,17 @@ fn child(ctx: &mut Ctx, v: &Value, rt: usize) -> String {
 
 fn format_prop(ctx: &mut Ctx, k: &str, v: &Value, rt: usize) -> String {
     let key = format_key(k);
-    if let Value::Object(a) = v {
-        if let ObjKind::Accessor(acc) = &a.kind {
-            let g = !acc.get.borrow().is_undefined();
-            let st = !acc.set.borrow().is_undefined();
-            let text = match (g, st) {
-                (true, true) => "[Getter/Setter]",
-                (true, false) => "[Getter]",
-                _ => "[Setter]",
-            };
-            return format!("{key}: {text}");
-        }
+    if let Value::Object(a) = v
+        && let ObjKind::Accessor(acc) = &a.kind
+    {
+        let g = !acc.get.borrow().is_undefined();
+        let st = !acc.set.borrow().is_undefined();
+        let text = match (g, st) {
+            (true, true) => "[Getter/Setter]",
+            (true, false) => "[Getter]",
+            _ => "[Setter]",
+        };
+        return format!("{key}: {text}");
     }
     format!("{key}: {}", child(ctx, v, rt))
 }
@@ -509,10 +507,11 @@ fn reduce(ctx: &Ctx, mut output: Vec<String>, shape: Shape<'_>, rt: usize) -> St
         output.sort();
     }
     let entries = output.len();
-    if let Some((has_more, numeric)) = shape.array {
-        if entries > 6 && ctx.compact >= 1 {
-            output = group_array_elements(ctx, output, has_more, numeric);
-        }
+    if let Some((has_more, numeric)) = shape.array
+        && entries > 6
+        && ctx.compact >= 1
+    {
+        output = group_array_elements(ctx, output, has_more, numeric);
     }
     let base_prefix = if shape.base.is_empty() {
         String::new()

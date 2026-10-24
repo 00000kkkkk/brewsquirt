@@ -203,10 +203,10 @@ const SLOT_CONST: u8 = 2;
 
 impl Globals {
     pub fn resolve(&self, name: &str) -> Option<u32> {
-        if !self.lex.is_empty() {
-            if let Some(&i) = self.lex.get(name) {
-                return Some(i);
-            }
+        if !self.lex.is_empty()
+            && let Some(&i) = self.lex.get(name)
+        {
+            return Some(i);
         }
         self.index.get(name).copied()
     }
@@ -323,6 +323,13 @@ pub struct Vm {
     pub globals: Globals,
     arg_buf: Vec<Value>,
     fast_resume: bool,
+    step_one: bool,
+    jit: Option<Box<crate::jit::Jit>>,
+    jit_on: bool,
+    jit_threshold: u32,
+    jit_stop: usize,
+    jit_error: Option<Value>,
+    jit_value: Option<Value>,
     builders: Vec<(usize, String)>,
     scratch: String,
     pub realm: Realm,
@@ -532,6 +539,23 @@ fn push_fast(stack: &mut Vec<Value>, v: Value) {
     }
 }
 
+enum Invoke {
+    Done(Value),
+    Reload,
+    Unwound,
+    Returned,
+    Failed(Value),
+}
+
+impl From<Result<Value, Value>> for Invoke {
+    fn from(r: Result<Value, Value>) -> Invoke {
+        match r {
+            Ok(v) => Invoke::Done(v),
+            Err(e) => Invoke::Failed(e),
+        }
+    }
+}
+
 #[inline(always)]
 fn push_number(stack: &mut Vec<Value>, x: f64) {
     stack.reserve(1);
@@ -713,19 +737,19 @@ fn ic_read(o: &Obj, key: &str, ic: &crate::bytecode::PropIc) -> Option<Value> {
                 continue;
             }
             if e.holder.get() == 0 {
-                if let Some(v) = props.value_at(e.index.get() as usize) {
-                    if ic_plain(v, props.may_have_accessors()) {
-                        return Some(v.clone());
-                    }
+                if let Some(v) = props.value_at(e.index.get() as usize)
+                    && ic_plain(v, props.may_have_accessors())
+                {
+                    return Some(v.clone());
                 }
                 break;
             }
             if let Some(h) = ic_holder(o, e) {
                 let pp = h.props.borrow();
-                if let Some(v) = pp.value_at(e.index.get() as usize) {
-                    if ic_plain(v, pp.may_have_accessors()) {
-                        return Some(v.clone());
-                    }
+                if let Some(v) = pp.value_at(e.index.get() as usize)
+                    && ic_plain(v, pp.may_have_accessors())
+                {
+                    return Some(v.clone());
                 }
             }
         }
@@ -1003,10 +1027,10 @@ fn receiver_type_name(v: &Value) -> Option<JsStr> {
         let Some(obj) = cur else {
             break;
         };
-        if let Some(Value::Object(c)) = obj.get_own("constructor") {
-            if let Some(n) = function_debug_name(&c) {
-                return Some(n);
-            }
+        if let Some(Value::Object(c)) = obj.get_own("constructor")
+            && let Some(n) = function_debug_name(&c)
+        {
+            return Some(n);
         }
         cur = obj.proto.borrow().clone();
     }
@@ -1100,6 +1124,16 @@ impl Vm {
             globals: Globals::default(),
             arg_buf: Vec::new(),
             fast_resume: false,
+            step_one: false,
+            jit: None,
+            jit_on: std::env::var_os("JSQ_NOJIT").is_none(),
+            jit_threshold: std::env::var("JSQ_JIT_THRESHOLD")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1000),
+            jit_stop: 0,
+            jit_error: None,
+            jit_value: None,
             builders: Vec::new(),
             scratch: String::new(),
             realm: Realm::new(),
@@ -1192,15 +1226,14 @@ impl Vm {
         crate::gc::configure_from_env();
         builtins::install(&mut vm);
         builtins::run_prelude(&mut vm);
-        if !is_worker {
-            if let Some(ms) = std::env::var("JSQ_SAMPLE_STACKS")
+        if !is_worker
+            && let Some(ms) = std::env::var("JSQ_SAMPLE_STACKS")
                 .ok()
                 .and_then(|v| v.parse::<u64>().ok())
                 .filter(|ms| *ms > 0)
-            {
-                vm.threads
-                    .start_sampler(std::time::Duration::from_millis(ms));
-            }
+        {
+            vm.threads
+                .start_sampler(std::time::Duration::from_millis(ms));
         }
         if !is_worker && std::env::var_os("JSQ_IPC").is_some() {
             let _ = builtins::node::setup_ipc(&mut vm);
@@ -1582,26 +1615,26 @@ impl Vm {
                 .filter(|v| crate::props::accessor_parts(v).is_none()));
         }
         let mut v = self.globals.lookup(n).cloned().unwrap_or_default();
-        if let Value::Object(a) = &v {
-            if a.is_accessor() {
-                v = self.resolve_accessor(v, &Value::Undefined)?;
-            }
+        if let Value::Object(a) = &v
+            && a.is_accessor()
+        {
+            v = self.resolve_accessor(v, &Value::Undefined)?;
         }
         Ok(Some(v))
     }
 
     #[inline(never)]
     fn ctx_lookup(&mut self, record: &Rc<Obj>, n: &JsStr) -> Result<Option<Value>, Value> {
-        if let Some(lex) = self.ctx_lex(record) {
-            if let Some(v) = lex.get_own(n) {
-                if matches!(v, Value::Uninit) {
-                    return Err(self.make_error(
-                        ErrorKind::ReferenceError,
-                        format!("Cannot access '{n}' before initialization"),
-                    ));
-                }
-                return Ok(Some(v));
+        if let Some(lex) = self.ctx_lex(record)
+            && let Some(v) = lex.get_own(n)
+        {
+            if matches!(v, Value::Uninit) {
+                return Err(self.make_error(
+                    ErrorKind::ReferenceError,
+                    format!("Cannot access '{n}' before initialization"),
+                ));
             }
+            return Ok(Some(v));
         }
         let sandbox = self.ctx_part(record, "sandbox");
         if self.has_property(&sandbox, &Value::Str(n.clone()))? {
@@ -1616,22 +1649,22 @@ impl Vm {
 
     #[inline(never)]
     fn ctx_set(&mut self, record: &Rc<Obj>, n: &JsStr, v: Value) -> Result<(), Value> {
-        if let Some(lex) = self.ctx_lex(record) {
-            if let Some(old) = lex.get_own(n) {
-                if matches!(old, Value::Uninit) {
-                    return Err(self.make_error(
-                        ErrorKind::ReferenceError,
-                        format!("Cannot access '{n}' before initialization"),
-                    ));
-                }
-                if let Value::Object(consts) = self.ctx_part(record, "consts") {
-                    if matches!(consts.get_own(n), Some(Value::Bool(true))) {
-                        return Err(self.type_error("Assignment to constant variable."));
-                    }
-                }
-                lex.set_own(n.clone(), v);
-                return Ok(());
+        if let Some(lex) = self.ctx_lex(record)
+            && let Some(old) = lex.get_own(n)
+        {
+            if matches!(old, Value::Uninit) {
+                return Err(self.make_error(
+                    ErrorKind::ReferenceError,
+                    format!("Cannot access '{n}' before initialization"),
+                ));
             }
+            if let Value::Object(consts) = self.ctx_part(record, "consts")
+                && matches!(consts.get_own(n), Some(Value::Bool(true)))
+            {
+                return Err(self.type_error("Assignment to constant variable."));
+            }
+            lex.set_own(n.clone(), v);
+            return Ok(());
         }
         let sandbox = self.ctx_part(record, "sandbox");
         self.set_prop(&sandbox, n.clone(), v)
@@ -1863,11 +1896,11 @@ impl Vm {
         self.loading.pop();
         match r {
             Ok(v) if Vm::is_promise(&v) => {
-                if let Value::Object(p) = &v {
-                    if self.main_promise.is_none() {
-                        self.main_promise = Some(p.clone());
-                        self.main_url = Some(Self::module_file_url(&abs));
-                    }
+                if let Value::Object(p) = &v
+                    && self.main_promise.is_none()
+                {
+                    self.main_promise = Some(p.clone());
+                    self.main_url = Some(Self::module_file_url(&abs));
                 }
                 Ok(v)
             }
@@ -2067,10 +2100,10 @@ impl Vm {
         }
         let spec = path.display().to_string();
         let exports = self.require_path(path, &spec)?;
-        if !module::is_commonjs(path) {
-            if let Some(v) = self.modules.get(path) {
-                return Ok(v.clone());
-            }
+        if !module::is_commonjs(path)
+            && let Some(v) = self.modules.get(path)
+        {
+            return Ok(v.clone());
         }
         let ns = self.new_object();
         ns.set_own("default", exports.clone());
@@ -2309,10 +2342,10 @@ impl Vm {
         };
         let lenient = module::is_typescript(&path.display().to_string());
         for source in &link.stars {
-            if let Some(dep) = self.link_target(path, source)? {
-                if !module::is_commonjs(&dep) {
-                    self.load_proto(&dep, source)?;
-                }
+            if let Some(dep) = self.link_target(path, source)?
+                && !module::is_commonjs(&dep)
+            {
+                self.load_proto(&dep, source)?;
             }
         }
         for (source, names) in &link.imports {
@@ -2376,10 +2409,11 @@ impl Vm {
                 }
             };
         }
-        if Self::bare_specifier(spec) && !builtins::node::PREFIX_ONLY.contains(&spec) {
-            if let Some(v) = self.import_node(spec)? {
-                return Ok(v);
-            }
+        if Self::bare_specifier(spec)
+            && !builtins::node::PREFIX_ONLY.contains(&spec)
+            && let Some(v) = self.import_node(spec)?
+        {
+            return Ok(v);
         }
         let path = match module::resolve(spec, &from.dir) {
             Ok(p) => p,
@@ -2467,10 +2501,11 @@ impl Vm {
                 }
             };
         }
-        if Self::bare_specifier(spec) && !builtins::node::PREFIX_ONLY.contains(&spec) {
-            if let Some(v) = self.import_node(spec)? {
-                return Ok(unwrap(v));
-            }
+        if Self::bare_specifier(spec)
+            && !builtins::node::PREFIX_ONLY.contains(&spec)
+            && let Some(v) = self.import_node(spec)?
+        {
+            return Ok(unwrap(v));
         }
         let path = match module::resolve_with(spec, &from.dir, true) {
             Ok(p) => p,
@@ -2936,10 +2971,10 @@ impl Vm {
         let Some(brand) = brand else {
             return base.clone();
         };
-        if let Some((_, b, key)) = slot {
-            if *b == brand {
-                return key.clone();
-            }
+        if let Some((_, b, key)) = slot
+            && *b == brand
+        {
+            return key.clone();
         }
         let key: JsStr = format!("{base}:{brand}").into();
         *slot = Some((id, brand, key.clone()));
@@ -3199,10 +3234,10 @@ impl Vm {
                 let mapped = p.mapped.clone();
                 self.new_mapped_arguments(all, &mapped, ci + 2)
             };
-            if p.sloppy {
-                if let Value::Object(a) = &arr {
-                    a.set_with_attrs("callee", self.stack[ci].clone(), crate::object::NON_ENUM);
-                }
+            if p.sloppy
+                && let Value::Object(a) = &arr
+            {
+                a.set_with_attrs("callee", self.stack[ci].clone(), crate::object::NON_ENUM);
             }
             self.stack.push(arr);
         }
@@ -3248,10 +3283,10 @@ impl Vm {
         let Value::Object(o) = f else {
             return Err(self.type_error(format!("{} is not a function", inspect_plain(f))));
         };
-        if let ObjKind::Proxy(p) = &o.kind {
-            if p.callable {
-                return self.proxy_call(o, this, args);
-            }
+        if let ObjKind::Proxy(p) = &o.kind
+            && p.callable
+        {
+            return self.proxy_call(o, this, args);
         }
         match &o.kind {
             ObjKind::Function(c) => {
@@ -3378,93 +3413,90 @@ impl Vm {
         args: &[Value],
         new_target: &Value,
     ) -> Result<Value, Value> {
-        if let Value::Object(o) = callee {
-            if let ObjKind::Proxy(_) = &o.kind {
-                return self.proxy_construct(o, args, new_target);
-            }
+        if let Value::Object(o) = callee
+            && let ObjKind::Proxy(_) = &o.kind
+        {
+            return self.proxy_construct(o, args, new_target);
         }
-        if !new_target.strict_eq(callee) {
-            if let Value::Object(o) = callee {
-                if let ObjKind::Native(n) = &o.kind {
-                    if let Some(k) = n.ctor {
-                        let f = n.func;
-                        let proto = match self.get_prop(new_target, "prototype")? {
-                            Value::Object(p) => p,
-                            _ => {
-                                self.check_function_realm(new_target)?;
-                                match o.get_own("prototype") {
-                                    Some(Value::Object(p)) => p,
-                                    _ => self.realm.object_proto.clone(),
-                                }
-                            }
-                        };
-                        let this = Obj::new(k(), Some(proto.clone()));
-                        let r = f(self, Value::Object(this.clone()), args)?;
-                        if let Value::Object(ro) = &r {
-                            let reused = Rc::ptr_eq(ro, &this)
-                                || args
-                                    .iter()
-                                    .any(|a| matches!(a, Value::Object(x) if Rc::ptr_eq(x, ro)));
-                            if !reused {
-                                *ro.proto.borrow_mut() = Some(proto);
-                            }
-                            return Ok(r);
-                        }
-                        return Ok(Value::Object(this));
+        if !new_target.strict_eq(callee)
+            && let Value::Object(o) = callee
+            && let ObjKind::Native(n) = &o.kind
+            && let Some(k) = n.ctor
+        {
+            let f = n.func;
+            let proto = match self.get_prop(new_target, "prototype")? {
+                Value::Object(p) => p,
+                _ => {
+                    self.check_function_realm(new_target)?;
+                    match o.get_own("prototype") {
+                        Some(Value::Object(p)) => p,
+                        _ => self.realm.object_proto.clone(),
                     }
                 }
+            };
+            let this = Obj::new(k(), Some(proto.clone()));
+            let r = f(self, Value::Object(this.clone()), args)?;
+            if let Value::Object(ro) = &r {
+                let reused = Rc::ptr_eq(ro, &this)
+                    || args
+                        .iter()
+                        .any(|a| matches!(a, Value::Object(x) if Rc::ptr_eq(x, ro)));
+                if !reused {
+                    *ro.proto.borrow_mut() = Some(proto);
+                }
+                return Ok(r);
             }
+            return Ok(Value::Object(this));
         }
-        if let (Value::Object(o), Value::Object(nt)) = (callee, new_target) {
-            if let ObjKind::Function(c) = &o.kind {
-                if c.proto.is_constructor() && !Rc::ptr_eq(o, nt) {
-                    let proto = match self.get_prop(new_target, "prototype")? {
-                        Value::Object(p) => p,
-                        _ => {
-                            self.check_function_realm(new_target)?;
-                            if &*c.proto.module.name == "<prelude>" {
-                                self.function_prototype(o)
-                                    .unwrap_or_else(|| self.realm.object_proto.clone())
-                            } else {
-                                self.realm.object_proto.clone()
-                            }
-                        }
-                    };
-                    let this = if c.proto.kind == ProtoKind::DerivedConstructor {
-                        Value::Uninit
+        if let (Value::Object(o), Value::Object(nt)) = (callee, new_target)
+            && let ObjKind::Function(c) = &o.kind
+            && c.proto.is_constructor()
+            && !Rc::ptr_eq(o, nt)
+        {
+            let proto = match self.get_prop(new_target, "prototype")? {
+                Value::Object(p) => p,
+                _ => {
+                    self.check_function_realm(new_target)?;
+                    if &*c.proto.module.name == "<prelude>" {
+                        self.function_prototype(o)
+                            .unwrap_or_else(|| self.realm.object_proto.clone())
                     } else {
-                        let kind = self
-                            .root_ctor_kind(o)
-                            .map(|k| k())
-                            .unwrap_or(ObjKind::Ordinary);
-                        Value::Object(Obj::new(kind, Some(proto)))
-                    };
-                    let c = c.clone();
-                    let mark = self.stack.len();
-                    self.stack.push(callee.clone());
-                    self.stack.push(this);
-                    self.stack.extend_from_slice(args);
-                    self.next_new_target = Some(nt.clone());
-                    if let Err(e) = self.push_frame(c, args.len(), true) {
-                        self.next_new_target = None;
-                        self.stack.truncate(mark);
-                        return Err(e);
+                        self.realm.object_proto.clone()
                     }
-                    self.native_depth += 1;
-                    let stop = self.frames.len() - 1;
-                    let r = self.run(stop);
-                    self.native_depth -= 1;
-                    return r;
                 }
+            };
+            let this = if c.proto.kind == ProtoKind::DerivedConstructor {
+                Value::Uninit
+            } else {
+                let kind = self
+                    .root_ctor_kind(o)
+                    .map(|k| k())
+                    .unwrap_or(ObjKind::Ordinary);
+                Value::Object(Obj::new(kind, Some(proto)))
+            };
+            let c = c.clone();
+            let mark = self.stack.len();
+            self.stack.push(callee.clone());
+            self.stack.push(this);
+            self.stack.extend_from_slice(args);
+            self.next_new_target = Some(nt.clone());
+            if let Err(e) = self.push_frame(c, args.len(), true) {
+                self.next_new_target = None;
+                self.stack.truncate(mark);
+                return Err(e);
             }
+            self.native_depth += 1;
+            let stop = self.frames.len() - 1;
+            let r = self.run(stop);
+            self.native_depth -= 1;
+            return r;
         }
         let r = self.construct(callee, args)?;
-        if !new_target.strict_eq(callee) {
-            if let (Value::Object(obj), Value::Object(nt)) = (&r, new_target) {
-                if let Value::Object(p) = self.get_prop(&Value::Object(nt.clone()), "prototype")? {
-                    *obj.proto.borrow_mut() = Some(p);
-                }
-            }
+        if !new_target.strict_eq(callee)
+            && let (Value::Object(obj), Value::Object(nt)) = (&r, new_target)
+            && let Value::Object(p) = self.get_prop(&Value::Object(nt.clone()), "prototype")?
+        {
+            *obj.proto.borrow_mut() = Some(p);
         }
         Ok(r)
     }
@@ -3621,10 +3653,10 @@ impl Vm {
                     return Value::Number(a.borrow().len() as f64);
                 }
                 if let Some(i) = array_index(key) {
-                    if let Some(v) = a.borrow().get(i) {
-                        if !o.is_hole(i) {
-                            return v.clone();
-                        }
+                    if let Some(v) = a.borrow().get(i)
+                        && !o.is_hole(i)
+                    {
+                        return v.clone();
                     }
                     if !self.proto_indices {
                         return Value::Undefined;
@@ -3749,10 +3781,10 @@ impl Vm {
                 if key == "length" {
                     return Value::Number(len16_rc(s) as f64);
                 }
-                if let Some(i) = array_index(key) {
-                    if let Some(c) = char_at16_rc(s, i) {
-                        return Value::from(c);
-                    }
+                if let Some(i) = array_index(key)
+                    && let Some(c) = char_at16_rc(s, i)
+                {
+                    return Value::from(c);
                 }
             }
             ObjKind::Set(s) if key == "size" => {
@@ -3797,14 +3829,14 @@ impl Vm {
                 "Cannot access binding before initialization",
             ));
         }
-        if let Value::Object(a) = &v {
-            if let ObjKind::Accessor(acc) = &a.kind {
-                let getter = acc.get.borrow().clone();
-                if getter.is_undefined() {
-                    return Ok(Value::Undefined);
-                }
-                return self.call_value(&getter, receiver.clone(), &[]);
+        if let Value::Object(a) = &v
+            && let ObjKind::Accessor(acc) = &a.kind
+        {
+            let getter = acc.get.borrow().clone();
+            if getter.is_undefined() {
+                return Ok(Value::Undefined);
             }
+            return self.call_value(&getter, receiver.clone(), &[]);
         }
         Ok(v)
     }
@@ -3818,10 +3850,10 @@ impl Vm {
                 return None;
             }
             if let Some(v) = c.props.borrow().get(key) {
-                if let Value::Object(a) = v {
-                    if let ObjKind::Accessor(acc) = &a.kind {
-                        return Some(acc.set.borrow().clone());
-                    }
+                if let Value::Object(a) = v
+                    && let ObjKind::Accessor(acc) = &a.kind
+                {
+                    return Some(acc.set.borrow().clone());
                 }
                 return None;
             }
@@ -3864,10 +3896,10 @@ impl Vm {
                     return self.op_get(o, key, v);
                 }
                 let raw = self.get_obj(o, key);
-                if key == "caller" {
-                    if let Some(c) = self.legacy_caller(o, &raw) {
-                        return Ok(c);
-                    }
+                if key == "caller"
+                    && let Some(c) = self.legacy_caller(o, &raw)
+                {
+                    return Ok(c);
                 }
                 self.resolve_accessor(raw, v)
             }
@@ -3954,20 +3986,20 @@ impl Vm {
     }
 
     pub fn set_prop(&mut self, target: &Value, key: JsStr, val: Value) -> Result<(), Value> {
-        if let Value::Object(o) = target {
-            if matches!(o.kind, ObjKind::Error) && matches!(&*key, "name" | "message") {
-                let old = crate::inspect::error_header(o);
-                self.set_prop_inner(target, key, val)?;
-                let new = crate::inspect::error_header(o);
-                if old != new {
-                    if let Some(Value::Str(stack)) = o.get_own("stack") {
-                        if let Some(rest) = stack.strip_prefix(&*old) {
-                            o.set_hidden("stack", format!("{new}{rest}").into());
-                        }
-                    }
-                }
-                return Ok(());
+        if let Value::Object(o) = target
+            && matches!(o.kind, ObjKind::Error)
+            && matches!(&*key, "name" | "message")
+        {
+            let old = crate::inspect::error_header(o);
+            self.set_prop_inner(target, key, val)?;
+            let new = crate::inspect::error_header(o);
+            if old != new
+                && let Some(Value::Str(stack)) = o.get_own("stack")
+                && let Some(rest) = stack.strip_prefix(&*old)
+            {
+                o.set_hidden("stack", format!("{new}{rest}").into());
             }
+            return Ok(());
         }
         self.set_prop_inner(target, key, val)
     }
@@ -4004,34 +4036,33 @@ impl Vm {
                     }
                     return Ok(());
                 }
-                if self.accessors_used
+                if (self.accessors_used
                     || o.is_callable()
-                    || !matches!(o.kind, ObjKind::Ordinary | ObjKind::Array(_))
+                    || !matches!(o.kind, ObjKind::Ordinary | ObjKind::Array(_)))
+                    && let Some(setter) = self.accessor_setter(o, &key)
                 {
-                    if let Some(setter) = self.accessor_setter(o, &key) {
-                        if setter.is_callable() {
-                            self.call_value(&setter, target.clone(), &[val])?;
-                            return Ok(());
-                        }
-                        return Err(self.assign_error(format!(
-                            "Cannot set property {key} of {} which has only a getter",
-                            inspect_plain(target)
-                        )));
-                    }
-                }
-                if let ObjKind::RegExp(r) = &o.kind {
-                    if &*key == "lastIndex" {
-                        if o.flags.get() & crate::object::ELEMENTS_FROZEN != 0 {
-                            return Err(self.read_only_error(o, &key));
-                        }
-                        *r.last_index.borrow_mut() = val;
+                    if setter.is_callable() {
+                        self.call_value(&setter, target.clone(), &[val])?;
                         return Ok(());
                     }
+                    return Err(self.assign_error(format!(
+                        "Cannot set property {key} of {} which has only a getter",
+                        inspect_plain(target)
+                    )));
                 }
-                if let ObjKind::Primitive(Value::Str(s)) = &o.kind {
-                    if &*key == "length" || array_index(&key).is_some_and(|i| i < len16(s)) {
+                if let ObjKind::RegExp(r) = &o.kind
+                    && &*key == "lastIndex"
+                {
+                    if o.flags.get() & crate::object::ELEMENTS_FROZEN != 0 {
                         return Err(self.read_only_error(o, &key));
                     }
+                    *r.last_index.borrow_mut() = val;
+                    return Ok(());
+                }
+                if let ObjKind::Primitive(Value::Str(s)) = &o.kind
+                    && (&*key == "length" || array_index(&key).is_some_and(|i| i < len16(s)))
+                {
+                    return Err(self.read_only_error(o, &key));
                 }
                 if let ObjKind::Arguments(m) = &o.kind {
                     self.set_mapped_arg(m, &key, &val);
@@ -4125,29 +4156,27 @@ impl Vm {
                 {
                     return Err(self.read_only_error(o, &key));
                 }
-                if &*key == "__proto__" && !o.has_own("__proto__") {
-                    if let Some(found) = o.get_chain("__proto__") {
-                        if found.strict_eq(&self.proto_accessor) {
-                            let proto = match val {
-                                Value::Object(p) => Some(p),
-                                Value::Null => None,
-                                _ => return Ok(()),
-                            };
-                            if !self.op_set_prototype_of(o, proto)? {
-                                return Err(self.type_error("Cyclic __proto__ value"));
-                            }
-                            return Ok(());
-                        }
+                if &*key == "__proto__"
+                    && !o.has_own("__proto__")
+                    && let Some(found) = o.get_chain("__proto__")
+                    && found.strict_eq(&self.proto_accessor)
+                {
+                    let proto = match val {
+                        Value::Object(p) => Some(p),
+                        Value::Null => None,
+                        _ => return Ok(()),
+                    };
+                    if !self.op_set_prototype_of(o, proto)? {
+                        return Err(self.type_error("Cyclic __proto__ value"));
                     }
+                    return Ok(());
                 }
-                if &*key == "prototype" {
-                    if let ObjKind::Function(f) = &o.kind {
-                        if !o.has_own("prototype")
-                            && (f.proto.is_constructor() || f.proto.is_generator)
-                        {
-                            let _ = self.get_obj(o, "prototype");
-                        }
-                    }
+                if &*key == "prototype"
+                    && let ObjKind::Function(f) = &o.kind
+                    && !o.has_own("prototype")
+                    && (f.proto.is_constructor() || f.proto.is_generator)
+                {
+                    let _ = self.get_obj(o, "prototype");
                 }
                 let mut props = o.props.borrow_mut();
                 let hit = props
@@ -4216,11 +4245,11 @@ impl Vm {
             if self.op_set(&proto, key.clone(), val, target)? {
                 return Ok(());
             }
-        } else if let Some(setter) = self.accessor_setter(&proto, &key) {
-            if setter.is_callable() {
-                self.call_value(&setter, target.clone(), &[val])?;
-                return Ok(());
-            }
+        } else if let Some(setter) = self.accessor_setter(&proto, &key)
+            && setter.is_callable()
+        {
+            self.call_value(&setter, target.clone(), &[val])?;
+            return Ok(());
         }
         Err(self.assign_error(format!(
             "Cannot create property '{}' on {} '{}'",
@@ -4261,16 +4290,17 @@ impl Vm {
             if i as f64 == *n {
                 match obj {
                     Value::Object(o) => {
-                        if let ObjKind::Array(a) = &o.kind {
-                            if o.flags.get() & crate::object::SLOW_ELEMENTS == 0 && i < 4294967295 {
-                                if let Some(v) = a.borrow().get(i) {
-                                    if !o.is_hole(i) {
-                                        return Ok(v.clone());
-                                    }
-                                }
-                                if !self.proto_indices {
-                                    return Ok(Value::Undefined);
-                                }
+                        if let ObjKind::Array(a) = &o.kind
+                            && o.flags.get() & crate::object::SLOW_ELEMENTS == 0
+                            && i < 4294967295
+                        {
+                            if let Some(v) = a.borrow().get(i)
+                                && !o.is_hole(i)
+                            {
+                                return Ok(v.clone());
+                            }
+                            if !self.proto_indices {
+                                return Ok(Value::Undefined);
                             }
                         }
                         if let ObjKind::Typed(t) = &o.kind {
@@ -4609,10 +4639,11 @@ impl Vm {
                 if &*k == "length" {
                     return Ok(true);
                 }
-                if let Some(i) = array_index(&k) {
-                    if i < a.borrow().len() && !o.is_hole(i) {
-                        return Ok(true);
-                    }
+                if let Some(i) = array_index(&k)
+                    && i < a.borrow().len()
+                    && !o.is_hole(i)
+                {
+                    return Ok(true);
                 }
             }
             ObjKind::Primitive(Value::Str(s)) => {
@@ -5028,10 +5059,10 @@ impl Vm {
         };
         let (iterator, next) = protocol;
         let step = self.protocol_step(&iterator, &next);
-        if !matches!(step, Ok(Some(_))) {
-            if let ObjKind::Iter(state) = &o.kind {
-                *state.borrow_mut() = IterState::List(Vec::new(), 0);
-            }
+        if !matches!(step, Ok(Some(_)))
+            && let ObjKind::Iter(state) = &o.kind
+        {
+            *state.borrow_mut() = IterState::List(Vec::new(), 0);
         }
         step
     }
@@ -5097,15 +5128,13 @@ impl Vm {
     }
 
     pub fn iterate(&mut self, v: &Value) -> Result<Vec<Value>, Value> {
-        if let Value::Object(o) = v {
-            if let ObjKind::Array(a) = &o.kind {
-                if self.builtin_iterable(o)
-                    && o.flags.get() & crate::object::SLOW_ELEMENTS == 0
-                    && !(self.proto_indices && o.has_holes())
-                {
-                    return Ok(a.borrow().clone());
-                }
-            }
+        if let Value::Object(o) = v
+            && let ObjKind::Array(a) = &o.kind
+            && self.builtin_iterable(o)
+            && o.flags.get() & crate::object::SLOW_ELEMENTS == 0
+            && !(self.proto_indices && o.has_holes())
+        {
+            return Ok(a.borrow().clone());
         }
         let it = self.get_iterator(v)?;
         let mut out = Vec::new();
@@ -5122,10 +5151,11 @@ impl Vm {
         }
         let id = props.shape_id();
         let at = Rc::as_ptr(p) as usize;
-        if let Some(&(sid, ep, r)) = self.for_in_protos.get(&at) {
-            if sid == id && ep == epoch {
-                return r;
-            }
+        if let Some(&(sid, ep, r)) = self.for_in_protos.get(&at)
+            && sid == id
+            && ep == epoch
+        {
+            return r;
         }
         let r = props.has_enumerable_string_key();
         drop(props);
@@ -5202,10 +5232,10 @@ impl Vm {
                 keys.push(Value::Str("length".into()));
             }
             if o.is_callable() {
-                if let ObjKind::Function(c) = &o.kind {
-                    if c.proto.is_constructor() {
-                        let _ = self.get_obj(o, "prototype");
-                    }
+                if let ObjKind::Function(c) = &o.kind
+                    && c.proto.is_constructor()
+                {
+                    let _ = self.get_obj(o, "prototype");
                 }
                 let mut indices: Vec<(usize, JsStr)> = o
                     .props
@@ -5250,27 +5280,27 @@ impl Vm {
 
     pub fn own_keys(&self, v: &Value) -> Vec<Value> {
         let mut keys = Vec::new();
-        if let Value::Object(o) = v {
-            if let ObjKind::Array(a) = &o.kind {
-                let slow = o.flags.get() & crate::object::SLOW_ELEMENTS != 0;
-                if o.has_holes() || slow {
-                    for i in 0..a.borrow().len() {
-                        if o.is_hole(i) {
-                            continue;
-                        }
-                        let k: JsStr = i.to_string().into();
-                        if slow && o.props.borrow().attrs(&k) & crate::object::NON_ENUM != 0 {
-                            continue;
-                        }
-                        keys.push(Value::Str(k));
+        if let Value::Object(o) = v
+            && let ObjKind::Array(a) = &o.kind
+        {
+            let slow = o.flags.get() & crate::object::SLOW_ELEMENTS != 0;
+            if o.has_holes() || slow {
+                for i in 0..a.borrow().len() {
+                    if o.is_hole(i) {
+                        continue;
                     }
-                    for (k, _) in o.props.borrow().enumerable() {
-                        if !is_symbol_key(k) {
-                            keys.push(Value::Str(k.clone()));
-                        }
+                    let k: JsStr = i.to_string().into();
+                    if slow && o.props.borrow().attrs(&k) & crate::object::NON_ENUM != 0 {
+                        continue;
                     }
-                    return keys;
+                    keys.push(Value::Str(k));
                 }
+                for (k, _) in o.props.borrow().enumerable() {
+                    if !is_symbol_key(k) {
+                        keys.push(Value::Str(k.clone()));
+                    }
+                }
+                return keys;
             }
         }
         match v {
@@ -5282,10 +5312,10 @@ impl Vm {
                 }
             }
             Value::Object(o) if matches!(o.kind, ObjKind::Proxy(_)) => {
-                if let ObjKind::Proxy(p) = &o.kind {
-                    if let Some(t) = p.target.borrow().clone() {
-                        return self.own_keys(&Value::Object(t));
-                    }
+                if let ObjKind::Proxy(p) = &o.kind
+                    && let Some(t) = p.target.borrow().clone()
+                {
+                    return self.own_keys(&Value::Object(t));
                 }
             }
             Value::Object(o) => {
@@ -5406,6 +5436,407 @@ impl Vm {
     }
 
     pub fn run(&mut self, stop: usize) -> Result<Value, Value> {
+        let prev = std::mem::replace(&mut self.step_one, false);
+        let r = self.run_loop(stop);
+        self.step_one = prev;
+        r
+    }
+
+    fn jit_compile(&mut self, proto: &FunctionProto) {
+        if self.jit.is_none() {
+            match crate::jit::Jit::new() {
+                Some(j) => self.jit = Some(Box::new(j)),
+                None => {
+                    self.jit_on = false;
+                    return;
+                }
+            }
+        }
+        let ok = self.jit.as_mut().is_some_and(|j| j.compile(proto));
+        if std::env::var_os("JSQ_JIT_LOG").is_some() {
+            eprintln!(
+                "jit {} {}",
+                if ok { "compiled" } else { "rejected" },
+                proto.name
+            );
+        }
+        proto.jit.state.set(if ok {
+            crate::jit::READY
+        } else {
+            crate::jit::REJECTED
+        });
+    }
+
+    fn enter_jit(&mut self, proto: &FunctionProto, base: usize, ip: usize, stop: usize) -> u64 {
+        let info = &proto.jit;
+        let need = base + info.max.get() as usize + 8;
+        if self.stack.capacity() < need {
+            self.stack.reserve(need - self.stack.len());
+        }
+        let mut ctx = crate::jit::JitCtx {
+            vm: self as *mut Vm,
+            bp: unsafe { self.stack.as_mut_ptr().add(base) },
+            base,
+            need,
+            interrupt: std::sync::Arc::as_ptr(&self.threads.interrupt) as *const u8,
+        };
+        let prev = std::mem::replace(&mut self.jit_stop, stop);
+        let f: crate::jit::JitFn = unsafe { std::mem::transmute(info.code.get()) };
+        let r = unsafe { f(&mut ctx, ip as u32) };
+        self.jit_stop = prev;
+        if r >> 32 == 0 {
+            let nip = (r & 0xffff_ffff) as usize;
+            let fi = self.frames.len() - 1;
+            let d = info.depth_at(nip).unwrap_or(self.stack.len() - base);
+            unsafe { self.stack.set_len(base + d) };
+            self.frames[fi].ip = nip;
+        }
+        r
+    }
+
+    pub(crate) fn jit_refresh(&mut self, ctx: &mut crate::jit::JitCtx) {
+        if self.stack.capacity() < ctx.need {
+            self.stack.reserve(ctx.need - self.stack.len());
+        }
+        ctx.bp = unsafe { self.stack.as_mut_ptr().add(ctx.base) };
+    }
+
+    fn jit_quick(&mut self, base: usize, ip: usize) -> bool {
+        let fi = self.frames.len() - 1;
+        let cl = self.frames[fi].closure.clone();
+        let proto = &cl.proto;
+        let op = proto.code[ip];
+        match op {
+            Op::Const(k) => {
+                let v = proto.consts[k as usize].clone();
+                self.stack.push(v);
+            }
+            Op::GetLocal(s) | Op::GetLocalUndef(s) | Op::GetLocalChecked(s, _) => {
+                let at = base + s as usize;
+                self.flush_builder(at);
+                if matches!(self.stack[at], Value::Uninit) && matches!(op, Op::GetLocalChecked(..))
+                {
+                    return false;
+                }
+                let v = self.stack[at].clone();
+                self.stack.push(v);
+                if matches!(op, Op::GetLocalUndef(_)) {
+                    self.stack.push(Value::Undefined);
+                }
+            }
+            Op::SetLocal(s) => {
+                let at = base + s as usize;
+                self.drop_builder(at);
+                let v = self.stack.last().cloned().unwrap_or_default();
+                self.stack[at] = v;
+            }
+            Op::StoreLocal(s) => {
+                let at = base + s as usize;
+                self.drop_builder(at);
+                let v = self.stack.pop().unwrap_or_default();
+                self.stack[at] = v;
+            }
+            Op::Pop => {
+                self.stack.pop();
+            }
+            Op::GetUpval(i) | Op::GetUpvalChecked(i, _) | Op::GetUpvalCheckedUndef(i, _) => {
+                let v = match &*cl.upvalues[i as usize].borrow() {
+                    Upvalue::Open(idx) => self.stack[*idx].clone(),
+                    Upvalue::Closed(v) => v.clone(),
+                };
+                if matches!(v, Value::Uninit) && !matches!(op, Op::GetUpval(_)) {
+                    return false;
+                }
+                self.stack.push(v);
+                if matches!(op, Op::GetUpvalCheckedUndef(..)) {
+                    self.stack.push(Value::Undefined);
+                }
+            }
+            Op::GetProp(k) | Op::GetMethod(k) => {
+                let ic = &proto.ics[proto.ic_index[ip] as usize];
+                return self.fast_get(&proto.consts[k as usize], ic, op);
+            }
+            Op::GetLocalProp(s, k) | Op::GetLocalMethod(s, k) => {
+                self.flush_builder(base + s as usize);
+                let ic = &proto.ics[proto.ic_index[ip] as usize];
+                return self.fast_get_local(base + s as usize, &proto.consts[k as usize], ic, op);
+            }
+            Op::StoreLocalProp(_, k) | Op::SetProp(k) | Op::StoreProp(k) => {
+                let at = match op {
+                    Op::StoreLocalProp(s, _) => base + s as usize,
+                    _ => self.stack.len() - 2,
+                };
+                let ic = &proto.ics[proto.ic_index[ip] as usize];
+                if !self.fast_put(at, &proto.consts[k as usize], ic) {
+                    return false;
+                }
+                match op {
+                    Op::SetProp(_) => {
+                        let at = self.stack.len() - 2;
+                        self.stack.swap_remove(at);
+                    }
+                    Op::StoreProp(_) => {
+                        self.stack.pop();
+                        self.stack.pop();
+                    }
+                    _ => {
+                        self.stack.pop();
+                    }
+                }
+            }
+            Op::NewObject => {
+                if crate::gc::due() {
+                    return false;
+                }
+                let o = self.new_object();
+                self.stack.push(Value::Object(o));
+            }
+            Op::InitProp(k) => {
+                let Value::Str(key) = &proto.consts[k as usize] else {
+                    return false;
+                };
+                let v = self.stack.pop().unwrap_or_default();
+                if let Some(Value::Object(o)) = self.stack.last() {
+                    o.props.borrow_mut().insert(key.clone(), v);
+                }
+            }
+            Op::NewArray(n) => self.fast_new_array(n as usize),
+            Op::ArrayPush => {
+                let v = self.stack.pop().unwrap_or_default();
+                if let Some(Value::Object(o)) = self.stack.last()
+                    && let ObjKind::Array(a) = &o.kind
+                {
+                    a.borrow_mut().push(v);
+                }
+            }
+            Op::GetGlobal(k) => {
+                let cached = proto.global_cache[k as usize].get();
+                if cached == u32::MAX || self.global_accessors {
+                    return false;
+                }
+                let v = self.globals.at(cached).clone();
+                if matches!(v, Value::Uninit) {
+                    return false;
+                }
+                self.stack.push(v);
+            }
+            Op::Template(n) => return self.fast_template(n as usize),
+            Op::GetIndex => {
+                let n = self.stack.len();
+                let x = match (&self.stack[n - 2], &self.stack[n - 1]) {
+                    (Value::Object(o), Value::Number(k)) => number_element(o, *k),
+                    _ => None,
+                };
+                let Some(x) = x else {
+                    return false;
+                };
+                self.stack.truncate(n - 2);
+                push_number(&mut self.stack, x);
+            }
+            Op::TryBegin(t, slot) => self.handlers.push(Handler {
+                frame: fi,
+                stack_len: base + slot as usize,
+                catch_ip: t as usize,
+                guard: false,
+            }),
+            Op::TryEnd => {
+                self.handlers.pop();
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    pub(crate) fn jit_step(
+        &mut self,
+        ctx: &mut crate::jit::JitCtx,
+        ip: usize,
+        depth: usize,
+    ) -> u64 {
+        let fi = self.frames.len() - 1;
+        unsafe { self.stack.set_len(ctx.base + depth) };
+        if self.jit_quick(ctx.base, ip) {
+            self.jit_refresh(ctx);
+            return (ip + 1) as u64;
+        }
+        unsafe { self.stack.set_len(ctx.base + depth) };
+        self.frames[fi].ip = ip;
+        let prev = std::mem::replace(&mut self.step_one, true);
+        let r = self.run_full(self.jit_stop);
+        self.step_one = prev;
+        match r {
+            Ok(v) => {
+                if !std::mem::take(&mut self.fast_resume) {
+                    self.jit_value = Some(v);
+                    return crate::jit::RETURNED;
+                }
+                if self.frames.len() != fi + 1 {
+                    return crate::jit::RELOAD;
+                }
+                self.jit_refresh(ctx);
+                self.frames[fi].ip as u64
+            }
+            Err(e) => {
+                self.jit_error = Some(e);
+                crate::jit::ERR
+            }
+        }
+    }
+
+    pub(crate) fn jit_call(
+        &mut self,
+        ctx: &mut crate::jit::JitCtx,
+        ip: usize,
+        depth: usize,
+        argc: usize,
+    ) -> u64 {
+        let fi = self.frames.len() - 1;
+        unsafe { self.stack.set_len(ctx.base + depth) };
+        let ci = ctx.base + depth - argc - 2;
+        if self.native_depth >= 1000 || crate::gc::due() || !self.stack[ci].is_callable() {
+            self.frames[fi].ip = ip;
+            return ip as u64;
+        }
+        self.frames[fi].ip = ip + 1;
+        let plain = match &self.stack[ci] {
+            Value::Object(o) => match &o.kind {
+                ObjKind::Function(c)
+                    if c.proto.plain
+                        && (!c.proto.sloppy_this
+                            || c.proto.kind == ProtoKind::Arrow
+                            || self.stack[ci + 1].is_object())
+                        && self.frames.len() < MAX_FRAMES
+                        && !self.threads.interrupted() =>
+                {
+                    Some(c.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let r = match plain {
+            Some(c) => {
+                let np = c.proto.num_params as usize;
+                if argc < np {
+                    self.stack.resize(ci + 2 + np, Value::Undefined);
+                } else if argc > np {
+                    self.stack.truncate(ci + 2 + np);
+                }
+                let callee = c.clone();
+                self.push_plain_frame(c, ci + 1);
+                self.native_depth += 1;
+                let r = self.jit_invoke(&callee.proto, ci + 1, fi + 1);
+                self.native_depth -= 1;
+                match r {
+                    Invoke::Done(v) => {
+                        let _: () = match v {
+                            Value::Number(x) => push_number(&mut self.stack, x),
+                            v => self.stack.push(v),
+                        };
+                        Ok(())
+                    }
+                    Invoke::Reload => return crate::jit::RELOAD,
+                    Invoke::Unwound => return crate::jit::ERR,
+                    Invoke::Returned => return crate::jit::RETURNED,
+                    Invoke::Failed(e) => Err(e),
+                }
+            }
+            None => self.fast_native_call(ci),
+        };
+        match r {
+            Ok(()) => {
+                self.jit_refresh(ctx);
+                (ip + 1) as u64
+            }
+            Err(e) => match self.unwind(e, self.jit_stop) {
+                Ok(()) => crate::jit::RELOAD,
+                Err(e) => {
+                    self.jit_error = Some(e);
+                    crate::jit::ERR
+                }
+            },
+        }
+    }
+
+    fn jit_invoke(&mut self, proto: &FunctionProto, base: usize, frame: usize) -> Invoke {
+        let info = &proto.jit;
+        if self.jit_on && info.state.get() == crate::jit::COLD {
+            let h = info.hot.get() + 1;
+            info.hot.set(h);
+            if h >= self.jit_threshold {
+                self.jit_compile(proto);
+            }
+        }
+        if !self.jit_on
+            || info.state.get() != crate::jit::READY
+            || info.entry_at(0) != Some(self.stack.len() - base)
+        {
+            return Invoke::from(self.run(frame));
+        }
+        let r = self.enter_jit(proto, base, 0, self.jit_stop);
+        match r >> 32 {
+            0 => {
+                let nip = (r & 0xffff_ffff) as usize;
+                if proto.code.get(nip) == Some(&Op::Return)
+                    && !self.frames[frame].construct
+                    && self.frames.len() == frame + 1
+                {
+                    let result = self.stack.pop().unwrap_or_default();
+                    self.close_upvalues(base);
+                    while self.handlers.last().is_some_and(|h| h.frame >= frame) {
+                        self.handlers.pop();
+                    }
+                    self.prune_builders(base - 1);
+                    self.drop_top_frame();
+                    self.stack.truncate(base - 1);
+                    return Invoke::Done(result);
+                }
+                Invoke::from(self.run(frame))
+            }
+            1 => {
+                if self.frames.len() > frame {
+                    Invoke::from(self.run(frame))
+                } else {
+                    Invoke::Reload
+                }
+            }
+            2 => Invoke::Unwound,
+            _ => Invoke::Returned,
+        }
+    }
+
+    pub(crate) fn jit_upval(
+        &mut self,
+        ctx: &mut crate::jit::JitCtx,
+        index: usize,
+        slot: usize,
+    ) -> u64 {
+        let fi = self.frames.len() - 1;
+        let v = match &*self.frames[fi].closure.upvalues[index].borrow() {
+            Upvalue::Open(idx) => self.stack[*idx].clone(),
+            Upvalue::Closed(v) => v.clone(),
+        };
+        let uninit = matches!(v, Value::Uninit);
+        unsafe { std::ptr::write(ctx.bp.add(slot), v) };
+        uninit as u64
+    }
+
+    pub(crate) fn jit_pop_to(
+        &mut self,
+        ctx: &mut crate::jit::JitCtx,
+        to: usize,
+        depth: usize,
+    ) -> u64 {
+        unsafe { self.stack.set_len(ctx.base + depth) };
+        let to = ctx.base + to;
+        self.close_upvalues(to);
+        self.prune_builders(to);
+        self.stack.truncate(to);
+        self.jit_refresh(ctx);
+        0
+    }
+
+    fn run_loop(&mut self, stop: usize) -> Result<Value, Value> {
         'frame: loop {
             let fi = self.frames.len() - 1;
             let cl: &Closure = unsafe { &*Rc::as_ptr(&self.frames[fi].closure) };
@@ -5413,6 +5844,31 @@ impl Vm {
             let code: *const Op = proto.code.as_ptr();
             let consts: *const Value = proto.consts.as_ptr();
             let base = self.frames[fi].base;
+            if self.jit_on {
+                let info = &proto.jit;
+                if info.state.get() == crate::jit::COLD {
+                    let h = info.hot.get() + 1;
+                    info.hot.set(h);
+                    if h >= self.jit_threshold {
+                        self.jit_compile(proto);
+                    }
+                }
+                if info.state.get() == crate::jit::READY {
+                    let ip0 = self.frames[fi].ip;
+                    if info
+                        .entry_at(ip0)
+                        .is_some_and(|d| self.stack.len() == base + d)
+                    {
+                        let r = self.enter_jit(proto, base, ip0, stop);
+                        match r >> 32 {
+                            0 => {}
+                            1 => continue 'frame,
+                            2 => return Err(self.jit_error.take().unwrap_or_default()),
+                            _ => return Ok(self.jit_value.take().unwrap_or_default()),
+                        }
+                    }
+                }
+            }
             let mut pc: *const Op = unsafe { code.add(self.frames[fi].ip) };
             let mut stk: *mut Value = self.stack.as_mut_ptr();
             let mut bp: *mut Value = unsafe { stk.add(base) };
@@ -5618,12 +6074,12 @@ impl Vm {
                         }
                     }
                     Op::SetLocal(s) => {
-                        if let Value::Number(x) = *top!() {
-                            if let Value::Number(d) = local!(s) {
-                                *d = x;
-                                pc = unsafe { pc.add(1) };
-                                continue;
-                            }
+                        if let Value::Number(x) = *top!()
+                            && let Value::Number(d) = local!(s)
+                        {
+                            *d = x;
+                            pc = unsafe { pc.add(1) };
+                            continue;
                         }
                         if !self.builders.is_empty() {
                             sync!();
@@ -5633,13 +6089,13 @@ impl Vm {
                         *local!(s) = v;
                     }
                     Op::StoreLocal(s) => {
-                        if let Value::Number(x) = *top!() {
-                            if let Value::Number(d) = local!(s) {
-                                *d = x;
-                                sp = unsafe { sp.sub(1) };
-                                pc = unsafe { pc.add(1) };
-                                continue;
-                            }
+                        if let Value::Number(x) = *top!()
+                            && let Value::Number(d) = local!(s)
+                        {
+                            *d = x;
+                            sp = unsafe { sp.sub(1) };
+                            pc = unsafe { pc.add(1) };
+                            continue;
                         }
                         if !self.builders.is_empty() {
                             sync!();
@@ -5761,8 +6217,27 @@ impl Vm {
                         }
                     }
                     Op::Jump(t) => {
-                        if unsafe { code.add(t as usize) } <= pc && self.threads.interrupted() {
-                            break;
+                        if unsafe { code.add(t as usize) } <= pc {
+                            if self.threads.interrupted() {
+                                break;
+                            }
+                            if self.jit_on && proto.jit.state.get() != crate::jit::REJECTED {
+                                let info = &proto.jit;
+                                if info.state.get() == crate::jit::COLD {
+                                    let h = info.hot.get() + 1;
+                                    info.hot.set(h);
+                                    if h >= self.jit_threshold {
+                                        sync!();
+                                        self.jit_compile(proto);
+                                        resync!();
+                                    }
+                                }
+                                if info.state.get() == crate::jit::READY {
+                                    sync!();
+                                    self.frames[fi].ip = t as usize;
+                                    continue 'frame;
+                                }
+                            }
                         }
                         pc = unsafe { code.add(t as usize) };
                         continue;
@@ -5967,10 +6442,10 @@ impl Vm {
                     }
                     Op::ArrayPush => {
                         let v = pop!();
-                        if let Value::Object(o) = top!() {
-                            if let ObjKind::Array(a) = &o.kind {
-                                a.borrow_mut().push(v);
-                            }
+                        if let Value::Object(o) = top!()
+                            && let ObjKind::Array(a) = &o.kind
+                        {
+                            a.borrow_mut().push(v);
                         }
                     }
                     Op::GetGlobal(k) => {
@@ -6254,11 +6729,11 @@ impl Vm {
         let optr = match &self.stack[top] {
             Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => Rc::as_ptr(o),
             v => {
-                if matches!(op, Op::GetProp(_)) {
-                    if let Some(n) = fast_length(v, key) {
-                        self.stack[top] = Value::Number(n);
-                        return true;
-                    }
+                if matches!(op, Op::GetProp(_))
+                    && let Some(n) = fast_length(v, key)
+                {
+                    self.stack[top] = Value::Number(n);
+                    return true;
                 }
                 self.method_holder(v, key)
             }
@@ -6285,11 +6760,11 @@ impl Vm {
         let optr = match &self.stack[abs] {
             Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => Rc::as_ptr(o),
             v => {
-                if matches!(op, Op::GetLocalProp(..)) {
-                    if let Some(n) = fast_length(v, key) {
-                        push_fast(&mut self.stack, Value::Number(n));
-                        return true;
-                    }
+                if matches!(op, Op::GetLocalProp(..))
+                    && let Some(n) = fast_length(v, key)
+                {
+                    push_fast(&mut self.stack, Value::Number(n));
+                    return true;
                 }
                 self.method_holder(v, key)
             }
@@ -6464,7 +6939,7 @@ impl Vm {
         loop {
             debug_assert!(ip < proto.code.len());
             let op = unsafe { *code.add(ip) };
-            if stepped && op.is_fast() {
+            if stepped && (self.step_one || op.is_fast()) {
                 self.frames[fi].ip = ip;
                 self.fast_resume = true;
                 return Ok(Value::Undefined);
@@ -6578,11 +7053,11 @@ impl Vm {
                 Op::SetLocal(s) => {
                     let dst = base + s as usize;
                     let top = self.stack.len() - 1;
-                    if let Value::Number(x) = self.stack[top] {
-                        if let Value::Number(d) = &mut self.stack[dst] {
-                            *d = x;
-                            continue;
-                        }
+                    if let Value::Number(x) = self.stack[top]
+                        && let Value::Number(d) = &mut self.stack[dst]
+                    {
+                        *d = x;
+                        continue;
                     }
                     self.drop_builder(dst);
                     copy_slot(&mut self.stack, top, dst);
@@ -6695,10 +7170,10 @@ impl Vm {
                         let obj = self.stack[abs].clone();
                         self.silent_fail = false;
                         self.frames[fi].ip = ip;
-                        if let Err(e) = self.set_prop(&obj, name!(k), val) {
-                            if !(proto.sloppy && self.silent_fail) {
-                                throw!(e);
-                            }
+                        if let Err(e) = self.set_prop(&obj, name!(k), val)
+                            && !(proto.sloppy && self.silent_fail)
+                        {
+                            throw!(e);
                         }
                         if let Value::Object(o) = &obj {
                             ic_fill_write(o, &proto.consts[k as usize], ic);
@@ -6755,12 +7230,11 @@ impl Vm {
                             if matches!(v, Value::Uninit) {
                                 throw!(self.tdz_error(proto, k));
                             }
-                            if self.global_accessors {
-                                if let Value::Object(a) = &v {
-                                    if a.is_accessor() {
-                                        v = tri!(self.resolve_accessor(v, &Value::Undefined));
-                                    }
-                                }
+                            if self.global_accessors
+                                && let Value::Object(a) = &v
+                                && a.is_accessor()
+                            {
+                                v = tri!(self.resolve_accessor(v, &Value::Undefined));
                             }
                             self.stack.push(v);
                         }
@@ -6832,10 +7306,10 @@ impl Vm {
                             if self.global_accessors || self.globals.readonly {
                                 self.silent_fail = false;
                                 self.frames[fi].ip = ip;
-                                if let Err(e) = self.set_global_prop(n.clone(), v) {
-                                    if !(proto.sloppy && self.silent_fail) {
-                                        throw!(e);
-                                    }
+                                if let Err(e) = self.set_global_prop(n.clone(), v)
+                                    && !(proto.sloppy && self.silent_fail)
+                                {
+                                    throw!(e);
                                 }
                                 continue;
                             }
@@ -6893,10 +7367,10 @@ impl Vm {
                 Op::EvalVar(k) => {
                     let obj = pop!();
                     let n = name!(k);
-                    if let Value::Object(o) = &obj {
-                        if !o.has_own(&n) {
-                            o.set_own(n, Value::Undefined);
-                        }
+                    if let Value::Object(o) = &obj
+                        && !o.has_own(&n)
+                    {
+                        o.set_own(n, Value::Undefined);
                     }
                 }
                 Op::DeleteGlobal(k) => {
@@ -6938,11 +7412,11 @@ impl Vm {
                             .get_own(&n)
                             .filter(|v| crate::props::accessor_parts(v).is_none());
                     }
-                    if let Some(Value::Object(a)) = &found {
-                        if a.is_accessor() {
-                            let raw = found.take().unwrap_or_default();
-                            found = Some(tri!(self.resolve_accessor(raw, &Value::Undefined)));
-                        }
+                    if let Some(Value::Object(a)) = &found
+                        && a.is_accessor()
+                    {
+                        let raw = found.take().unwrap_or_default();
+                        found = Some(tri!(self.resolve_accessor(raw, &Value::Undefined)));
                     }
                     let t = found.as_ref().map(|v| v.type_of()).unwrap_or("undefined");
                     self.stack.push(Value::Str(t.into()));
@@ -7005,10 +7479,10 @@ impl Vm {
                     if !done {
                         self.silent_fail = false;
                         self.frames[fi].ip = ip;
-                        if let Err(e) = self.set_prop(&obj, name!(k), val.clone()) {
-                            if !(proto.sloppy && self.silent_fail) {
-                                throw!(e);
-                            }
+                        if let Err(e) = self.set_prop(&obj, name!(k), val.clone())
+                            && !(proto.sloppy && self.silent_fail)
+                        {
+                            throw!(e);
                         }
                         if let Value::Object(o) = &obj {
                             ic_fill_write(o, &proto.consts[k as usize], ic);
@@ -7065,10 +7539,10 @@ impl Vm {
                     let obj = pop!();
                     self.silent_fail = false;
                     self.frames[fi].ip = ip;
-                    if let Err(e) = self.set_index(&obj, &key, val.clone()) {
-                        if !(proto.sloppy && self.silent_fail) {
-                            throw!(e);
-                        }
+                    if let Err(e) = self.set_index(&obj, &key, val.clone())
+                        && !(proto.sloppy && self.silent_fail)
+                    {
+                        throw!(e);
                     }
                     self.stack.push(val);
                 }
@@ -7385,10 +7859,10 @@ impl Vm {
                     let n = name!(k);
                     self.silent_fail = false;
                     self.frames[fi].ip = ip;
-                    if let Err(e) = self.super_store(cl, n, is_static, &this, val.clone()) {
-                        if !(proto.sloppy && self.silent_fail) {
-                            throw!(e);
-                        }
+                    if let Err(e) = self.super_store(cl, n, is_static, &this, val.clone())
+                        && !(proto.sloppy && self.silent_fail)
+                    {
+                        throw!(e);
                     }
                     self.stack.push(val);
                 }
@@ -7400,10 +7874,10 @@ impl Vm {
                     let n = tri!(self.to_property_key(&key));
                     self.silent_fail = false;
                     self.frames[fi].ip = ip;
-                    if let Err(e) = self.super_set_to(base, n, &this, val.clone()) {
-                        if !(proto.sloppy && self.silent_fail) {
-                            throw!(e);
-                        }
+                    if let Err(e) = self.super_set_to(base, n, &this, val.clone())
+                        && !(proto.sloppy && self.silent_fail)
+                    {
+                        throw!(e);
                     }
                     self.stack.push(val);
                 }
@@ -7558,24 +8032,24 @@ impl Vm {
                     self.stack.push(v);
                 }
                 Op::RequireObject(name) => {
-                    if let Some(v) = self.stack.last() {
-                        if v.is_nullish() {
-                            let t = if v.is_undefined() {
-                                "undefined"
-                            } else {
-                                "null"
-                            };
-                            let msg = if name != NO_NAME {
-                                let key = cl.proto.consts[name as usize].clone();
-                                format!(
-                                    "Cannot destructure property '{}' of '{t}' as it is {t}.",
-                                    inspect_top(&key)
-                                )
-                            } else {
-                                format!("Cannot destructure '{t}' as it is {t}.")
-                            };
-                            throw!(self.type_error(msg));
-                        }
+                    if let Some(v) = self.stack.last()
+                        && v.is_nullish()
+                    {
+                        let t = if v.is_undefined() {
+                            "undefined"
+                        } else {
+                            "null"
+                        };
+                        let msg = if name != NO_NAME {
+                            let key = cl.proto.consts[name as usize].clone();
+                            format!(
+                                "Cannot destructure property '{}' of '{t}' as it is {t}.",
+                                inspect_top(&key)
+                            )
+                        } else {
+                            format!("Cannot destructure '{t}' as it is {t}.")
+                        };
+                        throw!(self.type_error(msg));
                     }
                 }
                 Op::ToNumeric => {
@@ -7990,28 +8464,28 @@ impl Vm {
                 }
                 Op::ArrayPush => {
                     let v = pop!();
-                    if let Some(Value::Object(o)) = self.stack.last() {
-                        if let ObjKind::Array(a) = &o.kind {
-                            a.borrow_mut().push(v);
-                        }
+                    if let Some(Value::Object(o)) = self.stack.last()
+                        && let ObjKind::Array(a) = &o.kind
+                    {
+                        a.borrow_mut().push(v);
                     }
                 }
                 Op::ArrayHole => {
-                    if let Some(Value::Object(o)) = self.stack.last() {
-                        if let ObjKind::Array(a) = &o.kind {
-                            let i = a.borrow().len();
-                            a.borrow_mut().push(Value::Undefined);
-                            o.mark_holes(i, i + 1);
-                        }
+                    if let Some(Value::Object(o)) = self.stack.last()
+                        && let ObjKind::Array(a) = &o.kind
+                    {
+                        let i = a.borrow().len();
+                        a.borrow_mut().push(Value::Undefined);
+                        o.mark_holes(i, i + 1);
                     }
                 }
                 Op::ArraySpread => {
                     let src = pop!();
                     let items = tri!(self.iterate(&src));
-                    if let Some(Value::Object(o)) = self.stack.last() {
-                        if let ObjKind::Array(a) = &o.kind {
-                            a.borrow_mut().extend(items);
-                        }
+                    if let Some(Value::Object(o)) = self.stack.last()
+                        && let ObjKind::Array(a) = &o.kind
+                    {
+                        a.borrow_mut().extend(items);
                     }
                 }
                 Op::NewObject => {
@@ -8031,10 +8505,10 @@ impl Vm {
                 Op::InitMethod(k) => {
                     let v = pop!();
                     if let Some(Value::Object(o)) = self.stack.last() {
-                        if let Value::Object(f) = &v {
-                            if let ObjKind::Function(c) = &f.kind {
-                                *c.home.borrow_mut() = Some(o.clone());
-                            }
+                        if let Value::Object(f) = &v
+                            && let ObjKind::Function(c) = &f.kind
+                        {
+                            *c.home.borrow_mut() = Some(o.clone());
                         }
                         o.props.borrow_mut().insert(name!(k), v);
                     }
@@ -8045,10 +8519,10 @@ impl Vm {
                     let k = tri!(self.to_property_key(&key));
                     name_anonymous(&v, &k, "");
                     if let Some(Value::Object(o)) = self.stack.last() {
-                        if let Value::Object(f) = &v {
-                            if let ObjKind::Function(c) = &f.kind {
-                                *c.home.borrow_mut() = Some(o.clone());
-                            }
+                        if let Value::Object(f) = &v
+                            && let ObjKind::Function(c) = &f.kind
+                        {
+                            *c.home.borrow_mut() = Some(o.clone());
                         }
                         o.props.borrow_mut().insert(k, v);
                     }
@@ -8077,12 +8551,11 @@ impl Vm {
                     pop!();
                     let callee = pop!();
                     let mut intrinsic = matches!((&callee, &self.eval_fn), (Value::Object(a), Some(b)) if Rc::ptr_eq(a, b));
-                    if !intrinsic {
-                        if let (Value::Object(a), Some(record)) =
+                    if !intrinsic
+                        && let (Value::Object(a), Some(record)) =
                             (&callee, proto.module.vm_context())
-                        {
-                            intrinsic = matches!(record.get_own("eval"), Some(Value::Object(b)) if Rc::ptr_eq(a, &b));
-                        }
+                    {
+                        intrinsic = matches!(record.get_own("eval"), Some(Value::Object(b)) if Rc::ptr_eq(a, &b));
                     }
                     let v = if !intrinsic {
                         tri!(self.call_value(&callee, Value::Undefined, &args))
@@ -8220,10 +8693,9 @@ impl Vm {
                     let n = self.stack.len();
                     if let (Value::Object(h), Value::Object(f)) =
                         (&self.stack[n - 2], &self.stack[n - 1])
+                        && let ObjKind::Function(c) = &f.kind
                     {
-                        if let ObjKind::Function(c) = &f.kind {
-                            *c.home.borrow_mut() = Some(h.clone());
-                        }
+                        *c.home.borrow_mut() = Some(h.clone());
                     }
                 }
                 Op::InitHidden(k) => {
@@ -8557,10 +9029,10 @@ impl Vm {
                     if !done {
                         self.silent_fail = false;
                         self.frames[fi].ip = ip;
-                        if let Err(e) = self.set_prop(&obj, name!(k), val) {
-                            if !(proto.sloppy && self.silent_fail) {
-                                throw!(e);
-                            }
+                        if let Err(e) = self.set_prop(&obj, name!(k), val)
+                            && !(proto.sloppy && self.silent_fail)
+                        {
+                            throw!(e);
                         }
                         if let Value::Object(o) = &obj {
                             ic_fill_write(o, &proto.consts[k as usize], ic);
@@ -8582,10 +9054,10 @@ impl Vm {
                     let f = pop!();
                     if let Some(Value::Object(o)) = self.stack.last() {
                         let o = o.clone();
-                        if let Value::Object(func) = &f {
-                            if let ObjKind::Function(c) = &func.kind {
-                                *c.home.borrow_mut() = Some(o.clone());
-                            }
+                        if let Value::Object(func) = &f
+                            && let ObjKind::Function(c) = &func.kind
+                        {
+                            *c.home.borrow_mut() = Some(o.clone());
                         }
                         self.define_accessor(&o, name!(k), f, setter);
                     }
@@ -8597,10 +9069,10 @@ impl Vm {
                     name_anonymous(&f, &k, if setter { "set " } else { "get " });
                     if let Some(Value::Object(o)) = self.stack.last() {
                         let o = o.clone();
-                        if let Value::Object(func) = &f {
-                            if let ObjKind::Function(c) = &func.kind {
-                                *c.home.borrow_mut() = Some(o.clone());
-                            }
+                        if let Value::Object(func) = &f
+                            && let ObjKind::Function(c) = &func.kind
+                        {
+                            *c.home.borrow_mut() = Some(o.clone());
                         }
                         self.define_accessor(&o, k, f, setter);
                     }
@@ -8701,10 +9173,10 @@ impl Vm {
             return Err(self.make_error(ErrorKind::ReferenceError, format!("{n} is not defined")));
         }
         self.silent_fail = false;
-        if let Err(e) = self.set_prop(obj, n, v) {
-            if !(sloppy && self.silent_fail) {
-                return Err(e);
-            }
+        if let Err(e) = self.set_prop(obj, n, v)
+            && !(sloppy && self.silent_fail)
+        {
+            return Err(e);
         }
         Ok(())
     }
@@ -9056,10 +9528,10 @@ impl Vm {
                 None => return Err(self.type_error("Class has no prototype")),
             }
         };
-        if let Value::Object(m) = &method {
-            if let ObjKind::Function(mc) = &m.kind {
-                *mc.home.borrow_mut() = Some(target.clone());
-            }
+        if let Value::Object(m) = &method
+            && let ObjKind::Function(mc) = &m.kind
+        {
+            *mc.home.borrow_mut() = Some(target.clone());
         }
         if crate::object::is_private_key(&key) {
             target.set_with_attrs(
@@ -9095,10 +9567,10 @@ impl Vm {
                 None => return Err(self.type_error("Class has no prototype")),
             }
         };
-        if let Value::Object(m) = &f {
-            if let ObjKind::Function(mc) = &m.kind {
-                *mc.home.borrow_mut() = Some(target.clone());
-            }
+        if let Value::Object(m) = &f
+            && let ObjKind::Function(mc) = &m.kind
+        {
+            *mc.home.borrow_mut() = Some(target.clone());
         }
         self.define_accessor(&target, key.clone(), f, setter);
         target.props.borrow_mut().set_enumerable(&key, false);

@@ -99,10 +99,10 @@ enum WasmError {
 fn wasm_error(vm: &mut Vm, kind: WasmError, msg: &str) -> Value {
     let st = state(vm);
     let ctor = unsafe { (&mut *st).errors.as_ref() }.map(|e| e[kind as usize].clone());
-    if let Some(ctor) = ctor {
-        if let Ok(e) = vm.construct(&ctor, &[msg.into()]) {
-            return e;
-        }
+    if let Some(ctor) = ctor
+        && let Ok(e) = vm.construct(&ctor, &[msg.into()])
+    {
+        return e;
     }
     vm.make_error(ErrorKind::Error, msg)
 }
@@ -161,10 +161,10 @@ fn sync_memories(vm: &mut Vm) {
             let ptr = memory.data_ptr(&ctx) as usize;
             let len = memory.data_size(&ctx);
             let entry = &mut (&mut *st).memories[i];
-            if entry.ptr != ptr || entry.len != len {
-                if let Some(old) = entry.buffer.take() {
-                    super::typed::detach(&old);
-                }
+            if (entry.ptr != ptr || entry.len != len)
+                && let Some(old) = entry.buffer.take()
+            {
+                super::typed::detach(&old);
             }
         }
     }

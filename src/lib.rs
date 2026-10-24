@@ -8,6 +8,7 @@ pub mod event_loop;
 pub mod gc;
 pub mod inspect;
 pub mod io;
+pub mod jit;
 pub mod jsstr;
 pub mod lexer;
 pub mod module;

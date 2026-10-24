@@ -78,14 +78,13 @@ fn dispatch<const I: usize>(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     if mode == 2 {
         return f(vm, this, args);
     }
-    if let Value::Object(o) = &this {
-        if matches!(o.kind, ObjKind::Array(_))
-            && o.flags.get() & crate::object::SLOW_ELEMENTS == 0
-            && !vm.proto_indices
-            && (mode == 0 || species_intact(vm, o))
-        {
-            return f(vm, this, args);
-        }
+    if let Value::Object(o) = &this
+        && matches!(o.kind, ObjKind::Array(_))
+        && o.flags.get() & crate::object::SLOW_ELEMENTS == 0
+        && !vm.proto_indices
+        && (mode == 0 || species_intact(vm, o))
+    {
+        return f(vm, this, args);
     }
     generic(vm, name, this, args)
 }
@@ -167,10 +166,10 @@ pub fn capture_species(vm: &mut Vm) {
 }
 
 fn this_array(vm: &mut Vm, this: &Value, name: &str) -> Result<Rc<Obj>, Value> {
-    if let Value::Object(o) = this {
-        if matches!(o.kind, ObjKind::Array(_)) {
-            return Ok(o.clone());
-        }
+    if let Value::Object(o) = this
+        && matches!(o.kind, ObjKind::Array(_))
+    {
+        return Ok(o.clone());
     }
     Err(vm.type_error(format!(
         "Array.prototype.{name} called on non-array {}",
@@ -214,20 +213,20 @@ fn check_frozen(vm: &mut Vm, o: &Obj) -> Result<(), Value> {
 }
 
 fn array_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    if args.len() == 1 {
-        if let Value::Number(n) = args[0] {
-            if n < 0.0 || n.fract() != 0.0 || n > 4294967295.0 {
-                return Err(vm.range_error("Invalid array length"));
-            }
-            if n > 50_000_000.0 {
-                return Err(vm.range_error("Array length too large"));
-            }
-            let a = vm.new_array(vec![Value::Undefined; n as usize]);
-            if let Value::Object(o) = &a {
-                o.mark_holes(0, n as usize);
-            }
-            return Ok(a);
+    if args.len() == 1
+        && let Value::Number(n) = args[0]
+    {
+        if n < 0.0 || n.fract() != 0.0 || n > 4294967295.0 {
+            return Err(vm.range_error("Invalid array length"));
         }
+        if n > 50_000_000.0 {
+            return Err(vm.range_error("Array length too large"));
+        }
+        let a = vm.new_array(vec![Value::Undefined; n as usize]);
+        if let Value::Object(o) = &a {
+            o.mark_holes(0, n as usize);
+        }
+        return Ok(a);
     }
     Ok(vm.new_array(args.to_vec()))
 }
@@ -235,19 +234,19 @@ fn array_ctor(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 fn is_array(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let mut v = arg(args, 0);
     loop {
-        if let Value::Object(o) = &v {
-            if let ObjKind::Proxy(p) = &o.kind {
-                let t = p.target.borrow().clone();
-                match t {
-                    Some(t) => {
-                        v = Value::Object(t);
-                        continue;
-                    }
-                    None => {
-                        return Err(vm.type_error(
-                            "Cannot perform 'IsArray' on a proxy that has been revoked",
-                        ));
-                    }
+        if let Value::Object(o) = &v
+            && let ObjKind::Proxy(p) = &o.kind
+        {
+            let t = p.target.borrow().clone();
+            match t {
+                Some(t) => {
+                    v = Value::Object(t);
+                    continue;
+                }
+                None => {
+                    return Err(
+                        vm.type_error("Cannot perform 'IsArray' on a proxy that has been revoked")
+                    );
                 }
             }
         }
@@ -438,12 +437,13 @@ fn slice(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         Vec::new()
     };
     let result = vm.new_array(out);
-    if o.has_holes() && start < end {
-        if let Value::Object(r) = &result {
-            for i in start..end {
-                if o.is_hole(i) {
-                    r.mark_holes(i - start, i - start + 1);
-                }
+    if o.has_holes()
+        && start < end
+        && let Value::Object(r) = &result
+    {
+        for i in start..end {
+            if o.is_hole(i) {
+                r.mark_holes(i - start, i - start + 1);
             }
         }
     }
@@ -920,10 +920,10 @@ fn compare_values(
         let y = vm.to_string(b)?;
         return Ok(crate::value::compare_strings(&x, &y));
     }
-    if let Some(d) = d {
-        if let (Some(x), Some(y)) = (operand(a, &d.key), operand(b, &d.key)) {
-            return Ok(sign(if d.desc { y - x } else { x - y }));
-        }
+    if let Some(d) = d
+        && let (Some(x), Some(y)) = (operand(a, &d.key), operand(b, &d.key))
+    {
+        return Ok(sign(if d.desc { y - x } else { x - y }));
     }
     let r = vm.call_value(f, Value::Undefined, &[a.clone(), b.clone()])?;
     let n = vm.to_number(&r)?;

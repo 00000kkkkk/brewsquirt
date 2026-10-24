@@ -226,10 +226,10 @@ fn join(p: &Parts) -> f64 {
 }
 
 fn this_time(vm: &mut Vm, this: &Value) -> Result<(Rc<Obj>, f64), Value> {
-    if let Value::Object(o) = this {
-        if let ObjKind::Date(t) = &o.kind {
-            return Ok((o.clone(), t.get()));
-        }
+    if let Value::Object(o) = this
+        && let ObjKind::Date(t) = &o.kind
+    {
+        return Ok((o.clone(), t.get()));
     }
     Err(vm.type_error("this is not a Date object."))
 }
@@ -562,10 +562,10 @@ fn to_iso_string(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 
 fn to_json(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
     let o = Value::Object(vm.to_object(&this)?);
-    if let Value::Number(n) = vm.to_primitive_hint(&o, "number")? {
-        if !n.is_finite() {
-            return Ok(Value::Null);
-        }
+    if let Value::Number(n) = vm.to_primitive_hint(&o, "number")?
+        && !n.is_finite()
+    {
+        return Ok(Value::Null);
     }
     let f = vm.get_prop(&o, "toISOString")?;
     if !f.is_callable() {

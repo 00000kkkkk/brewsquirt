@@ -428,12 +428,12 @@ impl Writer<'_> {
         if let Some(tag) = tag {
             self.out.push(tag);
         }
-        if let Some(m) = o.get_own("message") {
-            if !matches!(&m, Value::Object(a) if matches!(a.kind, ObjKind::Accessor(_))) {
-                let m = vm.to_string(&m)?;
-                self.out.push(b'm');
-                self.string(m.as_str());
-            }
+        if let Some(m) = o.get_own("message")
+            && !matches!(&m, Value::Object(a) if matches!(a.kind, ObjKind::Accessor(_)))
+        {
+            let m = vm.to_string(&m)?;
+            self.out.push(b'm');
+            self.string(m.as_str());
         }
         if let Value::Str(s) = vm.get_prop(v, "stack")? {
             self.out.push(b's');
@@ -545,7 +545,9 @@ impl Reader<'_> {
         }
         let units: Vec<u16> = self
             .raw(n)?
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         Some(from16(&units))
@@ -840,10 +842,10 @@ impl Reader<'_> {
                     };
                     let out =
                         super::typed::new_typed(vm, kind, buffer, 0, len as usize / kind.size());
-                    if index == BUFFER_INDEX {
-                        if let (Value::Object(o), Some(p)) = (&out, &self.buffer_proto) {
-                            *o.proto.borrow_mut() = Some(p.clone());
-                        }
+                    if index == BUFFER_INDEX
+                        && let (Value::Object(o), Some(p)) = (&out, &self.buffer_proto)
+                    {
+                        *o.proto.borrow_mut() = Some(p.clone());
                     }
                     out
                 };

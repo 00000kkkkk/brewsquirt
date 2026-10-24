@@ -210,28 +210,28 @@ fn set_interval(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 }
 
 fn clear_timer(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    if let Value::Number(n) = arg(args, 0) {
-        if n >= 0.0 {
-            vm.clear_timer(n as u64);
-        }
+    if let Value::Number(n) = arg(args, 0)
+        && n >= 0.0
+    {
+        vm.clear_timer(n as u64);
     }
     Ok(Value::Undefined)
 }
 
 fn unref_timer(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    if let Value::Number(n) = arg(args, 0) {
-        if n >= 0.0 {
-            vm.unref_timer(n as u64);
-        }
+    if let Value::Number(n) = arg(args, 0)
+        && n >= 0.0
+    {
+        vm.unref_timer(n as u64);
     }
     Ok(Value::Undefined)
 }
 
 fn ref_timer(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    if let Value::Number(n) = arg(args, 0) {
-        if n >= 0.0 {
-            vm.ref_timer(n as u64);
-        }
+    if let Value::Number(n) = arg(args, 0)
+        && n >= 0.0
+    {
+        vm.ref_timer(n as u64);
     }
     Ok(Value::Undefined)
 }
@@ -257,96 +257,96 @@ fn sleep(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
 pub fn format_args(vm: &mut Vm, args: &[Value]) -> Result<String, Value> {
     let mut parts = Vec::new();
     let mut rest = args;
-    if let Some(Value::Str(fmt)) = args.first() {
-        if fmt.contains('%') {
-            let mut out = String::new();
-            let mut i = 1;
-            let mut chars = fmt.chars().peekable();
-            while let Some(c) = chars.next() {
-                if c != '%' {
-                    out.push(c);
-                    continue;
-                }
-                match chars.peek().copied() {
-                    Some('%') => {
-                        chars.next();
-                        out.push('%');
-                    }
-                    Some('c') if i < args.len() => {
-                        chars.next();
-                        i += 1;
-                    }
-                    Some(spec @ ('s' | 'd' | 'i' | 'f' | 'o' | 'O' | 'j')) if i < args.len() => {
-                        chars.next();
-                        let a = &args[i];
-                        i += 1;
-                        match spec {
-                            's' => match a {
-                                Value::Str(s) => out.push_str(s),
-                                Value::Object(o) if !o.is_callable() => {
-                                    let custom = matches!(
-                                        vm.get_prop(a, "toString"),
-                                        Ok(Value::Object(f)) if matches!(
-                                            f.kind,
-                                            crate::object::ObjKind::Function(_)
-                                                | crate::object::ObjKind::Bound(_)
-                                        )
-                                    );
-                                    if custom {
-                                        let text = vm.to_string(a)?;
-                                        out.push_str(&text);
-                                    } else {
-                                        let options = crate::inspect::InspectOptions {
-                                            depth: 0,
-                                            ..Default::default()
-                                        };
-                                        out.push_str(&crate::inspect::inspect_with(vm, a, options));
-                                    }
-                                }
-                                _ => out.push_str(&inspect_plain_vm(vm, a)),
-                            },
-                            'o' => {
-                                let options = crate::inspect::InspectOptions {
-                                    depth: 4,
-                                    ..Default::default()
-                                };
-                                out.push_str(&crate::inspect::inspect_with(vm, a, options));
-                            }
-                            'd' | 'i' if matches!(a, Value::BigInt(_)) => {
-                                out.push_str(&inspect_plain(a));
-                            }
-                            'd' | 'i' => {
-                                let n = match a {
-                                    Value::Object(_) => f64::NAN,
-                                    _ => vm.to_number(a)?,
-                                };
-                                let n = if spec == 'i' { n.trunc() } else { n };
-                                out.push_str(&crate::number::number_to_string(n));
-                            }
-                            'f' => {
-                                let n = match a {
-                                    Value::BigInt(_) => inspect_plain(a)
-                                        .trim_end_matches('n')
-                                        .parse::<f64>()
-                                        .unwrap_or(f64::NAN),
-                                    Value::Object(_) => f64::NAN,
-                                    _ => vm.to_number(a)?,
-                                };
-                                out.push_str(&crate::number::number_to_string(n));
-                            }
-                            'j' => match super::json_stringify(vm, a, "")? {
-                                Some(s) => out.push_str(&s),
-                                None => out.push_str("undefined"),
-                            },
-                            _ => out.push_str(&inspect_plain_vm(vm, a)),
-                        }
-                    }
-                    _ => out.push('%'),
-                }
+    if let Some(Value::Str(fmt)) = args.first()
+        && fmt.contains('%')
+    {
+        let mut out = String::new();
+        let mut i = 1;
+        let mut chars = fmt.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '%' {
+                out.push(c);
+                continue;
             }
-            parts.push(out);
-            rest = &args[i.min(args.len())..];
+            match chars.peek().copied() {
+                Some('%') => {
+                    chars.next();
+                    out.push('%');
+                }
+                Some('c') if i < args.len() => {
+                    chars.next();
+                    i += 1;
+                }
+                Some(spec @ ('s' | 'd' | 'i' | 'f' | 'o' | 'O' | 'j')) if i < args.len() => {
+                    chars.next();
+                    let a = &args[i];
+                    i += 1;
+                    match spec {
+                        's' => match a {
+                            Value::Str(s) => out.push_str(s),
+                            Value::Object(o) if !o.is_callable() => {
+                                let custom = matches!(
+                                    vm.get_prop(a, "toString"),
+                                    Ok(Value::Object(f)) if matches!(
+                                        f.kind,
+                                        crate::object::ObjKind::Function(_)
+                                            | crate::object::ObjKind::Bound(_)
+                                    )
+                                );
+                                if custom {
+                                    let text = vm.to_string(a)?;
+                                    out.push_str(&text);
+                                } else {
+                                    let options = crate::inspect::InspectOptions {
+                                        depth: 0,
+                                        ..Default::default()
+                                    };
+                                    out.push_str(&crate::inspect::inspect_with(vm, a, options));
+                                }
+                            }
+                            _ => out.push_str(&inspect_plain_vm(vm, a)),
+                        },
+                        'o' => {
+                            let options = crate::inspect::InspectOptions {
+                                depth: 4,
+                                ..Default::default()
+                            };
+                            out.push_str(&crate::inspect::inspect_with(vm, a, options));
+                        }
+                        'd' | 'i' if matches!(a, Value::BigInt(_)) => {
+                            out.push_str(&inspect_plain(a));
+                        }
+                        'd' | 'i' => {
+                            let n = match a {
+                                Value::Object(_) => f64::NAN,
+                                _ => vm.to_number(a)?,
+                            };
+                            let n = if spec == 'i' { n.trunc() } else { n };
+                            out.push_str(&crate::number::number_to_string(n));
+                        }
+                        'f' => {
+                            let n = match a {
+                                Value::BigInt(_) => inspect_plain(a)
+                                    .trim_end_matches('n')
+                                    .parse::<f64>()
+                                    .unwrap_or(f64::NAN),
+                                Value::Object(_) => f64::NAN,
+                                _ => vm.to_number(a)?,
+                            };
+                            out.push_str(&crate::number::number_to_string(n));
+                        }
+                        'j' => match super::json_stringify(vm, a, "")? {
+                            Some(s) => out.push_str(&s),
+                            None => out.push_str("undefined"),
+                        },
+                        _ => out.push_str(&inspect_plain_vm(vm, a)),
+                    }
+                }
+                _ => out.push('%'),
+            }
         }
+        parts.push(out);
+        rest = &args[i.min(args.len())..];
     }
     for a in rest {
         parts.push(inspect_top_vm(vm, a));
@@ -479,12 +479,13 @@ pub fn require_base(vm: &mut Vm, v: &Value) -> Result<std::path::PathBuf, Value>
             let raw = rest.as_bytes();
             let mut i = 0;
             while i < raw.len() {
-                if raw[i] == b'%' && i + 2 < raw.len() {
-                    if let Ok(b) = u8::from_str_radix(&rest[i + 1..i + 3], 16) {
-                        bytes.push(b);
-                        i += 3;
-                        continue;
-                    }
+                if raw[i] == b'%'
+                    && i + 2 < raw.len()
+                    && let Ok(b) = u8::from_str_radix(&rest[i + 1..i + 3], 16)
+                {
+                    bytes.push(b);
+                    i += 3;
+                    continue;
                 }
                 bytes.push(raw[i]);
                 i += 1;
@@ -811,13 +812,12 @@ fn process_memory() -> (usize, usize) {
     let mut commit = 0usize;
     let null = std::ptr::null_mut();
     unsafe { mi_process_info(null, null, null, &mut rss, null, &mut commit, null, null) };
-    if cfg!(target_os = "linux") {
-        if let Some(pages) = std::fs::read_to_string("/proc/self/statm")
+    if cfg!(target_os = "linux")
+        && let Some(pages) = std::fs::read_to_string("/proc/self/statm")
             .ok()
             .and_then(|s| s.split_whitespace().nth(1)?.parse::<usize>().ok())
-        {
-            rss = pages * 4096;
-        }
+    {
+        rss = pages * 4096;
     }
     (rss, commit.max(1))
 }

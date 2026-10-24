@@ -671,19 +671,19 @@ fn lock(record: &Value) -> bool {
 }
 
 fn resolve_fn(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    if let Value::Object(p) = &this {
-        if lock(&arg(args, 0)) {
-            vm.resolve_promise(p, arg(args, 1));
-        }
+    if let Value::Object(p) = &this
+        && lock(&arg(args, 0))
+    {
+        vm.resolve_promise(p, arg(args, 1));
     }
     Ok(Value::Undefined)
 }
 
 fn reject_fn(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    if let Value::Object(p) = &this {
-        if lock(&arg(args, 0)) {
-            vm.reject_promise(p, arg(args, 1));
-        }
+    if let Value::Object(p) = &this
+        && lock(&arg(args, 0))
+    {
+        vm.reject_promise(p, arg(args, 1));
     }
     Ok(Value::Undefined)
 }
