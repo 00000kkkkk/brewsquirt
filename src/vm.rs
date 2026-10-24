@@ -5120,8 +5120,9 @@ impl Vm {
 
     pub fn run(&mut self, stop: usize) -> Result<Value, Value> {
         let mut fi = self.frames.len() - 1;
-        let mut cl = self.frames[fi].closure.clone();
-        let mut proto = cl.proto.clone();
+        let mut cl: &Closure = unsafe { &*Rc::as_ptr(&self.frames[fi].closure) };
+        let mut proto: &FunctionProto = &cl.proto;
+        let mut code: *const Op = proto.code.as_ptr();
         let mut ip = self.frames[fi].ip;
         let mut base = self.frames[fi].base;
 
@@ -5129,8 +5130,9 @@ impl Vm {
             () => {{
                 fi = self.frames.len() - 1;
                 let f = &self.frames[fi];
-                cl = f.closure.clone();
-                proto = cl.proto.clone();
+                cl = unsafe { &*Rc::as_ptr(&f.closure) };
+                proto = &cl.proto;
+                code = proto.code.as_ptr();
                 ip = f.ip;
                 base = f.base;
             }};
@@ -5273,7 +5275,8 @@ impl Vm {
         }
 
         loop {
-            let op = proto.code[ip];
+            debug_assert!(ip < proto.code.len());
+            let op = unsafe { *code.add(ip) };
             ip += 1;
             match op {
                 Op::Const(i) => {
@@ -6873,7 +6876,7 @@ impl Vm {
                                 } else {
                                     self.frame_new_target(fi, base, &cl)
                                 };
-                                let c = cl.clone();
+                                let c = self.frames[fi].closure.clone();
                                 tri!(self.direct_eval(src, &scope, &c, base, nt))
                             }
                             Some(v) => v.clone(),
