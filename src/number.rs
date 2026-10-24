@@ -265,6 +265,26 @@ pub fn to_uint32(n: f64) -> u32 {
     m as u32
 }
 
+#[inline(always)]
+pub fn js_rem(x: f64, y: f64) -> f64 {
+    let (a, b) = (x as i64, y as i64);
+    if a as f64 == x
+        && b as f64 == y
+        && b != 0
+        && a.unsigned_abs() < 1 << 53
+        && b.unsigned_abs() < 1 << 53
+    {
+        let r = a.wrapping_rem(b);
+        if r == 0 && x.is_sign_negative() {
+            -0.0
+        } else {
+            r as f64
+        }
+    } else {
+        x % y
+    }
+}
+
 pub fn js_pow(base: f64, exp: f64) -> f64 {
     if exp.is_nan() {
         return f64::NAN;

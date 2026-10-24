@@ -159,6 +159,11 @@ pub enum Op {
     DefineAccessorComputed(bool, bool),
     NewRegex(u32, u32),
     CmpJump(Cmp, u32),
+    CmpConstJump(Cmp, u32, u32),
+    AddConst(u32),
+    SubConst(u32),
+    GetLocalUndef(u32),
+    GetUpvalCheckedUndef(u32, u32),
     IncLocal(u32),
     DecLocal(u32),
     StoreLocal(u32),
@@ -257,6 +262,7 @@ pub struct FunctionProto {
     pub is_generator: bool,
     pub sloppy: bool,
     pub sloppy_this: bool,
+    pub plain: bool,
     pub code: Vec<Op>,
     pub lines: Vec<u32>,
     pub cols: Vec<u32>,
@@ -318,6 +324,92 @@ impl PropIc {
 }
 
 impl Op {
+    pub fn is_fast(&self) -> bool {
+        matches!(
+            self,
+            Op::Const(_)
+                | Op::Undefined
+                | Op::Null
+                | Op::True
+                | Op::False
+                | Op::Pop
+                | Op::Dup
+                | Op::GetLocal(_)
+                | Op::GetLocalUndef(_)
+                | Op::GetLocalChecked(..)
+                | Op::SetLocal(_)
+                | Op::StoreLocal(_)
+                | Op::IncLocal(_)
+                | Op::DecLocal(_)
+                | Op::AppendLocal(_)
+                | Op::GetUpval(_)
+                | Op::GetUpvalChecked(..)
+                | Op::GetUpvalCheckedUndef(..)
+                | Op::Add
+                | Op::Sub
+                | Op::Mul
+                | Op::Div
+                | Op::Mod
+                | Op::AddConst(_)
+                | Op::SubConst(_)
+                | Op::Lt
+                | Op::Gt
+                | Op::Le
+                | Op::Ge
+                | Op::StrictEq
+                | Op::StrictNe
+                | Op::Not
+                | Op::Jump(_)
+                | Op::JumpIfFalse(_)
+                | Op::JumpIfTrue(_)
+                | Op::CmpJump(..)
+                | Op::CmpConstJump(..)
+                | Op::TryBegin(..)
+                | Op::TryEnd
+                | Op::PopTo(_)
+                | Op::GetProp(_)
+                | Op::GetLocalProp(..)
+                | Op::GetMethod(_)
+                | Op::GetLocalMethod(..)
+                | Op::GetIndex
+                | Op::Call(..)
+                | Op::Return
+                | Op::Uninit
+                | Op::UninitN(_)
+                | Op::UndefinedN(_)
+                | Op::Swap
+                | Op::NewObject
+                | Op::InitProp(_)
+                | Op::NewArray(_)
+                | Op::ArrayPush
+                | Op::StoreLocalProp(..)
+                | Op::SetProp(_)
+                | Op::StoreProp(_)
+                | Op::GetGlobal(_)
+                | Op::IterNext(_)
+                | Op::CloseUpvalues(_)
+                | Op::JumpIfFalseKeep(_)
+                | Op::JumpIfTrueKeep(_)
+                | Op::JumpIfNotNullishKeep(_)
+                | Op::JumpIfNotUndef(_)
+                | Op::JumpIfNullish(_)
+                | Op::BitAnd
+                | Op::BitOr
+                | Op::BitXor
+                | Op::Shl
+                | Op::Shr
+                | Op::UShr
+                | Op::Neg
+                | Op::Inc
+                | Op::Dec
+                | Op::Typeof
+                | Op::Pick(_)
+                | Op::ToNumeric
+                | Op::RequireObject(_)
+                | Op::New(..)
+        )
+    }
+
     pub fn uses_prop_ic(&self) -> bool {
         matches!(
             self,
@@ -427,6 +519,9 @@ impl FunctionProto {
             last_line = line;
             let detail = match op {
                 Op::Const(c)
+                | Op::AddConst(c)
+                | Op::SubConst(c)
+                | Op::CmpConstJump(_, c, _)
                 | Op::GetGlobal(c)
                 | Op::SetGlobal(c)
                 | Op::DefineGlobal(c, _)

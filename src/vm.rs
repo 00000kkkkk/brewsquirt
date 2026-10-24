@@ -321,6 +321,7 @@ pub struct Vm {
     pub(crate) console_indent: usize,
     pub globals: Globals,
     arg_buf: Vec<Value>,
+    fast_resume: bool,
     builders: Vec<(usize, String)>,
     pub realm: Realm,
     modules: FxHashMap<PathBuf, Value>,
@@ -527,6 +528,62 @@ fn push_fast(stack: &mut Vec<Value>, v: Value) {
         std::ptr::write(stack.as_mut_ptr().add(n), v);
         stack.set_len(n + 1);
     }
+}
+
+#[inline(always)]
+fn push_number(stack: &mut Vec<Value>, x: f64) {
+    stack.reserve(1);
+    unsafe {
+        let n = stack.len();
+        std::ptr::write(stack.as_mut_ptr().add(n), Value::Number(x));
+        stack.set_len(n + 1);
+    }
+}
+
+#[inline(never)]
+fn push_slot(stack: &mut Vec<Value>, at: usize) {
+    let v = stack[at].clone();
+    stack.push(v);
+}
+
+fn number_element(o: &Obj, k: f64) -> Option<f64> {
+    let i = k as usize;
+    if i as f64 != k {
+        return None;
+    }
+    match &o.kind {
+        ObjKind::Array(a)
+            if o.flags.get() & crate::object::SLOW_ELEMENTS == 0 && i < 4294967295 =>
+        {
+            match a.borrow().get(i) {
+                Some(Value::Number(x)) if !o.is_hole(i) => Some(*x),
+                _ => None,
+            }
+        }
+        ObjKind::Typed(t) => match t.get(i) {
+            Some(Value::Number(x)) => Some(x),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[inline(always)]
+fn compare_numbers(cmp: Cmp, x: f64, y: f64) -> bool {
+    match cmp {
+        Cmp::Lt => x < y,
+        Cmp::Le => x <= y,
+        Cmp::Gt => x > y,
+        Cmp::Ge => x >= y,
+        Cmp::StrictEq | Cmp::Eq => x == y,
+        Cmp::StrictNe | Cmp::Ne => x != y,
+    }
+}
+
+#[inline(always)]
+fn push_copy(stack: &mut Vec<Value>, at: usize) {
+    let v = stack[at].clone();
+    push_fast(stack, v);
 }
 
 #[inline(always)]
@@ -996,6 +1053,7 @@ impl Vm {
             console_indent: 0,
             globals: Globals::default(),
             arg_buf: Vec::new(),
+            fast_resume: false,
             builders: Vec::new(),
             realm: Realm::new(),
             modules: FxHashMap::default(),
@@ -2942,6 +3000,34 @@ impl Vm {
         };
         self.stack[abs] = r;
         Ok(())
+    }
+
+    fn compare_with(&mut self, cmp: Cmp, a: &Value, b: &Value) -> Result<bool, Value> {
+        Ok(match (a, b) {
+            (Value::Number(x), Value::Number(y)) => match cmp {
+                Cmp::Lt => x < y,
+                Cmp::Le => x <= y,
+                Cmp::Gt => x > y,
+                Cmp::Ge => x >= y,
+                Cmp::StrictEq | Cmp::Eq => x == y,
+                Cmp::StrictNe | Cmp::Ne => x != y,
+            },
+            _ => match cmp {
+                Cmp::StrictEq => a.strict_eq(b),
+                Cmp::StrictNe => !a.strict_eq(b),
+                Cmp::Eq => self.loose_eq(a, b)?,
+                Cmp::Ne => !self.loose_eq(a, b)?,
+                _ => match self.compare(a, b)? {
+                    Some(o) => match cmp {
+                        Cmp::Lt => o.is_lt(),
+                        Cmp::Le => o.is_le(),
+                        Cmp::Gt => o.is_gt(),
+                        _ => o.is_ge(),
+                    },
+                    None => false,
+                },
+            },
+        })
     }
 
     fn close_upvalues(&mut self, from: usize) {
@@ -5225,6 +5311,821 @@ impl Vm {
     }
 
     pub fn run(&mut self, stop: usize) -> Result<Value, Value> {
+        'frame: loop {
+            let fi = self.frames.len() - 1;
+            let cl: &Closure = unsafe { &*Rc::as_ptr(&self.frames[fi].closure) };
+            let proto: &FunctionProto = &cl.proto;
+            let code: *const Op = proto.code.as_ptr();
+            let consts: *const Value = proto.consts.as_ptr();
+            let base = self.frames[fi].base;
+            let mut ip = self.frames[fi].ip;
+            let mut stk: *mut Value = self.stack.as_mut_ptr();
+            let mut sp: *mut Value = unsafe { stk.add(self.stack.len()) };
+            let mut lim: *mut Value = unsafe { stk.add(self.stack.capacity()) };
+            macro_rules! sync {
+                () => {
+                    unsafe { self.stack.set_len(sp.offset_from(stk) as usize) }
+                };
+            }
+            macro_rules! resync {
+                () => {{
+                    stk = self.stack.as_mut_ptr();
+                    sp = unsafe { stk.add(self.stack.len()) };
+                    lim = unsafe { stk.add(self.stack.capacity()) };
+                }};
+            }
+            macro_rules! room {
+                ($n:expr) => {
+                    if unsafe { lim.offset_from(sp) } < $n as isize {
+                        sync!();
+                        self.stack.reserve(64usize.max($n as usize));
+                        resync!();
+                    }
+                };
+            }
+            macro_rules! slot {
+                ($i:expr) => {
+                    unsafe { &mut *stk.add($i) }
+                };
+            }
+            macro_rules! local {
+                ($s:expr) => {
+                    unsafe { &mut *stk.add(base + $s as usize) }
+                };
+            }
+            macro_rules! top {
+                () => {
+                    unsafe { &mut *sp.sub(1) }
+                };
+            }
+            macro_rules! push {
+                ($v:expr) => {{
+                    let v = $v;
+                    room!(1);
+                    unsafe {
+                        std::ptr::write(sp, v);
+                        sp = sp.add(1);
+                    }
+                }};
+            }
+            macro_rules! push_num {
+                ($x:expr) => {{
+                    let x = $x;
+                    room!(1);
+                    unsafe {
+                        std::ptr::write(sp, Value::Number(x));
+                        sp = sp.add(1);
+                    }
+                }};
+            }
+            macro_rules! push_bool {
+                ($b:expr) => {{
+                    let b = $b;
+                    room!(1);
+                    unsafe {
+                        std::ptr::write(sp, Value::Bool(b));
+                        sp = sp.add(1);
+                    }
+                }};
+            }
+            macro_rules! pop {
+                () => {
+                    unsafe {
+                        sp = sp.sub(1);
+                        std::ptr::read(sp)
+                    }
+                };
+            }
+            macro_rules! discard {
+                () => {
+                    unsafe {
+                        sp = sp.sub(1);
+                        if !matches!(
+                            *sp,
+                            Value::Number(_) | Value::Bool(_) | Value::Undefined | Value::Null
+                        ) {
+                            std::ptr::drop_in_place(sp);
+                        }
+                    }
+                };
+            }
+            macro_rules! two_numbers {
+                () => {
+                    match unsafe { (&*sp.sub(2), &*sp.sub(1)) } {
+                        (Value::Number(x), Value::Number(y)) => Some((*x, *y)),
+                        _ => None,
+                    }
+                };
+            }
+            macro_rules! arith {
+                ($f:expr) => {{
+                    let Some((x, y)) = two_numbers!() else {
+                        break;
+                    };
+                    unsafe {
+                        sp = sp.sub(1);
+                        std::ptr::write(sp.sub(1), Value::Number($f(x, y)));
+                    }
+                }};
+            }
+            macro_rules! compare {
+                ($f:expr) => {{
+                    let Some((x, y)) = two_numbers!() else {
+                        break;
+                    };
+                    unsafe {
+                        sp = sp.sub(1);
+                        std::ptr::write(sp.sub(1), Value::Bool($f(x, y)));
+                    }
+                }};
+            }
+            macro_rules! fail {
+                ($e:expr) => {{
+                    let e = $e;
+                    match self.unwind(e, stop) {
+                        Ok(()) => continue 'frame,
+                        Err(e) => return Err(e),
+                    }
+                }};
+            }
+            loop {
+                let op = unsafe { *code.add(ip) };
+                match op {
+                    Op::Const(i) => match unsafe { &*consts.add(i as usize) } {
+                        Value::Number(x) => push_num!(*x),
+                        v => push!(v.clone()),
+                    },
+                    Op::Undefined => push!(Value::Undefined),
+                    Op::Null => push!(Value::Null),
+                    Op::True => push_bool!(true),
+                    Op::False => push_bool!(false),
+                    Op::Uninit => push!(Value::Uninit),
+                    Op::UninitN(n) | Op::UndefinedN(n) => {
+                        room!(n);
+                        for _ in 0..n {
+                            unsafe {
+                                std::ptr::write(
+                                    sp,
+                                    if matches!(op, Op::UninitN(_)) {
+                                        Value::Uninit
+                                    } else {
+                                        Value::Undefined
+                                    },
+                                );
+                                sp = sp.add(1);
+                            }
+                        }
+                    }
+                    Op::Pop => discard!(),
+                    Op::Dup => match *top!() {
+                        Value::Number(x) => push_num!(x),
+                        _ => push!(top!().clone()),
+                    },
+                    Op::Swap => unsafe { std::ptr::swap(sp.sub(1), sp.sub(2)) },
+                    Op::Pick(d) => {
+                        let at = unsafe { sp.offset_from(stk) as usize } - 1 - d as usize;
+                        match *slot!(at) {
+                            Value::Number(x) => push_num!(x),
+                            _ => push!(slot!(at).clone()),
+                        }
+                    }
+                    Op::GetLocal(s) | Op::GetLocalUndef(s) => {
+                        match *local!(s) {
+                            Value::Number(x) => push_num!(x),
+                            _ => {
+                                if !self.builders.is_empty() {
+                                    sync!();
+                                    self.flush_builder(base + s as usize);
+                                }
+                                push!(local!(s).clone());
+                            }
+                        }
+                        if matches!(op, Op::GetLocalUndef(_)) {
+                            push!(Value::Undefined);
+                        }
+                    }
+                    Op::GetLocalChecked(s, _) => {
+                        if !self.builders.is_empty() {
+                            sync!();
+                            self.flush_builder(base + s as usize);
+                        }
+                        match *local!(s) {
+                            Value::Number(x) => push_num!(x),
+                            Value::Uninit => break,
+                            _ => push!(local!(s).clone()),
+                        }
+                    }
+                    Op::SetLocal(s) => {
+                        if let Value::Number(x) = *top!() {
+                            if let Value::Number(d) = local!(s) {
+                                *d = x;
+                                ip += 1;
+                                continue;
+                            }
+                        }
+                        if !self.builders.is_empty() {
+                            sync!();
+                            self.drop_builder(base + s as usize);
+                        }
+                        let v = top!().clone();
+                        *local!(s) = v;
+                    }
+                    Op::StoreLocal(s) => {
+                        if let Value::Number(x) = *top!() {
+                            if let Value::Number(d) = local!(s) {
+                                *d = x;
+                                sp = unsafe { sp.sub(1) };
+                                ip += 1;
+                                continue;
+                            }
+                        }
+                        if !self.builders.is_empty() {
+                            sync!();
+                            self.drop_builder(base + s as usize);
+                        }
+                        let v = pop!();
+                        *local!(s) = v;
+                    }
+                    Op::IncLocal(s) | Op::DecLocal(s) => {
+                        let Value::Number(n) = local!(s) else {
+                            break;
+                        };
+                        *n += if matches!(op, Op::IncLocal(_)) {
+                            1.0
+                        } else {
+                            -1.0
+                        };
+                    }
+                    Op::AppendLocal(s) => {
+                        let Value::Number(y) = *top!() else {
+                            break;
+                        };
+                        let Value::Number(x) = local!(s) else {
+                            break;
+                        };
+                        *x += y;
+                        sp = unsafe { sp.sub(1) };
+                    }
+                    Op::GetUpval(i)
+                    | Op::GetUpvalChecked(i, _)
+                    | Op::GetUpvalCheckedUndef(i, _) => {
+                        let checked = !matches!(op, Op::GetUpval(_));
+                        match &*cl.upvalues[i as usize].borrow() {
+                            Upvalue::Open(idx) => match *slot!(*idx) {
+                                Value::Number(x) => push_num!(x),
+                                Value::Uninit if checked => break,
+                                _ => push!(slot!(*idx).clone()),
+                            },
+                            Upvalue::Closed(v) => {
+                                if checked && matches!(v, Value::Uninit) {
+                                    break;
+                                }
+                                push!(v.clone());
+                            }
+                        }
+                        if matches!(op, Op::GetUpvalCheckedUndef(..)) {
+                            push!(Value::Undefined);
+                        }
+                    }
+                    Op::Add => arith!(|x: f64, y: f64| x + y),
+                    Op::Sub => arith!(|x: f64, y: f64| x - y),
+                    Op::Mul => arith!(|x: f64, y: f64| x * y),
+                    Op::Div => arith!(|x: f64, y: f64| x / y),
+                    Op::Mod => arith!(crate::number::js_rem),
+                    Op::BitAnd => arith!(|x, y| (to_int32(x) & to_int32(y)) as f64),
+                    Op::BitOr => arith!(|x, y| (to_int32(x) | to_int32(y)) as f64),
+                    Op::BitXor => arith!(|x, y| (to_int32(x) ^ to_int32(y)) as f64),
+                    Op::Shl => arith!(|x, y| to_int32(x).wrapping_shl(to_uint32(y) & 31) as f64),
+                    Op::Shr => arith!(|x, y| (to_int32(x) >> (to_uint32(y) & 31)) as f64),
+                    Op::UShr => arith!(|x, y| (to_uint32(x) >> (to_uint32(y) & 31)) as f64),
+                    Op::AddConst(k) | Op::SubConst(k) => {
+                        let (Value::Number(x), Value::Number(y)) =
+                            (top!(), unsafe { &*consts.add(k as usize) })
+                        else {
+                            break;
+                        };
+                        if matches!(op, Op::AddConst(_)) {
+                            *x += *y
+                        } else {
+                            *x -= *y
+                        }
+                    }
+                    Op::Neg | Op::Inc | Op::Dec | Op::ToNumeric => {
+                        let Value::Number(x) = top!() else {
+                            break;
+                        };
+                        match op {
+                            Op::Neg => *x = -*x,
+                            Op::Inc => *x += 1.0,
+                            Op::Dec => *x -= 1.0,
+                            _ => {}
+                        }
+                    }
+                    Op::Lt => compare!(|x: f64, y: f64| x < y),
+                    Op::Gt => compare!(|x: f64, y: f64| x > y),
+                    Op::Le => compare!(|x: f64, y: f64| x <= y),
+                    Op::Ge => compare!(|x: f64, y: f64| x >= y),
+                    Op::StrictEq | Op::StrictNe => {
+                        let eq = matches!(op, Op::StrictEq);
+                        if let Some((x, y)) = two_numbers!() {
+                            unsafe {
+                                sp = sp.sub(1);
+                                std::ptr::write(sp.sub(1), Value::Bool((x == y) == eq));
+                            }
+                        } else {
+                            let b = pop!();
+                            let a = pop!();
+                            let r = a.strict_eq(&b) == eq;
+                            drop(a);
+                            drop(b);
+                            push_bool!(r);
+                        }
+                    }
+                    Op::Not => {
+                        let Some(t) = plain_truthiness(top!()) else {
+                            break;
+                        };
+                        unsafe { std::ptr::write(sp.sub(1), Value::Bool(!t)) };
+                    }
+                    Op::Typeof => {
+                        let v = pop!();
+                        let t = Value::Str(v.type_of().into());
+                        drop(v);
+                        push!(t);
+                    }
+                    Op::RequireObject(_) => {
+                        if top!().is_nullish() {
+                            break;
+                        }
+                    }
+                    Op::Jump(t) => {
+                        if t as usize <= ip && self.threads.interrupted() {
+                            break;
+                        }
+                        ip = t as usize;
+                        continue;
+                    }
+                    Op::JumpIfFalse(t) | Op::JumpIfTrue(t) => {
+                        let Some(truthy) = plain_truthiness(top!()) else {
+                            break;
+                        };
+                        sp = unsafe { sp.sub(1) };
+                        if truthy == matches!(op, Op::JumpIfTrue(_)) {
+                            ip = t as usize;
+                            continue;
+                        }
+                    }
+                    Op::JumpIfFalseKeep(t)
+                    | Op::JumpIfTrueKeep(t)
+                    | Op::JumpIfNotNullishKeep(t)
+                    | Op::JumpIfNotUndef(t) => {
+                        let v = top!();
+                        let jump = match op {
+                            Op::JumpIfFalseKeep(_) => !v.truthy(),
+                            Op::JumpIfTrueKeep(_) => v.truthy(),
+                            Op::JumpIfNotNullishKeep(_) => !v.is_nullish(),
+                            _ => !v.is_undefined(),
+                        };
+                        if jump {
+                            ip = t as usize;
+                            continue;
+                        }
+                        discard!();
+                    }
+                    Op::JumpIfNullish(t) => {
+                        if top!().is_nullish() {
+                            unsafe { std::ptr::write(sp.sub(1), Value::Undefined) };
+                            ip = t as usize;
+                            continue;
+                        }
+                    }
+                    Op::CmpJump(cmp, t) => {
+                        let ok = if let Some((x, y)) = two_numbers!() {
+                            sp = unsafe { sp.sub(2) };
+                            compare_numbers(cmp, x, y)
+                        } else if matches!(cmp, Cmp::StrictEq | Cmp::StrictNe) {
+                            let b = pop!();
+                            let a = pop!();
+                            a.strict_eq(&b) == (cmp == Cmp::StrictEq)
+                        } else {
+                            break;
+                        };
+                        if !ok {
+                            ip = t as usize;
+                            continue;
+                        }
+                    }
+                    Op::CmpConstJump(cmp, k, t) => {
+                        let ok = match (&*top!(), unsafe { &*consts.add(k as usize) }) {
+                            (Value::Number(x), Value::Number(y)) => {
+                                let ok = compare_numbers(cmp, *x, *y);
+                                sp = unsafe { sp.sub(1) };
+                                ok
+                            }
+                            _ if matches!(cmp, Cmp::StrictEq | Cmp::StrictNe) => {
+                                discard!();
+                                cmp == Cmp::StrictNe
+                            }
+                            _ => break,
+                        };
+                        if !ok {
+                            ip = t as usize;
+                            continue;
+                        }
+                    }
+                    Op::TryBegin(t, s) => {
+                        self.handlers.push(Handler {
+                            frame: fi,
+                            stack_len: base + s as usize,
+                            catch_ip: t as usize,
+                            guard: false,
+                        });
+                    }
+                    Op::TryEnd => {
+                        self.handlers.pop();
+                    }
+                    Op::PopTo(n) => {
+                        let to = unsafe { stk.add(base + n as usize) };
+                        if self.builders.is_empty()
+                            && self
+                                .open_upvalues
+                                .last_key_value()
+                                .is_none_or(|(k, _)| *k < base + n as usize)
+                        {
+                            while sp > to {
+                                discard!();
+                            }
+                        } else {
+                            sync!();
+                            self.close_upvalues(base + n as usize);
+                            self.prune_builders(base + n as usize);
+                            self.stack.truncate(base + n as usize);
+                            resync!();
+                        }
+                    }
+                    Op::CloseUpvalues(n) => {
+                        if self
+                            .open_upvalues
+                            .last_key_value()
+                            .is_some_and(|(k, _)| *k >= base + n as usize)
+                        {
+                            sync!();
+                            self.close_upvalues(base + n as usize);
+                        }
+                    }
+                    Op::GetProp(k) | Op::GetMethod(k) => {
+                        let ic = &proto.ics[proto.ic_index[ip] as usize];
+                        sync!();
+                        let ok = self.fast_get(unsafe { &*consts.add(k as usize) }, ic, op);
+                        resync!();
+                        if !ok {
+                            break;
+                        }
+                    }
+                    Op::GetLocalProp(s, k) | Op::GetLocalMethod(s, k) => {
+                        let ic = &proto.ics[proto.ic_index[ip] as usize];
+                        sync!();
+                        self.flush_builder(base + s as usize);
+                        let ok = self.fast_get_local(
+                            base + s as usize,
+                            unsafe { &*consts.add(k as usize) },
+                            ic,
+                            op,
+                        );
+                        resync!();
+                        if !ok {
+                            break;
+                        }
+                    }
+                    Op::GetIndex => {
+                        let (Value::Object(o), Value::Number(k)) =
+                            (unsafe { &*sp.sub(2) }, &*top!())
+                        else {
+                            break;
+                        };
+                        let Some(x) = number_element(o, *k) else {
+                            break;
+                        };
+                        unsafe {
+                            sp = sp.sub(1);
+                            std::ptr::drop_in_place(sp.sub(1));
+                            std::ptr::write(sp.sub(1), Value::Number(x));
+                        }
+                    }
+                    Op::StoreLocalProp(_, k) | Op::SetProp(k) | Op::StoreProp(k) => {
+                        let at = match op {
+                            Op::StoreLocalProp(s, _) => base + s as usize,
+                            _ => (unsafe { sp.offset_from(stk) as usize }) - 2,
+                        };
+                        let ic = &proto.ics[proto.ic_index[ip] as usize];
+                        sync!();
+                        if !self.fast_put(at, unsafe { &*consts.add(k as usize) }, ic) {
+                            break;
+                        }
+                        match op {
+                            Op::SetProp(_) => {
+                                let v = pop!();
+                                discard!();
+                                push!(v);
+                            }
+                            Op::StoreProp(_) => {
+                                discard!();
+                                discard!();
+                            }
+                            _ => discard!(),
+                        }
+                    }
+                    Op::NewObject => {
+                        if crate::gc::due() {
+                            break;
+                        }
+                        sync!();
+                        let o = self.new_object();
+                        push!(Value::Object(o));
+                    }
+                    Op::InitProp(k) => {
+                        let Value::Str(key) = (unsafe { &*consts.add(k as usize) }) else {
+                            break;
+                        };
+                        let v = pop!();
+                        if let Value::Object(o) = top!() {
+                            o.props.borrow_mut().insert(key.clone(), v);
+                        }
+                    }
+                    Op::NewArray(n) => {
+                        sync!();
+                        self.fast_new_array(n as usize);
+                        resync!();
+                    }
+                    Op::ArrayPush => {
+                        let v = pop!();
+                        if let Value::Object(o) = top!() {
+                            if let ObjKind::Array(a) = &o.kind {
+                                a.borrow_mut().push(v);
+                            }
+                        }
+                    }
+                    Op::GetGlobal(k) => {
+                        let cached = proto.global_cache[k as usize].get();
+                        if cached == u32::MAX || self.global_accessors {
+                            break;
+                        }
+                        let v = self.globals.at(cached);
+                        if matches!(v, Value::Uninit) {
+                            break;
+                        }
+                        let v = v.clone();
+                        push!(v);
+                    }
+                    Op::IterNext(t) => {
+                        self.frames[fi].ip = ip + 1;
+                        sync!();
+                        let r = self.fast_iter_next();
+                        resync!();
+                        match r {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                ip = t as usize;
+                                continue;
+                            }
+                            Err(e) => fail!(e),
+                        }
+                    }
+                    Op::Call(argc, _) => {
+                        if crate::gc::due() {
+                            break;
+                        }
+                        let argc = argc as usize;
+                        let ci = unsafe { sp.offset_from(stk) as usize } - argc - 2;
+                        let Value::Object(o) = slot!(ci) else {
+                            break;
+                        };
+                        match &o.kind {
+                            ObjKind::Function(c)
+                                if c.proto.plain
+                                    && (!c.proto.sloppy_this
+                                        || c.proto.kind == ProtoKind::Arrow
+                                        || slot!(ci + 1).is_object())
+                                    && self.frames.len() < MAX_FRAMES
+                                    && !self.threads.interrupted() =>
+                            {
+                                let c = c.clone();
+                                let np = c.proto.num_params as usize;
+                                sync!();
+                                if argc < np {
+                                    self.stack.resize(ci + 2 + np, Value::Undefined);
+                                } else if argc > np {
+                                    self.stack.truncate(ci + 2 + np);
+                                }
+                                self.frames[fi].ip = ip + 1;
+                                self.frames.push(Frame {
+                                    closure: c,
+                                    ip: 0,
+                                    base: ci + 1,
+                                    construct: false,
+                                    co: None,
+                                    new_target: None,
+                                    brands: Vec::new(),
+                                });
+                                continue 'frame;
+                            }
+                            ObjKind::Native(_) => {
+                                self.frames[fi].ip = ip + 1;
+                                sync!();
+                                let r = self.fast_native_call(ci);
+                                resync!();
+                                if let Err(e) = r {
+                                    fail!(e);
+                                }
+                            }
+                            _ => break,
+                        }
+                    }
+                    Op::New(argc, _) => {
+                        self.frames[fi].ip = ip + 1;
+                        sync!();
+                        match self.fast_new(argc as usize) {
+                            Ok(true) => continue 'frame,
+                            Ok(false) => break,
+                            Err(e) => fail!(e),
+                        }
+                    }
+                    Op::Return => {
+                        let construct = self.frames[fi].construct;
+                        if construct && proto.kind == ProtoKind::DerivedConstructor {
+                            break;
+                        }
+                        sync!();
+                        self.close_upvalues(base);
+                        while self.handlers.last().is_some_and(|h| h.frame >= fi) {
+                            self.handlers.pop();
+                        }
+                        self.prune_builders(base - 1);
+                        let n = self.stack.len();
+                        if construct && !self.stack[n - 1].is_object() {
+                            let this = self.stack[base].clone();
+                            self.stack[n - 1] = this;
+                        }
+                        if let Value::Number(x) = self.stack[n - 1] {
+                            unsafe { self.stack.set_len(n - 1) };
+                            self.frames.pop();
+                            self.stack.truncate(base - 1);
+                            if self.frames.len() == stop {
+                                return Ok(Value::Number(x));
+                            }
+                            push_number(&mut self.stack, x);
+                            continue 'frame;
+                        }
+                        let result = self.stack.pop().unwrap_or_default();
+                        self.frames.pop();
+                        self.stack.truncate(base - 1);
+                        if self.frames.len() == stop {
+                            return Ok(result);
+                        }
+                        self.stack.push(result);
+                        continue 'frame;
+                    }
+                    _ => break,
+                }
+                ip += 1;
+            }
+            sync!();
+            self.frames[fi].ip = ip;
+            let r = self.run_full(stop)?;
+            if !std::mem::take(&mut self.fast_resume) {
+                return Ok(r);
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn fast_new(&mut self, argc: usize) -> Result<bool, Value> {
+        let ci = self.stack.len() - argc - 1;
+        let (o, c) = match &self.stack[ci] {
+            Value::Object(o) => match &o.kind {
+                ObjKind::Function(c) if c.proto.is_constructor() => (o.clone(), c.clone()),
+                _ => return Ok(false),
+            },
+            _ => return Ok(false),
+        };
+        let this = if c.proto.kind == ProtoKind::DerivedConstructor {
+            Value::Uninit
+        } else {
+            self.alloc_this(&o)
+        };
+        self.stack.insert(ci + 1, this);
+        self.push_frame(c, argc, true)?;
+        Ok(true)
+    }
+
+    #[inline(never)]
+    fn fast_new_array(&mut self, n: usize) {
+        let items = self.stack.split_off(self.stack.len() - n);
+        let a = self.new_array(items);
+        self.stack.push(a);
+    }
+
+    #[inline(never)]
+    fn fast_put(&mut self, at: usize, key: &Value, ic: &crate::bytecode::PropIc) -> bool {
+        let n = self.stack.len();
+        let (Value::Object(o), Value::Str(k)) = (&self.stack[at], key) else {
+            return false;
+        };
+        if !matches!(o.kind, ObjKind::Ordinary) || o.flags.get() != 0 {
+            return false;
+        }
+        let val = &self.stack[n - 1];
+        ic_write(o, key, ic, val)
+            || (!self.accessors_used
+                && o.props
+                    .borrow_mut()
+                    .insert_fast(k.clone(), val.clone(), !self.readonly_used))
+    }
+
+    #[inline(never)]
+    fn fast_iter_next(&mut self) -> Result<bool, Value> {
+        let it = pop_value(&mut self.stack);
+        match self.iter_next(&it)? {
+            Some(v) => {
+                self.stack.push(v);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    #[inline(never)]
+    fn fast_native_call(&mut self, ci: usize) -> Result<(), Value> {
+        let mut args = std::mem::take(&mut self.arg_buf);
+        args.extend(self.stack.drain(ci + 2..));
+        let this = pop_value(&mut self.stack);
+        let f = self.stack.pop().unwrap_or_default();
+        let r = self.call_value(&f, this, &args);
+        args.clear();
+        if self.arg_buf.capacity() < args.capacity() {
+            self.arg_buf = args;
+        }
+        self.stack.push(r?);
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn fast_get(&mut self, key: &Value, ic: &crate::bytecode::PropIc, op: Op) -> bool {
+        let top = self.stack.len() - 1;
+        let optr = match &self.stack[top] {
+            Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => Rc::as_ptr(o),
+            v => {
+                if matches!(op, Op::GetProp(_)) {
+                    if let Some(n) = fast_length(v, key) {
+                        self.stack[top] = Value::Number(n);
+                        return true;
+                    }
+                }
+                self.method_holder(v, key)
+            }
+        };
+        if optr.is_null() || !ic_push(&mut self.stack, unsafe { &*optr }, ic) {
+            return false;
+        }
+        if matches!(op, Op::GetProp(_)) {
+            self.stack.swap_remove(top);
+        } else {
+            self.stack.swap(top, top + 1);
+        }
+        true
+    }
+
+    #[inline(never)]
+    fn fast_get_local(
+        &mut self,
+        abs: usize,
+        key: &Value,
+        ic: &crate::bytecode::PropIc,
+        op: Op,
+    ) -> bool {
+        let optr = match &self.stack[abs] {
+            Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => Rc::as_ptr(o),
+            v => {
+                if matches!(op, Op::GetLocalProp(..)) {
+                    if let Some(n) = fast_length(v, key) {
+                        push_fast(&mut self.stack, Value::Number(n));
+                        return true;
+                    }
+                }
+                self.method_holder(v, key)
+            }
+        };
+        if optr.is_null() || !ic_push(&mut self.stack, unsafe { &*optr }, ic) {
+            return false;
+        }
+        if matches!(op, Op::GetLocalMethod(..)) {
+            push_slot(&mut self.stack, abs);
+        }
+        true
+    }
+
+    #[inline(never)]
+    fn run_full(&mut self, stop: usize) -> Result<Value, Value> {
         let mut fi = self.frames.len() - 1;
         let mut cl: &Closure = unsafe { &*Rc::as_ptr(&self.frames[fi].closure) };
         let mut proto: &FunctionProto = &cl.proto;
@@ -5380,9 +6281,16 @@ impl Vm {
             }};
         }
 
+        let mut stepped = false;
         loop {
             debug_assert!(ip < proto.code.len());
             let op = unsafe { *code.add(ip) };
+            if stepped && op.is_fast() {
+                self.frames[fi].ip = ip;
+                self.fast_resume = true;
+                return Ok(Value::Undefined);
+            }
+            stepped = true;
             ip += 1;
             match op {
                 Op::Const(i) => {
@@ -5403,7 +6311,7 @@ impl Vm {
                 Op::Dup => {
                     let n = self.stack.len();
                     if n > 0 {
-                        self.stack.extend_from_within(n - 1..n);
+                        push_copy(&mut self.stack, n - 1);
                     } else {
                         self.stack.push(Value::Undefined);
                     }
@@ -5428,11 +6336,11 @@ impl Vm {
                 }
                 Op::GetLocal(s) => {
                     let at = base + s as usize;
-                    self.flush_builder(at);
                     if let Value::Number(x) = self.stack[at] {
                         push_number!(x);
                     } else {
-                        self.stack.extend_from_within(at..=at);
+                        self.flush_builder(at);
+                        push_copy(&mut self.stack, at);
                     }
                 }
                 Op::Uninit => self.stack.push(Value::Uninit),
@@ -5450,7 +6358,7 @@ impl Vm {
                     if matches!(self.stack[at], Value::Uninit) {
                         throw!(self.tdz_error(proto, k));
                     }
-                    self.stack.extend_from_within(at..=at);
+                    push_copy(&mut self.stack, at);
                 }
                 Op::SetLocalChecked(s, k) => {
                     if matches!(self.stack[base + s as usize], Value::Uninit) {
@@ -5464,7 +6372,7 @@ impl Vm {
                     match &*cl.upvalues[i as usize].borrow() {
                         Upvalue::Open(idx) => {
                             let idx = *idx;
-                            self.stack.extend_from_within(idx..=idx);
+                            push_copy(&mut self.stack, idx);
                         }
                         Upvalue::Closed(v) => self.stack.push(v.clone()),
                     }
@@ -5490,7 +6398,6 @@ impl Vm {
                 }
                 Op::SetLocal(s) => {
                     let dst = base + s as usize;
-                    self.drop_builder(dst);
                     let top = self.stack.len() - 1;
                     if let Value::Number(x) = self.stack[top] {
                         if let Value::Number(d) = &mut self.stack[dst] {
@@ -5498,6 +6405,7 @@ impl Vm {
                             continue;
                         }
                     }
+                    self.drop_builder(dst);
                     copy_slot(&mut self.stack, top, dst);
                 }
                 Op::AppendLocal(s) => {
@@ -5621,7 +6529,7 @@ impl Vm {
                 Op::GetUpval(i) => match &*cl.upvalues[i as usize].borrow() {
                     Upvalue::Open(idx) => {
                         let idx = *idx;
-                        self.stack.extend_from_within(idx..=idx);
+                        push_copy(&mut self.stack, idx);
                     }
                     Upvalue::Closed(v) => self.stack.push(v.clone()),
                 },
@@ -6441,7 +7349,7 @@ impl Vm {
                 Op::Sub => num_op!(|x: f64, y: f64| x - y, BigOp::Sub),
                 Op::Mul => num_op!(|x: f64, y: f64| x * y, BigOp::Mul),
                 Op::Div => num_op!(|x: f64, y: f64| x / y, BigOp::Div),
-                Op::Mod => num_op!(|x: f64, y: f64| x % y, BigOp::Mod),
+                Op::Mod => num_op!(crate::number::js_rem, BigOp::Mod),
                 Op::Pow => num_op!(js_pow, BigOp::Pow),
                 Op::BitAnd => int_op!(|x, y| (to_int32(x) & to_int32(y)) as f64, BigOp::BitAnd),
                 Op::BitOr => int_op!(|x, y| (to_int32(x) | to_int32(y)) as f64, BigOp::BitOr),
@@ -6686,6 +7594,31 @@ impl Vm {
                         _ => None,
                     };
                     if let Some(c) = callee {
+                        if c.proto.plain
+                            && (!c.proto.sloppy_this
+                                || c.proto.kind == ProtoKind::Arrow
+                                || self.stack[ci + 1].is_object())
+                            && self.frames.len() < MAX_FRAMES
+                            && !self.threads.interrupted()
+                        {
+                            let np = c.proto.num_params as usize;
+                            if argc < np {
+                                self.stack.resize(ci + 2 + np, Value::Undefined);
+                            } else if argc > np {
+                                self.stack.truncate(ci + 2 + np);
+                            }
+                            self.frames.push(Frame {
+                                closure: c,
+                                ip: 0,
+                                base: ci + 1,
+                                construct: false,
+                                co: None,
+                                new_target: None,
+                                brands: Vec::new(),
+                            });
+                            reload!();
+                            continue;
+                        }
                         if c.proto.is_class() {
                             throw!(self.type_error(format!(
                                 "Class constructor {} cannot be invoked without 'new'",
@@ -7062,7 +7995,7 @@ impl Vm {
                 }
                 Op::Pick(d) => {
                     let at = self.stack.len() - 1 - d as usize;
-                    self.stack.extend_from_within(at..=at);
+                    push_copy(&mut self.stack, at);
                 }
                 Op::WithHas(k) => {
                     let obj = pop!();
@@ -7277,7 +8210,7 @@ impl Vm {
                     self.stack.push(ns);
                 }
                 Op::GetCallee => {
-                    self.stack.extend_from_within(base - 1..base);
+                    push_copy(&mut self.stack, base - 1);
                 }
                 Op::Await | Op::Yield => {
                     let v = pop!();
@@ -7310,38 +8243,75 @@ impl Vm {
                     }
                     let b = pop!();
                     let a = pop!();
-                    let ok = match (&a, &b) {
-                        (Value::Number(x), Value::Number(y)) => match cmp {
+                    if !tri!(self.compare_with(cmp, &a, &b)) {
+                        ip = t as usize;
+                    }
+                }
+                Op::CmpConstJump(cmp, k, t) => {
+                    let b = &proto.consts[k as usize];
+                    if let (Some(Value::Number(x)), Value::Number(y)) = (self.stack.last(), b) {
+                        let (x, y) = (*x, *y);
+                        unsafe { self.stack.set_len(self.stack.len() - 1) };
+                        let ok = match cmp {
                             Cmp::Lt => x < y,
                             Cmp::Le => x <= y,
                             Cmp::Gt => x > y,
                             Cmp::Ge => x >= y,
                             Cmp::StrictEq | Cmp::Eq => x == y,
                             Cmp::StrictNe | Cmp::Ne => x != y,
-                        },
-                        _ => match cmp {
-                            Cmp::StrictEq => a.strict_eq(&b),
-                            Cmp::StrictNe => !a.strict_eq(&b),
-                            Cmp::Eq => tri!(self.loose_eq(&a, &b)),
-                            Cmp::Ne => !tri!(self.loose_eq(&a, &b)),
-                            _ => match tri!(self.compare(&a, &b)) {
-                                Some(o) => match cmp {
-                                    Cmp::Lt => o.is_lt(),
-                                    Cmp::Le => o.is_le(),
-                                    Cmp::Gt => o.is_gt(),
-                                    _ => o.is_ge(),
-                                },
-                                None => false,
-                            },
-                        },
-                    };
-                    if !ok {
+                        };
+                        if !ok {
+                            ip = t as usize;
+                        }
+                        continue;
+                    }
+                    let a = pop!();
+                    if !tri!(self.compare_with(cmp, &a, b)) {
                         ip = t as usize;
                     }
                 }
+                Op::AddConst(k) => {
+                    let b = &proto.consts[k as usize];
+                    if let (Some(Value::Number(x)), Value::Number(y)) = (self.stack.last_mut(), b) {
+                        *x += *y;
+                        continue;
+                    }
+                    let a = pop!();
+                    let r = tri!(self.add_slow(&a, b));
+                    self.stack.push(r);
+                }
+                Op::SubConst(k) => {
+                    if let (Some(Value::Number(x)), Value::Number(y)) =
+                        (self.stack.last_mut(), &proto.consts[k as usize])
+                    {
+                        *x -= *y;
+                        continue;
+                    }
+                    self.stack.push(proto.consts[k as usize].clone());
+                    num_op!(|x: f64, y: f64| x - y, BigOp::Sub)
+                }
+                Op::GetLocalUndef(s) => {
+                    let at = base + s as usize;
+                    self.flush_builder(at);
+                    let v = self.stack[at].clone();
+                    self.stack.reserve(2);
+                    push_fast(&mut self.stack, v);
+                    push_fast(&mut self.stack, Value::Undefined);
+                }
+                Op::GetUpvalCheckedUndef(i, k) => {
+                    let v = match &*cl.upvalues[i as usize].borrow() {
+                        Upvalue::Open(idx) => self.stack[*idx].clone(),
+                        Upvalue::Closed(v) => v.clone(),
+                    };
+                    if matches!(v, Value::Uninit) {
+                        throw!(self.tdz_error(proto, k));
+                    }
+                    self.stack.reserve(2);
+                    push_fast(&mut self.stack, v);
+                    push_fast(&mut self.stack, Value::Undefined);
+                }
                 Op::IncLocal(s) | Op::DecLocal(s) => {
                     let slot = base + s as usize;
-                    self.flush_builder(slot);
                     let delta = if matches!(op, Op::IncLocal(_)) {
                         1.0
                     } else {
@@ -7350,6 +8320,7 @@ impl Vm {
                     if let Value::Number(n) = &mut self.stack[slot] {
                         *n += delta;
                     } else {
+                        self.flush_builder(slot);
                         let v = self.stack[slot].clone();
                         match tri!(self.to_numeric(&v)) {
                             Value::BigInt(b) => {
@@ -7365,7 +8336,6 @@ impl Vm {
                 }
                 Op::StoreLocal(s) => {
                     let dst = base + s as usize;
-                    self.drop_builder(dst);
                     let n = self.stack.len();
                     if let Some(Value::Number(x)) = self.stack.get(n.wrapping_sub(1)) {
                         let x = *x;
@@ -7375,6 +8345,7 @@ impl Vm {
                             continue;
                         }
                     }
+                    self.drop_builder(dst);
                     let v = pop!();
                     self.stack[dst] = v;
                 }

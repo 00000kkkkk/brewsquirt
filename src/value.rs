@@ -5,7 +5,7 @@ use crate::object::{Obj, ObjKind, Symbol};
 use std::fmt;
 use std::rc::Rc;
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub enum Value {
     #[default]
     Undefined,
@@ -20,6 +20,20 @@ pub enum Value {
 }
 
 const _: () = assert!(std::mem::size_of::<Value>() == 16);
+
+impl Clone for Value {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        match self {
+            Value::Str(s) => std::mem::forget(s.clone()),
+            Value::Object(o) => std::mem::forget(o.clone()),
+            Value::Symbol(s) => std::mem::forget(s.clone()),
+            Value::BigInt(b) => std::mem::forget(b.clone()),
+            _ => {}
+        }
+        unsafe { std::ptr::read(self) }
+    }
+}
 
 impl fmt::Debug for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

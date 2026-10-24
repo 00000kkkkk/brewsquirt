@@ -19,6 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Objects built from the same literal or constructor share one hidden class even after the
   objects that first used it are collected, so code that creates many short-lived objects runs
   more than twice as fast.
+- The interpreter runs the most common instructions (local variables, arithmetic and comparisons
+  on numbers, property reads that hit the inline cache, object and array literals, calls to
+  ordinary functions and built-ins, and returns) in a compact dispatch loop that keeps the stack
+  pointer in a register, and the compiler fuses frequent instruction pairs. Numeric loops run
+  about twice as fast, function calls about 40% faster, and parsers such as acorn and babel
+  12-22% faster.
+- `%` on integers uses integer arithmetic instead of a floating-point remainder.
+- `Array.prototype.sort` and `toSorted` without a comparator, or with a comparator of the form
+  `(a, b) => a - b`, `(a, b) => b - a` or `(a, b) => a.key - b.key`, sort numbers, strings and
+  objects without calling back into JavaScript for every comparison, about nine times faster.
 
 ### Fixed
 

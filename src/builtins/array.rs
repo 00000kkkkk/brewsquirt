@@ -784,7 +784,71 @@ fn reduce_right(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     Ok(acc)
 }
 
-fn compare_values(vm: &mut Vm, f: &Value, a: &Value, b: &Value) -> Result<Ordering, Value> {
+struct Difference {
+    key: Option<JsStr>,
+    desc: bool,
+}
+
+fn difference(f: &Value) -> Option<Difference> {
+    use crate::bytecode::Op;
+    let Value::Object(o) = f else { return None };
+    let ObjKind::Function(c) = &o.kind else {
+        return None;
+    };
+    let p = &c.proto;
+    if p.is_coroutine() || p.is_class() || p.num_params < 2 {
+        return None;
+    }
+    let (x, y, key) = match p.code.get(..4)? {
+        [Op::GetLocal(x), Op::GetLocal(y), Op::Sub, Op::Return] => (*x, *y, None),
+        [
+            Op::GetLocalProp(x, k),
+            Op::GetLocalProp(y, j),
+            Op::Sub,
+            Op::Return,
+        ] if k == j => {
+            let Some(Value::Str(key)) = p.consts.get(*k as usize) else {
+                return None;
+            };
+            (*x, *y, Some(key.clone()))
+        }
+        _ => return None,
+    };
+    match (x, y) {
+        (1, 2) => Some(Difference { key, desc: false }),
+        (2, 1) => Some(Difference { key, desc: true }),
+        _ => None,
+    }
+}
+
+fn operand(v: &Value, key: &Option<JsStr>) -> Option<f64> {
+    match (v, key) {
+        (Value::Number(n), None) => Some(*n),
+        (Value::Object(o), Some(k)) if matches!(o.kind, ObjKind::Ordinary) => match o.get_own(k) {
+            Some(Value::Number(n)) => Some(n),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn sign(n: f64) -> Ordering {
+    if n < 0.0 {
+        Ordering::Less
+    } else if n > 0.0 {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
+    }
+}
+
+fn compare_values(
+    vm: &mut Vm,
+    f: &Value,
+    d: Option<&Difference>,
+    a: &Value,
+    b: &Value,
+) -> Result<Ordering, Value> {
     match (a.is_undefined(), b.is_undefined()) {
         (true, true) => return Ok(Ordering::Equal),
         (true, false) => return Ok(Ordering::Greater),
@@ -796,14 +860,75 @@ fn compare_values(vm: &mut Vm, f: &Value, a: &Value, b: &Value) -> Result<Orderi
         let y = vm.to_string(b)?;
         return Ok(crate::value::compare_strings(&x, &y));
     }
+    if let Some(d) = d {
+        if let (Some(x), Some(y)) = (operand(a, &d.key), operand(b, &d.key)) {
+            return Ok(sign(if d.desc { y - x } else { x - y }));
+        }
+    }
     let r = vm.call_value(f, Value::Undefined, &[a.clone(), b.clone()])?;
     let n = vm.to_number(&r)?;
-    Ok(if n < 0.0 {
-        Ordering::Less
-    } else if n > 0.0 {
-        Ordering::Greater
+    Ok(sign(n))
+}
+
+fn sort_by_keys<K>(list: Vec<Value>, keys: Vec<K>, cmp: impl Fn(&K, &K) -> Ordering) -> Vec<Value> {
+    let mut order: Vec<usize> = (0..keys.len()).collect();
+    order.sort_by(|&i, &j| cmp(&keys[i], &keys[j]));
+    let mut slots: Vec<Option<Value>> = list.into_iter().map(Some).collect();
+    order
+        .into_iter()
+        .map(|i| slots[i].take().unwrap_or_default())
+        .collect()
+}
+
+fn presorted(
+    vm: &mut Vm,
+    list: Vec<Value>,
+    f: &Value,
+    d: Option<&Difference>,
+) -> Result<Vec<Value>, Vec<Value>> {
+    if f.is_undefined() {
+        if list
+            .iter()
+            .any(|v| matches!(v, Value::Object(_) | Value::Symbol(_) | Value::Uninit))
+        {
+            return Err(list);
+        }
+        let (defined, mut rest): (Vec<Value>, Vec<Value>) =
+            list.into_iter().partition(|v| !v.is_undefined());
+        let mut keys = Vec::with_capacity(defined.len());
+        for v in &defined {
+            match v {
+                Value::Str(s) => keys.push(s.clone()),
+                v => match vm.to_string(v) {
+                    Ok(s) => keys.push(s),
+                    Err(_) => {
+                        let mut all = defined;
+                        all.append(&mut rest);
+                        return Err(all);
+                    }
+                },
+            }
+        }
+        let mut out = sort_by_keys(defined, keys, |a, b| crate::value::compare_strings(a, b));
+        out.append(&mut rest);
+        return Ok(out);
+    }
+    let Some(d) = d else { return Err(list) };
+    let mut keys = Vec::with_capacity(list.len());
+    for v in &list {
+        match operand(v, &d.key) {
+            Some(n) if !n.is_nan() => keys.push(n),
+            _ => return Err(list),
+        }
+    }
+    Ok(if d.desc {
+        sort_by_keys(list, keys, |a, b| {
+            b.partial_cmp(a).unwrap_or(Ordering::Equal)
+        })
     } else {
-        Ordering::Equal
+        sort_by_keys(list, keys, |a, b| {
+            a.partial_cmp(b).unwrap_or(Ordering::Equal)
+        })
     })
 }
 
@@ -811,6 +936,11 @@ pub fn merge_sort(vm: &mut Vm, list: Vec<Value>, f: &Value) -> Result<Vec<Value>
     if list.len() <= 1 {
         return Ok(list);
     }
+    let d = difference(f);
+    let list = match presorted(vm, list, f, d.as_ref()) {
+        Ok(sorted) => return Ok(sorted),
+        Err(list) => list,
+    };
     let mut src = list;
     let n = src.len();
     let mut width = 1;
@@ -822,7 +952,7 @@ pub fn merge_sort(vm: &mut Vm, list: Vec<Value>, f: &Value) -> Result<Vec<Value>
             let hi = (lo + 2 * width).min(n);
             let (mut i, mut j) = (lo, mid);
             while i < mid && j < hi {
-                if compare_values(vm, f, &src[j], &src[i])? == Ordering::Less {
+                if compare_values(vm, f, d.as_ref(), &src[j], &src[i])? == Ordering::Less {
                     dst.push(src[j].clone());
                     j += 1;
                 } else {

@@ -795,6 +795,22 @@ impl Compiler {
                 }
             })
             .collect();
+        let mut code = st.code;
+        for i in 0..code.len() {
+            if let Op::Jump(t) = code[i] {
+                if code.get(t as usize) == Some(&Op::Return) {
+                    code[i] = Op::Return;
+                }
+            }
+        }
+        let plain = !st.is_async
+            && !st.is_generator
+            && !st.uses_arguments
+            && !st.has_rest
+            && !matches!(
+                st.kind,
+                ProtoKind::ClassConstructor | ProtoKind::DerivedConstructor
+            );
         FunctionProto {
             name: st.name,
             kind: st.kind,
@@ -807,7 +823,8 @@ impl Compiler {
             is_generator: st.is_generator,
             sloppy: !st.strict,
             sloppy_this: !st.strict && st.reads_this,
-            code: st.code,
+            plain,
+            code,
             lines: st.lines,
             cols: st.cols,
             consts: st.consts,
@@ -870,7 +887,13 @@ impl Compiler {
         let st = self.st();
         let at = st.code.len();
         if at > 0 && st.target.get() != at {
+            let number = |k: u32| matches!(st.consts.get(k as usize), Some(Value::Number(_)));
             let merged = match (st.code[at - 1], op) {
+                (Op::Const(k), Op::CmpJump(c, t)) if number(k) => Some(Op::CmpConstJump(c, k, t)),
+                (Op::Const(k), Op::Add) if number(k) => Some(Op::AddConst(k)),
+                (Op::Const(k), Op::Sub) if number(k) => Some(Op::SubConst(k)),
+                (Op::GetLocal(s), Op::Undefined) => Some(Op::GetLocalUndef(s)),
+                (Op::GetUpvalChecked(i, k), Op::Undefined) => Some(Op::GetUpvalCheckedUndef(i, k)),
                 (Op::Undefined, Op::Undefined) => Some(Op::UndefinedN(2)),
                 (Op::UndefinedN(n), Op::Undefined) => Some(Op::UndefinedN(n + 1)),
                 (Op::Uninit, Op::Uninit) => Some(Op::UninitN(2)),
@@ -878,6 +901,10 @@ impl Compiler {
                 _ => None,
             };
             if let Some(m) = merged {
+                if matches!(m, Op::CmpConstJump(..) | Op::AddConst(_) | Op::SubConst(_)) {
+                    st.lines[at - 1] = line;
+                    st.cols[at - 1] = col;
+                }
                 st.code[at - 1] = m;
                 return at - 1;
             }
@@ -912,6 +939,7 @@ impl Compiler {
             Op::YieldReturn(_) => Op::YieldReturn(t),
             Op::TemplateCache(s, _) => Op::TemplateCache(s, t),
             Op::CmpJump(c, _) => Op::CmpJump(c, t),
+            Op::CmpConstJump(c, k, _) => Op::CmpConstJump(c, k, t),
             other => other,
         };
     }
