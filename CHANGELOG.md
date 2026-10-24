@@ -30,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `WeakMap` and `WeakSet` constructors step through their iterable, call the instance's
   `set` and `add`, and close the iterator when an entry is rejected, so an endless iterable no
   longer hangs and symbols are accepted as keys.
+- Regular expression group names written with `\u` escapes, such as `(?<\u{1d453}>...)`, keep
+  their decoded name in `groups`, `$<name>` and `\k<name>`, and a `\k<name>` reference inside
+  the group it names, or before it, matches the empty string as the specification requires.
 
 ## [1.10.0] - 2026-10-24
 
