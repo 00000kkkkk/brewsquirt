@@ -25,7 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Strings are capped at Node's maximum length: `repeat`, `padStart`, `padEnd`, `concat` and
   `join` throw `RangeError: Invalid string length` instead of exhausting memory, and
   `Array.from` on an array-like with an impossible length throws `RangeError` instead of
-  crashing the process.
+  crashing the process. `replace` and `replaceAll` stop with the same error while expanding a
+  replacement that would grow past the limit.
+- The `WeakMap` and `WeakSet` constructors step through their iterable, call the instance's
+  `set` and `add`, and close the iterator when an entry is rejected, so an endless iterable no
+  longer hangs and symbols are accepted as keys.
 
 ## [1.10.0] - 2026-10-24
 

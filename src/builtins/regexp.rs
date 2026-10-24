@@ -4,7 +4,7 @@ use crate::jsstr::JsStr;
 use crate::object::{Obj, ObjKind, RegExpObj};
 use crate::regexp::{Match, RegexData, compile, next_char_boundary};
 use crate::value::Value;
-use crate::value::{byte_index_rc, len16_rc, utf16_index_rc};
+use crate::value::{byte_index_rc, len16, len16_rc, utf16_index_rc};
 use crate::vm::{ErrorKind, Vm};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -404,14 +404,19 @@ pub fn expand_template(
     after: &str,
     groups: &[Value],
     named: &Value,
-) -> String {
+) -> Option<String> {
     let chars: Vec<char> = template.chars().collect();
     let mut out = String::new();
+    let mut units = 0usize;
     let mut i = 0;
     while i < chars.len() {
+        if units > super::string::MAX_STRING_LENGTH {
+            return None;
+        }
         let c = chars[i];
         if c != '$' || i + 1 >= chars.len() {
             out.push(c);
+            units += c.len_utf16();
             i += 1;
             continue;
         }
@@ -419,18 +424,22 @@ pub fn expand_template(
         match n {
             '$' => {
                 out.push('$');
+                units += 1;
                 i += 2;
             }
             '&' => {
                 out.push_str(matched);
+                units += len16(matched);
                 i += 2;
             }
             '`' => {
                 out.push_str(before);
+                units += len16(before);
                 i += 2;
             }
             '\'' => {
                 out.push_str(after);
+                units += len16(after);
                 i += 2;
             }
             '0'..='9' => {
@@ -446,10 +455,12 @@ pub fn expand_template(
                 if idx >= 1 && idx < groups.len() {
                     if let Value::Str(g) = &groups[idx] {
                         out.push_str(g);
+                        units += len16(g);
                     }
                     i += width;
                 } else {
                     out.push('$');
+                    units += 1;
                     i += 1;
                 }
             }
@@ -459,22 +470,25 @@ pub fn expand_template(
                     if let Value::Object(g) = named {
                         if let Some(Value::Str(v)) = g.get_own(&name) {
                             out.push_str(&v);
+                            units += len16(&v);
                         }
                     }
                     i += 3 + end;
                 }
                 None => {
                     out.push('$');
+                    units += 1;
                     i += 1;
                 }
             },
             _ => {
                 out.push('$');
+                units += 1;
                 i += 1;
             }
         }
     }
-    out
+    (units <= super::string::MAX_STRING_LENGTH).then_some(out)
 }
 
 pub fn string_replace_regexp(
@@ -501,9 +515,11 @@ pub fn string_replace_regexp(
         Some(vm.to_string(replacement)?)
     };
     let mut out = String::new();
+    let mut units = 0usize;
     let mut last = 0;
     for m in matches {
         out.push_str(&s[last..m.start]);
+        units += len16(&s[last..m.start]);
         let groups: Vec<Value> = m
             .groups
             .iter()
@@ -515,7 +531,12 @@ pub fn string_replace_regexp(
         let named = groups_object(vm, data, &groups);
         let matched = &s[m.start..m.end];
         let piece = match &template {
-            Some(t) => expand_template(t, matched, &s[..m.start], &s[m.end..], &groups, &named),
+            Some(t) => {
+                match expand_template(t, matched, &s[..m.start], &s[m.end..], &groups, &named) {
+                    Some(p) => p,
+                    None => return Err(vm.range_error("Invalid string length")),
+                }
+            }
             None => {
                 let mut call_args = groups.clone();
                 call_args.push(Value::Number(utf16_index_rc(&s, m.start) as f64));
@@ -528,6 +549,10 @@ pub fn string_replace_regexp(
             }
         };
         out.push_str(&piece);
+        units += len16(&piece);
+        if units > super::string::MAX_STRING_LENGTH {
+            return Err(vm.range_error("Invalid string length"));
+        }
         last = m.end;
     }
     out.push_str(&s[last..]);

@@ -574,14 +574,15 @@ fn replacement(
     let b = crate::regexp::byte_index(whole, offset);
     let before = &whole[..b];
     let after = &whole[(b + matched.len()).min(whole.len())..];
-    Ok(super::regexp::expand_template(
+    super::regexp::expand_template(
         &template,
         matched,
         before,
         after,
         &[Value::Str(matched.into())],
         &Value::Undefined,
-    ))
+    )
+    .ok_or_else(|| string_too_long(vm))
 }
 
 fn match_fn(vm: &mut Vm, this: Value, args: &[Value]) -> R {

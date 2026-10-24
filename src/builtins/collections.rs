@@ -478,11 +478,31 @@ fn weakmap_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         return Err(vm.type_error("Constructor WeakMap requires 'new'"));
     };
     let src = arg(args, 0);
-    if !src.is_nullish() {
-        for entry in vm.iterate(&src)? {
+    if src.is_nullish() {
+        return Ok(this);
+    }
+    let adder = vm.get_prop(&this, "set")?;
+    if !adder.is_callable() {
+        return Err(vm.type_error(
+            "'set' returned for property 'set' of object '#<WeakMap>' is not callable",
+        ));
+    }
+    let it = vm.get_iterator(&src)?;
+    while let Some(entry) = vm.iter_next(&it)? {
+        let step = (|| {
+            if !entry.is_object() {
+                return Err(vm.type_error(format!(
+                    "Iterator value {} is not an entry object",
+                    inspect_plain(&entry)
+                )));
+            }
             let k = vm.get_prop(&entry, "0")?;
             let v = vm.get_prop(&entry, "1")?;
-            weakmap_set(vm, this.clone(), &[k, v])?;
+            vm.call_value(&adder, this.clone(), &[k, v])
+        })();
+        if let Err(e) = step {
+            let _ = vm.iter_close(&it);
+            return Err(e);
         }
     }
     Ok(this)
@@ -547,9 +567,20 @@ fn weakset_ctor(vm: &mut Vm, this: Value, args: &[Value]) -> R {
         return Err(vm.type_error("Constructor WeakSet requires 'new'"));
     };
     let src = arg(args, 0);
-    if !src.is_nullish() {
-        for v in vm.iterate(&src)? {
-            weakset_add(vm, this.clone(), &[v])?;
+    if src.is_nullish() {
+        return Ok(this);
+    }
+    let adder = vm.get_prop(&this, "add")?;
+    if !adder.is_callable() {
+        return Err(vm.type_error(
+            "'add' returned for property 'add' of object '#<WeakSet>' is not callable",
+        ));
+    }
+    let it = vm.get_iterator(&src)?;
+    while let Some(v) = vm.iter_next(&it)? {
+        if let Err(e) = vm.call_value(&adder, this.clone(), &[v]) {
+            let _ = vm.iter_close(&it);
+            return Err(e);
         }
     }
     Ok(this)
