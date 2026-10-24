@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Uint8Array.prototype.setFromBase64` and `setFromHex` decode into an existing array and report
+  how much they read and wrote, and `Uint8Array.fromBase64` honours `lastChunkHandling`
+  (`loose`, `strict` and `stop-before-partial`). Every base64 and hex method validates its
+  arguments and options and reports malformed input with a `SyntaxError`, as ES2026 specifies.
+
+### Fixed
+
+- In multiline mode `^` and `$` treat `\r`, U+2028 and U+2029 as line ends like `\n`, so
+  `/^key=(.*)$/m` matches lines of text with Windows line endings.
+- `\b`, `\B` and `\w` use JavaScript's ASCII word characters, so `/\bcafé\b/` and
+  `"café".match(/\b\w+\b/g)` behave as in Node.
+- A back-reference to a group that did not take part in the match matches the empty string, and
+  duplicate named groups report the alternative that matched in `groups`, `$<name>` and
+  `\k<name>`.
+- `(?s:...)`, `(?-s:...)`, `(?m:...)` and `(?-i:...)` modifiers change how `.`, `^`, `$` and word
+  boundaries behave inside the group only.
+
 ## [1.11.0] - 2026-10-24
 
 ### Added

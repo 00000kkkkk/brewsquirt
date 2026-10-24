@@ -1,6 +1,6 @@
 use crate::jsstr::JsStr;
 use rustc_hash::FxHashMap;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 pub struct RegexData {
@@ -10,6 +10,9 @@ pub struct RegexData {
     pub global: bool,
     pub sticky: bool,
     pub names: Vec<Option<JsStr>>,
+    fast: Option<fancy_regex::Regex>,
+    fast_lines: bool,
+    fast_seen: Cell<Option<(usize, usize, bool)>>,
 }
 
 pub struct Match {
@@ -209,6 +212,72 @@ fn astral_class(highs: &[(u32, u32)], lows: &[(u32, u32)]) -> String {
     out
 }
 
+const LINE_START: &str = r"(?:\A|(?<=[\n\r\x{2028}\x{2029}]))";
+const LINE_END: &str = r"(?:\z|(?=[\n\r\x{2028}\x{2029}]))";
+
+fn word_class(extended: bool, negated: bool) -> &'static str {
+    match (extended, negated) {
+        (false, false) => "(?-i:[A-Za-z0-9_])",
+        (false, true) => "(?-i:[^A-Za-z0-9_])",
+        (true, false) => r"(?-i:[A-Za-z0-9_\x{17F}\x{212A}])",
+        (true, true) => r"(?-i:[^A-Za-z0-9_\x{17F}\x{212A}])",
+    }
+}
+
+fn word_boundary(extended: bool, negated: bool) -> String {
+    let w = word_class(extended, false);
+    if negated {
+        format!("(?:(?<={w})(?={w})|(?<!{w})(?!{w}))")
+    } else {
+        format!("(?:(?<={w})(?!{w})|(?<!{w})(?={w}))")
+    }
+}
+
+fn backref(numbers: &[usize], plain: bool) -> String {
+    if plain {
+        let alternatives: Vec<String> = numbers.iter().map(|n| format!("\\{n}")).collect();
+        return format!("(?:{})", alternatives.join("|"));
+    }
+    let mut out = String::new();
+    for n in numbers {
+        out.push_str(&format!("(?({n})\\{n}|"));
+    }
+    out.push_str(&")".repeat(numbers.len()));
+    out
+}
+
+fn named_groups(chars: &[char], v: bool) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut depth = 0usize;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 1,
+            '[' => depth += 1,
+            ']' if depth > 0 => {
+                if v {
+                    depth -= 1;
+                } else {
+                    depth = 0;
+                }
+            }
+            '(' if depth == 0
+                && chars.get(i + 1) == Some(&'?')
+                && chars.get(i + 2) == Some(&'<')
+                && !matches!(chars.get(i + 3), Some('=') | Some('!')) =>
+            {
+                if let Some((name, _)) = group_name_at(chars, i + 2) {
+                    let (before, _) = crate::regexp_syntax::prescan(&chars[..i], v);
+                    out.push((name, before + 1));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out
+}
+
 fn group_name_at(chars: &[char], open: usize) -> Option<(String, usize)> {
     let mut name = String::new();
     let mut i = open + 1;
@@ -254,6 +323,10 @@ fn group_name_at(chars: &[char], open: usize) -> Option<(String, usize)> {
 }
 
 pub fn translate(source: &str, flags: &str) -> Result<String, String> {
+    translate_with(source, flags, false)
+}
+
+fn translate_with(source: &str, flags: &str, fast: bool) -> Result<String, String> {
     let vmode = flags.contains('v');
     let mut chars: Vec<char> = source.chars().collect();
     if vmode {
@@ -265,17 +338,18 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
     if flags.contains('i') {
         inline.push('i');
     }
-    if flags.contains('m') {
-        inline.push('m');
-    }
     if flags.contains('s') {
         inline.push('s');
     }
     if !inline.is_empty() {
         out.push_str(&format!("(?{inline})"));
     }
-    let dot_all = flags.contains('s');
     let unicode = flags.contains('u') || flags.contains('v');
+    let mut icase = flags.contains('i');
+    let mut multiline = flags.contains('m');
+    let mut dot_all = flags.contains('s');
+    let mut modifiers: Vec<(bool, bool, bool, bool)> = Vec::new();
+    let mut lookbehind = 0usize;
     let mut in_class = false;
     let mut class_depth = 0usize;
     let mut class_last: Option<u32> = None;
@@ -300,8 +374,14 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                 match e {
                     'd' if !in_class => out.push_str("[0-9]"),
                     'D' if !in_class => out.push_str("[^0-9]"),
-                    'w' if !in_class => out.push_str("[A-Za-z0-9_]"),
-                    'W' if !in_class => out.push_str("[^A-Za-z0-9_]"),
+                    'w' if !in_class => out.push_str(word_class(icase && unicode, false)),
+                    'W' if !in_class => out.push_str(word_class(icase && unicode, true)),
+                    'b' | 'B' if !in_class && fast => {
+                        out.push('\\');
+                        out.push(e);
+                    }
+                    'b' if !in_class => out.push_str(&word_boundary(icase && unicode, false)),
+                    'B' if !in_class => out.push_str(&word_boundary(icase && unicode, true)),
                     'd' | 'w' | 's' | 'S' | 'D' | 'W' if in_class => {
                         match e {
                             'd' => out.push_str("0-9"),
@@ -349,8 +429,7 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                             if n > before {
                                 out.push_str("(?:)");
                             } else {
-                                out.push('\\');
-                                out.extend(chars[i..j].iter());
+                                out.push_str(&backref(&[n], lookbehind > 0));
                             }
                             i = j - 1;
                         } else if e == '8' || e == '9' {
@@ -375,9 +454,18 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                             out.push_str("(?:)");
                             i = c;
                         } else if let Some((name, end)) = group_name_at(&chars, i + 1) {
-                            out.push_str("\\k<");
-                            out.push_str(&name);
-                            out.push('>');
+                            let numbers: Vec<usize> = named_groups(&chars, flags.contains('v'))
+                                .into_iter()
+                                .filter(|(n, _)| *n == name)
+                                .map(|(_, number)| number)
+                                .collect();
+                            if numbers.is_empty() {
+                                out.push_str("\\k<");
+                                out.push_str(&name);
+                                out.push('>');
+                            } else {
+                                out.push_str(&backref(&numbers, lookbehind > 0));
+                            }
                             i = end;
                         } else {
                             out.push_str("\\k");
@@ -576,7 +664,46 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                     out.push_str("[^\\n\\r\\x{2028}\\x{2029}]");
                 }
             }
+            '^' if !in_class => out.push_str(match (multiline, lookbehind > 0 || fast) {
+                (false, _) => "\\A",
+                (true, false) => LINE_START,
+                (true, true) => "(?m:^)",
+            }),
+            '$' if !in_class => out.push_str(match (multiline, lookbehind > 0 || fast) {
+                (false, _) => "\\z",
+                (true, false) => LINE_END,
+                (true, true) => "(?m:$)",
+            }),
             '(' if !in_class => {
+                let behind = chars.get(i + 1) == Some(&'?')
+                    && chars.get(i + 2) == Some(&'<')
+                    && matches!(chars.get(i + 3), Some('=') | Some('!'));
+                if behind {
+                    lookbehind += 1;
+                }
+                modifiers.push((icase, multiline, dot_all, behind));
+                if chars.get(i + 1) == Some(&'?') {
+                    let mut j = i + 2;
+                    let mut on = true;
+                    let mut changes = Vec::new();
+                    while let Some(&m) = chars.get(j) {
+                        match m {
+                            'i' | 'm' | 's' => changes.push((m, on)),
+                            '-' => on = false,
+                            _ => break,
+                        }
+                        j += 1;
+                    }
+                    if chars.get(j) == Some(&':') {
+                        for (m, value) in changes {
+                            match m {
+                                'i' => icase = value,
+                                'm' => multiline = value,
+                                _ => dot_all = value,
+                            }
+                        }
+                    }
+                }
                 let lookahead = chars.get(i + 1) == Some(&'?')
                     && matches!(chars.get(i + 2), Some('=') | Some('!'));
                 groups_open.push(if lookahead { Some(out.len()) } else { None });
@@ -592,6 +719,14 @@ pub fn translate(source: &str, flags: &str) -> Result<String, String> {
                 }
             }
             ')' if !in_class => {
+                if let Some((a, b, c, behind)) = modifiers.pop() {
+                    icase = a;
+                    multiline = b;
+                    dot_all = c;
+                    if behind {
+                        lookbehind -= 1;
+                    }
+                }
                 out.push(')');
                 if let Some(Some(start)) = groups_open.pop() {
                     if !unicode {
@@ -671,7 +806,23 @@ pub fn compile(source: &str, flags: &str) -> Result<Rc<RegexData>, String> {
         .backtrack_limit(10_000_000)
         .build()
         .map_err(|e| format!("Invalid regular expression: /{source}/{flags}: {e}"))?;
-    let names = re.capture_names().map(|n| n.map(JsStr::from)).collect();
+    let quick = translate_with(source, flags, true)
+        .ok()
+        .filter(|t| *t != translated);
+    let fast_lines = quick.as_ref().is_some_and(|t| t.contains("(?m:"));
+    let fast = quick.and_then(|t| {
+        fancy_regex::RegexBuilder::new(&t)
+            .backtrack_limit(10_000_000)
+            .build()
+            .ok()
+    });
+    let mut names: Vec<Option<JsStr>> = re.capture_names().map(|n| n.map(JsStr::from)).collect();
+    let chars: Vec<char> = source.chars().collect();
+    for (name, number) in named_groups(&chars, flags.contains('v')) {
+        if let Some(slot) = names.get_mut(number) {
+            *slot = Some(name.as_str().into());
+        }
+    }
     let data = Rc::new(RegexData {
         source: key.0.clone(),
         flags: key.1.clone(),
@@ -679,6 +830,9 @@ pub fn compile(source: &str, flags: &str) -> Result<Rc<RegexData>, String> {
         global: flags.contains('g'),
         sticky: flags.contains('y'),
         names,
+        fast,
+        fast_lines,
+        fast_seen: Cell::new(None),
     });
     CACHE.with(|c| c.borrow_mut().insert(key, data.clone()));
     Ok(data)
@@ -691,6 +845,22 @@ impl RegexData {
 
     pub fn has_names(&self) -> bool {
         self.names.iter().any(|n| n.is_some())
+    }
+
+    fn engine(&self, text: &str) -> &fancy_regex::Regex {
+        let Some(fast) = &self.fast else {
+            return &self.re;
+        };
+        let key = (text.as_ptr() as usize, text.len());
+        let usable = match self.fast_seen.get() {
+            Some((p, l, ok)) if (p, l) == key => ok,
+            _ => {
+                let ok = text.is_ascii() && !(self.fast_lines && text.as_bytes().contains(&b'\r'));
+                self.fast_seen.set(Some((key.0, key.1, ok)));
+                ok
+            }
+        };
+        if usable { fast } else { &self.re }
     }
 
     pub fn find_at(&self, text: &str, pos: usize) -> Result<Option<Match>, String> {
@@ -707,7 +877,7 @@ impl RegexData {
             return Ok(None);
         }
         let found = self
-            .re
+            .engine(text)
             .find_from_pos(text, pos)
             .map_err(|e| format!("RegExp execution failed: {e}"))?;
         Ok(match found {
@@ -721,7 +891,7 @@ impl RegexData {
             return Ok(None);
         }
         let caps = self
-            .re
+            .engine(text)
             .captures_from_pos(text, pos)
             .map_err(|e| format!("RegExp execution failed: {e}"))?;
         let Some(caps) = caps else {

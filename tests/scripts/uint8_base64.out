@@ -1,0 +1,16 @@
+{"read":8,"written":6} 72,101,108,108,111,32,0,0
+{"read":4,"written":2} {"read":2,"written":1}
+ZXhhZg loose 101,120,97,102
+ZXhhZg strict SyntaxError
+ZXhhZg stop-before-partial 101,120,97
+ZXhhZg== strict 101,120,97,102
+ZXhhZh== strict SyntaxError
+ZXhhZh== loose 101,120,97,102
+255,239 -_8
+TypeError
+TypeError
+TypeError
+SyntaxError
+SyntaxError
+TypeError
+SyntaxError 170,187,0,0

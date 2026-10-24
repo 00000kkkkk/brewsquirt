@@ -183,9 +183,17 @@ fn groups_object(vm: &mut Vm, data: &RegexData, items: &[Value]) -> Value {
         return Value::Undefined;
     }
     let g = Obj::new(ObjKind::Ordinary, None);
+    let mut matched: Vec<&crate::jsstr::JsStr> = Vec::new();
     for (i, name) in data.names.iter().enumerate() {
         if let Some(n) = name {
-            g.set_own(n.clone(), items.get(i).cloned().unwrap_or_default());
+            if matched.contains(&n) {
+                continue;
+            }
+            let v = items.get(i).cloned().unwrap_or_default();
+            if !matches!(v, Value::Undefined) {
+                matched.push(n);
+            }
+            g.set_own(n.clone(), v);
         }
     }
     let _ = vm;

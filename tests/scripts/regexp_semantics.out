@@ -1,0 +1,17 @@
+/(a)|\1b/ ["b",null]
+/(?:(a)|b)\1c/ ["bc",null]
+/^(?:(?<a>x)|(?<a>y)|z)\k<a>$/ ["z",null,null]
+/^(?:(?<a>x)|(?<a>y)|z)\k<a>$/ ["yy",null,"y"]
+/(?:(?<x>a)|(?<x>b))\k<x>/ ["bb",null,"b"]
+/\1(a)/ ["a","a"]
+/(?<=(a)\1)b/ ["b","a"]
+{"x":"a"} {"x":"b"} [a]
+[a][b] a,b
+[ 'y', 'x', 'z' ] {"x":[0,1]}
+false false [ 'caf', 'na', 've' ] true
+true false false false true
+[ 'key=1', 'x=2' ] 3 [ 'a', 'b' ]
+true true true false false
+true false true false true false
+tqbf L one
+L two

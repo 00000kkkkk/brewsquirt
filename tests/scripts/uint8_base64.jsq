@@ -1,0 +1,25 @@
+const u8 = new Uint8Array(8)
+console.log(JSON.stringify(u8.setFromBase64("SGVsbG8gV29ybGQ=")), Array.from(u8).join())
+console.log(JSON.stringify(new Uint8Array(4).setFromHex("cafe")), JSON.stringify(new Uint8Array(1).setFromHex("cafe")))
+for (const [s, last] of [["ZXhhZg", "loose"], ["ZXhhZg", "strict"], ["ZXhhZg", "stop-before-partial"], ["ZXhhZg==", "strict"], ["ZXhhZh==", "strict"], ["ZXhhZh==", "loose"]]) {
+  try {
+    console.log(s, last, Array.from(Uint8Array.fromBase64(s, { lastChunkHandling: last })).join())
+  } catch (e) {
+    console.log(s, last, e.constructor.name)
+  }
+}
+console.log(Array.from(Uint8Array.fromBase64("_-8", { alphabet: "base64url" })).join(), new Uint8Array([251, 255]).toBase64({ alphabet: "base64url", omitPadding: true }))
+for (const bad of [() => Uint8Array.fromBase64(1), () => Uint8Array.fromBase64("AA", 1), () => Uint8Array.fromBase64("AA", { alphabet: "x" }), () => Uint8Array.fromHex("abc"), () => new Uint8Array(2).setFromHex("zz"), () => new Uint8Array(1).toBase64({ alphabet: 1 })]) {
+  try {
+    bad()
+    console.log("no error")
+  } catch (e) {
+    console.log(e.constructor.name)
+  }
+}
+const partial = new Uint8Array(4)
+try {
+  partial.setFromHex("aabb!!")
+} catch (e) {
+  console.log(e.constructor.name, Array.from(partial).join())
+}

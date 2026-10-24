@@ -192,22 +192,256 @@ pub(crate) fn random_vec(n: usize) -> Vec<u8> {
     buf
 }
 
-fn this_u8(vm: &mut Vm, this: &Value, name: &str) -> Result<Vec<u8>, Value> {
+fn uint8_this(
+    vm: &mut Vm,
+    this: &Value,
+    name: &str,
+) -> Result<std::rc::Rc<crate::object::Obj>, Value> {
     match this {
-        Value::Object(o) => match &o.kind {
-            ObjKind::Typed(t) if t.kind == TypedKind::Uint8 => Ok(t.bytes()),
-            _ => Err(vm.type_error(format!(
-                "Uint8Array.prototype.{name} called on incompatible receiver"
-            ))),
-        },
+        Value::Object(o) if matches!(&o.kind, ObjKind::Typed(t) if t.kind == TypedKind::Uint8) => {
+            Ok(o.clone())
+        }
         _ => Err(vm.type_error(format!(
             "Uint8Array.prototype.{name} called on incompatible receiver"
         ))),
     }
 }
 
+fn uint8_bytes(vm: &mut Vm, o: &crate::object::Obj) -> Result<Vec<u8>, Value> {
+    let ObjKind::Typed(t) = &o.kind else {
+        return Err(vm.type_error("not a Uint8Array"));
+    };
+    if t.detached() || t.out_of_bounds() {
+        return Err(vm.type_error("Cannot perform this operation on a detached ArrayBuffer"));
+    }
+    Ok(t.bytes())
+}
+
+fn options_object(vm: &mut Vm, v: &Value) -> Result<Option<Value>, Value> {
+    match v {
+        Value::Undefined => Ok(None),
+        v if v.is_object() => Ok(Some(v.clone())),
+        _ => Err(vm.type_error("The options argument must be an object")),
+    }
+}
+
+fn alphabet_option(vm: &mut Vm, opts: &Option<Value>) -> Result<bool, Value> {
+    let Some(o) = opts else {
+        return Ok(false);
+    };
+    match vm.get_prop(o, "alphabet")? {
+        Value::Undefined => Ok(false),
+        Value::Str(s) if &*s == "base64" => Ok(false),
+        Value::Str(s) if &*s == "base64url" => Ok(true),
+        _ => Err(vm.type_error("Expected alphabet to be either \"base64\" or \"base64url\"")),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum LastChunk {
+    Loose,
+    Strict,
+    StopBeforePartial,
+}
+
+fn last_chunk_option(vm: &mut Vm, opts: &Option<Value>) -> Result<LastChunk, Value> {
+    let Some(o) = opts else {
+        return Ok(LastChunk::Loose);
+    };
+    match vm.get_prop(o, "lastChunkHandling")? {
+        Value::Undefined => Ok(LastChunk::Loose),
+        Value::Str(s) if &*s == "loose" => Ok(LastChunk::Loose),
+        Value::Str(s) if &*s == "strict" => Ok(LastChunk::Strict),
+        Value::Str(s) if &*s == "stop-before-partial" => Ok(LastChunk::StopBeforePartial),
+        _ => Err(vm.type_error(
+            "Expected lastChunkHandling to be either \"loose\", \"strict\", or \"stop-before-partial\"",
+        )),
+    }
+}
+
+struct Decoded {
+    read: usize,
+    bytes: Vec<u8>,
+    error: bool,
+}
+
+fn decode_chunk(chunk: &[u8], strict: bool) -> Option<Vec<u8>> {
+    let mut s = [0u32; 4];
+    for (i, v) in chunk.iter().enumerate() {
+        s[i] = *v as u32;
+    }
+    let n = s[0] << 18 | s[1] << 12 | s[2] << 6 | s[3];
+    let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+    match chunk.len() {
+        2 => (!strict || bytes[1] == 0).then(|| vec![bytes[0]]),
+        3 => (!strict || bytes[2] == 0).then(|| vec![bytes[0], bytes[1]]),
+        _ => Some(bytes.to_vec()),
+    }
+}
+
+fn sextet(c: u16) -> Option<u8> {
+    let c = char::from_u32(c as u32)?;
+    Some(match c {
+        'A'..='Z' => c as u8 - b'A',
+        'a'..='z' => c as u8 - b'a' + 26,
+        '0'..='9' => c as u8 - b'0' + 52,
+        '+' => 62,
+        '/' => 63,
+        _ => return None,
+    })
+}
+
+fn from_base64(units: &[u16], url: bool, last: LastChunk, max: usize) -> Decoded {
+    let mut res = Decoded {
+        read: 0,
+        bytes: Vec::new(),
+        error: false,
+    };
+    if max == 0 {
+        return res;
+    }
+    let len = units.len();
+    let skip = |mut i: usize| {
+        while i < len && matches!(units[i], 0x09 | 0x0a | 0x0c | 0x0d | 0x20) {
+            i += 1;
+        }
+        i
+    };
+    let mut chunk: Vec<u8> = Vec::with_capacity(4);
+    let mut index = 0;
+    loop {
+        index = skip(index);
+        if index == len {
+            if !chunk.is_empty() {
+                match last {
+                    LastChunk::StopBeforePartial => return res,
+                    LastChunk::Strict => {
+                        res.error = true;
+                        return res;
+                    }
+                    LastChunk::Loose => {
+                        if chunk.len() == 1 {
+                            res.error = true;
+                            return res;
+                        }
+                        res.bytes
+                            .extend(decode_chunk(&chunk, false).unwrap_or_default());
+                    }
+                }
+            }
+            res.read = len;
+            return res;
+        }
+        let mut c = units[index];
+        index += 1;
+        if c == b'=' as u16 {
+            if chunk.len() < 2 {
+                res.error = true;
+                return res;
+            }
+            index = skip(index);
+            if chunk.len() == 2 {
+                if index == len {
+                    if last != LastChunk::StopBeforePartial {
+                        res.error = true;
+                    }
+                    return res;
+                }
+                if units[index] == b'=' as u16 {
+                    index = skip(index + 1);
+                }
+            }
+            if index < len {
+                res.error = true;
+                return res;
+            }
+            match decode_chunk(&chunk, last == LastChunk::Strict) {
+                Some(b) => res.bytes.extend(b),
+                None => {
+                    res.error = true;
+                    return res;
+                }
+            }
+            res.read = len;
+            return res;
+        }
+        if url {
+            if c == b'+' as u16 || c == b'/' as u16 {
+                res.error = true;
+                return res;
+            }
+            if c == b'-' as u16 {
+                c = b'+' as u16;
+            } else if c == b'_' as u16 {
+                c = b'/' as u16;
+            }
+        }
+        let Some(v) = sextet(c) else {
+            res.error = true;
+            return res;
+        };
+        let remaining = max - res.bytes.len();
+        if (remaining == 1 && chunk.len() == 2) || (remaining == 2 && chunk.len() == 3) {
+            return res;
+        }
+        chunk.push(v);
+        if chunk.len() == 4 {
+            res.bytes
+                .extend(decode_chunk(&chunk, false).unwrap_or_default());
+            chunk.clear();
+            res.read = index;
+            if res.bytes.len() == max {
+                return res;
+            }
+        }
+    }
+}
+
+fn from_hex(units: &[u16], max: usize) -> Decoded {
+    let mut res = Decoded {
+        read: 0,
+        bytes: Vec::new(),
+        error: false,
+    };
+    if units.len() % 2 != 0 {
+        res.error = true;
+        return res;
+    }
+    let digit = |u: u16| char::from_u32(u as u32).and_then(|c| c.to_digit(16));
+    while res.read < units.len() && res.bytes.len() < max {
+        match (digit(units[res.read]), digit(units[res.read + 1])) {
+            (Some(h), Some(l)) => res.bytes.push((h * 16 + l) as u8),
+            _ => {
+                res.error = true;
+                return res;
+            }
+        }
+        res.read += 2;
+    }
+    res
+}
+
+fn string_units(vm: &mut Vm, v: &Value) -> Result<Vec<u16>, Value> {
+    match v {
+        Value::Str(s) => Ok(s.as_str().encode_utf16().collect()),
+        _ => Err(vm.type_error("The input must be a string")),
+    }
+}
+
+fn decode_error(vm: &mut Vm, base64: bool) -> Value {
+    vm.make_error(
+        ErrorKind::SyntaxError,
+        if base64 {
+            "Invalid base64 string"
+        } else {
+            "Input string must contain hex characters in even length"
+        },
+    )
+}
+
 pub(super) fn ta_to_hex(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
-    let bytes = this_u8(vm, &this, "toHex")?;
+    let o = uint8_this(vm, &this, "toHex")?;
+    let bytes = uint8_bytes(vm, &o)?;
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         s.push_str(&format!("{b:02x}"));
@@ -216,10 +450,16 @@ pub(super) fn ta_to_hex(vm: &mut Vm, this: Value, _args: &[Value]) -> R {
 }
 
 pub(super) fn ta_to_base64(vm: &mut Vm, this: Value, args: &[Value]) -> R {
-    let bytes = this_u8(vm, &this, "toBase64")?;
-    let url = base64_url_option(vm, &arg(args, 0))?;
+    let o = uint8_this(vm, &this, "toBase64")?;
+    let opts = options_object(vm, &arg(args, 0))?;
+    let url = alphabet_option(vm, &opts)?;
+    let omit = match &opts {
+        Some(o) => vm.get_prop(o, "omitPadding")?.truthy(),
+        None => false,
+    };
+    let bytes = uint8_bytes(vm, &o)?;
     let mut s = base64_encode(&bytes, url);
-    if arg(args, 0).is_object() && vm.get_prop(&arg(args, 0), "omitPadding")?.truthy() {
+    if omit {
         while s.ends_with('=') {
             s.pop();
         }
@@ -227,47 +467,72 @@ pub(super) fn ta_to_base64(vm: &mut Vm, this: Value, args: &[Value]) -> R {
     Ok(s.into())
 }
 
-fn base64_url_option(vm: &mut Vm, options: &Value) -> Result<bool, Value> {
-    if !options.is_object() {
-        return Ok(false);
-    }
-    let a = vm.get_prop(options, "alphabet")?;
-    Ok(matches!(&a, Value::Str(s) if &**s == "base64url"))
-}
-
 pub(super) fn u8_from_hex(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    let s = vm.to_string(&arg(args, 0))?;
-    if s.len() % 2 != 0 {
-        return Err(vm.make_error(
-            ErrorKind::SyntaxError,
-            "Input string must contain hex characters in even length",
-        ));
+    let units = string_units(vm, &arg(args, 0))?;
+    let res = from_hex(&units, usize::MAX);
+    if res.error {
+        return Err(decode_error(vm, false));
     }
-    let mut out = Vec::with_capacity(s.len() / 2);
-    let b = s.as_bytes();
-    for pair in b.chunks(2) {
-        let hi = (pair[0] as char).to_digit(16);
-        let lo = (pair[1] as char).to_digit(16);
-        match (hi, lo) {
-            (Some(h), Some(l)) => out.push((h * 16 + l) as u8),
-            _ => {
-                return Err(vm.make_error(
-                    ErrorKind::SyntaxError,
-                    "Input string must contain hex characters in even length",
-                ));
-            }
-        }
-    }
-    Ok(new_uint8(vm, out))
+    Ok(new_uint8(vm, res.bytes))
 }
 
 pub(super) fn u8_from_base64(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
-    let s = vm.to_string(&arg(args, 0))?;
-    let url = base64_url_option(vm, &arg(args, 1))?;
-    match base64_decode(&s, url) {
-        Some(bytes) => Ok(new_uint8(vm, bytes)),
-        None => Err(vm.make_error(ErrorKind::SyntaxError, "Invalid base64 string")),
+    let units = string_units(vm, &arg(args, 0))?;
+    let opts = options_object(vm, &arg(args, 1))?;
+    let url = alphabet_option(vm, &opts)?;
+    let last = last_chunk_option(vm, &opts)?;
+    let res = from_base64(&units, url, last, usize::MAX);
+    if res.error {
+        return Err(decode_error(vm, true));
     }
+    Ok(new_uint8(vm, res.bytes))
+}
+
+fn write_decoded(vm: &mut Vm, o: &crate::object::Obj, res: Decoded, base64: bool) -> R {
+    if let ObjKind::Typed(t) = &o.kind {
+        let mut store = t.store().borrow_mut();
+        for (i, b) in res.bytes.iter().enumerate() {
+            if let Some(slot) = store.get_mut(t.offset + i) {
+                *slot = *b;
+            }
+        }
+    }
+    if res.error {
+        return Err(decode_error(vm, base64));
+    }
+    let out = vm.new_object();
+    out.set_own("read", Value::Number(res.read as f64));
+    out.set_own("written", Value::Number(res.bytes.len() as f64));
+    Ok(Value::Object(out))
+}
+
+fn writable_length(vm: &mut Vm, o: &crate::object::Obj) -> Result<usize, Value> {
+    let ObjKind::Typed(t) = &o.kind else {
+        return Err(vm.type_error("not a Uint8Array"));
+    };
+    if t.detached() || t.out_of_bounds() {
+        return Err(vm.type_error("Cannot perform this operation on a detached ArrayBuffer"));
+    }
+    Ok(t.len())
+}
+
+pub(super) fn ta_set_from_base64(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let o = uint8_this(vm, &this, "setFromBase64")?;
+    let units = string_units(vm, &arg(args, 0))?;
+    let opts = options_object(vm, &arg(args, 1))?;
+    let url = alphabet_option(vm, &opts)?;
+    let last = last_chunk_option(vm, &opts)?;
+    let max = writable_length(vm, &o)?;
+    let res = from_base64(&units, url, last, max);
+    write_decoded(vm, &o, res, true)
+}
+
+pub(super) fn ta_set_from_hex(vm: &mut Vm, this: Value, args: &[Value]) -> R {
+    let o = uint8_this(vm, &this, "setFromHex")?;
+    let units = string_units(vm, &arg(args, 0))?;
+    let max = writable_length(vm, &o)?;
+    let res = from_hex(&units, max);
+    write_decoded(vm, &o, res, false)
 }
 
 fn te_ctor(vm: &mut Vm, this: Value, _args: &[Value]) -> R {

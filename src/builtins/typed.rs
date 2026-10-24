@@ -542,6 +542,14 @@ fn install_typed(vm: &mut Vm) {
             method(vm, &c, "fromBase64", 1, super::binary::u8_from_base64);
             method(vm, &proto, "toHex", 0, super::binary::ta_to_hex);
             method(vm, &proto, "toBase64", 0, super::binary::ta_to_base64);
+            method(
+                vm,
+                &proto,
+                "setFromBase64",
+                1,
+                super::binary::ta_set_from_base64,
+            );
+            method(vm, &proto, "setFromHex", 1, super::binary::ta_set_from_hex);
         }
         made.push(Value::Object(c.clone()));
         vm.define_global(kind.name(), Value::Object(c));

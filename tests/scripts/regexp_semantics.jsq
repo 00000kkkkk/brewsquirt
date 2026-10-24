@@ -1,0 +1,23 @@
+const show = (re, s) => console.log(String(re), JSON.stringify(re.exec(s)))
+
+show(/(a)|\1b/, "b")
+show(/(?:(a)|b)\1c/, "bc")
+show(/^(?:(?<a>x)|(?<a>y)|z)\k<a>$/, "z")
+show(/^(?:(?<a>x)|(?<a>y)|z)\k<a>$/, "yy")
+show(/(?:(?<x>a)|(?<x>b))\k<x>/, "bb")
+show(/\1(a)/, "a")
+show(/(?<=(a)\1)b/, "aab")
+
+const dup = /(?<x>a)|(?<x>b)/
+console.log(JSON.stringify(dup.exec("a").groups), JSON.stringify(dup.exec("b").groups), "a".replace(dup, "[$<x>]"))
+console.log("ab".replace(/(?<x>a)|(?<x>b)/g, "[$<x>]"), [..."ab".matchAll(/(?<x>a)|(?<x>b)/g)].map((m) => m.groups.x).join())
+const indexed = /(?<y>c)|(?<x>a)|(?<x>b)|(?<z>d)/d.exec("b")
+console.log(Object.keys(indexed.groups), JSON.stringify(indexed.indices.groups))
+
+console.log(/\bé/.test("é"), /\bcafé\b/.test("café"), "café naïve".match(/\b\w+\b/g), /\Bx\b/.test("ax x"))
+console.log(/\bk/iu.test("\u212A"), /\bk/i.test("\u212A"), /(?-i:\b)k/iu.test("\u212A"), /\w/i.test("\u017F"), /\w/iu.test("\u017F"))
+console.log("key=1\r\nx=2\r\n".match(/^(\w+)=(.*)$/gm), "a\r\n\r\nb".match(/^$/gm).length, "a\u2028b".match(/^\w$/gm))
+console.log(/^b/m.test("a\rb"), /a$/m.test("a\u2028b"), /(?m:^b)/.test("a\nb"), /^b/.test("a\nb"), /a$/.test("a\n"))
+console.log(/(?s:a.b)/.test("a\nb"), /(?-s:a.b)/s.test("a\nb"), /(?i:a)b/.test("Ab"), /(?i:a)b/.test("AB"), /(?-i:a)b/i.test("aB"), /(?-i:a)b/i.test("AB"))
+console.log("the quick brown fox".match(/\b\w/g).join(""), "line one\nline two".replace(/^line/gm, "L"))
+
