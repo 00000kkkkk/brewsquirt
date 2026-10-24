@@ -1,6 +1,6 @@
 # BrewSquirt
 
-[![CI](https://github.com/00000kkkkk/javasquirt/actions/workflows/ci.yml/badge.svg)](https://github.com/00000kkkkk/javasquirt/actions/workflows/ci.yml)
+[![CI](https://github.com/00000kkkkk/brewsquirt/actions/workflows/ci.yml/badge.svg)](https://github.com/00000kkkkk/brewsquirt/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![MSRV](https://img.shields.io/badge/MSRV-1.86-orange.svg)](https://blog.rust-lang.org/2025/04/03/Rust-1.86.0/)
 [![Rust edition](https://img.shields.io/badge/edition-2024-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/)
@@ -66,13 +66,13 @@ No Rust toolchain needed. Every method below installs two binaries, `jsq` and `v
 Linux and macOS:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/00000kkkkk/javasquirt/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/00000kkkkk/brewsquirt/main/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/00000kkkkk/javasquirt/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/00000kkkkk/brewsquirt/main/install.ps1 | iex
 ```
 
 The scripts download the latest release for your platform, verify its SHA-256 checksum, install
@@ -85,14 +85,14 @@ Set `JSQ_VERSION=v1.0.0` to pin a version, `JSQ_INSTALL_DIR` to pick another dir
 Scoop (Windows):
 
 ```powershell
-scoop bucket add brewsquirt https://github.com/00000kkkkk/javasquirt
+scoop bucket add brewsquirt https://github.com/00000kkkkk/brewsquirt
 scoop install jsq
 ```
 
 Homebrew (macOS and Linux):
 
 ```sh
-brew tap 00000kkkkk/javasquirt https://github.com/00000kkkkk/javasquirt
+brew tap 00000kkkkk/brewsquirt https://github.com/00000kkkkk/brewsquirt
 brew install jsq
 ```
 
@@ -101,7 +101,7 @@ brew install jsq
 Requires Rust 1.86 or newer.
 
 ```sh
-cargo install --git https://github.com/00000kkkkk/javasquirt
+cargo install --git https://github.com/00000kkkkk/brewsquirt
 ```
 
 This installs both `jsq` and `vrotdaem` into `~/.cargo/bin`.
@@ -109,7 +109,7 @@ This installs both `jsq` and `vrotdaem` into `~/.cargo/bin`.
 ### Release binaries
 
 Prebuilt archives for every tagged release are on the
-[Releases page](https://github.com/00000kkkkk/javasquirt/releases):
+[Releases page](https://github.com/00000kkkkk/brewsquirt/releases):
 
 | Platform            | Archive                                              |
 | ------------------- | ---------------------------------------------------- |

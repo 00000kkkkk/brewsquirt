@@ -2,7 +2,7 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-$Repo = "00000kkkkk/javasquirt"
+$Repo = "00000kkkkk/brewsquirt"
 $InstallDir = if ($env:JSQ_INSTALL_DIR) { $env:JSQ_INSTALL_DIR } else { Join-Path $env:USERPROFILE ".jsq\bin" }
 $Version = $env:JSQ_VERSION
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="00000kkkkk/javasquirt"
+REPO="00000kkkkk/brewsquirt"
 INSTALL_DIR="${JSQ_INSTALL_DIR:-$HOME/.jsq/bin}"
 VERSION="${JSQ_VERSION:-}"
 

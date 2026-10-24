@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPO="00000kkkkk/javasquirt"
+REPO="00000kkkkk/brewsquirt"
 TAG="${1:-}"
 [ -n "$TAG" ] || {
   echo "usage: scripts/update-manifests.sh vX.Y.Z" >&2

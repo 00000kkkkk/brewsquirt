@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Report a security vulnerability
-    url: https://github.com/00000kkkkk/javasquirt/security/advisories/new
+    url: https://github.com/00000kkkkk/brewsquirt/security/advisories/new
     about: Report vulnerabilities privately through GitHub Security Advisories, never in a public issue.
   - name: Language reference
-    url: https://github.com/00000kkkkk/javasquirt/blob/main/docs/LANGUAGE.md
+    url: https://github.com/00000kkkkk/brewsquirt/blob/main/docs/LANGUAGE.md
     about: Check how a feature is supposed to work before reporting it as a bug.

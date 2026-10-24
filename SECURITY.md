@@ -12,7 +12,7 @@ Security fixes are released for the latest minor version only.
 ## Reporting a vulnerability
 
 Please report vulnerabilities privately through
-[GitHub Security Advisories](https://github.com/00000kkkkk/javasquirt/security/advisories/new).
+[GitHub Security Advisories](https://github.com/00000kkkkk/brewsquirt/security/advisories/new).
 Do not open a public issue, pull request or discussion for a security problem.
 
 Include as much of the following as you can:

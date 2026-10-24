@@ -1859,7 +1859,7 @@ failures reject with `TypeError: fetch failed`, with the reason in `cause`.
 | `timeout`    | Milliseconds before the request fails; no limit by default         |
 
 ```js
-const res = await fetch("https://api.github.com/repos/00000kkkkk/javasquirt", {
+const res = await fetch("https://api.github.com/repos/00000kkkkk/brewsquirt", {
   headers: { accept: "application/vnd.github+json" },
 })
 if (!res.ok) throw new Error(`HTTP ${res.status}`)
