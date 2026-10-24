@@ -236,6 +236,53 @@ pub fn net_connect(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     Ok(Value::Number(id as f64))
 }
 
+pub fn net_connect_path(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let path = vm.to_string(&arg(args, 0))?.to_string();
+    let id = vm.io.next_id();
+    let cmd = io::socket_connect_path(id, path, vm.io.tx.clone());
+    vm.io.pending += 1;
+    vm.io_sockets.insert(
+        id,
+        SocketEntry {
+            cmd,
+            handler: Value::Undefined,
+            refed: true,
+            frame: vm.async_frame.clone(),
+        },
+    );
+    Ok(Value::Number(id as f64))
+}
+
+pub fn net_listen_path(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let path = vm.to_string(&arg(args, 0))?.to_string();
+    let handler = arg(args, 1);
+    let id = vm.io.next_id();
+    let handle = match io::socket_listen_path(&path, id, vm.io.ids.clone(), vm.io.tx.clone()) {
+        Ok(h) => h,
+        Err(e) => {
+            let code = io::error_code(&e);
+            let err = vm.make_error(ErrorKind::Error, format!("listen {code}: {path}"));
+            if let Value::Object(o) = &err {
+                o.set_own("code", code.into());
+                o.set_own("syscall", "listen".into());
+                o.set_own("address", path.clone().into());
+            }
+            return Err(err);
+        }
+    };
+    vm.io.pending += 1;
+    vm.io_net_servers.insert(
+        id,
+        NetServerEntry {
+            handler,
+            handle,
+            refed: true,
+            frame: vm.async_frame.clone(),
+        },
+    );
+    Ok(Value::Number(id as f64))
+}
+
 pub fn net_attach(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let id = id_arg(vm, args)?;
     let frame = vm.async_frame.clone();
@@ -534,11 +581,14 @@ pub fn flush_sockets(vm: &mut Vm) {
     }
 }
 
-fn addr_values(addr: &SocketAddr) -> [Value; 2] {
-    [
-        addr.ip().to_string().into(),
-        Value::Number(addr.port() as f64),
-    ]
+fn addr_values(addr: &Option<SocketAddr>) -> [Value; 2] {
+    match addr {
+        Some(addr) => [
+            addr.ip().to_string().into(),
+            Value::Number(addr.port() as f64),
+        ],
+        None => [Value::Undefined, Value::Undefined],
+    }
 }
 
 fn call_handler(vm: &mut Vm, handler: &Value, frame: &Value, args: &[Value]) -> Result<(), Value> {
@@ -599,8 +649,8 @@ pub fn handle_accept(
     vm: &mut Vm,
     server: u64,
     id: u64,
-    local: SocketAddr,
-    remote: SocketAddr,
+    local: Option<SocketAddr>,
+    remote: Option<SocketAddr>,
     cmd: Sender<SocketCmd>,
     alpn: Option<String>,
 ) -> Result<(), Value> {

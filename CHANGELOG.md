@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `getHourCycles`, `getNumberingSystems`, `getTimeZones`, `getTextInfo` and `getWeekInfo`,
   which honour the `rg` and `sd` keywords. `Intl.getCanonicalLocales` and every `Intl`
   constructor share the same canonicalization. Docusaurus builds.
+- `net.connect`, `net.createConnection` and `server.listen` accept a Unix domain socket path on
+  Linux and macOS, as a `path` option or a string argument that is not a port, and
+  `http.request` takes `socketPath`. A server's `address()` returns the path and closing it
+  removes the socket file.
 - `zlib` has zstd: `zstdCompress`, `zstdDecompress`, their sync forms, `createZstdCompress`,
   `createZstdDecompress` and the `ZSTD_*` constants, through libzstd, so the output matches Node
   byte for byte. Decoding stops after the first frame, as in Node.

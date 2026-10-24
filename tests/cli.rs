@@ -385,3 +385,31 @@ fn unsettled_top_level_await_exits_with_13() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[cfg(unix)]
+#[test]
+fn unix_domain_sockets() {
+    let out = run_in(&root(), &["tests/scripts/fixtures/unix_socket.js"]);
+    assert!(out.status.success(), "{}", normalize(&out.stderr));
+    let text = normalize(&out.stdout);
+    let mut lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines[0].starts_with("listening ") && lines[0].ends_with(".sock true"),
+        "{text}"
+    );
+    lines.remove(0);
+    lines.sort_unstable();
+    assert_eq!(
+        lines,
+        [
+            "client connected undefined undefined",
+            "client got pong",
+            "closed false",
+            "error ENOENT connect /tmp/does-not-exist.sock",
+            "http 200 text/plain hello",
+            "server conn undefined undefined",
+            "server conn undefined undefined",
+        ],
+        "{text}"
+    );
+}

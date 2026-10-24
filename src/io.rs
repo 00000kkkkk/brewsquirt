@@ -135,8 +135,8 @@ pub enum IoEvent {
     Accept {
         server: u64,
         id: u64,
-        local: SocketAddr,
-        remote: SocketAddr,
+        local: Option<SocketAddr>,
+        remote: Option<SocketAddr>,
         cmd: Sender<SocketCmd>,
         alpn: Option<String>,
     },
@@ -276,8 +276,8 @@ pub fn watch_start(
 
 pub enum SocketEvent {
     Connected {
-        local: SocketAddr,
-        remote: SocketAddr,
+        local: Option<SocketAddr>,
+        remote: Option<SocketAddr>,
         alpn: Option<String>,
     },
     Data(Vec<u8>),
@@ -371,6 +371,10 @@ pub fn error_code(e: &std::io::Error) -> &'static str {
         AddrNotAvailable => "EADDRNOTAVAIL",
         HostUnreachable | NetworkUnreachable => "EHOSTUNREACH",
         PermissionDenied => "EACCES",
+        NotFound => "ENOENT",
+        AlreadyExists => "EEXIST",
+        InvalidInput => "EINVAL",
+        Unsupported => "ENOTSUP",
         _ => "EIO",
     }
 }
@@ -551,25 +555,98 @@ fn tls_wrap(
     Ok(stream)
 }
 
+pub enum Sock {
+    Tcp(TcpStream),
+    #[cfg(unix)]
+    Unix(std::os::unix::net::UnixStream),
+}
+
+impl Sock {
+    fn try_clone(&self) -> std::io::Result<Sock> {
+        match self {
+            Sock::Tcp(s) => s.try_clone().map(Sock::Tcp),
+            #[cfg(unix)]
+            Sock::Unix(s) => s.try_clone().map(Sock::Unix),
+        }
+    }
+
+    fn shutdown(&self, how: std::net::Shutdown) -> std::io::Result<()> {
+        match self {
+            Sock::Tcp(s) => s.shutdown(how),
+            #[cfg(unix)]
+            Sock::Unix(s) => s.shutdown(how),
+        }
+    }
+
+    fn set_read_timeout(&self, d: Option<Duration>) -> std::io::Result<()> {
+        match self {
+            Sock::Tcp(s) => s.set_read_timeout(d),
+            #[cfg(unix)]
+            Sock::Unix(s) => s.set_read_timeout(d),
+        }
+    }
+}
+
+impl Read for Sock {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Sock::Tcp(s) => s.read(buf),
+            #[cfg(unix)]
+            Sock::Unix(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for Sock {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Sock::Tcp(s) => s.write(buf),
+            #[cfg(unix)]
+            Sock::Unix(s) => s.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Sock::Tcp(s) => s.flush(),
+            #[cfg(unix)]
+            Sock::Unix(s) => s.flush(),
+        }
+    }
+}
+
 pub trait IntoSock {
-    fn into_sock(self) -> (TcpStream, Option<rustls::Connection>);
+    fn into_sock(self) -> (Sock, Option<rustls::Connection>);
 }
 
 impl IntoSock for TcpStream {
-    fn into_sock(self) -> (TcpStream, Option<rustls::Connection>) {
-        (self, None)
+    fn into_sock(self) -> (Sock, Option<rustls::Connection>) {
+        (Sock::Tcp(self), None)
+    }
+}
+
+#[cfg(unix)]
+impl IntoSock for std::os::unix::net::UnixStream {
+    fn into_sock(self) -> (Sock, Option<rustls::Connection>) {
+        (Sock::Unix(self), None)
     }
 }
 
 impl IntoSock for rustls::StreamOwned<rustls::ClientConnection, TcpStream> {
-    fn into_sock(self) -> (TcpStream, Option<rustls::Connection>) {
-        (self.sock, Some(rustls::Connection::Client(self.conn)))
+    fn into_sock(self) -> (Sock, Option<rustls::Connection>) {
+        (
+            Sock::Tcp(self.sock),
+            Some(rustls::Connection::Client(self.conn)),
+        )
     }
 }
 
 impl IntoSock for rustls::StreamOwned<rustls::ServerConnection, TcpStream> {
-    fn into_sock(self) -> (TcpStream, Option<rustls::Connection>) {
-        (self.sock, Some(rustls::Connection::Server(self.conn)))
+    fn into_sock(self) -> (Sock, Option<rustls::Connection>) {
+        (
+            Sock::Tcp(self.sock),
+            Some(rustls::Connection::Server(self.conn)),
+        )
     }
 }
 
@@ -591,12 +668,7 @@ fn drain_plaintext(conn: &mut rustls::Connection, out: &mut Vec<u8>) -> bool {
     }
 }
 
-fn tls_send(
-    conn: &SharedTls,
-    sock: &mut TcpStream,
-    data: &[u8],
-    close: bool,
-) -> std::io::Result<()> {
+fn tls_send(conn: &SharedTls, sock: &mut Sock, data: &[u8], close: bool) -> std::io::Result<()> {
     let mut out = Vec::with_capacity(data.len() + 64);
     {
         let mut c = lock_tls(conn);
@@ -639,7 +711,7 @@ fn quiet_read_error(e: &std::io::Error) -> bool {
 }
 
 fn socket_reader(
-    mut sock: TcpStream,
+    mut sock: Sock,
     conn: Option<SharedTls>,
     id: u64,
     cmd: Sender<SocketCmd>,
@@ -895,8 +967,8 @@ pub fn socket_connect(
                 let _ = tx.send(IoEvent::Socket {
                     id,
                     event: SocketEvent::Connected {
-                        local,
-                        remote,
+                        local: Some(local),
+                        remote: Some(remote),
                         alpn: None,
                     },
                 });
@@ -911,8 +983,8 @@ pub fn socket_connect(
                     let _ = tx.send(IoEvent::Socket {
                         id,
                         event: SocketEvent::Connected {
-                            local,
-                            remote,
+                            local: Some(local),
+                            remote: Some(remote),
                             alpn,
                         },
                     });
@@ -956,8 +1028,8 @@ pub fn socket_listen(
                     let _ = tx.send(IoEvent::Accept {
                         server,
                         id,
-                        local,
-                        remote,
+                        local: Some(local),
+                        remote: Some(remote),
                         cmd: ctx,
                         alpn: None,
                     });
@@ -984,8 +1056,8 @@ pub fn socket_listen(
                             .send(IoEvent::Accept {
                                 server,
                                 id,
-                                local,
-                                remote,
+                                local: Some(local),
+                                remote: Some(remote),
                                 cmd: ctx,
                                 alpn,
                             })
@@ -999,7 +1071,106 @@ pub fn socket_listen(
             }
         }
     });
-    Ok(ServerHandle { addr, stop })
+    Ok(ServerHandle {
+        addr,
+        stop,
+        path: None,
+    })
+}
+
+#[cfg(not(unix))]
+fn unsupported_path() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "IPC paths need a Unix domain socket, which this platform does not provide",
+    )
+}
+
+pub fn socket_connect_path(id: u64, path: String, tx: Sender<IoEvent>) -> Sender<SocketCmd> {
+    let (ctx, crx) = channel::<SocketCmd>();
+    let own = ctx.clone();
+    std::thread::spawn(move || {
+        #[cfg(unix)]
+        let stream = std::os::unix::net::UnixStream::connect(&path);
+        #[cfg(not(unix))]
+        let stream: std::io::Result<TcpStream> = Err(unsupported_path());
+        match stream {
+            Ok(stream) => {
+                let _ = tx.send(IoEvent::Socket {
+                    id,
+                    event: SocketEvent::Connected {
+                        local: None,
+                        remote: None,
+                        alpn: None,
+                    },
+                });
+                socket_loop(stream, id, own, crx, tx);
+            }
+            Err(e) => {
+                let code = error_code(&e);
+                let _ = tx.send(IoEvent::Socket {
+                    id,
+                    event: SocketEvent::Error {
+                        code: code.to_string(),
+                        message: format!("connect {code} {path}"),
+                    },
+                });
+                let _ = tx.send(IoEvent::Socket {
+                    id,
+                    event: SocketEvent::Closed,
+                });
+            }
+        }
+    });
+    ctx
+}
+
+#[cfg(unix)]
+pub fn socket_listen_path(
+    path: &str,
+    server: u64,
+    ids: Arc<AtomicU64>,
+    tx: Sender<IoEvent>,
+) -> std::io::Result<ServerHandle> {
+    let listener = std::os::unix::net::UnixListener::bind(path)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            if flag.load(Ordering::SeqCst) {
+                break;
+            }
+            let Ok(stream) = conn else { continue };
+            let id = ids.fetch_add(1, Ordering::SeqCst) + 1;
+            let (ctx, crx) = channel::<SocketCmd>();
+            let own = ctx.clone();
+            let tx2 = tx.clone();
+            let _ = tx.send(IoEvent::Accept {
+                server,
+                id,
+                local: None,
+                remote: None,
+                cmd: ctx,
+                alpn: None,
+            });
+            std::thread::spawn(move || socket_loop(stream, id, own, crx, tx2));
+        }
+    });
+    Ok(ServerHandle {
+        addr: SocketAddr::from(([0, 0, 0, 0], 0)),
+        stop,
+        path: Some(path.into()),
+    })
+}
+
+#[cfg(not(unix))]
+pub fn socket_listen_path(
+    _path: &str,
+    _server: u64,
+    _ids: Arc<AtomicU64>,
+    _tx: Sender<IoEvent>,
+) -> std::io::Result<ServerHandle> {
+    Err(unsupported_path())
 }
 
 #[cfg(windows)]
@@ -1752,11 +1923,20 @@ pub fn spawn_fetch(tx: Sender<IoEvent>, id: u64, req: FetchRequest) {
 pub struct ServerHandle {
     pub addr: SocketAddr,
     stop: Arc<AtomicBool>,
+    path: Option<std::path::PathBuf>,
 }
 
 impl ServerHandle {
     pub fn close(&self) {
         if self.stop.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if let Some(path) = &self.path {
+            #[cfg(unix)]
+            {
+                let _ = std::os::unix::net::UnixStream::connect(path);
+            }
+            let _ = std::fs::remove_file(path);
             return;
         }
         let mut wake = self.addr;
@@ -1796,7 +1976,11 @@ pub fn listen(
             std::thread::spawn(move || serve_connection(stream, server, tx, flag, ids, tls));
         }
     });
-    Ok(ServerHandle { addr, stop })
+    Ok(ServerHandle {
+        addr,
+        stop,
+        path: None,
+    })
 }
 
 const MAX_HEAD: usize = 64 * 1024;

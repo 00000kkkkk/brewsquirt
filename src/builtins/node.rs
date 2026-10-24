@@ -4924,7 +4924,7 @@ const NODE_SRC: &str = r##"
         host,
         hostname: host,
         port,
-        path: agentOptions.path ?? null,
+        path: this.#options.socketPath ?? agentOptions.path ?? null,
         method: this.method,
         protocol: this.#url.protocol === "wss:" ? "https:" : this.#url.protocol === "ws:" ? "http:" : this.#url.protocol,
         servername: this.#options.servername ?? host,
@@ -5059,7 +5059,7 @@ const NODE_SRC: &str = r##"
       const body = requestState(this).chunks.length ? Buffer.concat(requestState(this).chunks) : undefined
       const agent = this.#options.agent
       const customAgent = agent && ((typeof agent.createConnection === "function" && agent.createConnection !== Agent.prototype.createConnection) || (typeof agent.addRequest === "function" && agent.addRequest !== Agent.prototype.addRequest) || (typeof agent.createSocket === "function" && agent.createSocket !== Agent.prototype.createSocket))
-      if (requestHeaders(this).has("upgrade") || this.#options.createConnection || customAgent) return this.#socketRequest(body, cb)
+      if (requestHeaders(this).has("upgrade") || this.#options.createConnection || customAgent || this.#options.socketPath) return this.#socketRequest(body, cb)
       const agentOptions = this.#options.agent?.options ?? {}
       const tlsOptions = { rejectUnauthorized: this.#options.rejectUnauthorized ?? agentOptions.rejectUnauthorized, ca: this.#options.ca ?? agentOptions.ca }
       fetch(this.#url, { method: this.method, headers: requestHeaders(this), body, signal: requestState(this).controller.signal, redirect: "manual", tls: tlsOptions, [Symbol.for("jsq.rawBody")]: true }).then(
@@ -5102,6 +5102,7 @@ const NODE_SRC: &str = r##"
     return req
   }
   const defaultConnection = (options) => {
+    if (options.socketPath) return net.connect({ path: options.socketPath })
     const secure = options.protocol === "https:"
     return secure
       ? tls.connect({ host: options.host, port: options.port, servername: options.servername, rejectUnauthorized: options.rejectUnauthorized, ca: options.ca })
@@ -6362,7 +6363,7 @@ const NODE_SRC: &str = r##"
           sock.localPort = b
           sock.remoteAddress = c
           sock.remotePort = d
-          sock.remoteFamily = isIPv6(c) ? "IPv6" : "IPv4"
+          sock.remoteFamily = c === undefined ? undefined : isIPv6(c) ? "IPv6" : "IPv4"
           sock.readyState = "open"
           for (const [chunk, cb] of st.queued) {
             native.netWrite(st.id, chunk)
@@ -6392,6 +6393,8 @@ const NODE_SRC: &str = r##"
           if (sock.remoteAddress) {
             e.address = sock.remoteAddress
             e.port = sock.remotePort
+          } else if (st.path !== undefined) {
+            e.address = st.path
           } else {
             e.address = st.host
             e.port = st.port
@@ -6412,6 +6415,7 @@ const NODE_SRC: &str = r##"
     native.netAttach(id, handler)
     return handler
   }
+  const isPipeName = (v) => typeof v === "string" && !(Number(v) >= 0)
   const touchTimeout = (sock) => {
     const st = sock[kSock]
     clearTimeout(st.timer)
@@ -6444,7 +6448,7 @@ const NODE_SRC: &str = r##"
         this.localPort = options.localPort
         this.remoteAddress = options.remoteAddress
         this.remotePort = options.remotePort
-        this.remoteFamily = isIPv6(options.remoteAddress) ? "IPv6" : "IPv4"
+        this.remoteFamily = options.remoteAddress === undefined ? undefined : isIPv6(options.remoteAddress) ? "IPv6" : "IPv4"
         attachSocket(this, options[kSocketId])
       }
     }
@@ -6452,13 +6456,16 @@ const NODE_SRC: &str = r##"
       const cb = typeof args[args.length - 1] === "function" ? args.pop() : null
       let options = args[0]
       if (typeof options !== "object" || options === null) {
-        options = { port: args[0], host: typeof args[1] === "string" ? args[1] : undefined }
+        options = isPipeName(args[0]) ? { path: args[0] } : { port: args[0], host: typeof args[1] === "string" ? args[1] : undefined }
       }
       const st = this[kSock]
-      if (options.path) {
-        const e = new Error("IPC sockets are not supported in this runtime")
-        e.code = "ENOTSUP"
-        queueMicrotask(() => this.destroy(e))
+      if (options.path !== undefined && options.path !== null) {
+        st.path = String(options.path)
+        this.connecting = true
+        this.readyState = "opening"
+        if (cb) this.once("connect", cb)
+        attachSocket(this, native.netConnectPath(st.path))
+        if (options.timeout) this.setTimeout(options.timeout)
         return this
       }
       const port = Number(options.port)
@@ -6579,38 +6586,46 @@ const NODE_SRC: &str = r##"
       const cb = typeof args[args.length - 1] === "function" ? args.pop() : null
       let options = args[0]
       if (typeof options !== "object" || options === null) {
-        options = { port: args[0], host: typeof args[1] === "string" ? args[1] : undefined }
+        options = isPipeName(args[0]) ? { path: args[0] } : { port: args[0], host: typeof args[1] === "string" ? args[1] : undefined }
       }
       const st = this[kSock]
       if (st.id !== null) throw streamError("ERR_SERVER_ALREADY_LISTEN", "Listen method has been called more than once without closing.")
-      if (options.path) {
-        const e = new Error("IPC servers are not supported in this runtime")
-        e.code = "ENOTSUP"
-        queueMicrotask(() => this.emit("error", e))
+      const onConnection = (id, localAddress, localPort, remoteAddress, remotePort, alpn) => {
+        if (this.maxConnections !== undefined && st.connections.size >= this.maxConnections) {
+          native.netDestroy(id)
+          this.emit("drop", { localAddress, localPort, remoteAddress, remotePort })
+          return
+        }
+        const sock = new Socket({ [kSocketId]: id, localAddress, localPort, remoteAddress, remotePort, allowHalfOpen: st.options.allowHalfOpen })
+        sock[kAlpn] = alpn ?? false
+        sock.server = this
+        st.connections.add(sock)
+        sock.once("close", () => {
+          st.connections.delete(sock)
+          if (st.closing && st.connections.size === 0) this.emit("close")
+        })
+        this.emit("connection", sock)
+      }
+      if (cb) this.once("listening", cb)
+      if (options.path !== undefined && options.path !== null) {
+        const path = String(options.path)
+        try {
+          st.id = native.netListenPath(path, onConnection)
+        } catch (e) {
+          queueMicrotask(() => this.emit("error", e))
+          return this
+        }
+        st.address = path
+        this.listening = true
+        queueMicrotask(() => this.emit("listening"))
         return this
       }
       const port = options.port === undefined ? 0 : Number(options.port)
       const host = options.host ?? "::"
-      if (cb) this.once("listening", cb)
       let result
       try {
         const material = this instanceof TLSServer ? tlsMaterial(st.options) : [null, null]
-        result = native.netListen(host, port, (id, localAddress, localPort, remoteAddress, remotePort, alpn) => {
-          if (this.maxConnections !== undefined && st.connections.size >= this.maxConnections) {
-            native.netDestroy(id)
-            this.emit("drop", { localAddress, localPort, remoteAddress, remotePort })
-            return
-          }
-          const sock = new Socket({ [kSocketId]: id, localAddress, localPort, remoteAddress, remotePort, allowHalfOpen: st.options.allowHalfOpen })
-          sock[kAlpn] = alpn ?? false
-          sock.server = this
-          st.connections.add(sock)
-          sock.once("close", () => {
-            st.connections.delete(sock)
-            if (st.closing && st.connections.size === 0) this.emit("close")
-          })
-          this.emit("connection", sock)
-        }, material[0], material[1], alpnList(st.options.ALPNProtocols))
+        result = native.netListen(host, port, onConnection, material[0], material[1], alpnList(st.options.ALPNProtocols))
       } catch (e) {
         queueMicrotask(() => this.emit("error", e))
         return this
@@ -9046,7 +9061,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     };
     let factory = vm.run_proto(proto)?;
     let n = vm.new_object();
-    let natives: [(&str, u32, crate::object::NativeFn); 67] = [
+    let natives: [(&str, u32, crate::object::NativeFn); 69] = [
         ("isProxy", 1, is_proxy),
         ("watchStart", 4, super::netio::watch_start),
         ("watchClose", 1, super::netio::watch_close),
@@ -9065,6 +9080,8 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
         ("netDestroy", 1, super::netio::net_destroy),
         ("netRef", 2, super::netio::net_ref),
         ("netListen", 3, super::netio::net_listen),
+        ("netConnectPath", 1, super::netio::net_connect_path),
+        ("netListenPath", 2, super::netio::net_listen_path),
         ("netServerClose", 1, super::netio::net_server_close),
         ("netServerRef", 2, super::netio::net_server_ref),
         ("childSpawn", 4, super::netio::child_spawn),
