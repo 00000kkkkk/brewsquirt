@@ -49,6 +49,7 @@ fn symbol(name: &CStr) -> usize {
 macro_rules! napi {
     ($($name:ident($($arg:ident: $ty:ty),*);)*) => {
         $(
+            #[allow(clippy::too_many_arguments)]
             unsafe fn $name($($arg: $ty),*) -> i32 {
                 static F: OnceLock<usize> = OnceLock::new();
                 let f = *F.get_or_init(|| {
@@ -238,15 +239,27 @@ unsafe extern "C" fn counter_new(env: Env, info: Info) -> Val {
     this
 }
 
-unsafe fn counter_of(env: Env, this: Val) -> &'static mut Counter {
+unsafe fn counter_of(env: Env, this: Val) -> Option<&'static mut Counter> {
     let mut p = null_mut();
-    unsafe { napi_unwrap(env, this, &mut p) };
-    unsafe { &mut *(p as *mut Counter) }
+    let status = unsafe { napi_unwrap(env, this, &mut p) };
+    if status != 0 || p.is_null() {
+        unsafe {
+            napi_throw_error(
+                env,
+                c"E_NOT_COUNTER".as_ptr(),
+                c"receiver is not a Counter".as_ptr(),
+            )
+        };
+        return None;
+    }
+    Some(unsafe { &mut *(p as *mut Counter) })
 }
 
 unsafe extern "C" fn counter_inc(env: Env, info: Info) -> Val {
     let ([by], this) = unsafe { args::<1>(env, info) };
-    let c = unsafe { counter_of(env, this) };
+    let Some(c) = (unsafe { counter_of(env, this) }) else {
+        return null_mut();
+    };
     let mut t = 0;
     unsafe { napi_typeof(env, by, &mut t) };
     c.value += if t == 3 {
@@ -259,7 +272,10 @@ unsafe extern "C" fn counter_inc(env: Env, info: Info) -> Val {
 
 unsafe extern "C" fn counter_value(env: Env, info: Info) -> Val {
     let (_, this) = unsafe { args::<0>(env, info) };
-    unsafe { js_number(env, counter_of(env, this).value) }
+    match unsafe { counter_of(env, this) } {
+        Some(c) => unsafe { js_number(env, c.value) },
+        None => null_mut(),
+    }
 }
 
 struct SumJob {

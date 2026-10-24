@@ -406,7 +406,12 @@ pub unsafe extern "C" fn napi_get_all_property_names(
     env.status(OK)
 }
 
-fn define_one(env: &mut Env, target: &Value, d: &napi_property_descriptor) -> Result<(), Value> {
+fn define_one(
+    env: &mut Env,
+    target: &Value,
+    d: &napi_property_descriptor,
+    holder: Option<&Rc<Obj>>,
+) -> Result<(), Value> {
     let key = if d.utf8name.is_null() {
         let k = env.get(d.name);
         env.vm().to_property_key(&k)?
@@ -423,15 +428,15 @@ fn define_one(env: &mut Env, target: &Value, d: &napi_property_descriptor) -> Re
     set(env, "configurable", Value::Bool(attrs & CONFIGURABLE != 0))?;
     if d.getter.is_some() || d.setter.is_some() {
         if d.getter.is_some() {
-            let g = make_function(env, &display, d.getter, d.data)?;
+            let g = make_method(env, &display, d.getter, d.data, holder.cloned())?;
             set(env, "get", g)?;
         }
         if d.setter.is_some() {
-            let s = make_function(env, &display, d.setter, d.data)?;
+            let s = make_method(env, &display, d.setter, d.data, holder.cloned())?;
             set(env, "set", s)?;
         }
     } else if d.method.is_some() {
-        let f = make_function(env, &display, d.method, d.data)?;
+        let f = make_method(env, &display, d.method, d.data, holder.cloned())?;
         set(env, "value", f)?;
         set(env, "writable", Value::Bool(attrs & WRITABLE != 0))?;
     } else {
@@ -458,7 +463,7 @@ pub unsafe extern "C" fn napi_define_properties(
     };
     for i in 0..property_count {
         let d = unsafe { &*properties.add(i) };
-        js!(env, define_one(env, &o, d));
+        js!(env, define_one(env, &o, d, None));
     }
     env.status(OK)
 }
@@ -480,12 +485,16 @@ pub unsafe extern "C" fn napi_define_class(
     let proto = js!(env, env.vm().get_prop(&class, "prototype"));
     for i in 0..property_count {
         let d = unsafe { &*properties.add(i) };
-        let target = if d.attributes & STATIC != 0 {
-            class.clone()
+        let (target, holder) = if d.attributes & STATIC != 0 {
+            (class.clone(), None)
         } else {
-            proto.clone()
+            let holder = match &proto {
+                Value::Object(p) => Some(p),
+                _ => None,
+            };
+            (proto.clone(), holder)
         };
-        js!(env, define_one(env, &target, d));
+        js!(env, define_one(env, &target, d, holder));
     }
     out!(env, result, env.put(class));
     env.status(OK)

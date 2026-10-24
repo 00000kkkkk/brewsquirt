@@ -256,6 +256,21 @@ struct FnRecord {
     env: napi_env,
     cb: napi_callback,
     data: *mut c_void,
+    holder: Option<Rc<Obj>>,
+}
+
+fn holds(vm: &mut Vm, this: &Value, holder: &Rc<Obj>) -> Result<bool, Value> {
+    let Value::Object(o) = this else {
+        return Ok(false);
+    };
+    let mut cur = vm.op_get_prototype_of(o)?;
+    while let Some(p) = cur {
+        if Rc::ptr_eq(&p, holder) {
+            return Ok(true);
+        }
+        cur = vm.op_get_prototype_of(&p)?;
+    }
+    Ok(false)
 }
 
 fn invoke(vm: &mut Vm, _this: Value, args: &[Value]) -> Result<Value, Value> {
@@ -266,6 +281,11 @@ fn invoke(vm: &mut Vm, _this: Value, args: &[Value]) -> Result<Value, Value> {
     let rec = unsafe { &*ptr };
     let new_target = args.get(1).cloned().unwrap_or_default();
     let this = args.get(2).cloned().unwrap_or_default();
+    if let Some(holder) = &rec.holder {
+        if !holds(vm, &this, holder)? {
+            return Err(vm.type_error("Illegal invocation"));
+        }
+    }
     let list = match args.get(3) {
         Some(Value::Object(o)) => match &o.kind {
             ObjKind::Array(a) => a.borrow().clone(),
@@ -302,10 +322,21 @@ pub(crate) fn make_function(
     cb: napi_callback,
     data: *mut c_void,
 ) -> Result<Value, Value> {
+    make_method(env, name, cb, data, None)
+}
+
+pub(crate) fn make_method(
+    env: &mut Env,
+    name: &str,
+    cb: napi_callback,
+    data: *mut c_void,
+    holder: Option<Rc<Obj>>,
+) -> Result<Value, Value> {
     let rec = Box::into_raw(Box::new(FnRecord {
         env: env as *mut Env,
         cb,
         data,
+        holder,
     }));
     let maker = env.global("%napiFunction%");
     let vm = env.vm();

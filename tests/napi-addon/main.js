@@ -24,6 +24,11 @@ const c = new addon.Counter(10)
 c.inc()
 c.inc(5)
 console.log(c.value, c instanceof addon.Counter, addon.Counter.name)
+try {
+  addon.Counter.prototype.inc.call({})
+} catch (e) {
+  console.log(e.code, e.message)
+}
 for (let i = 0; i < 1000; i++) new addon.Counter(i).inc()
 const seen = []
 const ticked = new Promise(resolve => {

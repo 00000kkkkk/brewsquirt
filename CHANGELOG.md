@@ -70,6 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Instance methods and accessors that a Node-API addon defines with `napi_define_class` throw
+  `TypeError: Illegal invocation` when called on an object that is not an instance of the class,
+  as in Node, instead of handing the addon a receiver it never wrapped.
 - Strings are capped at Node's maximum length: `repeat`, `padStart`, `padEnd`, `concat` and
   `join` throw `RangeError: Invalid string length` instead of exhausting memory, and
   `Array.from` on an array-like with an impossible length throws `RangeError` instead of
