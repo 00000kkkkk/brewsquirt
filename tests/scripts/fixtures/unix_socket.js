@@ -30,7 +30,25 @@ server.listen(path, () => {
         const bad = net.connect({ path: "/tmp/does-not-exist.sock" })
         bad.on("error", (e) => {
           console.log("error", e.code, e.syscall, e.address)
-          server.close(() => console.log("closed", fs.existsSync(path)))
+          server.close(() => {
+            console.log("closed", fs.existsSync(path))
+            const web = http.createServer((req, res) => {
+              res.setHeader("content-type", "application/json")
+              res.end(JSON.stringify({ url: req.url, method: req.method, remote: req.socket.remoteAddress ?? null }))
+            })
+            web.listen(path, () => {
+              console.log("http listening", web.address() === path)
+              const req = http.request({ socketPath: path, path: "/containers/json?all=1", method: "POST" }, (res) => {
+                let body = ""
+                res.on("data", (d) => (body += d))
+                res.on("end", () => {
+                  console.log("http server", res.statusCode, body)
+                  web.close(() => console.log("http closed", fs.existsSync(path)))
+                })
+              })
+              req.end("{}")
+            })
+          })
         })
       })
     })

@@ -2452,6 +2452,19 @@ const WEB_SRC: &str = r##"
     if (body instanceof ReadableStream) return pump(replyId, status, headers, body)
     native.reply(replyId, status, headers, typeof body === "string" ? body : toBytes(body), chunked)
   }
+  const nativeListenPath = (path, upgrade, dispatch) => {
+    const id = native.servePath(path, dispatch, typeof upgrade === "function" ? upgrade : null)
+    let open = true
+    return {
+      path,
+      stop() {
+        if (open) {
+          open = false
+          native.close(id)
+        }
+      },
+    }
+  }
   const nativeListen = (options, dispatch) => {
     const tls = options.tls ?? null
     const [id, port, hostname] = native.serve(String(options.hostname ?? "127.0.0.1"), Number(options.port ?? 3000), dispatch, typeof options.upgrade === "function" ? options.upgrade : null, tls?.key ?? null, tls?.cert ?? null)
@@ -3361,9 +3374,13 @@ const WEB_SRC: &str = r##"
         const cb = typeof args[args.length - 1] === "function" ? args.pop() : undefined
         let port = 0
         let host
+        let path
         if (typeof args[0] === "object" && args[0] !== null) {
           port = args[0].port ?? 0
           host = args[0].host
+          path = args[0].path ?? undefined
+        } else if (typeof args[0] === "string" && !(Number(args[0]) >= 0)) {
+          path = args[0]
         } else {
           if (args[0] != null) port = args[0]
           if (typeof args[1] === "string") host = args[1]
@@ -3388,7 +3405,7 @@ const WEB_SRC: &str = r##"
             throw e
           }
           const closers = new Map()
-          srv = nativeListen({ port, hostname: host ?? "::", upgrade: onUpgrade, tls }, (raw, replyId) => {
+          const onRequest = (raw, replyId) => {
             if (raw === null) {
               closers.get(replyId)?.()
               return
@@ -3414,7 +3431,8 @@ const WEB_SRC: &str = r##"
               console.error(err)
               reply(500, [["content-type", "text/plain;charset=UTF-8"]], "Internal Server Error")
             }
-          })
+          }
+          srv = path !== undefined ? nativeListenPath(String(path), onUpgrade, onRequest) : nativeListen({ port, hostname: host ?? "::", upgrade: onUpgrade, tls }, onRequest)
         } catch (e) {
           if ((handlers.error?.length ?? 0) === 0) throw e
           queueMicrotask(() => emit("error", e))
@@ -3443,7 +3461,9 @@ const WEB_SRC: &str = r##"
         return server
       },
       address() {
-        return srv ? { address: srv.hostname, family: srv.hostname.includes(":") ? "IPv6" : "IPv4", port: srv.port } : null
+        if (!srv) return null
+        if (srv.path !== undefined) return srv.path
+        return { address: srv.hostname, family: srv.hostname.includes(":") ? "IPv6" : "IPv4", port: srv.port }
       },
     }
     Object.setPrototypeOf(server, Server.prototype)
@@ -3598,6 +3618,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     method(vm, &natives, "fetch", 8, native_fetch);
     method(vm, &natives, "fetchBody", 3, native_fetch_body);
     method(vm, &natives, "serve", 3, native_serve);
+    method(vm, &natives, "servePath", 3, native_serve_path);
     method(vm, &natives, "reply", 4, native_reply);
     method(vm, &natives, "replyHead", 3, native_reply_head);
     method(vm, &natives, "replyChunk", 2, native_reply_chunk);
@@ -3964,6 +3985,30 @@ fn native_serve(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     ]))
 }
 
+fn native_serve_path(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
+    let path = vm.to_string(&arg(args, 0))?.to_string();
+    let dispatch = arg(args, 1);
+    let upgrade = arg(args, 2);
+    let id = vm.io.next_id();
+    let handle = match io::listen_path(&path, id, vm.io.ids.clone(), vm.io.tx.clone()) {
+        Ok(h) => h,
+        Err(e) => {
+            let code = io::error_code(&e);
+            let err = vm.make_error(ErrorKind::Error, format!("listen {code}: {path}"));
+            if let Value::Object(o) = &err {
+                o.set_own("code", code.into());
+                o.set_own("syscall", "listen".into());
+                o.set_own("address", path.clone().into());
+            }
+            return Err(err);
+        }
+    };
+    vm.io.pending += 1;
+    let frame = vm.async_frame.clone();
+    vm.io_servers.insert(id, (dispatch, upgrade, handle, frame));
+    Ok(Value::Number(id as f64))
+}
+
 fn native_reply(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let id = vm.to_number(&arg(args, 0))? as u64;
     let status = vm.to_number(&arg(args, 1))? as u16;
@@ -4047,7 +4092,14 @@ fn request_value(vm: &mut Vm, r: HttpRequest) -> Value {
     let headers = pairs_value(vm, r.headers);
     o.set_own("headers", headers);
     o.set_own("body", super::binary::new_uint8(vm, r.body));
-    o.set_own("remote", r.remote.into());
+    o.set_own(
+        "remote",
+        if r.remote.is_empty() {
+            Value::Undefined
+        } else {
+            r.remote.into()
+        },
+    );
     Value::Object(o)
 }
 
@@ -4176,10 +4228,10 @@ pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
                 &[
                     raw,
                     Value::Number(id as f64),
-                    local.ip().to_string().into(),
-                    Value::Number(local.port() as f64),
-                    remote.ip().to_string().into(),
-                    Value::Number(remote.port() as f64),
+                    local.map_or(Value::Undefined, |a| a.ip().to_string().into()),
+                    local.map_or(Value::Undefined, |a| Value::Number(a.port() as f64)),
+                    remote.map_or(Value::Undefined, |a| a.ip().to_string().into()),
+                    remote.map_or(Value::Undefined, |a| Value::Number(a.port() as f64)),
                     head,
                 ],
             );

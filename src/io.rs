@@ -148,8 +148,8 @@ pub enum IoEvent {
         server: u64,
         id: u64,
         request: HttpRequest,
-        local: SocketAddr,
-        remote: SocketAddr,
+        local: Option<SocketAddr>,
+        remote: Option<SocketAddr>,
         cmd: Sender<SocketCmd>,
         head: Vec<u8>,
     },
@@ -528,6 +528,9 @@ trait CloseNotify {
 }
 
 impl CloseNotify for TcpStream {}
+
+#[cfg(unix)]
+impl CloseNotify for std::os::unix::net::UnixStream {}
 
 impl CloseNotify for rustls::StreamOwned<rustls::ServerConnection, TcpStream> {
     fn close_notify(&mut self) {
@@ -1983,6 +1986,61 @@ pub fn listen(
     })
 }
 
+#[cfg(unix)]
+pub fn listen_path(
+    path: &str,
+    server: u64,
+    ids: Arc<AtomicU64>,
+    tx: Sender<IoEvent>,
+) -> std::io::Result<ServerHandle> {
+    let listener = std::os::unix::net::UnixListener::bind(path)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = stop.clone();
+    std::thread::spawn(move || {
+        for conn in listener.incoming() {
+            if flag.load(Ordering::SeqCst) {
+                break;
+            }
+            let Ok(stream) = conn else { continue };
+            let Ok(control) = stream.try_clone() else {
+                continue;
+            };
+            let tx = tx.clone();
+            let flag = flag.clone();
+            let ids = ids.clone();
+            std::thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                serve_stream(
+                    Sock::Unix(control),
+                    stream,
+                    None,
+                    None,
+                    server,
+                    tx,
+                    flag,
+                    ids,
+                    false,
+                );
+            });
+        }
+    });
+    Ok(ServerHandle {
+        addr: SocketAddr::from(([0, 0, 0, 0], 0)),
+        stop,
+        path: Some(path.into()),
+    })
+}
+
+#[cfg(not(unix))]
+pub fn listen_path(
+    _path: &str,
+    _server: u64,
+    _ids: Arc<AtomicU64>,
+    _tx: Sender<IoEvent>,
+) -> std::io::Result<ServerHandle> {
+    Err(unsupported_path())
+}
+
 const MAX_HEAD: usize = 64 * 1024;
 
 fn read_line(r: &mut impl BufRead, budget: &mut usize) -> Option<String> {
@@ -2033,8 +2091,8 @@ struct Parsed {
 
 fn read_request(
     r: &mut impl BufRead,
-    local: &SocketAddr,
-    remote: &SocketAddr,
+    local: &Option<SocketAddr>,
+    remote: &Option<SocketAddr>,
     secure: bool,
 ) -> Option<Parsed> {
     let mut budget = MAX_HEAD;
@@ -2082,7 +2140,7 @@ fn read_request(
         .iter()
         .find(|(k, _)| k == "host")
         .map(|(_, v)| v.clone())
-        .unwrap_or_else(|| local.to_string());
+        .unwrap_or_else(|| local.map_or_else(|| "localhost".to_string(), |a| a.to_string()));
     let url = if target.starts_with("http://") || target.starts_with("https://") {
         target.clone()
     } else if secure {
@@ -2100,7 +2158,7 @@ fn read_request(
             target,
             headers,
             body,
-            remote: remote.ip().to_string(),
+            remote: remote.map(|a| a.ip().to_string()).unwrap_or_default(),
         },
         keep_alive,
         head,
@@ -2226,13 +2284,28 @@ fn write_chunk(w: &mut impl Write, data: &[u8]) -> std::io::Result<()> {
     w.flush()
 }
 
-fn peer_gone(tcp: &TcpStream) -> bool {
-    if tcp.set_nonblocking(true).is_err() {
-        return false;
-    }
-    let mut probe = [0u8; 1];
-    let r = tcp.peek(&mut probe);
-    let _ = tcp.set_nonblocking(false);
+fn peer_gone(sock: &Sock) -> bool {
+    let r = match sock {
+        Sock::Tcp(tcp) => {
+            if tcp.set_nonblocking(true).is_err() {
+                return false;
+            }
+            let mut probe = [0u8; 1];
+            let r = tcp.peek(&mut probe);
+            let _ = tcp.set_nonblocking(false);
+            r
+        }
+        #[cfg(unix)]
+        Sock::Unix(unix) => {
+            if unix.set_nonblocking(true).is_err() {
+                return false;
+            }
+            let mut probe = [std::mem::MaybeUninit::<u8>::uninit(); 1];
+            let r = socket2::SockRef::from(unix).peek(&mut probe);
+            let _ = unix.set_nonblocking(false);
+            r
+        }
+    };
     match r {
         Ok(0) => true,
         Ok(_) => false,
@@ -2247,7 +2320,7 @@ enum Waited {
 
 fn wait_reply(
     rx: &Receiver<ReplyMsg>,
-    tcp: &TcpStream,
+    tcp: &Sock,
     notified: &mut bool,
     notify: &dyn Fn(),
 ) -> Waited {
@@ -2296,6 +2369,8 @@ fn serve_connection(
     let Ok(tcp) = stream.try_clone() else {
         return;
     };
+    let tcp = Sock::Tcp(tcp);
+    let (local, remote) = (Some(local), Some(remote));
     match tls {
         None => serve_stream(tcp, stream, local, remote, server, tx, stop, ids, false),
         Some(config) => {
@@ -2310,10 +2385,10 @@ fn serve_connection(
 
 #[allow(clippy::too_many_arguments)]
 fn serve_stream<S: Read + Write + CloseNotify + IntoSock + Send + 'static>(
-    tcp: TcpStream,
+    tcp: Sock,
     stream: S,
-    local: SocketAddr,
-    remote: SocketAddr,
+    local: Option<SocketAddr>,
+    remote: Option<SocketAddr>,
     server: u64,
     tx: Sender<IoEvent>,
     stop: Arc<AtomicBool>,
