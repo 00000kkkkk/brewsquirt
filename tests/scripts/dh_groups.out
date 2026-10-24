@@ -1,0 +1,86 @@
+modp1 96 02 0 96 true b52ba6a3026520a6
+modp2 128 02 0 128 true 3f35a3f5f6c4376a
+modp5 192 02 0 192 true 64fcc83ec403930b
+modp14 256 02 0 256 true d66436f79bbd6b2e
+modp15 384 02 0 384 true 48cf8b092fbce435
+modp16 512 02 0 512 true 4ee95187682bcb23
+modp17 768 02 0 768 true d1bfe6d0925ce7e4
+modp18 1024 02 0 1024 true 39ab4feab950a312
+true undefined [ 'verifyError' ] true
+constructor,generateKeys,computeSecret,getPrime,getGenerator,getPublicKey,getPrivateKey,setPublicKey,setPrivateKey
+constructor,generateKeys,computeSecret,getPrime,getGenerator,getPublicKey,getPrivateKey
+4 1 true
+{"value":0,"writable":false,"enumerable":true,"configurable":false}
+0 0 05
+512 true 256
+true true
+no public Error ERR_CRYPTO_INVALID_STATE No public key - did you forget to generate one? code
+07 80 1
+09
+no private Error ERR_CRYPTO_INVALID_STATE No private key - did you forget to generate one? code
+secret without key Error ERR_CRYPTO_OPERATION_FAILED Failed to compute shared secret code
+true true
+841ad311a237c5b4417619073dc277d3 256
+too small RangeError ERR_CRYPTO_INVALID_KEYLEN Supplied key is too small code
+zero RangeError ERR_CRYPTO_INVALID_KEYLEN Supplied key is too small code
+too large RangeError ERR_CRYPTO_INVALID_KEYLEN Supplied key is too large code
+largest 256
+hex abc 129 ab 02
+23 gen 5 128 17 05
+251 gen 3 130 fb 03
+251 gen 2 130 fb 02
+252 gen 2 129 fc 02
+251 gen 0 130 fb 02
+251 gen utf8 138 fb 3032
+251 gen [0,2] 130 fb 02
+empty Error ERR_CRYPTO_INVALID_STATE p is null code
+4096 hex 129 1000 02
+p14 gen 3 0 ffffffff 03
+p14 gen 65537 0 ffffffff 010001
+p14 hex 0 ffffffff 02
+gen 1 Error ERR_OSSL_DH_BAD_GENERATOR error:02800065:Diffie-Hellman routines::bad generator library,reason,code
+gen -1 Error ERR_OSSL_DH_BAD_GENERATOR error:02800065:Diffie-Hellman routines::bad generator library,reason,code
+gen [1] Error ERR_OSSL_DH_BAD_GENERATOR error:02800065:Diffie-Hellman routines::bad generator library,reason,code
+gen [] Error ERR_OSSL_DH_BAD_GENERATOR error:02800065:Diffie-Hellman routines::bad generator library,reason,code
+gen 2.5 RangeError ERR_OUT_OF_RANGE The value of "generator" is out of range. It must be an integer. Received 2.5 code
+gen object TypeError ERR_INVALID_ARG_TYPE The "generator" argument must be one of type number or string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received an instance of Object code
+size object TypeError ERR_INVALID_ARG_TYPE The "sizeOrKey" argument must be one of type number or string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received an instance of Object code
+size 100 TypeError ERR_INVALID_ARG_VALUE Invalid DH parameters code
+size -5 Error ERR_OSSL_DH_MODULUS_TOO_SMALL error:0280007E:Diffie-Hellman routines::modulus too small library,reason,code
+size 512.5 RangeError ERR_OUT_OF_RANGE The value of "sizeOrKey" is out of range. It must be an integer. Received 512.5 code
+size gen buffer TypeError ERR_INVALID_ARG_TYPE Second argument must be an int32 code
+size gen 1 Error ERR_OSSL_DH_BAD_GENERATOR error:02800065:Diffie-Hellman routines::bad generator library,reason,code
+small prime keys Error ERR_CRYPTO_OPERATION_FAILED Key generation failed code
+unknown group Error ERR_CRYPTO_UNKNOWN_DH_GROUP Unknown DH group code
+group number TypeError ERR_INVALID_ARG_TYPE Group name must be a string code
+group proto Error ERR_CRYPTO_UNKNOWN_DH_GROUP Unknown DH group code
+generated 2 64 true 0 0 23 02 64 true
+generated 5 64 true 0 0 59 05 64 true
+generated 3 64 true 0 0 11 03 64 true
+dh {} public
+true 3082011706092a864886f70d010301308201080282010100ffffffffffffffffc90fdaa2 02
+0201003082011706092a864886f70d010301308201080282010100ffffffffffffffffc9 true
+256 true
+-----BEGIN PRIVATE KEY----- dh true true
+true true
+-----BEGIN ENCRYPTED PRIVATE KEY----- true
+true true
+true 05 256
+dh -----BEGIN PUBLIC KEY-----
+missing TypeError ERR_MISSING_OPTION At least one of the group, prime, or primeLength options is required code
+unknown Error ERR_CRYPTO_UNKNOWN_DH_GROUP Unknown DH group code
+pair TypeError ERR_INCOMPATIBLE_OPTION_PAIR Option "group" cannot be used in combination with option "prime" code
+pair2 TypeError ERR_INCOMPATIBLE_OPTION_PAIR Option "prime" cannot be used in combination with option "primeLength" code
+domain Error ERR_OSSL_MISMATCHING_DOMAIN_PARAMETERS error:1C8000CB:Provider routines::mismatching domain parameters library,reason,code
+types Error ERR_CRYPTO_INCOMPATIBLE_KEY Incompatible key types for Diffie-Hellman: dh and ec code
+types2 Error ERR_CRYPTO_INCOMPATIBLE_KEY Incompatible key types for Diffie-Hellman: x25519 and ec code
+curves Error ERR_OSSL_MISMATCHING_DOMAIN_PARAMETERS error:1C8000CB:Provider routines::mismatching domain parameters library,reason,code
+ed Error ERR_CRYPTO_INCOMPATIBLE_KEY Incompatible key types for Diffie-Hellman: ed25519 and ed25519 code
+jwk Error ERR_CRYPTO_JWK_UNSUPPORTED_KEY_TYPE Unsupported JWK Key Type. code
+jwk public Error ERR_CRYPTO_JWK_UNSUPPORTED_KEY_TYPE Unsupported JWK Key Type. code
+pkcs1 Error ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS The selected key encoding pkcs1 can only be used for RSA keys. code
+sec1 Error ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS The selected key encoding sec1 can only be used for EC keys. code
+sec1 rsa Error ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS The selected key encoding sec1 can only be used for EC keys. code
+sign Error ERR_OSSL_EVP_OPERATION_NOT_SUPPORTED_FOR_THIS_KEYTYPE error:03000096:digital envelope routines::operation not supported for this keytype library,reason,code
+sign x25519 Error ERR_OSSL_EVP_OPERATION_NOT_SUPPORTED_FOR_THIS_KEYTYPE error:03000096:digital envelope routines::operation not supported for this keytype library,reason,code
+verify x25519 Error ERR_OSSL_EVP_OPERATION_NOT_SUPPORTED_FOR_THIS_KEYTYPE error:03000096:digital envelope routines::operation not supported for this keytype library,reason,code

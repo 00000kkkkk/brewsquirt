@@ -2526,7 +2526,7 @@ const NODE_SRC: &str = r##"
       }
       const format = options?.format ?? "pem"
       if (format === "jwk") {
-        if (this.#info?.alg === "rsa-pss") throw cryptoErr("ERR_CRYPTO_JWK_UNSUPPORTED_KEY_TYPE", "Unsupported JWK Key Type.")
+        if (this.#info?.alg === "rsa-pss" || this.#info?.alg === "dh") throw cryptoErr("ERR_CRYPTO_JWK_UNSUPPORTED_KEY_TYPE", "Unsupported JWK Key Type.")
         return native.keyExportJwk(this.#bytes, this.#type)
       }
       if (format !== "pem" && format !== "der") throw cryptoErr("ERR_INVALID_ARG_VALUE", `The property 'options.format' must be one of: 'pem', 'der', 'jwk'. Received '${format}'`, TypeError)
@@ -2737,7 +2737,7 @@ const NODE_SRC: &str = r##"
   }
   function generateKeyPairSync(type, options = {}) {
     const t = String(type)
-    if (!["rsa", "rsa-pss", "ec", "ed25519", "x25519"].includes(t)) {
+    if (!["rsa", "rsa-pss", "ec", "ed25519", "x25519", "dh"].includes(t)) {
       throw cryptoErr("ERR_INVALID_ARG_VALUE", `The argument 'type' must be a supported key type. Received '${t}'`, TypeError)
     }
     if ((t === "rsa" || t === "rsa-pss") && typeof options?.modulusLength !== "number") {
@@ -2746,7 +2746,30 @@ const NODE_SRC: &str = r##"
     if (t === "ec" && typeof options?.namedCurve !== "string") {
       throw cryptoErr("ERR_INVALID_ARG_TYPE", `The "options.namedCurve" property must be of type string. Received ${describeReceived(options?.namedCurve)}`, TypeError)
     }
-    const pair = native.keyGenerate(t, options?.modulusLength, options?.publicExponent, options?.namedCurve)
+    let dhPrime
+    if (t === "dh") {
+      const { group, primeLength, prime, generator } = options ?? {}
+      const optionPair = (a, b) => cryptoErr("ERR_INCOMPATIBLE_OPTION_PAIR", `Option "${a}" cannot be used in combination with option "${b}"`, TypeError)
+      if (group != null) {
+        if (prime != null) throw optionPair("group", "prime")
+        if (primeLength != null) throw optionPair("group", "primeLength")
+        if (generator != null) throw optionPair("group", "generator")
+        if (typeof group !== "string") throw cryptoErr("ERR_INVALID_ARG_TYPE", `The "options.group" property must be of type string. Received ${describeReceived(group)}`, TypeError)
+        dhPrime = native.dhGroup(group)
+        if (!dhPrime) throw cryptoErr("ERR_CRYPTO_UNKNOWN_DH_GROUP", "Unknown DH group")
+      } else if (prime != null) {
+        if (primeLength != null) throw optionPair("prime", "primeLength")
+        dhPrime = cryptoBytes(prime, undefined, "options.prime")
+      } else if (primeLength != null) {
+        dhInt32(primeLength, "options.primeLength")
+        dhPrime = native.dhPrime(primeLength, generator ?? 2)
+        if (!dhPrime) throw sslError("ERR_OSSL_DH_MODULUS_TOO_SMALL", "0280007E", "Diffie-Hellman routines", "modulus too small")
+      } else {
+        throw cryptoErr("ERR_MISSING_OPTION", "At least one of the group, prime, or primeLength options is required", TypeError)
+      }
+      if (generator != null) dhInt32(generator, "options.generator")
+    }
+    const pair = native.keyGenerate(t, options?.modulusLength, t === "dh" ? (options.generator ?? 2) : options?.publicExponent, options?.namedCurve, dhPrime)
     let publicKey = keyFromInfo(pair.publicKey)
     let privateKey = keyFromInfo(pair.privateKey)
     if (options?.publicKeyEncoding) publicKey = publicKey.export(options.publicKeyEncoding)
@@ -2803,6 +2826,128 @@ const NODE_SRC: &str = r##"
     if (!c) throw cryptoErr("ERR_CRYPTO_INVALID_CURVE", "Invalid EC curve name", TypeError)
     return new ECDH(c)
   }
+  const dhStates = new WeakMap()
+  const dhBufferTypes = "one of type number or string or an instance of ArrayBuffer, Buffer, TypedArray, or DataView"
+  const dhStrip = (bytes) => {
+    let i = 0
+    while (i < bytes.length && bytes[i] === 0) i++
+    return Buffer.from(bytes.subarray(i))
+  }
+  const dhOut = (bytes, encoding) => {
+    const buf = Buffer.from(bytes)
+    return encoding && encoding !== "buffer" ? buf.toString(encoding) : buf
+  }
+  const dhInput = (value, encoding, name) => (typeof value === "string" ? Buffer.from(value, !encoding || encoding === "buffer" ? "utf8" : encoding) : cryptoBytes(value, undefined, name))
+  const dhInt32 = (value, name) => {
+    if (!Number.isInteger(value)) throw cryptoErr("ERR_OUT_OF_RANGE", `The value of "${name}" is out of range. It must be an integer. Received ${value}`, RangeError)
+    if (value < -2147483648 || value > 2147483647) throw cryptoErr("ERR_OUT_OF_RANGE", `The value of "${name}" is out of range. It must be >= -2147483648 && <= 2147483647. Received ${value}`, RangeError)
+  }
+  const sslError = (code, hex, library, reason) => {
+    const e = new Error(`error:${hex}:${library}::${reason}`)
+    e.library = library
+    e.reason = reason
+    e.code = code
+    return e
+  }
+  const dhBadGenerator = () => sslError("ERR_OSSL_DH_BAD_GENERATOR", "02800065", "Diffie-Hellman routines", "bad generator")
+  const dhState = (self) => {
+    const st = dhStates.get(self)
+    if (!st) throw new TypeError("Illegal invocation")
+    return st
+  }
+  const dhIntBytes = (n) => {
+    const out = []
+    while (n > 0) {
+      out.unshift(n & 0xff)
+      n = Math.floor(n / 256)
+    }
+    return Buffer.from(out)
+  }
+  function DiffieHellman(sizeOrKey, keyEncoding, generator, genEncoding) {
+    if (!new.target) return new DiffieHellman(sizeOrKey, keyEncoding, generator, genEncoding)
+    if (typeof sizeOrKey !== "number" && typeof sizeOrKey !== "string" && !ArrayBuffer.isView(sizeOrKey) && !(sizeOrKey instanceof ArrayBuffer)) {
+      throw cryptoErr("ERR_INVALID_ARG_TYPE", `The "sizeOrKey" argument must be ${dhBufferTypes}. Received ${describeReceived(sizeOrKey)}`, TypeError)
+    }
+    if (typeof sizeOrKey === "number") dhInt32(sizeOrKey, "sizeOrKey")
+    if (keyEncoding && !Buffer.isEncoding(keyEncoding) && keyEncoding !== "buffer") {
+      genEncoding = generator
+      generator = keyEncoding
+      keyEncoding = false
+    }
+    if (typeof sizeOrKey !== "number") sizeOrKey = dhInput(sizeOrKey, keyEncoding)
+    if (!generator) generator = 2
+    else if (typeof generator === "number") dhInt32(generator, "generator")
+    else if (typeof generator === "string") generator = dhInput(generator, genEncoding)
+    else if (!ArrayBuffer.isView(generator) && !(generator instanceof ArrayBuffer)) {
+      throw cryptoErr("ERR_INVALID_ARG_TYPE", `The "generator" argument must be ${dhBufferTypes}. Received ${describeReceived(generator)}`, TypeError)
+    }
+    let state
+    let verifyError = 0
+    if (typeof sizeOrKey === "number") {
+      if (sizeOrKey < 2) throw sslError("ERR_OSSL_DH_MODULUS_TOO_SMALL", "0280007E", "Diffie-Hellman routines", "modulus too small")
+      if (typeof generator !== "number") throw cryptoErr("ERR_INVALID_ARG_TYPE", "Second argument must be an int32", TypeError)
+      if (generator < 2) throw dhBadGenerator()
+      const prime = native.dhPrime(sizeOrKey, generator)
+      if (!prime) throw cryptoErr("ERR_INVALID_ARG_VALUE", "Invalid DH parameters", TypeError)
+      state = { prime: Buffer.from(prime), gen: dhIntBytes(generator) }
+    } else {
+      const gen = typeof generator === "number" ? dhIntBytes(Math.max(generator, 0)) : dhStrip(cryptoBytes(generator))
+      if (gen.length === 0 || (gen.length === 1 && gen[0] < 2)) throw dhBadGenerator()
+      state = { prime: dhStrip(sizeOrKey), gen }
+      verifyError = native.dhCheck(state.prime, state.gen)
+    }
+    state.priv = null
+    state.pub = null
+    dhStates.set(this, state)
+    Object.defineProperty(this, "verifyError", { enumerable: true, value: verifyError, writable: false })
+  }
+  function DiffieHellmanGroup(name) {
+    if (!new.target) return new DiffieHellmanGroup(name)
+    if (typeof name !== "string") throw cryptoErr("ERR_INVALID_ARG_TYPE", "Group name must be a string", TypeError)
+    const prime = native.dhGroup(name)
+    if (!prime) throw cryptoErr("ERR_CRYPTO_UNKNOWN_DH_GROUP", "Unknown DH group")
+    dhStates.set(this, { prime: Buffer.from(prime), gen: Buffer.from([2]), priv: null, pub: null })
+    Object.defineProperty(this, "verifyError", { enumerable: true, value: 0, writable: false })
+  }
+  DiffieHellmanGroup.prototype.generateKeys = DiffieHellman.prototype.generateKeys = function dhGenerateKeys(encoding) {
+    const st = dhState(this)
+    const [priv, pub] = native.dhKeys(st.prime, st.gen, st.priv ?? undefined)
+    st.priv = Buffer.from(priv)
+    st.pub = Buffer.from(pub)
+    return dhOut(st.pub, encoding)
+  }
+  DiffieHellmanGroup.prototype.computeSecret = DiffieHellman.prototype.computeSecret = function dhComputeSecret(key, inputEncoding, outputEncoding) {
+    const st = dhState(this)
+    return dhOut(native.dhCompute(st.prime, st.priv ?? undefined, dhInput(key, inputEncoding, "key")), outputEncoding)
+  }
+  DiffieHellmanGroup.prototype.getPrime = DiffieHellman.prototype.getPrime = function dhGetPrime(encoding) {
+    const st = dhState(this)
+    if (st.prime.length === 0) throw cryptoErr("ERR_CRYPTO_INVALID_STATE", "p is null")
+    return dhOut(st.prime, encoding)
+  }
+  DiffieHellmanGroup.prototype.getGenerator = DiffieHellman.prototype.getGenerator = function dhGetGenerator(encoding) {
+    return dhOut(dhState(this).gen, encoding)
+  }
+  DiffieHellmanGroup.prototype.getPublicKey = DiffieHellman.prototype.getPublicKey = function dhGetPublicKey(encoding) {
+    const st = dhState(this)
+    if (!st.pub) throw cryptoErr("ERR_CRYPTO_INVALID_STATE", "No public key - did you forget to generate one?")
+    return dhOut(st.pub, encoding)
+  }
+  DiffieHellmanGroup.prototype.getPrivateKey = DiffieHellman.prototype.getPrivateKey = function dhGetPrivateKey(encoding) {
+    const st = dhState(this)
+    if (!st.priv) throw cryptoErr("ERR_CRYPTO_INVALID_STATE", "No private key - did you forget to generate one?")
+    return dhOut(st.priv, encoding)
+  }
+  DiffieHellman.prototype.setPublicKey = function setPublicKey(key, encoding) {
+    dhState(this).pub = dhStrip(dhInput(key, encoding, "key"))
+    return this
+  }
+  DiffieHellman.prototype.setPrivateKey = function setPrivateKey(key, encoding) {
+    dhState(this).priv = dhStrip(dhInput(key, encoding, "key"))
+    return this
+  }
+  const createDiffieHellman = (sizeOrKey, keyEncoding, generator, genEncoding) => new DiffieHellman(sizeOrKey, keyEncoding, generator, genEncoding)
+  const createDiffieHellmanGroup = (name) => new DiffieHellmanGroup(name)
   function scryptOptions(options) {
     const o = options ?? {}
     return { N: o.N ?? o.cost ?? 16384, r: o.r ?? o.blockSize ?? 8, p: o.p ?? o.parallelization ?? 1 }
@@ -3197,8 +3342,18 @@ const NODE_SRC: &str = r##"
       queueMicrotask(() => (err ? cb(err) : cb(null, out.publicKey, out.privateKey)))
     }, ["publicKey", "privateKey"]),
     createECDH,
+    createDiffieHellman,
+    createDiffieHellmanGroup,
+    getDiffieHellman: createDiffieHellmanGroup,
+    DiffieHellman,
+    DiffieHellmanGroup,
     diffieHellman({ privateKey, publicKey } = {}) {
       if (!(privateKey instanceof KeyObject) || !(publicKey instanceof KeyObject)) throw cryptoErr("ERR_INVALID_ARG_TYPE", 'The "options.privateKey" property must be of type KeyObject.', TypeError)
+      const privateType = privateKey.asymmetricKeyType
+      const publicType = publicKey.asymmetricKeyType
+      if (privateType !== publicType || !["dh", "ec", "x448", "x25519"].includes(privateType)) {
+        throw cryptoErr("ERR_CRYPTO_INCOMPATIBLE_KEY", `Incompatible key types for Diffie-Hellman: ${privateType} and ${publicType}`)
+      }
       const out = native.deriveShared(privateKey[kKeyBytes], publicKey.type === "private" ? createPublicKey(publicKey)[kKeyBytes] : publicKey[kKeyBytes])
       return Buffer.from(out.buffer, out.byteOffset, out.byteLength)
     },
@@ -3249,7 +3404,47 @@ const NODE_SRC: &str = r##"
     webcrypto: globalThis.crypto,
     subtle: globalThis.crypto.subtle,
     constants: {
+      OPENSSL_VERSION_NUMBER: 810549360,
+      SSL_OP_ALL: 2147485776,
+      SSL_OP_ALLOW_NO_DHE_KEX: 1024,
+      SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION: 262144,
+      SSL_OP_CIPHER_SERVER_PREFERENCE: 4194304,
+      SSL_OP_CISCO_ANYCONNECT: 32768,
+      SSL_OP_COOKIE_EXCHANGE: 8192,
+      SSL_OP_CRYPTOPRO_TLSEXT_BUG: 2147483648,
+      SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS: 2048,
+      SSL_OP_LEGACY_SERVER_CONNECT: 4,
+      SSL_OP_NO_COMPRESSION: 131072,
+      SSL_OP_NO_ENCRYPT_THEN_MAC: 524288,
+      SSL_OP_NO_QUERY_MTU: 4096,
+      SSL_OP_NO_RENEGOTIATION: 1073741824,
+      SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION: 65536,
+      SSL_OP_NO_SSLv2: 0,
+      SSL_OP_NO_SSLv3: 33554432,
+      SSL_OP_NO_TICKET: 16384,
+      SSL_OP_NO_TLSv1: 67108864,
+      SSL_OP_NO_TLSv1_1: 268435456,
+      SSL_OP_NO_TLSv1_2: 134217728,
+      SSL_OP_NO_TLSv1_3: 536870912,
+      SSL_OP_PRIORITIZE_CHACHA: 2097152,
+      SSL_OP_TLS_ROLLBACK_BUG: 8388608,
+      ENGINE_METHOD_RSA: 1,
+      ENGINE_METHOD_DSA: 2,
+      ENGINE_METHOD_DH: 4,
+      ENGINE_METHOD_RAND: 8,
+      ENGINE_METHOD_EC: 2048,
+      ENGINE_METHOD_CIPHERS: 64,
+      ENGINE_METHOD_DIGESTS: 128,
+      ENGINE_METHOD_PKEY_METHS: 512,
+      ENGINE_METHOD_PKEY_ASN1_METHS: 1024,
+      ENGINE_METHOD_ALL: 65535,
+      ENGINE_METHOD_NONE: 0,
+      DH_CHECK_P_NOT_SAFE_PRIME: 2,
+      DH_CHECK_P_NOT_PRIME: 1,
+      DH_UNABLE_TO_CHECK_GENERATOR: 4,
+      DH_NOT_SUITABLE_GENERATOR: 8,
       RSA_PKCS1_PADDING: 1,
+      RSA_SSLV23_PADDING: 2,
       RSA_NO_PADDING: 3,
       RSA_PKCS1_OAEP_PADDING: 4,
       RSA_X931_PADDING: 5,
@@ -3257,9 +3452,15 @@ const NODE_SRC: &str = r##"
       RSA_PSS_SALTLEN_DIGEST: -1,
       RSA_PSS_SALTLEN_MAX_SIGN: -2,
       RSA_PSS_SALTLEN_AUTO: -2,
+      defaultCoreCipherList: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:DHE-RSA-AES256-SHA384:ECDHE-RSA-AES256-SHA256:DHE-RSA-AES256-SHA256:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!SRP:!CAMELLIA",
+      TLS1_VERSION: 769,
+      TLS1_1_VERSION: 770,
+      TLS1_2_VERSION: 771,
+      TLS1_3_VERSION: 772,
       POINT_CONVERSION_COMPRESSED: 2,
       POINT_CONVERSION_UNCOMPRESSED: 4,
       POINT_CONVERSION_HYBRID: 6,
+      defaultCipherList: "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:DHE-RSA-AES256-SHA384:ECDHE-RSA-AES256-SHA256:DHE-RSA-AES256-SHA256:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!SRP:!CAMELLIA",
     },
   }
   const utf8Incomplete = (bytes) => {
@@ -9361,6 +9562,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     super::v8wire::install_natives(vm, &n);
     super::x509::install_natives(vm, &n);
     super::cryptokeys::install_natives(vm, &n);
+    super::dh::install_natives(vm, &n);
     let exports = vm.call_value(&factory, Value::Undefined, &[Value::Object(n)])?;
     let buffer = vm.get_prop(&exports, "Buffer")?;
     vm.define_global("Buffer", buffer);

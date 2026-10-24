@@ -28,10 +28,22 @@ const OID_K256: &str = "1.3.132.0.10";
 const OID_P521: &str = "1.3.132.0.35";
 const OID_ED25519: &str = "1.3.101.112";
 const OID_X25519: &str = "1.3.101.110";
+const OID_DH: &str = "1.2.840.113549.1.3.1";
+const UNSUPPORTED_KEYTYPE: &str =
+    "error:03000096:digital envelope routines::operation not supported for this keytype";
 
 fn crypto_error(vm: &mut Vm, code: &str, msg: &str) -> Value {
     let e = vm.make_error(ErrorKind::Error, msg);
     if let Value::Object(o) = &e {
+        if let Some((library, reason)) = msg
+            .strip_prefix("error:")
+            .and_then(|rest| rest.get(9..))
+            .and_then(|rest| rest.split_once("::"))
+        {
+            let reason = reason.split(" (").next().unwrap_or(reason);
+            o.set_own("library", library.into());
+            o.set_own("reason", reason.into());
+        }
         o.set_own("code", code.into());
     }
     e
@@ -61,6 +73,12 @@ fn out_bytes(vm: &Vm, bytes: Vec<u8>) -> Value {
     super::typed::new_typed(vm, crate::object::TypedKind::Uint8, buf, 0, len)
 }
 
+#[derive(Clone, PartialEq)]
+struct DhParams {
+    p: num_bigint::BigUint,
+    g: num_bigint::BigUint,
+}
+
 enum Private {
     Rsa(RsaPrivateKey, bool),
     P256(p256::SecretKey),
@@ -69,6 +87,7 @@ enum Private {
     P521(p521::SecretKey),
     Ed25519(ed25519_dalek::SigningKey),
     X25519([u8; 32]),
+    Dh(DhParams, num_bigint::BigUint),
 }
 
 enum Public {
@@ -79,6 +98,75 @@ enum Public {
     P521(p521::PublicKey),
     Ed25519(ed25519_dalek::VerifyingKey),
     X25519([u8; 32]),
+    Dh(DhParams, num_bigint::BigUint),
+}
+
+fn read_tlv(b: &[u8], at: usize) -> Option<(u8, usize, usize)> {
+    let tag = *b.get(at)?;
+    let first = *b.get(at + 1)? as usize;
+    let (len, head) = if first < 0x80 {
+        (first, 2)
+    } else {
+        let n = first & 0x7f;
+        let mut len = 0usize;
+        for i in 0..n {
+            len = (len << 8) | *b.get(at + 2 + i)? as usize;
+        }
+        (len, 2 + n)
+    };
+    if at + head + len > b.len() {
+        return None;
+    }
+    Some((tag, at + head, at + head + len))
+}
+
+fn der_int(b: &[u8]) -> Option<num_bigint::BigUint> {
+    let (tag, start, end) = read_tlv(b, 0)?;
+    (tag == 0x02).then(|| num_bigint::BigUint::from_bytes_be(&b[start..end]))
+}
+
+fn dh_params(params: Option<pkcs8::der::asn1::AnyRef<'_>>) -> Result<DhParams, String> {
+    let body = params.ok_or("Missing DH parameters")?.value();
+    let (tag, start, end) = read_tlv(body, 0).ok_or("Invalid DH parameters")?;
+    let (gtag, gstart, gend) = read_tlv(body, end).ok_or("Invalid DH parameters")?;
+    if tag != 0x02 || gtag != 0x02 {
+        return Err("Invalid DH parameters".into());
+    }
+    Ok(DhParams {
+        p: num_bigint::BigUint::from_bytes_be(&body[start..end]),
+        g: num_bigint::BigUint::from_bytes_be(&body[gstart..gend]),
+    })
+}
+
+fn der_uint(n: &num_bigint::BigUint) -> Vec<u8> {
+    let mut body = n.to_bytes_be();
+    if body[0] & 0x80 != 0 {
+        body.insert(0, 0);
+    }
+    der_tlv(0x02, &body)
+}
+
+fn dh_algorithm(params: &DhParams) -> Vec<u8> {
+    let mut seq = der_uint(&params.p);
+    seq.extend(der_uint(&params.g));
+    let mut body = oid(OID_DH).to_der().unwrap_or_default();
+    body.extend(der_tlv(0x30, &seq));
+    der_tlv(0x30, &body)
+}
+
+fn dh_pkcs8(params: &DhParams, x: &num_bigint::BigUint) -> Vec<u8> {
+    let mut body = der_tlv(0x02, &[0]);
+    body.extend(dh_algorithm(params));
+    body.extend(der_tlv(0x04, &der_uint(x)));
+    der_tlv(0x30, &body)
+}
+
+fn dh_spki(params: &DhParams, y: &num_bigint::BigUint) -> Vec<u8> {
+    let mut bits = vec![0u8];
+    bits.extend(der_uint(y));
+    let mut body = dh_algorithm(params);
+    body.extend(der_tlv(0x03, &bits));
+    der_tlv(0x30, &body)
 }
 
 fn curve_of(params: Option<pkcs8::der::asn1::AnyRef<'_>>) -> Option<&'static str> {
@@ -129,6 +217,11 @@ fn parse_private(der: &[u8]) -> Result<Private, String> {
                 .map_err(|_| "Invalid X25519 key".to_string())?;
             Ok(Private::X25519(raw))
         }
+        OID_DH => {
+            let params = dh_params(info.algorithm.parameters)?;
+            let x = der_int(info.private_key).ok_or("Invalid DH key")?;
+            Ok(Private::Dh(params, x))
+        }
         _ => Err(format!("Unsupported key algorithm {oid}")),
     }
 }
@@ -172,6 +265,11 @@ fn parse_public(der: &[u8]) -> Result<Public, String> {
                 .try_into()
                 .map_err(|_| "Invalid X25519 key".to_string())?;
             Ok(Public::X25519(raw))
+        }
+        OID_DH => {
+            let params = dh_params(info.algorithm.parameters)?;
+            let y = der_int(bits).ok_or("Invalid DH key")?;
+            Ok(Public::Dh(params, y))
         }
         _ => Err(format!("Unsupported key algorithm {oid}")),
     }
@@ -247,6 +345,7 @@ fn public_of(key: &Private) -> Result<Public, String> {
             let secret = x25519_dalek::StaticSecret::from(*raw);
             Public::X25519(x25519_dalek::PublicKey::from(&secret).to_bytes())
         }
+        Private::Dh(params, x) => Public::Dh(params.clone(), params.g.modpow(x, &params.p)),
     })
 }
 
@@ -278,6 +377,7 @@ fn private_der(key: &Private) -> Result<Vec<u8>, String> {
             .map(|d| d.as_bytes().to_vec())
             .map_err(|e| e.to_string()),
         Private::X25519(raw) => x25519_pkcs8(raw),
+        Private::Dh(params, x) => Ok(dh_pkcs8(params, x)),
     }
 }
 
@@ -306,6 +406,7 @@ fn public_der(key: &Public) -> Result<Vec<u8>, String> {
             .map_err(|e| e.to_string()),
         Public::Ed25519(k) => okp_spki(OID_ED25519, k.as_bytes()),
         Public::X25519(raw) => okp_spki(OID_X25519, raw),
+        Public::Dh(params, y) => Ok(dh_spki(params, y)),
     }
 }
 
@@ -321,6 +422,7 @@ fn describe(vm: &mut Vm, kind: &str, der: Vec<u8>, public: &Public) -> R {
         Public::P521(_) => ("ec", Some("P-521")),
         Public::Ed25519(_) => ("ed25519", None),
         Public::X25519(_) => ("x25519", None),
+        Public::Dh(..) => ("dh", None),
     };
     o.set_own("alg", alg.into());
     if let Some(c) = curve {
@@ -344,21 +446,6 @@ fn pem_decode(text: &str) -> Result<(String, Vec<u8>), String> {
 }
 
 fn extract_cert_spki(der: &[u8]) -> Option<Vec<u8>> {
-    fn read_tlv(b: &[u8], at: usize) -> Option<(u8, usize, usize)> {
-        let tag = *b.get(at)?;
-        let first = *b.get(at + 1)? as usize;
-        let (len, head) = if first < 0x80 {
-            (first, 2)
-        } else {
-            let n = first & 0x7f;
-            let mut len = 0usize;
-            for i in 0..n {
-                len = (len << 8) | *b.get(at + 2 + i)? as usize;
-            }
-            (len, 2 + n)
-        };
-        Some((tag, at + head, at + head + len))
-    }
     let (_, cert_body, _) = read_tlv(der, 0)?;
     let (_, tbs_body, tbs_end) = read_tlv(der, cert_body)?;
     let mut at = tbs_body;
@@ -596,6 +683,7 @@ fn native_key_export_jwk(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
                     fields.push(("x", b64url(public.as_bytes())));
                     fields.push(("kty", "OKP".into()));
                 }
+                Private::Dh(..) => return Err("Unsupported JWK Key Type.".into()),
             }
         } else {
             match parse_public(&der)? {
@@ -646,6 +734,7 @@ fn native_key_export_jwk(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
                     fields.push(("x", b64url(&raw)));
                     fields.push(("kty", "OKP".into()));
                 }
+                Public::Dh(..) => return Err("Unsupported JWK Key Type.".into()),
             }
         }
         Ok(())
@@ -838,11 +927,15 @@ fn native_key_export(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
                             .as_bytes()
                             .to_vec(),
                     )),
-                    _ => Err("pkcs1 export requires an RSA key".into()),
+                    _ => {
+                        Err("The selected key encoding pkcs1 can only be used for RSA keys.".into())
+                    }
                 },
                 "sec1" => match ec_sec1(&key) {
                     Some(der) => Ok(("EC PRIVATE KEY".into(), der)),
-                    None => Err("sec1 export requires an EC key".into()),
+                    None => {
+                        Err("The selected key encoding sec1 can only be used for EC keys.".into())
+                    }
                 },
                 _ => match passphrase {
                     Some(pass) => {
@@ -864,7 +957,9 @@ fn native_key_export(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
                             .as_bytes()
                             .to_vec(),
                     )),
-                    _ => Err("pkcs1 export requires an RSA key".into()),
+                    _ => {
+                        Err("The selected key encoding pkcs1 can only be used for RSA keys.".into())
+                    }
                 },
                 _ => Ok(("PUBLIC KEY".into(), der.clone())),
             }
@@ -916,6 +1011,15 @@ fn native_key_generate(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
         "x25519" => Ok(Private::X25519(
             x25519_dalek::StaticSecret::random_from_rng(OsRng).to_bytes(),
         )),
+        "dh" => {
+            let p = super::typed::buffer_source_bytes(&arg(args, 4))
+                .map(|b| num_bigint::BigUint::from_bytes_be(&b))
+                .unwrap_or_default();
+            let g = num_bigint::BigUint::from(exponent);
+            super::dh::private_key(&p, &g)
+                .map(|x| Private::Dh(DhParams { p, g }, x))
+                .ok_or_else(|| "Key generation failed".to_string())
+        }
         _ => Err(format!(
             "The argument 'type' must be a supported key type. Received '{alg}'"
         )),
@@ -1101,7 +1205,7 @@ fn native_sign(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             use ed25519_dalek::Signer;
             Ok(k.sign(&data).to_bytes().to_vec())
         }
-        Private::X25519(_) => Err("X25519 keys cannot be used for signing".into()),
+        Private::X25519(_) | Private::Dh(..) => Err(UNSUPPORTED_KEYTYPE.into()),
     };
     match result {
         Ok(sig) => Ok(out_bytes(vm, sig)),
@@ -1240,7 +1344,13 @@ fn native_verify(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
             Ok(s) => k.verify_strict(&data, &s).is_ok(),
             Err(_) => false,
         },
-        Public::X25519(_) => false,
+        Public::X25519(_) | Public::Dh(..) => {
+            return Err(crypto_error(
+                vm,
+                "ERR_OSSL_EVP_OPERATION_NOT_SUPPORTED_FOR_THIS_KEYTYPE",
+                UNSUPPORTED_KEYTYPE,
+            ));
+        }
     };
     Ok(Value::Bool(ok))
 }
@@ -1307,7 +1417,7 @@ fn native_derive(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let public = bytes_arg(vm, &arg(args, 1))?;
     let key = parse_private(&private).map_err(|m| crypto_error(vm, "ERR_OSSL_UNSUPPORTED", &m))?;
     let peer = parse_public(&public).map_err(|m| crypto_error(vm, "ERR_OSSL_UNSUPPORTED", &m))?;
-    let shared: Result<Vec<u8>, &str> = match (&key, &peer) {
+    let shared: Result<Vec<u8>, (&str, &str)> = match (&key, &peer) {
         (Private::P256(a), Public::P256(b)) => Ok(p256::ecdh::diffie_hellman(
             a.to_nonzero_scalar(),
             b.as_affine(),
@@ -1339,11 +1449,21 @@ fn native_derive(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
                 .to_bytes()
                 .to_vec())
         }
-        _ => Err("Incompatible key types for Diffie-Hellman"),
+        (Private::Dh(a, x), Public::Dh(b, y)) if a == b => super::dh::secret(&a.p, Some(x), y)
+            .map_err(|_| {
+                (
+                    "ERR_CRYPTO_OPERATION_FAILED",
+                    "Failed to compute shared secret",
+                )
+            }),
+        _ => Err((
+            "ERR_OSSL_MISMATCHING_DOMAIN_PARAMETERS",
+            "error:1C8000CB:Provider routines::mismatching domain parameters",
+        )),
     };
     match shared {
         Ok(s) => Ok(out_bytes(vm, s)),
-        Err(m) => Err(crypto_error(vm, "ERR_CRYPTO_INCOMPATIBLE_KEY", m)),
+        Err((code, m)) => Err(crypto_error(vm, code, m)),
     }
 }
 
@@ -1436,6 +1556,7 @@ fn native_key_raw(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
                 Public::P521(k) => k.to_encoded_point(false).as_bytes().to_vec(),
                 Public::Ed25519(k) => k.as_bytes().to_vec(),
                 Public::X25519(raw) => raw.to_vec(),
+                Public::Dh(_, y) => y.to_bytes_be(),
                 Public::Rsa(k, _) => k
                     .to_pkcs1_der()
                     .map(|d| d.as_bytes().to_vec())

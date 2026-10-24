@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `secp256k1` and P-521 (`secp521r1`) curves in `node:crypto`: key generation, import and
   export in every key format, ECDSA signatures, `createECDH` and `diffieHellman`, and P-521 in
   WebCrypto's ECDSA and ECDH.
+- Finite-field Diffie-Hellman in `node:crypto`: `createDiffieHellman` with a given prime or a
+  freshly generated safe prime, `getDiffieHellman` and `createDiffieHellmanGroup` with the MODP
+  groups from `modp1` to `modp18`, `verifyError` computed the way OpenSSL checks parameters, and
+  `dh` key objects from `generateKeyPair` that import, export and work with `diffieHellman`.
+  `crypto.constants` lists every constant Node does.
 
 ### Fixed
 

@@ -1,0 +1,193 @@
+import crypto from "node:crypto"
+
+const readTlv = (b, at) => {
+  let len = b[at + 1]
+  let head = 2
+  if (len & 0x80) {
+    const n = len & 0x7f
+    len = 0
+    for (let i = 0; i < n; i++) len = len * 256 + b[at + 2 + i]
+    head = 2 + n
+  }
+  return { tag: b[at], start: at + head, end: at + head + len }
+}
+const privateValue = (der) => {
+  const top = readTlv(der, 0)
+  const version = readTlv(der, top.start)
+  const alg = readTlv(der, version.end)
+  const octets = readTlv(der, alg.end)
+  const int = readTlv(der, octets.start)
+  return der.subarray(int.start, int.end)
+}
+const publicValue = (der) => {
+  const top = readTlv(der, 0)
+  const alg = readTlv(der, top.start)
+  const bits = readTlv(der, alg.end)
+  const int = readTlv(der, bits.start + 1)
+  return der.subarray(int.start, int.end)
+}
+const generatorOf = (der) => {
+  const top = readTlv(der, 0)
+  const alg = readTlv(der, top.start)
+  const oid = readTlv(der, alg.start)
+  const params = readTlv(der, oid.end)
+  const p = readTlv(der, params.start)
+  const g = readTlv(der, p.end)
+  return der.subarray(g.start, g.end).toString("hex")
+}
+const dhStrip = (b) => {
+  let i = 0
+  while (i < b.length && b[i] === 0) i++
+  return b.subarray(i)
+}
+const show = (label, f) => {
+  try {
+    console.log(label, f())
+  } catch (e) {
+    console.log(label, e.name, e.code, e.message, Object.keys(e).filter((k) => k !== "opensslErrorStack").join(","))
+  }
+}
+
+for (const name of ["modp1", "modp2", "modp5", "modp14", "modp15", "modp16", "modp17", "modp18"]) {
+  const a = crypto.getDiffieHellman(name)
+  const b = crypto.createDiffieHellmanGroup(name)
+  a.generateKeys()
+  b.generateKeys()
+  const s1 = a.computeSecret(b.getPublicKey())
+  const s2 = b.computeSecret(a.getPublicKey())
+  console.log(name, a.getPrime().length, a.getGenerator("hex"), a.verifyError, s1.length, s1.equals(s2), crypto.createHash("sha256").update(a.getPrime()).digest("hex").slice(0, 16))
+}
+
+const group = crypto.getDiffieHellman("modp14")
+const prime = group.getPrime()
+console.log(group instanceof crypto.DiffieHellmanGroup, typeof group.setPublicKey, Object.keys(group), crypto.getDiffieHellman === crypto.createDiffieHellmanGroup)
+console.log(Object.getOwnPropertyNames(crypto.DiffieHellman.prototype).join(","))
+console.log(Object.getOwnPropertyNames(crypto.DiffieHellmanGroup.prototype).join(","))
+console.log(crypto.DiffieHellman.length, crypto.DiffieHellmanGroup.length, crypto.DiffieHellman(prime, 2) instanceof crypto.DiffieHellman)
+console.log(JSON.stringify(Object.getOwnPropertyDescriptor(group, "verifyError")))
+
+const alice = crypto.createDiffieHellman(prime, 5)
+const bob = crypto.createDiffieHellman(alice.getPrime("base64"), "base64", alice.getGenerator("hex"), "hex")
+console.log(alice.verifyError, bob.verifyError, bob.getGenerator("hex"))
+const alicePub = alice.generateKeys("hex")
+bob.generateKeys()
+console.log(alicePub.length, alice.generateKeys("hex") === alicePub, alice.getPrivateKey().length)
+console.log(alice.computeSecret(bob.getPublicKey()).equals(bob.computeSecret(alicePub, "hex")), alice.computeSecret(bob.getPublicKey(), null, "base64") === bob.computeSecret(alice.getPublicKey(), "buffer", "base64"))
+
+const fixed = crypto.createDiffieHellman(prime, 2)
+fixed.setPrivateKey(Buffer.from([0, 0, 7]))
+show("no public", () => fixed.getPublicKey())
+console.log(fixed.getPrivateKey("hex"), fixed.generateKeys("hex"), fixed.getPublicKey().length)
+const other = crypto.createDiffieHellman(prime, 2)
+other.setPublicKey("09", "hex")
+console.log(other.getPublicKey("hex"))
+show("no private", () => other.getPrivateKey())
+show("secret without key", () => other.computeSecret(Buffer.from([5])))
+console.log(other.generateKeys().length > 200, other.getPrivateKey().length > 20)
+const known = crypto.createDiffieHellman(prime, 2)
+known.setPrivateKey(Buffer.from("1234", "hex"))
+console.log(known.computeSecret(Buffer.from([2])).toString("hex").slice(0, 32), known.computeSecret(Buffer.from([2])).length)
+const pm1 = Buffer.from((BigInt("0x" + prime.toString("hex")) - 1n).toString(16), "hex")
+const pm2 = Buffer.from((BigInt("0x" + prime.toString("hex")) - 2n).toString(16), "hex")
+show("too small", () => known.computeSecret(Buffer.from([1])))
+show("zero", () => known.computeSecret(Buffer.alloc(0)))
+show("too large", () => known.computeSecret(pm1))
+show("largest", () => known.computeSecret(pm2).length)
+
+for (const [label, args] of [
+  ["hex abc", ["abc", "hex"]],
+  ["23 gen 5", [Buffer.from([23]), Buffer.from([5])]],
+  ["251 gen 3", [Buffer.from([0xfb]), 3]],
+  ["251 gen 2", [Buffer.from([0xfb]), 2]],
+  ["252 gen 2", [Buffer.from([0xfc]), 2]],
+  ["251 gen 0", [Buffer.from([0xfb]), 0]],
+  ["251 gen utf8", [Buffer.from([0xfb]), "02"]],
+  ["251 gen [0,2]", [Buffer.from([0xfb]), Buffer.from([0, 2])]],
+  ["empty", [Buffer.from([])]],
+  ["4096 hex", ["10001", "hex", "02", "hex"]],
+  ["p14 gen 3", [prime, 3]],
+  ["p14 gen 65537", [prime, 65537]],
+  ["p14 hex", [prime.toString("hex"), "hex"]],
+]) {
+  show(label, () => {
+    const d = crypto.createDiffieHellman(...args)
+    return [d.verifyError, d.getPrime("hex").slice(0, 8), d.getGenerator("hex")].join(" ")
+  })
+}
+for (const [label, args] of [
+  ["gen 1", [Buffer.from([0xfb]), 1]],
+  ["gen -1", [Buffer.from([0xfb]), -1]],
+  ["gen [1]", [Buffer.from([0xfb]), Buffer.from([1])]],
+  ["gen []", [Buffer.from([0xfb]), Buffer.from([])]],
+  ["gen 2.5", [Buffer.from([0xfb]), 2.5]],
+  ["gen object", [prime, {}]],
+  ["size object", [{}]],
+  ["size 100", [100]],
+  ["size -5", [-5]],
+  ["size 512.5", [512.5]],
+  ["size gen buffer", [512, Buffer.from([2])]],
+  ["size gen 1", [512, 1]],
+]) {
+  show(label, () => crypto.createDiffieHellman(...args))
+}
+show("small prime keys", () => crypto.createDiffieHellman(Buffer.from([0xfb]), 3).generateKeys())
+show("unknown group", () => crypto.getDiffieHellman("modp3"))
+show("group number", () => crypto.getDiffieHellman(14))
+show("group proto", () => crypto.getDiffieHellman("toString"))
+
+for (const gen of [2, 5, 3]) {
+  const d = crypto.createDiffieHellman(512, gen)
+  const p = BigInt("0x" + d.getPrime("hex"))
+  const mod = gen === 2 ? 24n : gen === 5 ? 60n : 12n
+  d.generateKeys()
+  const e = crypto.createDiffieHellman(d.getPrime(), d.getGenerator())
+  e.generateKeys()
+  console.log("generated", gen, d.getPrime().length, d.getPrime()[0] >= 0x80, d.verifyError, e.verifyError, String(p % mod), d.getGenerator("hex"), d.getPrivateKey().length, d.computeSecret(e.getPublicKey()).equals(e.computeSecret(d.getPublicKey())))
+}
+
+const kp = crypto.generateKeyPairSync("dh", { group: "modp14" })
+const kq = crypto.generateKeyPairSync("dh", { group: "modp14" })
+console.log(kp.privateKey.asymmetricKeyType, JSON.stringify(kp.privateKey.asymmetricKeyDetails), kp.publicKey.type)
+const spki = kp.publicKey.export({ type: "spki", format: "der" })
+const pkcs8 = kp.privateKey.export({ type: "pkcs8", format: "der" })
+console.log(spki.length >= 551, spki.subarray(4, 40).toString("hex"), generatorOf(spki))
+console.log(pkcs8.subarray(4, 40).toString("hex"), publicValue(spki).length >= 255)
+const shared = crypto.diffieHellman({ privateKey: kp.privateKey, publicKey: kq.publicKey })
+console.log(shared.length, shared.equals(crypto.diffieHellman({ privateKey: kq.privateKey, publicKey: kp.publicKey })))
+const pem = kp.privateKey.export({ type: "pkcs8", format: "pem" })
+const back = crypto.createPrivateKey(pem)
+console.log(pem.split("\n")[0], back.asymmetricKeyType, back.equals(kp.privateKey), crypto.createPublicKey(pem).equals(kp.publicKey))
+console.log(crypto.createPublicKey({ key: spki, format: "der", type: "spki" }).equals(kp.publicKey), crypto.createPrivateKey({ key: pkcs8, format: "der", type: "pkcs8" }).equals(kp.privateKey))
+const enc = kp.privateKey.export({ type: "pkcs8", format: "pem", cipher: "aes-256-cbc", passphrase: "pw" })
+console.log(enc.split("\n")[0], crypto.createPrivateKey({ key: enc, passphrase: "pw" }).equals(kp.privateKey))
+
+const classic = crypto.createDiffieHellman(prime, 2)
+classic.setPrivateKey(privateValue(pkcs8))
+classic.generateKeys()
+console.log(classic.computeSecret(publicValue(kq.publicKey.export({ type: "spki", format: "der" }))).equals(shared), classic.getPublicKey().equals(dhStrip(publicValue(spki))))
+
+const custom = crypto.generateKeyPairSync("dh", { prime, generator: 5 })
+console.log(custom.privateKey.export({ type: "pkcs8", format: "der" }).length > 500, generatorOf(custom.publicKey.export({ type: "spki", format: "der" })), privateValue(custom.privateKey.export({ type: "pkcs8", format: "der" })).length)
+const byLength = crypto.generateKeyPairSync("dh", { primeLength: 512 })
+console.log(byLength.privateKey.asymmetricKeyType, byLength.publicKey.export({ type: "spki", format: "pem" }).split("\n")[0])
+show("missing", () => crypto.generateKeyPairSync("dh", {}))
+show("unknown", () => crypto.generateKeyPairSync("dh", { group: "nope" }))
+show("pair", () => crypto.generateKeyPairSync("dh", { group: "modp14", prime }))
+show("pair2", () => crypto.generateKeyPairSync("dh", { prime, primeLength: 512 }))
+const small = crypto.generateKeyPairSync("dh", { group: "modp5" })
+show("domain", () => crypto.diffieHellman({ privateKey: small.privateKey, publicKey: kq.publicKey }))
+const ec = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" })
+const ec384 = crypto.generateKeyPairSync("ec", { namedCurve: "P-384" })
+const x = crypto.generateKeyPairSync("x25519")
+show("types", () => crypto.diffieHellman({ privateKey: kp.privateKey, publicKey: ec.publicKey }))
+show("types2", () => crypto.diffieHellman({ privateKey: x.privateKey, publicKey: ec.publicKey }))
+show("curves", () => crypto.diffieHellman({ privateKey: ec.privateKey, publicKey: ec384.publicKey }))
+show("ed", () => crypto.diffieHellman({ privateKey: crypto.generateKeyPairSync("ed25519").privateKey, publicKey: crypto.generateKeyPairSync("ed25519").publicKey }))
+show("jwk", () => kp.privateKey.export({ format: "jwk" }))
+show("jwk public", () => kp.publicKey.export({ format: "jwk" }))
+show("pkcs1", () => kp.privateKey.export({ type: "pkcs1", format: "pem" }))
+show("sec1", () => kp.privateKey.export({ type: "sec1", format: "pem" }))
+show("sec1 rsa", () => crypto.generateKeyPairSync("rsa", { modulusLength: 512 }).privateKey.export({ type: "sec1", format: "pem" }))
+show("sign", () => crypto.sign(null, Buffer.from("x"), kp.privateKey))
+show("sign x25519", () => crypto.sign(null, Buffer.from("x"), x.privateKey))
+show("verify x25519", () => crypto.verify(null, Buffer.from("x"), x.publicKey, Buffer.alloc(64)))

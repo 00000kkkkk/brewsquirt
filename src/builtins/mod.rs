@@ -3,6 +3,7 @@ pub mod binary;
 mod collections;
 pub mod cryptokeys;
 mod date;
+pub mod dh;
 mod extras;
 pub mod intl;
 pub mod intrinsics;
