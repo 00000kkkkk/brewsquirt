@@ -1,0 +1,20 @@
+C=UA | ST=Kyiv | L=Kyiv | O=Squirt Labs | OU=Runtime | OU=QA | CN=example.com | emailAddress=admin@example.com
+CN=jsq-test-ca | DNS:example.com, DNS:*.example.org, IP Address:10.0.0.1, IP Address:0:0:0:0:0:0:0:1, email:admin@example.com, URI:https://example.com/id
+OCSP - URI:http://ocsp.example.com | CA Issuers - URI:http://ca.example.com/ca.crt
+Oct 24 11:02:43 2026 GMT -> Sep 30 11:02:43 2126 GMT 2126-09-30T11:02:43.000Z
+40 95 [ '1.3.6.1.5.5.7.3.1', '1.3.6.1.5.5.7.3.2' ] false true
+example.com *.example.org undefined ::1 undefined admin@example.com
+true false true false
+true false
+true true
+subject,issuer,subjectaltname,infoAccess,ca,modulus,exponent,pubkey,bits,valid_from,valid_to,fingerprint,fingerprint256,fingerprint512,ext_key_usage,serialNumber,raw,asn1Curve,nistCurve
+[ 'Runtime', 'QA' ] [ 'http://ocsp.example.com' ] 2048 0x10001 [ '1.3.6.1.5.5.7.3.1', '1.3.6.1.5.5.7.3.2' ]
+256 prime256v1 P-256 65 4
+client sees localhost from jsq-test-ca true
+server sees client-one from jsq-test-ca true
+client sees localhost from jsq-test-ca true
+rejected
+200 server sees ec-client from jsq-test-ca true
+200 server sees client-one from jsq-test-ca true
+200 server sees client-one from jsq-test-ca true
+rejected

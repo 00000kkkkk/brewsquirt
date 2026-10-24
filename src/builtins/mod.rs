@@ -17,6 +17,7 @@ pub mod uverr;
 pub mod v8wire;
 pub mod wasm;
 mod winpath;
+pub mod x509;
 pub use reflect::{array_like, key_value};
 mod number;
 mod object;

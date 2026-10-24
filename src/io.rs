@@ -86,6 +86,7 @@ pub struct HttpRequest {
     pub headers: Headers,
     pub body: Vec<u8>,
     pub remote: String,
+    pub peer_cert: Option<Vec<u8>>,
 }
 
 pub struct HttpReply {
@@ -139,6 +140,7 @@ pub enum IoEvent {
         remote: Option<SocketAddr>,
         cmd: Sender<SocketCmd>,
         alpn: Option<String>,
+        peer: Option<Vec<u8>>,
     },
     Child {
         id: u64,
@@ -279,6 +281,7 @@ pub enum SocketEvent {
         local: Option<SocketAddr>,
         remote: Option<SocketAddr>,
         alpn: Option<String>,
+        peer: Option<Vec<u8>>,
     },
     Data(Vec<u8>),
     End,
@@ -358,6 +361,42 @@ impl Io {
     }
 }
 
+const TLS_ALERTS: [(&str, &str); 10] = [
+    (
+        "CertificateRequired",
+        "ERR_SSL_TLSV13_ALERT_CERTIFICATE_REQUIRED",
+    ),
+    ("BadCertificate", "ERR_SSL_SSLV3_ALERT_BAD_CERTIFICATE"),
+    ("HandshakeFailure", "ERR_SSL_SSLV3_ALERT_HANDSHAKE_FAILURE"),
+    ("UnknownCA", "ERR_SSL_TLSV1_ALERT_UNKNOWN_CA"),
+    ("ProtocolVersion", "ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION"),
+    ("DecryptError", "ERR_SSL_TLSV1_ALERT_DECRYPT_ERROR"),
+    ("AccessDenied", "ERR_SSL_TLSV1_ALERT_ACCESS_DENIED"),
+    (
+        "CertificateExpired",
+        "ERR_SSL_SSLV3_ALERT_CERTIFICATE_EXPIRED",
+    ),
+    (
+        "CertificateUnknown",
+        "ERR_SSL_SSLV3_ALERT_CERTIFICATE_UNKNOWN",
+    ),
+    (
+        "CertificateRevoked",
+        "ERR_SSL_SSLV3_ALERT_CERTIFICATE_REVOKED",
+    ),
+];
+
+pub fn tls_error_code(message: &str) -> &'static str {
+    if let Some(rest) = message.split("received fatal alert: ").nth(1) {
+        for (name, code) in TLS_ALERTS {
+            if rest.starts_with(name) {
+                return code;
+            }
+        }
+    }
+    "ERR_TLS_HANDSHAKE"
+}
+
 pub fn error_code(e: &std::io::Error) -> &'static str {
     use std::io::ErrorKind::*;
     match e.kind() {
@@ -404,6 +443,43 @@ pub struct TlsClientOptions {
     pub insecure: bool,
     pub ca: Option<Vec<u8>>,
     pub alpn: Vec<String>,
+    pub cert: Option<Vec<u8>>,
+    pub key: Option<Vec<u8>>,
+    pub passphrase: Option<String>,
+}
+
+type ClientIdentity = (
+    Vec<rustls::pki_types::CertificateDer<'static>>,
+    rustls::pki_types::PrivateKeyDer<'static>,
+);
+
+fn client_identity(opts: &TlsClientOptions) -> Result<Option<ClientIdentity>, String> {
+    use rustls::pki_types::pem::PemObject;
+    let (Some(cert), Some(key)) = (&opts.cert, &opts.key) else {
+        return Ok(None);
+    };
+    let certs = pem_certificates(cert)?;
+    let text = String::from_utf8_lossy(key);
+    let key = if text.contains("ENCRYPTED PRIVATE KEY") {
+        let Some(pass) = &opts.passphrase else {
+            return Err("the private key is encrypted and no passphrase was given".to_string());
+        };
+        let start = text
+            .find("-----BEGIN ENCRYPTED PRIVATE KEY-----")
+            .ok_or("invalid encrypted private key")?;
+        let (_, der) = pem_rfc7468::decode_vec(text[start..].as_bytes())
+            .map_err(|e| format!("invalid encrypted private key: {e}"))?;
+        let info = pkcs8::EncryptedPrivateKeyInfo::try_from(der.as_slice())
+            .map_err(|e| format!("invalid encrypted private key: {e}"))?;
+        let doc = info
+            .decrypt(pass.as_bytes())
+            .map_err(|_| "bad decrypt: wrong passphrase for the private key".to_string())?;
+        rustls::pki_types::PrivateKeyDer::Pkcs8(doc.as_bytes().to_vec().into())
+    } else {
+        rustls::pki_types::PrivateKeyDer::from_pem_slice(key)
+            .map_err(|e| format!("invalid private key: {e}"))?
+    };
+    Ok(Some((certs, key)))
 }
 
 #[derive(Debug)]
@@ -478,53 +554,102 @@ fn client_config_for(opts: &TlsClientOptions) -> Result<Arc<rustls::ClientConfig
 }
 
 fn client_config_base(opts: &TlsClientOptions) -> Result<Arc<rustls::ClientConfig>, String> {
-    if !opts.insecure && opts.ca.is_none() {
+    let identity = client_identity(opts)?;
+    if !opts.insecure && opts.ca.is_none() && identity.is_none() {
         return Ok(tls_config());
     }
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_safe_default_protocol_versions()
         .map_err(|e| e.to_string())?;
-    let config = if opts.insecure {
+    let wants = if opts.insecure {
         builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(AcceptAnyCert(provider)))
-            .with_no_client_auth()
-    } else {
+    } else if let Some(ca) = &opts.ca {
         let mut roots = rustls::RootCertStore::empty();
-        for cert in pem_certificates(opts.ca.as_deref().unwrap_or_default())? {
+        for cert in pem_certificates(ca)? {
             roots
                 .add(cert)
                 .map_err(|e| format!("invalid CA certificate: {e}"))?;
         }
-        builder.with_root_certificates(roots).with_no_client_auth()
+        builder.with_root_certificates(roots)
+    } else {
+        builder.with_root_certificates(rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        })
+    };
+    let config = match identity {
+        Some((certs, key)) => wants
+            .with_client_auth_cert(certs, key)
+            .map_err(|e| format!("invalid client certificate: {e}"))?,
+        None => wants.with_no_client_auth(),
     };
     Ok(Arc::new(config))
+}
+
+pub struct ClientAuth {
+    pub ca: Option<Vec<u8>>,
+    pub required: bool,
 }
 
 pub fn tls_server_config(
     cert_pem: &[u8],
     key_pem: &[u8],
     alpn: &[&str],
+    client: Option<ClientAuth>,
 ) -> Result<Arc<rustls::ServerConfig>, String> {
     use rustls::pki_types::pem::PemObject;
     let certs = pem_certificates(cert_pem)?;
     let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem)
         .map_err(|e| format!("invalid private key: {e}"))?;
-    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|e| e.to_string())?
-    .with_no_client_auth()
-    .with_single_cert(certs, key)
-    .map_err(|e| e.to_string())?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let builder = rustls::ServerConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?;
+    let builder = match client {
+        None => builder.with_no_client_auth(),
+        Some(auth) => {
+            let mut roots = rustls::RootCertStore::empty();
+            match &auth.ca {
+                Some(ca) => {
+                    for cert in pem_certificates(ca)? {
+                        roots
+                            .add(cert)
+                            .map_err(|e| format!("invalid CA certificate: {e}"))?;
+                    }
+                }
+                None => roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
+            }
+            let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+                Arc::new(roots),
+                provider,
+            );
+            let verifier = if auth.required {
+                verifier
+            } else {
+                verifier.allow_unauthenticated()
+            };
+            builder.with_client_cert_verifier(verifier.build().map_err(|e| e.to_string())?)
+        }
+    };
+    let mut config = builder
+        .with_single_cert(certs, key)
+        .map_err(|e| e.to_string())?;
     config.alpn_protocols = alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
     Ok(Arc::new(config))
 }
 
+fn first_peer_cert(certs: Option<&[rustls::pki_types::CertificateDer<'_>]>) -> Option<Vec<u8>> {
+    certs.and_then(|c| c.first()).map(|c| c.to_vec())
+}
+
 trait CloseNotify {
     fn close_notify(&mut self) {}
+
+    fn peer_cert(&self) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 impl CloseNotify for TcpStream {}
@@ -536,6 +661,10 @@ impl CloseNotify for rustls::StreamOwned<rustls::ServerConnection, TcpStream> {
     fn close_notify(&mut self) {
         self.conn.send_close_notify();
         let _ = self.conn.complete_io(&mut self.sock);
+    }
+
+    fn peer_cert(&self) -> Option<Vec<u8>> {
+        first_peer_cert(self.conn.peer_certificates())
     }
 }
 
@@ -800,8 +929,12 @@ fn socket_reader(
             let _ = cmd.send(SocketCmd::TlsFlush);
         }
         if let Some(message) = failure {
+            let code = match tls_error_code(&message) {
+                "ERR_TLS_HANDSHAKE" => "ERR_SSL_PROTOCOL_ERROR",
+                code => code,
+            };
             emit(SocketEvent::Error {
-                code: "ERR_SSL_PROTOCOL_ERROR".to_string(),
+                code: code.to_string(),
                 message,
             });
             failed = true;
@@ -973,6 +1106,7 @@ pub fn socket_connect(
                         local: Some(local),
                         remote: Some(remote),
                         alpn: None,
+                        peer: None,
                     },
                 });
                 socket_loop(stream, id, own, crx, tx);
@@ -983,17 +1117,19 @@ pub fn socket_connect(
                         .conn
                         .alpn_protocol()
                         .map(|p| String::from_utf8_lossy(p).into_owned());
+                    let peer = first_peer_cert(secure.conn.peer_certificates());
                     let _ = tx.send(IoEvent::Socket {
                         id,
                         event: SocketEvent::Connected {
                             local: Some(local),
                             remote: Some(remote),
                             alpn,
+                            peer,
                         },
                     });
                     socket_loop(secure, id, own, crx, tx);
                 }
-                Err(message) => fail("ERR_TLS_HANDSHAKE", message),
+                Err(message) => fail(tls_error_code(&message), message),
             },
         }
     });
@@ -1035,6 +1171,7 @@ pub fn socket_listen(
                         remote: Some(remote),
                         cmd: ctx,
                         alpn: None,
+                        peer: None,
                     });
                     std::thread::spawn(move || socket_loop(stream, id, own, crx, tx2));
                 }
@@ -1055,6 +1192,7 @@ pub fn socket_listen(
                             .conn
                             .alpn_protocol()
                             .map(|p| String::from_utf8_lossy(p).into_owned());
+                        let peer = first_peer_cert(secure.conn.peer_certificates());
                         if tx2
                             .send(IoEvent::Accept {
                                 server,
@@ -1063,6 +1201,7 @@ pub fn socket_listen(
                                 remote: Some(remote),
                                 cmd: ctx,
                                 alpn,
+                                peer,
                             })
                             .is_err()
                         {
@@ -1105,6 +1244,7 @@ pub fn socket_connect_path(id: u64, path: String, tx: Sender<IoEvent>) -> Sender
                         local: None,
                         remote: None,
                         alpn: None,
+                        peer: None,
                     },
                 });
                 socket_loop(stream, id, own, crx, tx);
@@ -1155,6 +1295,7 @@ pub fn socket_listen_path(
                 remote: None,
                 cmd: ctx,
                 alpn: None,
+                peer: None,
             });
             std::thread::spawn(move || socket_loop(stream, id, own, crx, tx2));
         }
@@ -1776,6 +1917,23 @@ fn fetch_tls_config(opts: &TlsClientOptions) -> Result<ureq::tls::TlsConfig, Str
             .collect::<Vec<_>>();
         builder = builder.root_certs(ureq::tls::RootCerts::Specific(Arc::new(certs)));
     }
+    if let Some((certs, key)) = client_identity(opts)? {
+        use rustls::pki_types::PrivateKeyDer;
+        let chain = certs
+            .iter()
+            .map(|c| ureq::tls::Certificate::from_der(c.as_ref()).to_owned())
+            .collect::<Vec<_>>();
+        let label = match &key {
+            PrivateKeyDer::Pkcs1(_) => "RSA PRIVATE KEY",
+            PrivateKeyDer::Sec1(_) => "EC PRIVATE KEY",
+            _ => "PRIVATE KEY",
+        };
+        let pem = pem_rfc7468::encode_string(label, pem_rfc7468::LineEnding::LF, key.secret_der())
+            .map_err(|e| format!("invalid private key: {e}"))?;
+        let key = ureq::tls::PrivateKey::from_pem(pem.as_bytes())
+            .map_err(|e| format!("invalid private key: {e}"))?;
+        builder = builder.client_cert(Some(ureq::tls::ClientCert::new_with_certs(&chain, key)));
+    }
     Ok(builder.build())
 }
 
@@ -2159,6 +2317,7 @@ fn read_request(
             headers,
             body,
             remote: remote.map(|a| a.ip().to_string()).unwrap_or_default(),
+            peer_cert: None,
         },
         keep_alive,
         head,
@@ -2397,10 +2556,13 @@ fn serve_stream<S: Read + Write + CloseNotify + IntoSock + Send + 'static>(
 ) {
     let mut reader = BufReader::new(stream);
     while !stop.load(Ordering::SeqCst) {
-        let Some(parsed) = read_request(&mut reader, &local, &remote, secure) else {
+        let Some(mut parsed) = read_request(&mut reader, &local, &remote, secure) else {
             let _ = tcp.shutdown(std::net::Shutdown::Both);
             return;
         };
+        if secure {
+            parsed.request.peer_cert = reader.get_ref().peer_cert();
+        }
         if parsed.request.method == "CONNECT" || wants_upgrade(&parsed.request.headers) {
             let head = reader.buffer().to_vec();
             let stream = reader.into_inner();

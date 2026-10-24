@@ -2467,7 +2467,8 @@ const WEB_SRC: &str = r##"
   }
   const nativeListen = (options, dispatch) => {
     const tls = options.tls ?? null
-    const [id, port, hostname] = native.serve(String(options.hostname ?? "127.0.0.1"), Number(options.port ?? 3000), dispatch, typeof options.upgrade === "function" ? options.upgrade : null, tls?.key ?? null, tls?.cert ?? null)
+    const clientCa = tls?.requestCert ? tls.ca ?? true : null
+    const [id, port, hostname] = native.serve(String(options.hostname ?? "127.0.0.1"), Number(options.port ?? 3000), dispatch, typeof options.upgrade === "function" ? options.upgrade : null, tls?.key ?? null, tls?.cert ?? null, clientCa, tls?.rejectUnauthorized !== false)
     let open = true
     return {
       hostname,
@@ -2629,8 +2630,12 @@ const WEB_SRC: &str = r##"
   const defineMethods = (proto, methods) => {
     for (const key of Reflect.ownKeys(methods)) Object.defineProperty(proto, key, { value: methods[key], writable: true, configurable: true })
   }
-  function NullSocket(remoteAddress) {
+  const kPeerCert = Symbol("peerCert")
+  function NullSocket(remoteAddress, peerCert) {
     this.remoteAddress = remoteAddress
+    this.authorized = peerCert !== undefined
+    this.authorizationError = null
+    Object.defineProperty(this, kPeerCert, { value: peerCert, configurable: true })
     this.remotePort = 0
     this.localAddress = "127.0.0.1"
     this.localPort = 0
@@ -2640,6 +2645,12 @@ const WEB_SRC: &str = r##"
     this.destroyed = false
   }
   defineMethods(NullSocket.prototype, {
+    getPeerCertificate() {
+      const raw = this[kPeerCert]
+      if (raw === undefined) return {}
+      const { X509Certificate } = require("node:crypto")
+      return new X509Certificate(Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength)).toLegacyObject()
+    },
     setTimeout() {
       return this
     },
@@ -2706,7 +2717,7 @@ const WEB_SRC: &str = r##"
     },
     address: () => ({ address: "127.0.0.1", family: "IPv4", port: 0 }),
   })
-  const nullSocket = (remoteAddress) => new NullSocket(remoteAddress)
+  const nullSocket = (remoteAddress, peerCert) => new NullSocket(remoteAddress, peerCert)
   const SINGLE_HEADERS = new Set(["age", "authorization", "content-length", "content-type", "etag", "expires", "from", "host", "if-modified-since", "if-unmodified-since", "last-modified", "location", "max-forwards", "proxy-authorization", "referer", "retry-after", "server", "user-agent"])
   const nodeHeaders = (pairs) => {
     const headers = {}
@@ -2768,7 +2779,7 @@ const WEB_SRC: &str = r##"
         this.httpVersion = "1.1"
         this.httpVersionMajor = 1
         this.httpVersionMinor = 1
-        this.socket = nullSocket(raw.remote)
+        this.socket = nullSocket(raw.remote, raw.peerCert)
         body = req[kRaw]
       } else if (requestLike) {
         const u = new URL(req.url)
@@ -2821,7 +2832,7 @@ const WEB_SRC: &str = r##"
       this.url = raw.target
       this.headers = parsed.headers
       this.rawHeaders = parsed.rawHeaders
-      this.socket = nullSocket(raw.remote)
+      this.socket = nullSocket(raw.remote, raw.peerCert)
       const b = req[kRaw]
       state.bytes = b == null ? new Uint8Array(0) : typeof b === "string" ? encoder.encode(b) : b
     } else if (req && typeof req.url === "string" && req.headers && typeof req.headers.entries === "function") {
@@ -3273,7 +3284,7 @@ const WEB_SRC: &str = r##"
   function createServer(options, listener) {
     if (typeof options === "function") [options, listener] = [{}, options]
     const secure = options?.[SECURE] === true
-    const tls = secure ? { key: options.key, cert: options.cert } : null
+    const tls = secure ? { key: options.key, cert: options.cert, requestCert: options.requestCert, ca: options.ca, rejectUnauthorized: options.rejectUnauthorized } : null
     let srv = null
     const handlers = { request: listener ? [listener] : [], listening: [], close: [] }
     const onceWrappers = new WeakMap()
@@ -3956,7 +3967,14 @@ fn native_serve(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let dispatch = arg(args, 2);
     let upgrade = arg(args, 3);
     let alpn = vm.new_array(vec!["http/1.1".into()]);
-    let tls = super::netio::server_tls(vm, &arg(args, 4), &arg(args, 5), &alpn)?;
+    let tls = super::netio::server_tls(
+        vm,
+        &arg(args, 4),
+        &arg(args, 5),
+        &alpn,
+        &arg(args, 6),
+        &arg(args, 7),
+    )?;
     let id = vm.io.next_id();
     let handle = match io::listen(
         &host,
@@ -4100,6 +4118,10 @@ fn request_value(vm: &mut Vm, r: HttpRequest) -> Value {
             r.remote.into()
         },
     );
+    if let Some(cert) = r.peer_cert {
+        let cert = super::binary::new_uint8(vm, cert);
+        o.set_own("peerCert", cert);
+    }
     Value::Object(o)
 }
 
@@ -4114,7 +4136,8 @@ pub fn handle_io(vm: &mut Vm, ev: IoEvent) -> Result<(), Value> {
             remote,
             cmd,
             alpn,
-        } => super::netio::handle_accept(vm, server, id, local, remote, cmd, alpn)?,
+            peer,
+        } => super::netio::handle_accept(vm, server, id, local, remote, cmd, alpn, peer)?,
         IoEvent::Child { id, event } => super::netio::handle_child(vm, id, event)?,
         IoEvent::Watch { id, event } => super::netio::handle_watch(vm, id, event)?,
         IoEvent::Port { port, event } => super::threads::handle_port(vm, port, event)?,

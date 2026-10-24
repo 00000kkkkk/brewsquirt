@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `crypto.X509Certificate` parses PEM and DER certificates and reports the subject, issuer,
+  alternative names, authority information access, validity dates, fingerprints, serial number,
+  extended key usage and public key, with `checkHost`, `checkIP`, `checkEmail`, `checkIssued`,
+  `checkPrivateKey`, `verify` and `toLegacyObject`, in the formats Node prints.
+- TLS client certificates: `tls.connect`, `https.request` and `https.Agent` take `cert`, `key`
+  and `passphrase`, including passphrase-encrypted PKCS#8 keys. `tls.createServer` and
+  `https.createServer` take `requestCert`, `ca` and `rejectUnauthorized` to require and verify
+  them. `getPeerCertificate()` returns the peer's certificate on client and server sockets and
+  on `req.socket`, and `authorized` reports whether it was verified. Rejected handshakes carry
+  Node's `ERR_SSL_*_ALERT_*` codes.
+
 ## [1.10.0] - 2026-10-24
 
 ### Added

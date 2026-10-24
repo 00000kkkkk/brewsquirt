@@ -2892,6 +2892,206 @@ const NODE_SRC: &str = r##"
     }
     return value
   }
+  const X509_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+  const x509Date = (ms) => {
+    const d = new Date(ms)
+    const two = (n) => String(n).padStart(2, "0")
+    return `${X509_MONTHS[d.getUTCMonth()]} ${String(d.getUTCDate()).padStart(2, " ")} ${two(d.getUTCHours())}:${two(d.getUTCMinutes())}:${two(d.getUTCSeconds())} ${d.getUTCFullYear()} GMT`
+  }
+  const x509Name = (rdns) => rdns.map((rdn) => rdn.map(([k, v]) => `${k}=${v}`).join("+")).join("\n")
+  const x509NameObject = (rdns) => {
+    const out = Object.create(null)
+    for (const rdn of rdns) {
+      for (const [k, v] of rdn) {
+        if (k in out) out[k] = Array.isArray(out[k]) ? [...out[k], v] : [out[k], v]
+        else out[k] = v
+      }
+    }
+    return out
+  }
+  const colonHex = (buf) => Array.from(buf, (b) => b.toString(16).toUpperCase().padStart(2, "0")).join(":")
+  const X509_SIGNATURE_HASHES = {
+    "1.2.840.113549.1.1.5": "sha1",
+    "1.2.840.113549.1.1.11": "sha256",
+    "1.2.840.113549.1.1.12": "sha384",
+    "1.2.840.113549.1.1.13": "sha512",
+    "1.2.840.113549.1.1.14": "sha224",
+    "1.2.840.10045.4.1": "sha1",
+    "1.2.840.10045.4.3.2": "sha256",
+    "1.2.840.10045.4.3.3": "sha384",
+    "1.2.840.10045.4.3.4": "sha512",
+    "1.3.101.112": null,
+  }
+  const NIST_CURVES = { prime256v1: "P-256", secp384r1: "P-384", secp521r1: "P-521" }
+  const hostMatches = (pattern, host) => {
+    const p = pattern.toLowerCase()
+    const h = host.toLowerCase().replace(/\.$/, "")
+    if (!p.startsWith("*.")) return p === h
+    const rest = p.slice(1)
+    return h.endsWith(rest) && h.length > rest.length && !h.slice(0, h.length - rest.length).includes(".")
+  }
+  const ipBytesKey = (ip) => {
+    if (isIPv4(ip)) return ip
+    if (!isIPv6(ip)) return null
+    const [head, tail] = ip.split("::")
+    const groups = (s) => (s ? s.split(":") : [])
+    const h = groups(head)
+    const t = tail === undefined ? [] : groups(tail)
+    const fill = tail === undefined ? [] : Array(8 - h.length - t.length).fill("0")
+    return [...h, ...fill, ...t].map((g) => parseInt(g, 16).toString(16).toUpperCase()).join(":")
+  }
+  class X509Certificate {
+    #p
+    #raw
+    constructor(buffer) {
+      if (typeof buffer === "string") buffer = Buffer.from(buffer)
+      if (!ArrayBuffer.isView(buffer)) {
+        throw nodeTypeError("ERR_INVALID_ARG_TYPE", `The "buffer" argument must be an instance of ArrayBuffer, Buffer, TypedArray, or DataView. Received ${describeReceived(buffer)}`)
+      }
+      let der = Buffer.from(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+      const pem = /-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/.exec(der.toString("latin1"))
+      if (pem) der = Buffer.from(pem[1].replace(/\s+/g, ""), "base64")
+      this.#p = native.x509Parse(der)
+      this.#raw = Buffer.from(der)
+    }
+    get subject() {
+      return x509Name(this.#p.subject)
+    }
+    get issuer() {
+      return x509Name(this.#p.issuer)
+    }
+    get subjectAltName() {
+      const san = this.#p.subjectAltName
+      return san.length ? san.map(([k, v]) => `${k}:${v}`).join(", ") : undefined
+    }
+    get infoAccess() {
+      const info = this.#p.infoAccess
+      return info.length ? info.map(([k, v]) => `${k}:${v}`).join("\n") : undefined
+    }
+    get validFrom() {
+      return x509Date(this.#p.notBefore)
+    }
+    get validTo() {
+      return x509Date(this.#p.notAfter)
+    }
+    get validFromDate() {
+      return new Date(this.#p.notBefore)
+    }
+    get validToDate() {
+      return new Date(this.#p.notAfter)
+    }
+    get fingerprint() {
+      return colonHex(new Hash("sha1").update(this.#raw).digest())
+    }
+    get fingerprint256() {
+      return colonHex(new Hash("sha256").update(this.#raw).digest())
+    }
+    get fingerprint512() {
+      return colonHex(new Hash("sha512").update(this.#raw).digest())
+    }
+    get keyUsage() {
+      return this.#p.extKeyUsage.length ? [...this.#p.extKeyUsage] : undefined
+    }
+    get serialNumber() {
+      return this.#p.serialNumber
+    }
+    get raw() {
+      return Buffer.from(this.#raw)
+    }
+    get ca() {
+      return this.#p.ca
+    }
+    get issuerCertificate() {
+      return undefined
+    }
+    get publicKey() {
+      return createPublicKey({ key: Buffer.from(this.#p.spki), format: "der", type: "spki" })
+    }
+    checkHost(name) {
+      const dns = this.#p.subjectAltName.filter(([k]) => k === "DNS").map(([, v]) => v)
+      const candidates = dns.length ? dns : this.#p.subject.flat().filter(([k]) => k === "CN").map(([, v]) => v)
+      return candidates.find((c) => hostMatches(c, String(name)))
+    }
+    checkIP(ip) {
+      const want = ipBytesKey(String(ip))
+      if (want === null) return undefined
+      return this.#p.subjectAltName.some(([k, v]) => k === "IP Address" && ipBytesKey(v.includes(":") ? v : v) === want) ? String(ip) : undefined
+    }
+    checkEmail(email) {
+      const want = String(email).toLowerCase()
+      const sans = this.#p.subjectAltName.filter(([k]) => k === "email").map(([, v]) => v)
+      const candidates = sans.length ? sans : this.#p.subject.flat().filter(([k]) => k === "emailAddress").map(([, v]) => v)
+      return candidates.some((c) => c.toLowerCase() === want) ? String(email) : undefined
+    }
+    checkIssued(other) {
+      if (!(other instanceof X509Certificate)) throw nodeTypeError("ERR_INVALID_ARG_TYPE", `The "otherCert" argument must be an instance of X509Certificate. Received ${describeReceived(other)}`)
+      return Buffer.from(this.#p.issuerDer).equals(Buffer.from(other.#p.subjectDer))
+    }
+    checkPrivateKey(pkey) {
+      if (!(pkey instanceof KeyObject) || pkey.type !== "private") throw nodeTypeError("ERR_INVALID_ARG_TYPE", `The "pkey" argument must be a private KeyObject. Received ${describeReceived(pkey)}`)
+      return createPublicKey(pkey).export({ type: "spki", format: "der" }).equals(Buffer.from(this.#p.spki))
+    }
+    verify(pkey) {
+      if (!(pkey instanceof KeyObject) || pkey.type !== "public") throw nodeTypeError("ERR_INVALID_ARG_TYPE", `The "pkey" argument must be a public KeyObject. Received ${describeReceived(pkey)}`)
+      const alg = this.#p.signatureAlgorithm
+      if (!(alg in X509_SIGNATURE_HASHES)) return false
+      try {
+        return crypto.verify(X509_SIGNATURE_HASHES[alg], Buffer.from(this.#p.tbs), pkey, Buffer.from(this.#p.signature))
+      } catch {
+        return false
+      }
+    }
+    toString() {
+      const b64 = this.#raw.toString("base64").replace(/.{64}/g, "$&\n")
+      return `-----BEGIN CERTIFICATE-----\n${b64}${b64.endsWith("\n") ? "" : "\n"}-----END CERTIFICATE-----\n`
+    }
+    toJSON() {
+      return this.toString()
+    }
+    toLegacyObject() {
+      const p = this.#p
+      const out = {
+        subject: x509NameObject(p.subject),
+        issuer: x509NameObject(p.issuer),
+        subjectaltname: this.subjectAltName,
+        infoAccess: undefined,
+        ca: p.ca,
+      }
+      if (p.infoAccess.length) {
+        const info = Object.create(null)
+        for (const [k, v] of p.infoAccess) (info[k] ??= []).push(v)
+        out.infoAccess = info
+      }
+      const key = this.publicKey
+      const jwk = key.export({ format: "jwk" })
+      if (key.asymmetricKeyType === "rsa" || key.asymmetricKeyType === "rsa-pss") {
+        out.modulus = Buffer.from(jwk.n, "base64url").toString("hex").toUpperCase()
+        out.exponent = "0x" + Buffer.from(jwk.e, "base64url").toString("hex").replace(/^0+/, "")
+        out.pubkey = Buffer.from(p.spki)
+        out.bits = key.asymmetricKeyDetails.modulusLength
+      } else if (key.asymmetricKeyType === "ec") {
+        const curve = key.asymmetricKeyDetails.namedCurve
+        out.modulus = undefined
+        out.exponent = undefined
+        out.pubkey = Buffer.concat([Buffer.from([4]), Buffer.from(jwk.x, "base64url"), Buffer.from(jwk.y, "base64url")])
+        out.bits = { prime256v1: 256, secp384r1: 384, secp521r1: 521 }[curve]
+      } else {
+        out.pubkey = Buffer.from(p.spki)
+      }
+      out.valid_from = this.validFrom
+      out.valid_to = this.validTo
+      out.fingerprint = this.fingerprint
+      out.fingerprint256 = this.fingerprint256
+      out.fingerprint512 = this.fingerprint512
+      out.ext_key_usage = this.keyUsage
+      out.serialNumber = p.serialNumber
+      out.raw = this.raw
+      const curve = key.asymmetricKeyType === "ec" ? key.asymmetricKeyDetails.namedCurve : undefined
+      out.asn1Curve = curve
+      out.nistCurve = curve === undefined ? undefined : NIST_CURVES[curve]
+      return out
+    }
+  }
   const crypto = {
     createHash: (alg) => new Hash(alg),
     createHmac: (alg, key, options) => new Hmac(alg, key, options?.encoding),
@@ -2925,6 +3125,7 @@ const NODE_SRC: &str = r##"
     Hash,
     Hmac,
     KeyObject,
+    X509Certificate,
     createSecretKey: (key, encoding) => new KeyObject("secret", new Uint8Array(cryptoBytes(key, encoding, "key"))),
     createPrivateKey,
     createPublicKey,
@@ -5061,7 +5262,7 @@ const NODE_SRC: &str = r##"
       const customAgent = agent && ((typeof agent.createConnection === "function" && agent.createConnection !== Agent.prototype.createConnection) || (typeof agent.addRequest === "function" && agent.addRequest !== Agent.prototype.addRequest) || (typeof agent.createSocket === "function" && agent.createSocket !== Agent.prototype.createSocket))
       if (requestHeaders(this).has("upgrade") || this.#options.createConnection || customAgent || this.#options.socketPath) return this.#socketRequest(body, cb)
       const agentOptions = this.#options.agent?.options ?? {}
-      const tlsOptions = { rejectUnauthorized: this.#options.rejectUnauthorized ?? agentOptions.rejectUnauthorized, ca: this.#options.ca ?? agentOptions.ca }
+      const tlsOptions = { rejectUnauthorized: this.#options.rejectUnauthorized ?? agentOptions.rejectUnauthorized, ca: this.#options.ca ?? agentOptions.ca, cert: this.#options.cert ?? agentOptions.cert, key: this.#options.key ?? agentOptions.key, passphrase: this.#options.passphrase ?? agentOptions.passphrase }
       fetch(this.#url, { method: this.method, headers: requestHeaders(this), body, signal: requestState(this).controller.signal, redirect: "manual", tls: tlsOptions, [Symbol.for("jsq.rawBody")]: true }).then(
         (res) => {
           const incoming = new IncomingResponse(res)
@@ -5078,6 +5279,18 @@ const NODE_SRC: &str = r##"
     }
   }
 
+  const TLS_ALERTS = {
+    CertificateRequired: "ERR_SSL_TLSV13_ALERT_CERTIFICATE_REQUIRED",
+    BadCertificate: "ERR_SSL_SSLV3_ALERT_BAD_CERTIFICATE",
+    HandshakeFailure: "ERR_SSL_SSLV3_ALERT_HANDSHAKE_FAILURE",
+    UnknownCA: "ERR_SSL_TLSV1_ALERT_UNKNOWN_CA",
+    ProtocolVersion: "ERR_SSL_TLSV1_ALERT_PROTOCOL_VERSION",
+    DecryptError: "ERR_SSL_TLSV1_ALERT_DECRYPT_ERROR",
+    AccessDenied: "ERR_SSL_TLSV1_ALERT_ACCESS_DENIED",
+    CertificateExpired: "ERR_SSL_SSLV3_ALERT_CERTIFICATE_EXPIRED",
+    CertificateUnknown: "ERR_SSL_SSLV3_ALERT_CERTIFICATE_UNKNOWN",
+    CertificateRevoked: "ERR_SSL_SSLV3_ALERT_CERTIFICATE_REVOKED",
+  }
   const nodeRequestError = (e, url) => {
     if (e?.name === "AbortError") return e
     const detail = String(e?.cause?.message ?? e?.message ?? e)
@@ -5085,6 +5298,8 @@ const NODE_SRC: &str = r##"
     const port = url.port || (url.protocol === "https:" ? "443" : "80")
     const make = (code, message) => Object.assign(new Error(message), { code, cause: e?.cause })
     if (/refused/i.test(detail)) return Object.assign(make("ECONNREFUSED", `connect ECONNREFUSED ${host}:${port}`), { errno: -4078, syscall: "connect", address: host, port: Number(port) })
+    const alert = /received fatal alert: (\w+)/.exec(detail)
+    if (alert && TLS_ALERTS[alert[1]]) return make(TLS_ALERTS[alert[1]], detail)
     if (/self[- ]signed/i.test(detail)) return make("DEPTH_ZERO_SELF_SIGNED_CERT", "self-signed certificate")
     if (/UnknownIssuer|unknown issuer|not valid for name|NotValidForName|certificate/i.test(detail)) return make(/name/i.test(detail) ? "ERR_TLS_CERT_ALTNAME_INVALID" : "UNABLE_TO_VERIFY_LEAF_SIGNATURE", detail)
     if (/dns|resolve|lookup|No such host/i.test(detail)) return Object.assign(make("ENOTFOUND", `getaddrinfo ENOTFOUND ${host}`), { syscall: "getaddrinfo", hostname: host })
@@ -5105,7 +5320,7 @@ const NODE_SRC: &str = r##"
     if (options.socketPath) return net.connect({ path: options.socketPath })
     const secure = options.protocol === "https:"
     return secure
-      ? tls.connect({ host: options.host, port: options.port, servername: options.servername, rejectUnauthorized: options.rejectUnauthorized, ca: options.ca })
+      ? tls.connect({ host: options.host, port: options.port, servername: options.servername, rejectUnauthorized: options.rejectUnauthorized, ca: options.ca, cert: options.cert, key: options.key, passphrase: options.passphrase })
       : net.connect({ host: options.host, port: options.port })
   }
   class Agent extends EventEmitter {
@@ -6352,9 +6567,10 @@ const NODE_SRC: &str = r##"
   const attachSocket = (sock, id) => {
     const st = sock[kSock]
     st.id = id
-    const handler = (kind, a, b, c, d, e) => {
+    const handler = (kind, a, b, c, d, e, f) => {
       switch (kind) {
         case "connect": {
+          if (f !== undefined) st.peerCert = f
           st.connected = true
           sock.connecting = false
           sock.pending = false
@@ -6415,6 +6631,7 @@ const NODE_SRC: &str = r##"
     native.netAttach(id, handler)
     return handler
   }
+  const kPeerCert = Symbol("peerCert")
   const isPipeName = (v) => typeof v === "string" && !(Number(v) >= 0)
   const touchTimeout = (sock) => {
     const st = sock[kSock]
@@ -6427,7 +6644,7 @@ const NODE_SRC: &str = r##"
   class Socket extends Duplex {
     constructor(options = {}) {
       super({ ...options, allowHalfOpen: options.allowHalfOpen ?? false, objectMode: false })
-      this[kSock] = { id: null, connected: false, queued: [], pendingEnd: false, closed: false, hadError: false, timeout: 0, timer: null, host: undefined, port: undefined, tls: !!options[kTls], servername: options.servername, rejectUnauthorized: options.rejectUnauthorized, ca: options.ca, alpn: options.ALPNProtocols }
+      this[kSock] = { id: null, connected: false, queued: [], pendingEnd: false, closed: false, hadError: false, timeout: 0, timer: null, host: undefined, port: undefined, tls: !!options[kTls], servername: options.servername, rejectUnauthorized: options.rejectUnauthorized, ca: options.ca, cert: options.cert, key: options.key, passphrase: options.passphrase, alpn: options.ALPNProtocols }
       this.connecting = false
       this.pending = true
       this.readyState = "closed"
@@ -6449,6 +6666,7 @@ const NODE_SRC: &str = r##"
         this.remoteAddress = options.remoteAddress
         this.remotePort = options.remotePort
         this.remoteFamily = options.remoteAddress === undefined ? undefined : isIPv6(options.remoteAddress) ? "IPv6" : "IPv4"
+        if (options[kPeerCert] !== undefined) st.peerCert = options[kPeerCert]
         attachSocket(this, options[kSocketId])
       }
     }
@@ -6479,7 +6697,7 @@ const NODE_SRC: &str = r##"
       this.readyState = "opening"
       if (cb) this.once("connect", cb)
       const servername = st.servername ?? options.servername ?? host
-      const tlsOptions = st.tls ? { rejectUnauthorized: st.rejectUnauthorized ?? options.rejectUnauthorized, ca: st.ca ?? options.ca, ALPNProtocols: alpnList(st.alpn ?? options.ALPNProtocols) } : false
+      const tlsOptions = st.tls ? { rejectUnauthorized: st.rejectUnauthorized ?? options.rejectUnauthorized, ca: st.ca ?? options.ca, cert: st.cert ?? options.cert, key: st.key ?? options.key, passphrase: st.passphrase ?? options.passphrase, ALPNProtocols: alpnList(st.alpn ?? options.ALPNProtocols) } : false
       const id = native.netConnect(host, port, tlsOptions, servername, null)
       attachSocket(this, id)
       if (options.timeout) this.setTimeout(options.timeout)
@@ -6590,13 +6808,13 @@ const NODE_SRC: &str = r##"
       }
       const st = this[kSock]
       if (st.id !== null) throw streamError("ERR_SERVER_ALREADY_LISTEN", "Listen method has been called more than once without closing.")
-      const onConnection = (id, localAddress, localPort, remoteAddress, remotePort, alpn) => {
+      const onConnection = (id, localAddress, localPort, remoteAddress, remotePort, alpn, peer) => {
         if (this.maxConnections !== undefined && st.connections.size >= this.maxConnections) {
           native.netDestroy(id)
           this.emit("drop", { localAddress, localPort, remoteAddress, remotePort })
           return
         }
-        const sock = new Socket({ [kSocketId]: id, localAddress, localPort, remoteAddress, remotePort, allowHalfOpen: st.options.allowHalfOpen })
+        const sock = new Socket({ [kSocketId]: id, localAddress, localPort, remoteAddress, remotePort, allowHalfOpen: st.options.allowHalfOpen, [kPeerCert]: peer })
         sock[kAlpn] = alpn ?? false
         sock.server = this
         st.connections.add(sock)
@@ -6625,7 +6843,8 @@ const NODE_SRC: &str = r##"
       let result
       try {
         const material = this instanceof TLSServer ? tlsMaterial(st.options) : [null, null]
-        result = native.netListen(host, port, onConnection, material[0], material[1], alpnList(st.options.ALPNProtocols))
+        const clientCa = this instanceof TLSServer && st.options.requestCert ? st.options.ca ?? true : null
+        result = native.netListen(host, port, onConnection, material[0], material[1], alpnList(st.options.ALPNProtocols), clientCa, st.options.rejectUnauthorized !== false)
       } catch (e) {
         queueMicrotask(() => this.emit("error", e))
         return this
@@ -6749,7 +6968,9 @@ const NODE_SRC: &str = r##"
       if (socket && typeof socket.on === "function" && !(socket instanceof Socket)) this._handle = { _parentWrap: new JSStreamSocket(socket) }
     }
     getPeerCertificate() {
-      return {}
+      const raw = this[kSock].peerCert
+      if (raw === undefined) return {}
+      return new X509Certificate(Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength)).toLegacyObject()
     }
     getCertificate() {
       return {}
@@ -6802,7 +7023,8 @@ const NODE_SRC: &str = r##"
       if (typeof listener === "function") this.on("secureConnection", listener)
       this.on("connection", (sock) => {
         sock.encrypted = true
-        sock.authorized = false
+        sock.authorized = sock[kSock].peerCert !== undefined
+        sock.authorizationError = sock.authorized || !this[kSock].options.requestCert ? null : "UNABLE_TO_GET_ISSUER_CERT"
         sock.alpnProtocol = sock[kAlpn] ?? false
         Object.setPrototypeOf(sock, TLSSocket.prototype)
         this.emit("secureConnection", sock)
@@ -9137,6 +9359,7 @@ pub fn load(vm: &mut Vm) -> Result<Value, Value> {
     }
     super::threads::install_natives(vm, &n);
     super::v8wire::install_natives(vm, &n);
+    super::x509::install_natives(vm, &n);
     super::cryptokeys::install_natives(vm, &n);
     let exports = vm.call_value(&factory, Value::Undefined, &[Value::Object(n)])?;
     let buffer = vm.get_prop(&exports, "Buffer")?;

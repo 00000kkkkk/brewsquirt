@@ -153,9 +153,22 @@ pub fn server_tls(
     key: &Value,
     cert: &Value,
     alpn: &Value,
+    client_ca: &Value,
+    required: &Value,
 ) -> Result<Option<std::sync::Arc<rustls::ServerConfig>>, Value> {
     let (Some(key), Some(cert)) = (pem_bytes(vm, key)?, pem_bytes(vm, cert)?) else {
         return Ok(None);
+    };
+    let client = match client_ca {
+        Value::Undefined | Value::Null => None,
+        Value::Bool(true) => Some(io::ClientAuth {
+            ca: None,
+            required: required.truthy(),
+        }),
+        v => Some(io::ClientAuth {
+            ca: pem_bytes(vm, v)?,
+            required: required.truthy(),
+        }),
     };
     let mut protocols = Vec::new();
     if alpn.is_object() {
@@ -164,7 +177,7 @@ pub fn server_tls(
         }
     }
     let refs: Vec<&str> = protocols.iter().map(String::as_str).collect();
-    match io::tls_server_config(&cert, &key, &refs) {
+    match io::tls_server_config(&cert, &key, &refs, client) {
         Ok(config) => Ok(Some(config)),
         Err(message) => {
             let err = vm.make_error(ErrorKind::Error, message);
@@ -190,6 +203,9 @@ pub fn tls_client_options(
         insecure: insecure_env(),
         ca: None,
         alpn: Vec::new(),
+        cert: None,
+        key: None,
+        passphrase: None,
     };
     if options.is_object() {
         if let Value::Bool(false) = vm.get_prop(options, "rejectUnauthorized")? {
@@ -197,6 +213,14 @@ pub fn tls_client_options(
         }
         let ca = vm.get_prop(options, "ca")?;
         opts.ca = pem_bytes(vm, &ca)?;
+        let cert = vm.get_prop(options, "cert")?;
+        opts.cert = pem_bytes(vm, &cert)?;
+        let key = vm.get_prop(options, "key")?;
+        opts.key = pem_bytes(vm, &key)?;
+        let passphrase = vm.get_prop(options, "passphrase")?;
+        if !passphrase.is_nullish() {
+            opts.passphrase = Some(vm.to_string(&passphrase)?.to_string());
+        }
         let alpn = vm.get_prop(options, "ALPNProtocols")?;
         if alpn.is_object() {
             for p in vm.iterate(&alpn)? {
@@ -344,7 +368,14 @@ pub fn net_listen(vm: &mut Vm, _this: Value, args: &[Value]) -> R {
     let host = vm.to_string(&arg(args, 0))?.to_string();
     let port = port_arg(vm, &arg(args, 1))?;
     let handler = arg(args, 2);
-    let tls = server_tls(vm, &arg(args, 3), &arg(args, 4), &arg(args, 5))?;
+    let tls = server_tls(
+        vm,
+        &arg(args, 3),
+        &arg(args, 4),
+        &arg(args, 5),
+        &arg(args, 6),
+        &arg(args, 7),
+    )?;
     let id = vm.io.next_id();
     let handle = match io::socket_listen(&host, port, id, vm.io.ids.clone(), vm.io.tx.clone(), tls)
     {
@@ -612,15 +643,17 @@ pub fn handle_socket(vm: &mut Vm, id: u64, event: SocketEvent) -> Result<(), Val
             local,
             remote,
             alpn,
+            peer,
         } => {
             let [la, lp] = addr_values(&local);
             let [ra, rp] = addr_values(&remote);
             let alpn = alpn.map(Value::from).unwrap_or(Value::Bool(false));
+            let peer = peer.map_or(Value::Undefined, |p| super::typed::new_uint8(vm, p));
             call_handler(
                 vm,
                 &handler,
                 &frame,
-                &["connect".into(), la, lp, ra, rp, alpn],
+                &["connect".into(), la, lp, ra, rp, alpn, peer],
             )
         }
         SocketEvent::Data(bytes) => {
@@ -645,6 +678,7 @@ pub fn handle_socket(vm: &mut Vm, id: u64, event: SocketEvent) -> Result<(), Val
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_accept(
     vm: &mut Vm,
     server: u64,
@@ -653,6 +687,7 @@ pub fn handle_accept(
     remote: Option<SocketAddr>,
     cmd: Sender<SocketCmd>,
     alpn: Option<String>,
+    peer: Option<Vec<u8>>,
 ) -> Result<(), Value> {
     let Some(entry) = vm.io_net_servers.get(&server) else {
         let _ = cmd.send(SocketCmd::Destroy);
@@ -673,11 +708,12 @@ pub fn handle_accept(
     let [la, lp] = addr_values(&local);
     let [ra, rp] = addr_values(&remote);
     let alpn = alpn.map(Value::from).unwrap_or(Value::Bool(false));
+    let peer = peer.map_or(Value::Undefined, |p| super::typed::new_uint8(vm, p));
     call_handler(
         vm,
         &handler,
         &frame,
-        &[Value::Number(id as f64), la, lp, ra, rp, alpn],
+        &[Value::Number(id as f64), la, lp, ra, rp, alpn, peer],
     )
 }
 
