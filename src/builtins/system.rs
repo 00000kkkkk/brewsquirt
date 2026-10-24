@@ -102,7 +102,7 @@ pub fn install(vm: &mut Vm) {
     versions.set_own("modules", "127".into());
     versions.set_own("napi", "9".into());
     versions.set_own("jsq", crate::VERSION.into());
-    versions.set_own("javasquirt", crate::VERSION.into());
+    versions.set_own("brewsquirt", crate::VERSION.into());
     process.set_own("versions", Value::Object(versions));
     process.set_own(
         "release",
@@ -110,7 +110,7 @@ pub fn install(vm: &mut Vm) {
             let r = vm.new_object();
             r.set_own("name", "node".into());
             r.set_own("lts", "Jod".into());
-            r.set_own("javasquirt", crate::VERSION.into());
+            r.set_own("brewsquirt", crate::VERSION.into());
             r
         }),
     );

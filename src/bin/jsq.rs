@@ -1,7 +1,7 @@
+use brewsquirt::Vm;
+use brewsquirt::compiler::Mode;
+use brewsquirt::inspect::inspect_plain;
 use clap::Parser;
-use javasquirt::Vm;
-use javasquirt::compiler::Mode;
-use javasquirt::inspect::inspect_plain;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -13,7 +13,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[command(
     name = "jsq",
     version,
-    about = "JavaSquirt: JS semantics, Rust speed",
+    about = "BrewSquirt: JS semantics, Rust speed",
     after_help = "Run without arguments to open the REPL.
 Run `jsq test [paths] [--filter text]` to run *.test.jsq files."
 )]
@@ -209,7 +209,7 @@ fn main() -> ExitCode {
         }
     }
     if flags.test {
-        return javasquirt::runner::node_test_command(&args[1..], &flags.exec_argv);
+        return brewsquirt::runner::node_test_command(&args[1..], &flags.exec_argv);
     }
     let cli = Cli::parse_from(args);
     let handle = std::thread::Builder::new()
@@ -219,13 +219,13 @@ fn main() -> ExitCode {
     handle.join().unwrap_or(ExitCode::FAILURE)
 }
 
-fn preload(vm: &mut Vm, flags: &NodeFlags) -> Result<(), javasquirt::Value> {
+fn preload(vm: &mut Vm, flags: &NodeFlags) -> Result<(), brewsquirt::Value> {
     let mut exec_argv = Vec::new();
     for a in &flags.exec_argv {
-        exec_argv.push(javasquirt::Value::from(a.as_str()));
+        exec_argv.push(brewsquirt::Value::from(a.as_str()));
     }
     let list = vm.new_array(exec_argv);
-    if let Some(javasquirt::Value::Object(p)) = vm.globals.get("process").cloned() {
+    if let Some(brewsquirt::Value::Object(p)) = vm.globals.get("process").cloned() {
         p.set_own("execArgv", list);
     }
     for spec in &flags.require {
@@ -257,7 +257,7 @@ fn test_command(args: &[String]) -> ExitCode {
             _ => paths.push(a.clone()),
         }
     }
-    let summary = javasquirt::runner::run_tests(&paths, filter.as_deref());
+    let summary = brewsquirt::runner::run_tests(&paths, filter.as_deref());
     if summary.ok() {
         ExitCode::SUCCESS
     } else {
@@ -348,19 +348,19 @@ fn run(cli: Cli, flags: NodeFlags) -> ExitCode {
 
 fn complete(
     vm: &mut Vm,
-    r: Result<javasquirt::Value, javasquirt::Value>,
-) -> Result<javasquirt::Value, javasquirt::Value> {
+    r: Result<brewsquirt::Value, brewsquirt::Value>,
+) -> Result<brewsquirt::Value, brewsquirt::Value> {
     match r {
         Ok(v) => vm.finish_main(Ok(())).map(|_| v),
-        Err(e) => vm.finish_main(Err(e)).map(|_| javasquirt::Value::Undefined),
+        Err(e) => vm.finish_main(Err(e)).map(|_| brewsquirt::Value::Undefined),
     }
 }
 
-fn println_value(v: &javasquirt::Value) -> Option<String> {
+fn println_value(v: &brewsquirt::Value) -> Option<String> {
     Some(inspect_plain(v))
 }
 
-fn finish(vm: &mut Vm, r: Result<Option<String>, javasquirt::Value>) -> ExitCode {
+fn finish(vm: &mut Vm, r: Result<Option<String>, brewsquirt::Value>) -> ExitCode {
     match r {
         Ok(text) => {
             if let Some(t) = text {
@@ -368,7 +368,7 @@ fn finish(vm: &mut Vm, r: Result<Option<String>, javasquirt::Value>) -> ExitCode
                 vm.write_out("\n");
             }
             vm.flush();
-            match javasquirt::builtins::exit_code(vm) {
+            match brewsquirt::builtins::exit_code(vm) {
                 0 => ExitCode::SUCCESS,
                 n => ExitCode::from(n as u8),
             }
@@ -384,8 +384,8 @@ fn finish(vm: &mut Vm, r: Result<Option<String>, javasquirt::Value>) -> ExitCode
 
 fn repl(vm: &mut Vm) -> ExitCode {
     println!(
-        "JavaSquirt {} \u{1f4a6} type .exit to leave",
-        javasquirt::VERSION
+        "BrewSquirt {} \u{1f4a6} type .exit to leave",
+        brewsquirt::VERSION
     );
     let stdin = std::io::stdin();
     let mut buffer = String::new();

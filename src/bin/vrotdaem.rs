@@ -1,7 +1,7 @@
+use brewsquirt::Vm;
+use brewsquirt::module::MANIFEST;
+use brewsquirt::pm;
 use clap::{Parser, Subcommand};
-use javasquirt::Vm;
-use javasquirt::module::MANIFEST;
-use javasquirt::pm;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -12,7 +12,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 #[command(
     name = "vrotdaem",
     version,
-    about = "The JavaSquirt package manager. Injects dependencies directly into your nude_modules"
+    about = "The BrewSquirt package manager. Injects dependencies directly into your nude_modules"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -153,7 +153,7 @@ fn execute(command: Command) -> Result<ExitCode, String> {
                     let r = vm.finish_main(r);
                     vm.flush();
                     match r {
-                        Ok(_) => match javasquirt::builtins::exit_code(&mut vm) {
+                        Ok(_) => match brewsquirt::builtins::exit_code(&mut vm) {
                             0 => ExitCode::SUCCESS,
                             n => ExitCode::from(n as u8),
                         },
@@ -172,7 +172,7 @@ fn execute(command: Command) -> Result<ExitCode, String> {
             let handle = std::thread::Builder::new()
                 .stack_size(256 * 1024 * 1024)
                 .spawn(move || {
-                    if javasquirt::runner::run_tests(&paths, filter.as_deref()).ok() {
+                    if brewsquirt::runner::run_tests(&paths, filter.as_deref()).ok() {
                         ExitCode::SUCCESS
                     } else {
                         ExitCode::FAILURE

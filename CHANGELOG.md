@@ -56,6 +56,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - These constructors read and validate their options in the order ECMA-402 specifies,
   `supportedLocalesOf` takes options, and methods reject receivers of the wrong type.
 
+### Changed
+
+- The language is now called BrewSquirt; it was released as JavaSquirt up to 1.10.0. The crate is
+  `brewsquirt`, `process.versions.brewsquirt` replaces `process.versions.javasquirt`, the HTTP
+  client sends `brewsquirt/<version>` as its user agent, and release archives are named
+  `brewsquirt-<version>-<target>`. The `jsq` and `vrotdaem` commands, the `.jsq` extension and
+  `squirt.json` keep their names, and the install scripts still find archives of earlier
+  releases.
+- A NOTICE file with the copyright, trademark, Unicode data and third-party notices ships with
+  the source and in every release archive.
+
 ### Fixed
 
 - Strings are capped at Node's maximum length: `repeat`, `padStart`, `padEnd`, `concat` and
@@ -803,8 +814,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a plain function from `util.inherits` subclasses and mixed into other objects, and offers
   `errorMonitor`, `getEventListeners`, `EventEmitter.on` with abort signals.
 - `process.version`, `process.versions.node` and `process.release.name` report a Node 22
-  compatible runtime so that packages checking the Node version work; the JavaSquirt version
-  stays in `process.versions.jsq` and `process.release.javasquirt`.
+  compatible runtime so that packages checking the Node version work; the BrewSquirt version
+  stays in `process.versions.jsq` and `process.release.brewsquirt`.
 - A regular expression literal may follow `export default`.
 - Package entry resolution honours `exports` conditions (`import`, `require`, `node`,
   `module-sync`, `default`), subpath exports with `*` patterns, and the `module` field.
@@ -1182,7 +1193,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   50,000,000 elements at once, and indices at or above 2^32 - 1 are plain properties.
 - `obj[key] op= value` converts `key` to a property key once, and reading or writing an index on
   `null` or `undefined` throws before the key is converted.
-- JavaSquirt 0.9.0 passes 95% of the test262 strict mode tests it runs.
+- BrewSquirt 0.9.0 passes 95% of the test262 strict mode tests it runs.
 
 ### Fixed
 

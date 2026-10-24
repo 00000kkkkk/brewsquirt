@@ -1,6 +1,6 @@
 private rsa 1024 public
-rsa sig CuNfteQ41+7mERdGQHx1hZGMdTT2f3T+gJcMTjiD true
-ed sig 489286cd2e0891b41a8868bd26145fb3d795880f true
+rsa sig jQ/Otaw5f7ClkLWYy6jbCt1nI0MIvVSYifc6tzme true
+ed sig 1519ad620fae3a936038f60d5a6209ee17c3f5e0 true
 spki true Ed25519
 roundtrip true
 cbc fb2fb926a98eb0800f5497f2b234e8cb83b26c04afab143f2170c301e107697f

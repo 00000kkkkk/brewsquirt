@@ -33,4 +33,4 @@ const shout = pipeline(
   (s) => s.toUpperCase(),
   (s) => `${s}${squirt(2)}`,
 )
-console.log(shout("   javasquirt goes deep   "))
+console.log(shout("   brewsquirt goes deep   "))

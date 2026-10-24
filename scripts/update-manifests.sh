@@ -19,7 +19,7 @@ trap 'rm -rf "$TMP"' EXIT
 gh release download "$TAG" -R "$REPO" -p '*.sha256' -D "$TMP"
 
 hash_for() {
-  cut -d ' ' -f 1 "$TMP/javasquirt-$TAG-$1.sha256"
+  cut -d ' ' -f 1 "$TMP/brewsquirt-$TAG-$1.sha256"
 }
 
 WIN=$(hash_for x86_64-pc-windows-msvc)
@@ -32,12 +32,12 @@ BASE="https://github.com/$REPO/releases/download/$TAG"
 cat > "$ROOT/bucket/jsq.json" <<EOF
 {
     "version": "$VERSION",
-    "description": "JavaSquirt: JavaScript semantics, Rust speed. Installs the jsq runtime and the vrotdaem package manager.",
+    "description": "BrewSquirt: JavaScript semantics, Rust speed. Installs the jsq runtime and the vrotdaem package manager.",
     "homepage": "https://github.com/$REPO",
     "license": "Apache-2.0",
     "architecture": {
         "64bit": {
-            "url": "$BASE/javasquirt-$TAG-x86_64-pc-windows-msvc.zip",
+            "url": "$BASE/brewsquirt-$TAG-x86_64-pc-windows-msvc.zip",
             "hash": "$WIN"
         }
     },
@@ -49,9 +49,9 @@ cat > "$ROOT/bucket/jsq.json" <<EOF
     "autoupdate": {
         "architecture": {
             "64bit": {
-                "url": "https://github.com/$REPO/releases/download/v\$version/javasquirt-v\$version-x86_64-pc-windows-msvc.zip",
+                "url": "https://github.com/$REPO/releases/download/v\$version/brewsquirt-v\$version-x86_64-pc-windows-msvc.zip",
                 "hash": {
-                    "url": "https://github.com/$REPO/releases/download/v\$version/javasquirt-v\$version-x86_64-pc-windows-msvc.sha256"
+                    "url": "https://github.com/$REPO/releases/download/v\$version/brewsquirt-v\$version-x86_64-pc-windows-msvc.sha256"
                 }
             }
         }
@@ -61,29 +61,29 @@ EOF
 
 cat > "$ROOT/Formula/jsq.rb" <<EOF
 class Jsq < Formula
-  desc "JavaSquirt: JavaScript semantics, Rust speed"
+  desc "BrewSquirt: JavaScript semantics, Rust speed"
   homepage "https://github.com/$REPO"
   version "$VERSION"
   license "Apache-2.0"
 
   on_macos do
     on_arm do
-      url "$BASE/javasquirt-$TAG-aarch64-apple-darwin.tar.gz"
+      url "$BASE/brewsquirt-$TAG-aarch64-apple-darwin.tar.gz"
       sha256 "$MAC_ARM"
     end
     on_intel do
-      url "$BASE/javasquirt-$TAG-x86_64-apple-darwin.tar.gz"
+      url "$BASE/brewsquirt-$TAG-x86_64-apple-darwin.tar.gz"
       sha256 "$MAC_X64"
     end
   end
 
   on_linux do
     on_arm do
-      url "$BASE/javasquirt-$TAG-aarch64-unknown-linux-gnu.tar.gz"
+      url "$BASE/brewsquirt-$TAG-aarch64-unknown-linux-gnu.tar.gz"
       sha256 "$LINUX_ARM"
     end
     on_intel do
-      url "$BASE/javasquirt-$TAG-x86_64-unknown-linux-gnu.tar.gz"
+      url "$BASE/brewsquirt-$TAG-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "$LINUX_X64"
     end
   end

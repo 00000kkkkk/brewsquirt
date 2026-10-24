@@ -31,7 +31,7 @@ Include as much of the following as you can:
 
 ## Scope
 
-JavaSquirt is not a sandbox. Programs run by `jsq` can read and write files through `squirt:fs`,
+BrewSquirt is not a sandbox. Programs run by `jsq` can read and write files through `squirt:fs`,
 read environment variables through `process.env` and exit the process. Running an untrusted
 `.jsq` file is equivalent to running an untrusted executable.
 

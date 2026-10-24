@@ -1,4 +1,4 @@
-# JavaSquirt
+# BrewSquirt
 
 [![CI](https://github.com/00000kkkkk/javasquirt/actions/workflows/ci.yml/badge.svg)](https://github.com/00000kkkkk/javasquirt/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -8,7 +8,7 @@
 > High-performance language with JS semantics and Rust speed.
 > Type `vrotdaem gluboko --force` to inject dependencies directly into your `nude_modules`.
 
-JavaSquirt is a small, fast language that looks and behaves like the JavaScript you already know,
+BrewSquirt is a small, fast language that looks and behaves like the JavaScript you already know,
 compiled to bytecode and executed by a stack VM written in Rust. It ships as two binaries:
 
 - **`jsq`**: the runtime. Runs `.jsq` files, evaluates one-liners, dumps bytecode, and gives you a REPL.
@@ -33,7 +33,7 @@ class Runtime {
 
 class Squirt extends Runtime {
   constructor() {
-    super("JavaSquirt", 9000)
+    super("BrewSquirt", 9000)
   }
 
   describe() {
@@ -53,7 +53,7 @@ console.log(`combined speed: ${total}x`)
 ```console
 $ jsq speed.jsq
 tree-walker goes 3x
-JavaSquirt goes 9000x and never stops
+BrewSquirt goes 9000x and never stops
 combined speed: 9004x
 ```
 
@@ -85,7 +85,7 @@ Set `JSQ_VERSION=v1.0.0` to pin a version, `JSQ_INSTALL_DIR` to pick another dir
 Scoop (Windows):
 
 ```powershell
-scoop bucket add javasquirt https://github.com/00000kkkkk/javasquirt
+scoop bucket add brewsquirt https://github.com/00000kkkkk/javasquirt
 scoop install jsq
 ```
 
@@ -113,11 +113,11 @@ Prebuilt archives for every tagged release are on the
 
 | Platform            | Archive                                              |
 | ------------------- | ---------------------------------------------------- |
-| Linux x86_64        | `javasquirt-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`  |
-| Linux ARM64         | `javasquirt-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz` |
-| macOS Intel         | `javasquirt-vX.Y.Z-x86_64-apple-darwin.tar.gz`       |
-| macOS Apple Silicon | `javasquirt-vX.Y.Z-aarch64-apple-darwin.tar.gz`      |
-| Windows x86_64      | `javasquirt-vX.Y.Z-x86_64-pc-windows-msvc.zip`       |
+| Linux x86_64        | `brewsquirt-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz`  |
+| Linux ARM64         | `brewsquirt-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS Intel         | `brewsquirt-vX.Y.Z-x86_64-apple-darwin.tar.gz`       |
+| macOS Apple Silicon | `brewsquirt-vX.Y.Z-aarch64-apple-darwin.tar.gz`      |
+| Windows x86_64      | `brewsquirt-vX.Y.Z-x86_64-pc-windows-msvc.zip`       |
 
 Each archive has a matching `.sha256` checksum file. Unpack it and put `jsq` and `vrotdaem` on your `PATH`.
 
@@ -195,7 +195,7 @@ import helpers from "./helpers"
 
 ## Features
 
-JavaSquirt 1.10.0 implements modern JavaScript as specified, passing 98% of test262:
+BrewSquirt 1.10.0 implements modern JavaScript as specified, passing 98% of test262:
 
 - **Values**: `undefined`, `null`, booleans, numbers, strings, arrays, objects, functions, classes, `Map`, `Set`, `Error`
 - **Bindings**: block-scoped `let` and `const`, hoisted function declarations
@@ -268,7 +268,7 @@ The full reference with examples lives in [docs/LANGUAGE.md](docs/LANGUAGE.md).
 ## Project layout
 
 ```text
-javasquirt/
+brewsquirt/
   src/
     lexer.rs, token.rs        tokens and the lexer
     parser.rs, ast.rs         Pratt parser and syntax tree
@@ -358,4 +358,5 @@ report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for the
+copyright, trademark and third-party notices that come with every copy.

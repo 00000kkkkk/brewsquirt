@@ -1,6 +1,6 @@
-use javasquirt::Vm;
-use javasquirt::compiler::Mode;
-use javasquirt::gc;
+use brewsquirt::Vm;
+use brewsquirt::compiler::Mode;
+use brewsquirt::gc;
 
 fn quiet_vm() -> Vm {
     Vm::with_output(

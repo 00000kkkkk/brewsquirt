@@ -2224,7 +2224,7 @@ const WEB_SRC: &str = r##"
   function encodeFormData(form) {
     let boundary = formBoundaries.get(form)
     if (!boundary) {
-      boundary = "----JavaSquirtFormBoundary" + Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("")
+      boundary = "----BrewSquirtFormBoundary" + Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, "0")).join("")
       formBoundaries.set(form, boundary)
     }
     const chunks = []

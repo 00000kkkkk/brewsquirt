@@ -1,5 +1,5 @@
 class Jsq < Formula
-  desc "JavaSquirt: JavaScript semantics, Rust speed"
+  desc "BrewSquirt: JavaScript semantics, Rust speed"
   homepage "https://github.com/00000kkkkk/javasquirt"
   version "1.10.0"
   license "Apache-2.0"

@@ -113,13 +113,16 @@ main() {
     v*) ;;
     *) VERSION="v$VERSION" ;;
   esac
-  name="javasquirt-$VERSION-$TARGET"
+  name="brewsquirt-$VERSION-$TARGET"
   base="https://github.com/$REPO/releases/download/$VERSION"
   tmp=$(mktemp -d 2>/dev/null || mktemp -d -t jsq)
   trap 'rm -rf "$tmp"' EXIT
 
-  say "downloading JavaSquirt $VERSION for $TARGET"
-  download "$base/$name.tar.gz" "$tmp/$name.tar.gz"
+  say "downloading BrewSquirt $VERSION for $TARGET"
+  if ! download "$base/$name.tar.gz" "$tmp/$name.tar.gz" 2>/dev/null; then
+    name="javasquirt-$VERSION-$TARGET"
+    download "$base/$name.tar.gz" "$tmp/$name.tar.gz"
+  fi
   download "$base/$name.sha256" "$tmp/$name.sha256"
 
   expected=$(cut -d ' ' -f 1 "$tmp/$name.sha256")

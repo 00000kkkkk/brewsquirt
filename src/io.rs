@@ -1690,7 +1690,7 @@ fn agent() -> &'static ureq::Agent {
         use ureq::unversioned::transport::Connector;
         let config = ureq::Agent::config_builder()
             .http_status_as_error(false)
-            .user_agent(format!("javasquirt/{}", crate::VERSION))
+            .user_agent(format!("brewsquirt/{}", crate::VERSION))
             .build();
         let connector = ()
             .chain(ureq::unversioned::transport::ConnectProxyConnector::default())
@@ -1963,7 +1963,7 @@ fn run_fetch(req: FetchRequest) -> Result<(FetchResponse, ureq::Body), String> {
             .tls_config(tls)
             .user_agent(if req.decode {
                 ureq::config::AutoHeaderValue::Provided(std::sync::Arc::new(format!(
-                    "javasquirt/{}",
+                    "brewsquirt/{}",
                     crate::VERSION
                 )))
             } else {
@@ -1988,7 +1988,7 @@ fn run_fetch(req: FetchRequest) -> Result<(FetchResponse, ureq::Body), String> {
             .tls_config(tls)
             .user_agent(if req.decode {
                 ureq::config::AutoHeaderValue::Provided(std::sync::Arc::new(format!(
-                    "javasquirt/{}",
+                    "brewsquirt/{}",
                     crate::VERSION
                 )))
             } else {

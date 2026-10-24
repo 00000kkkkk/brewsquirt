@@ -1,6 +1,6 @@
-# Contributing to JavaSquirt
+# Contributing to BrewSquirt
 
-Thanks for helping make JavaSquirt faster, smaller and more correct. This guide covers everything
+Thanks for helping make BrewSquirt faster, smaller and more correct. This guide covers everything
 you need to get a pull request merged.
 
 ## Workflow

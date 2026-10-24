@@ -196,6 +196,66 @@ dependencies = [
 ]
 
 [[package]]
+name = "brewsquirt"
+version = "1.10.0"
+dependencies = [
+ "aes",
+ "aes-gcm",
+ "brotli",
+ "cbc",
+ "chacha20poly1305",
+ "chrono",
+ "chrono-tz",
+ "clap",
+ "crc32fast",
+ "ctr",
+ "ed25519-dalek",
+ "encoding_rs",
+ "fancy-regex",
+ "flate2",
+ "getrandom 0.2.17",
+ "hmac",
+ "iana-time-zone",
+ "indexmap",
+ "k256",
+ "libc",
+ "libloading",
+ "libsqlite3-sys",
+ "md-5",
+ "memchr",
+ "mimalloc",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "p256",
+ "p384",
+ "p521",
+ "pem-rfc7468",
+ "pkcs8",
+ "rand_core",
+ "regex-syntax",
+ "rsa",
+ "rustc-hash",
+ "rustls",
+ "scrypt",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "socket2",
+ "spki",
+ "unicode-ident",
+ "unicode-normalization",
+ "unicode-segmentation",
+ "ureq",
+ "wasmi",
+ "webpki-roots",
+ "x25519-dalek",
+ "x509-cert",
+ "zstd",
+]
+
+[[package]]
 name = "brotli"
 version = "8.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -811,66 +871,6 @@ name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
-
-[[package]]
-name = "javasquirt"
-version = "1.10.0"
-dependencies = [
- "aes",
- "aes-gcm",
- "brotli",
- "cbc",
- "chacha20poly1305",
- "chrono",
- "chrono-tz",
- "clap",
- "crc32fast",
- "ctr",
- "ed25519-dalek",
- "encoding_rs",
- "fancy-regex",
- "flate2",
- "getrandom 0.2.17",
- "hmac",
- "iana-time-zone",
- "indexmap",
- "k256",
- "libc",
- "libloading",
- "libsqlite3-sys",
- "md-5",
- "memchr",
- "mimalloc",
- "num-bigint",
- "num-integer",
- "num-traits",
- "p256",
- "p384",
- "p521",
- "pem-rfc7468",
- "pkcs8",
- "rand_core",
- "regex-syntax",
- "rsa",
- "rustc-hash",
- "rustls",
- "scrypt",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "socket2",
- "spki",
- "unicode-ident",
- "unicode-normalization",
- "unicode-segmentation",
- "ureq",
- "wasmi",
- "webpki-roots",
- "x25519-dalek",
- "x509-cert",
- "zstd",
-]
 
 [[package]]
 name = "jobserver"

@@ -1,6 +1,6 @@
-17 H t o 72 7 3 true
-JavaSquirt Squir Hello Java HELLO, JAVASQUIRT hello, javasquirt
-true true [ 'Hello', 'JavaSquirt' ] [ 'a', 'b', '', 'c' ] [ 'a', 'b', 'c' ] []
+17 H t o 72 -1 3 true
+BrewSquirt Squir Hello Brew HELLO, BREWSQUIRT hello, brewsquirt
+true true [ 'Hello', 'BrewSquirt' ] [ 'a', 'b', '', 'c' ] [ 'a', 'b', 'c' ] []
 pad| pad  |   pad|
 005 ab-+- hahaha a+b-c a+b+c
 aBc xy1null 1

@@ -2,7 +2,7 @@
 
 ## Our pledge
 
-We as members, contributors and maintainers pledge to make participation in the JavaSquirt
+We as members, contributors and maintainers pledge to make participation in the BrewSquirt
 community a harassment-free experience for everyone, regardless of age, body size, visible or
 invisible disability, ethnicity, sex characteristics, gender identity and expression, level of
 experience, education, socio-economic status, nationality, personal appearance, race, caste,

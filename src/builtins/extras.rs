@@ -2135,7 +2135,7 @@ define(globalThis, "navigator", {
     return process.platform
   },
   get userAgent() {
-    return `JavaSquirt/${process.version.slice(1)}`
+    return `BrewSquirt/${process.version.slice(1)}`
   },
   get onLine() {
     return true

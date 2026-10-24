@@ -291,7 +291,7 @@ pub fn init(root: &Path, name: Option<String>) -> Result<Manifest, String> {
     write_manifest(root, &m)?;
     let main = root.join(&m.main);
     if !main.exists() {
-        fs::write(&main, "console.log(`hello from ${squirt()} JavaSquirt`)\n")
+        fs::write(&main, "console.log(`hello from ${squirt()} BrewSquirt`)\n")
             .map_err(|e| format!("cannot write {}: {e}", main.display()))?;
     }
     Ok(m)

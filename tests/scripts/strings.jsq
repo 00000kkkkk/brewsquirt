@@ -1,4 +1,4 @@
-const s = "Hello, JavaSquirt"
+const s = "Hello, BrewSquirt"
 console.log(s.length, s[0], s.at(-1), s.charAt(4), s.charCodeAt(0), s.indexOf("Java"), s.lastIndexOf("l"), s.includes("Squirt"))
 console.log(s.slice(7), s.slice(-6, -1), s.substring(5, 0), s.substr(7, 4), s.toUpperCase(), s.toLowerCase())
 console.log(s.startsWith("Hell"), s.endsWith("rt"), s.split(", "), "a,b,,c".split(","), "abc".split(""), "x".split("", 0))

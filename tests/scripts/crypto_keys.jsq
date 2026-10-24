@@ -6,7 +6,7 @@ const rsa = crypto.createPrivateKey(readFileSync(`${dir}/fixtures/rsa_key.pem`, 
 const ed = crypto.createPrivateKey(readFileSync(`${dir}/fixtures/ed25519_key.pem`, "utf8"))
 const rsaPub = crypto.createPublicKey(rsa)
 const edPub = crypto.createPublicKey(ed)
-const data = Buffer.from("javasquirt")
+const data = Buffer.from("brewsquirt")
 
 console.log(rsa.type, rsa.asymmetricKeyType, rsa.asymmetricKeyDetails.modulusLength, rsaPub.type)
 const rsaSig = crypto.sign("sha256", data, rsa)

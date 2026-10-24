@@ -28,7 +28,7 @@ describe("objects", () => {
   test("collections", () => {
     expect([1, 2, 3]).toContain(2)
     expect([{ id: 1 }]).toContainEqual({ id: 1 })
-    expect("javasquirt").toMatch(/squirt$/)
+    expect("brewsquirt").toMatch(/squirt$/)
     expect([1, 2]).toHaveLength(2)
   })
 })

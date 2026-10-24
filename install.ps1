@@ -21,14 +21,19 @@ if (-not $Version.StartsWith("v")) {
   $Version = "v$Version"
 }
 
-$Name = "javasquirt-$Version-x86_64-pc-windows-msvc"
+$Name = "brewsquirt-$Version-x86_64-pc-windows-msvc"
 $Base = "https://github.com/$Repo/releases/download/$Version"
 $Tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("jsq-" + [System.Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $Tmp | Out-Null
 
 try {
-  Write-Host "downloading JavaSquirt $Version for x86_64-pc-windows-msvc"
-  Invoke-WebRequest "$Base/$Name.zip" -OutFile (Join-Path $Tmp "$Name.zip") -UseBasicParsing
+  Write-Host "downloading BrewSquirt $Version for x86_64-pc-windows-msvc"
+  try {
+    Invoke-WebRequest "$Base/$Name.zip" -OutFile (Join-Path $Tmp "$Name.zip") -UseBasicParsing
+  } catch {
+    $Name = "javasquirt-$Version-x86_64-pc-windows-msvc"
+    Invoke-WebRequest "$Base/$Name.zip" -OutFile (Join-Path $Tmp "$Name.zip") -UseBasicParsing
+  }
   Invoke-WebRequest "$Base/$Name.sha256" -OutFile (Join-Path $Tmp "$Name.sha256") -UseBasicParsing
 
   $Expected = ((Get-Content (Join-Path $Tmp "$Name.sha256") -Raw).Trim() -split "\s+")[0]
