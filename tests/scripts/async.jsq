@@ -2,7 +2,7 @@ const log = []
 const wait = (ms, v) => new Promise((resolve) => setTimeout(() => resolve(v), ms))
 
 async function fetchUser(id) {
-  await wait(5)
+  await wait(30)
   if (id < 0) throw new RangeError(`bad id ${id}`)
   return { id, name: `user${id}` }
 }
