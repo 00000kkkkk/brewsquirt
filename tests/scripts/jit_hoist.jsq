@@ -1,0 +1,150 @@
+const show = (...xs) => console.log(JSON.stringify(xs))
+
+const propChanges = () => {
+  const p = { x: 1, y: 2 }
+  let s = 0
+  for (let i = 0; i < 5000; i++) {
+    s += p.x * p.y
+    if (i % 100 === 0) p.x = i
+  }
+  return s
+}
+show(propChanges())
+
+const lengthChanges = () => {
+  const a = Array.from({ length: 100 }, (_, i) => i)
+  let s = 0
+  for (let k = 0; k < 300; k++) {
+    for (let i = 0; i < a.length; i++) {
+      s += a[i]
+      if (k === 150 && i === 50) a.length = 60
+    }
+  }
+  return [s, a.length]
+}
+show(...lengthChanges())
+
+const swapped = () => {
+  let a = [1, 2, 3]
+  const b = [10, 20, 30, 40]
+  let s = 0
+  for (let k = 0; k < 3000; k++) {
+    for (let i = 0; i < a.length; i++) s += a[i]
+    if (k === 1500) a = b
+  }
+  return s
+}
+show(swapped())
+
+const getterLater = () => {
+  const p = { x: 1 }
+  let s = 0
+  for (let i = 0; i < 4000; i++) {
+    s += p.x
+    if (i === 2000) Object.defineProperty(p, "x", { get: () => 100 })
+  }
+  return s
+}
+show(getterLater())
+
+const protoMethod = () => {
+  class V {
+    constructor() {
+      this.n = 3
+    }
+    get double() {
+      return this.n * 2
+    }
+  }
+  const v = new V()
+  let s = 0
+  for (let i = 0; i < 4000; i++) s += v.n + v.double
+  return s
+}
+show(protoMethod())
+
+const nested = () => {
+  const grid = Array.from({ length: 50 }, (_, r) => Array.from({ length: 50 }, (_, c) => r * c))
+  const w = { scale: 2 }
+  let s = 0
+  for (let k = 0; k < 20; k++) {
+    for (let r = 0; r < grid.length; r++) {
+      const row = grid[r]
+      for (let c = 0; c < row.length; c++) s += row[c] * w.scale
+    }
+  }
+  return s
+}
+show(nested())
+
+const typedSwitch = () => {
+  const views = [new Uint8Array(64), new Int32Array(64), new Float64Array(64)]
+  const out = []
+  for (const v of views) {
+    for (let k = 0; k < 200; k++) for (let i = 0; i < v.length; i++) v[i] = v[i] + i * 1.5
+    let s = 0
+    for (let i = 0; i < v.length; i++) s += v[i]
+    out.push(s)
+  }
+  return out
+}
+show(...typedSwitch())
+
+const frequentBails = () => {
+  const p = { x: 1 }
+  const a = [1, 2, 3, 4]
+  let s = ""
+  let n = 0
+  for (let i = 0; i < 6000; i++) {
+    n += p.x + a[i % 4]
+    if (i % 3 === 0) s = s + "x"
+    else n += a.length
+  }
+  return [n, s.length]
+}
+show(...frequentBails())
+
+const thrown = () => {
+  const a = [1, 2, 3]
+  let caught = 0
+  for (let k = 0; k < 3000; k++) {
+    try {
+      for (let i = 0; i < a.length; i++) if (a[i] === 2 && k % 100 === 0) throw new Error("e")
+    } catch (e) {
+      caught++
+    }
+  }
+  return caught
+}
+show(thrown())
+
+const holes = () => {
+  const a = [1, , 3, 4]
+  let s = 0
+  for (let k = 0; k < 2000; k++) for (let i = 0; i < a.length; i++) s += a[i] === undefined ? 10 : a[i]
+  return s
+}
+show(holes())
+
+const objectsArray = () => {
+  const pts = Array.from({ length: 100 }, (_, i) => ({ x: i, y: -i }))
+  let s = 0
+  for (let k = 0; k < 300; k++) for (let i = 0; i < pts.length; i++) s += pts[i].x - pts[i].y
+  return s
+}
+show(objectsArray())
+
+const captured = () => {
+  const data = [5, 6, 7]
+  const conf = { m: 3 }
+  const run = () => {
+    let s = 0
+    for (let k = 0; k < 2000; k++) for (let i = 0; i < data.length; i++) s += data[i] * conf.m
+    return s
+  }
+  const r1 = run()
+  data.push(8)
+  conf.m = 4
+  return [r1, run()]
+}
+show(...captured())

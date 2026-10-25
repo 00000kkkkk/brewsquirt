@@ -58,6 +58,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Template literals and `+` on strings and numbers run in compiled code through direct runtime
   helpers, so loops that build keys or labels compile. Pushing a million numbers and summing
   them with `for...of` takes 14 ms instead of 40 ms.
+- Loops that call nothing but `Math` methods and `push` get a specialized compiled version.
+  Property values, array and typed array storage, `.length` and `Math` methods of objects the
+  loop does not reassign are checked once when the loop is entered and kept in registers, and
+  a rare slow path leaves the loop for the interpreter instead of rejoining it; a function
+  whose loops leave too often is recompiled without the specialization. Summing properties of
+  a fixed object runs 4 times faster, `Math.floor`/`Math.abs` loops 2.5 times faster, and
+  loops over local, captured or typed arrays 1.4 to 2 times faster.
 - `Uint8Array.prototype.setFromBase64` and `setFromHex` decode into an existing array and report
   how much they read and wrote, and `Uint8Array.fromBase64` honours `lastChunkHandling`
   (`loose`, `strict` and `stop-before-partial`). Every base64 and hex method validates its

@@ -1,0 +1,70 @@
+const show = (...xs) => console.log(JSON.stringify(xs))
+
+const plain = () => {
+  let s = 0
+  for (let i = -3000; i < 3000; i++) s += Math.floor(i / 7) + Math.abs(i % 13) + Math.max(i, 2) - Math.min(i, -2) + Math.sqrt(i * i) + Math.ceil(i / 3) + Math.trunc(i / 5)
+  return s
+}
+show(plain())
+
+const swapped = () => {
+  const saved = Math.floor
+  let s = 0
+  for (let i = 0; i < 4000; i++) {
+    s += Math.floor(i / 2)
+    if (i === 2000) Math.floor = (x) => -1
+  }
+  Math.floor = saved
+  return s
+}
+show(swapped())
+
+const strings = () => {
+  let s = 0
+  for (let i = 0; i < 3000; i++) s += Math.floor(i % 500 === 0 ? "7.5" : i / 3)
+  return s
+}
+show(strings())
+
+const objects = () => {
+  let s = 0
+  const v = { valueOf: () => 9.9 }
+  for (let i = 0; i < 3000; i++) s += Math.round(i / 3) + Math.floor(i % 1000 === 0 ? v : 1.5)
+  return s
+}
+show(objects())
+
+const special = () => {
+  const out = []
+  for (let i = 0; i < 2000; i++) {
+    const r = [Math.floor(-0.5), Math.abs(-0), Math.min(0, -0), Math.max(NaN, 1), Math.sqrt(-4), Math.ceil(-0.2)]
+    if (i === 1999) out.push(...r.map((x) => (Object.is(x, -0) ? "-0" : String(x))))
+  }
+  return out
+}
+show(...special())
+
+const replacedMath = () => {
+  const real = globalThis.Math
+  let s = 0
+  for (let i = 0; i < 3000; i++) {
+    s += Math.abs(-i)
+    if (i === 1500) globalThis.Math = { abs: () => 1 }
+  }
+  globalThis.Math = real
+  return s
+}
+show(replacedMath())
+
+const thrown = () => {
+  let caught = 0
+  for (let i = 0; i < 3000; i++) {
+    try {
+      Math.floor(i % 1000 === 0 ? Symbol("x") : i)
+    } catch (e) {
+      caught++
+    }
+  }
+  return caught
+}
+show(thrown())

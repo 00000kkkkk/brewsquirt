@@ -5701,6 +5701,7 @@ impl Vm {
             banned: info.banned.borrow().clone(),
             no_int: info.no_int.get(),
             no_spec: info.no_spec.get(),
+            no_hoist: info.no_hoist.get(),
         };
         let owned = unsafe {
             Rc::increment_strong_count(proto as *const FunctionProto);
@@ -5796,6 +5797,17 @@ impl Vm {
 
     fn jit_settle(&mut self, info: &crate::jit::JitInfo, base: usize, r: u64) {
         let kind = r >> 32;
+        if kind == 8 {
+            let n = info.bails.get() + 1;
+            info.bails.set(n);
+            if n > 32 && !info.no_hoist.get() {
+                info.no_hoist.set(true);
+                info.compiles.set(info.compiles.get() + 1);
+                info.direct.set(0);
+                info.state.set(crate::jit::COLD);
+                info.hot.set(0);
+            }
+        }
         if kind == 4 || kind == 5 || kind == 7 {
             let at = (r & 0xffff_ffff) as u32;
             if std::env::var_os("JSQ_JIT_LOG").is_some() {
@@ -5824,7 +5836,7 @@ impl Vm {
             });
             info.hot.set(0);
         }
-        if kind == 0 || kind == 4 || kind == 5 || kind == 7 {
+        if kind == 0 || kind == 4 || kind == 5 || kind == 7 || kind == 8 {
             let nip = (r & 0xffff_ffff) as usize + (kind == 7) as usize;
             let fi = self.frames.len() - 1;
             let d = info.depth_at(nip).unwrap_or(self.stack.len() - base);
@@ -6130,7 +6142,7 @@ impl Vm {
 
     fn invoke_result(&mut self, base: usize, frame: usize, r: u64) -> Invoke {
         match r >> 32 {
-            0 | 4 | 5 | 7 => {
+            0 | 4 | 5 | 7 | 8 => {
                 let nip = self.frames[frame].ip;
                 if self.frames.len() == frame + 1
                     && !self.frames[frame].construct
@@ -6238,7 +6250,7 @@ impl Vm {
         self.native_depth -= 1;
         let frame = ctx.frame + 1;
         let mut base = 0;
-        if matches!(r >> 32, 0 | 4 | 5 | 7) {
+        if matches!(r >> 32, 0 | 4 | 5 | 7 | 8) {
             let cl = self.frames[frame].closure.clone();
             base = self.frames[frame].base;
             self.jit_settle(&cl.proto.jit, base, r);
@@ -6508,7 +6520,7 @@ impl Vm {
                     {
                         let r = self.enter_jit(proto, base, ip0, stop);
                         match r >> 32 {
-                            0 | 4 | 5 | 7 => {}
+                            0 | 4 | 5 | 7 | 8 => {}
                             1 => continue 'frame,
                             2 => return Err(self.jit_error.take().unwrap_or_default()),
                             6 => {
