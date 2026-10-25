@@ -1,0 +1,127 @@
+const show = (...xs) => console.log(JSON.stringify(xs))
+
+const points = () => {
+  let s = 0
+  let last
+  for (let i = 0; i < 4000; i++) {
+    const p = { x: i, y: i * 2, tag: i % 3 === 0 ? "a" : "b" }
+    s += p.x + p.y + p.tag.length
+    if (i === 3999) last = p
+  }
+  return [s, JSON.stringify(last), Object.keys(last).join()]
+}
+show(...points())
+
+const shapes = () => {
+  const out = []
+  for (let i = 0; i < 3000; i++) {
+    const a = { x: 1, x2: 2 }
+    const b = { x: i, x: i + 1 }
+    const c = { ["k" + (i % 2)]: i, z: 0 }
+    const d = { __proto__: { inherited: 7 }, own: i }
+    const e = { get g() { return i }, v: 1 }
+    const f = { ...a, w: i }
+    const g = { nested: { deep: { i } }, list: [i, i + 1] }
+    if (i === 2999) {
+      out.push(JSON.stringify([a, b, c, f, g]), d.inherited, d.own, Object.keys(d).join(), e.g, Object.keys(e).join())
+    }
+  }
+  return out
+}
+show(...shapes())
+
+const many = () => {
+  const keep = []
+  for (let i = 0; i < 20000; i++) {
+    const o = { a: i, b: "s" + (i % 10), c: [i], d: { e: i } }
+    if (i % 1000 === 0) keep.push(o)
+  }
+  return keep.map((o) => o.a + o.b + o.c[0] + o.d.e).join("|")
+}
+show(many())
+
+const forOf = () => {
+  const arr = Array.from({ length: 500 }, (_, i) => i)
+  let s = 0
+  for (let k = 0; k < 20; k++) for (const v of arr) s += v
+  const holes = [1, , 3]
+  let h = 0
+  for (let k = 0; k < 2000; k++) for (const v of holes) h += v === undefined ? 100 : v
+  let str = ""
+  for (let k = 0; k < 300; k++) for (const ch of "ab") str += ch
+  const m = new Map([["x", 1], ["y", 2]])
+  let ms = 0
+  for (let k = 0; k < 2000; k++) for (const [key, val] of m) ms += val + key.length
+  let early = 0
+  for (let k = 0; k < 2000; k++) {
+    for (const v of arr) {
+      if (v === 3) break
+      early += v
+    }
+  }
+  let skipped = 0
+  for (let k = 0; k < 300; k++) {
+    for (const v of arr) {
+      if (v % 2) continue
+      skipped += v
+    }
+  }
+  let caught = 0
+  for (let k = 0; k < 1500; k++) {
+    try {
+      for (const v of arr) if (v === k % 50) throw new Error("x" + v)
+    } catch (e) {
+      caught += e.message.length
+    }
+  }
+  return [s, h, str.length, ms, early, skipped, caught]
+}
+show(...forOf())
+
+const firstOver = (arr, n) => {
+  for (const v of arr) if (v > n) return v
+  return -1
+}
+const returns = () => {
+  const arr = Array.from({ length: 100 }, (_, i) => i * 3)
+  let s = 0
+  for (let i = 0; i < 3000; i++) s += firstOver(arr, i % 300)
+  return s
+}
+show(returns())
+
+const pushes = () => {
+  const a = []
+  for (let i = 0; i < 5000; i++) a.push(i)
+  const frozen = Object.freeze([1])
+  let fails = 0
+  for (let i = 0; i < 2000; i++) {
+    try {
+      frozen.push(i)
+    } catch {
+      fails++
+    }
+  }
+  class Sub extends Array {}
+  const sub = new Sub()
+  for (let i = 0; i < 2000; i++) sub.push(i)
+  const holes = [1, , 3]
+  for (let i = 0; i < 2000; i++) holes.push(i)
+  const sparse = []
+  sparse[10] = 1
+  for (let i = 0; i < 2000; i++) sparse.push(i)
+  const r = []
+  let lens = 0
+  for (let i = 0; i < 3000; i++) lens += r.push(i, i)
+  const saved = Array.prototype.push
+  let calls = 0
+  Array.prototype.push = function (v) {
+    calls++
+    return saved.call(this, v)
+  }
+  const p = []
+  for (let i = 0; i < 2000; i++) p.push(i)
+  Array.prototype.push = saved
+  return [a.length, a[4999], fails, sub.length, sub instanceof Sub, holes.length, 1 in holes, sparse.length, lens, calls, p.length]
+}
+show(...pushes())

@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skips reference counting for a local array or object that is only indexed. Summing or
   updating an array runs 2 to 2.6 times faster, a loop over `Math` methods 3 times faster and
   a sieve over a `Uint8Array` 5 times faster than before.
+- The JIT compiles in a background thread, so the program keeps running in the interpreter
+  while a hot function compiles and never pauses for the compiler. Object literals in compiled
+  code are created with their final hidden class and filled in place, `for...of` loops over
+  arrays and `try` blocks compile, and `array.push(x)` appends without leaving machine code.
+  `JSQ_JIT_THRESHOLD=1` and `JSQ_JIT_SYNC=1` compile synchronously.
 - `Uint8Array.prototype.setFromBase64` and `setFromHex` decode into an existing array and report
   how much they read and wrote, and `Uint8Array.fromBase64` honours `lastChunkHandling`
   (`loose`, `strict` and `stop-before-partial`). Every base64 and hex method validates its

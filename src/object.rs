@@ -176,8 +176,46 @@ impl Shape {
 
 pub const FUNCTION_TAG: u8 = 2;
 
+pub fn literal_object(site: &Cell<usize>, keys: &[usize], proto: Rc<Obj>) -> Option<Rc<Obj>> {
+    let mut sp = site.get();
+    if sp == 0 {
+        let mut shape = Shape::root();
+        for &k in keys {
+            let Value::Str(key) = (unsafe { &*(k as *const Value) }) else {
+                return None;
+            };
+            shape = shape.child(key);
+        }
+        if shape.dictionary || shape.keys.len() != keys.len() {
+            return None;
+        }
+        sp = Rc::into_raw(shape) as usize;
+        site.set(sp);
+    }
+    let shape = unsafe {
+        Rc::increment_strong_count(sp as *const Shape);
+        Rc::from_raw(sp as *const Shape)
+    };
+    let o = Rc::new(Obj {
+        kind: ObjKind::Ordinary,
+        props: RefCell::new(PropMap {
+            shape,
+            values: vec![Value::Undefined; keys.len()],
+            extra: None,
+            accessors: false,
+        }),
+        proto: RefCell::new(Some(proto)),
+        flags: Cell::new(0),
+        gc_slot: Cell::new(u32::MAX),
+        heap_slot: Cell::new(u32::MAX),
+    });
+    crate::gc::register(&o);
+    Some(o)
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct JitLayout {
+    pub vec_cap: usize,
     pub typed_tag: u8,
     pub view_kind: usize,
     pub view_buffer: usize,
@@ -229,6 +267,11 @@ pub fn jit_layout() -> JitLayout {
         .unwrap_or(0)
         * 8;
     let vec_len = words.iter().position(|&w| w == 1).unwrap_or(0) * 8;
+    let vec_cap = words
+        .iter()
+        .position(|&w| w == probe.capacity())
+        .unwrap_or(2)
+        * 8;
     let plain = Rc::new(Obj {
         kind: ObjKind::Ordinary,
         props: RefCell::new(PropMap::default()),
@@ -304,6 +347,7 @@ pub fn jit_layout() -> JitLayout {
         heap_slot: Cell::new(u32::MAX),
     };
     JitLayout {
+        vec_cap,
         typed_tag: tag_of(&typed),
         view_kind: std::mem::offset_of!(View, kind),
         view_buffer: std::mem::offset_of!(View, buffer),

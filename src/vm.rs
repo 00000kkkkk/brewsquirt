@@ -348,7 +348,10 @@ pub struct Vm {
     fast_resume: bool,
     pub(crate) array_push: Option<Rc<Obj>>,
     step_one: bool,
-    jit: Option<Box<crate::jit::Jit>>,
+    jit: Option<Box<crate::jit::Compiler>>,
+    jit_pending: Vec<Rc<FunctionProto>>,
+    jit_keep: Vec<Rc<Obj>>,
+    jit_sync: bool,
     jit_on: bool,
     jit_threshold: u32,
     jit_stop: usize,
@@ -572,6 +575,10 @@ pub(crate) struct VmLayout {
     pub(crate) frames_cap: usize,
     pub(crate) handlers_ptr: usize,
     pub(crate) handlers_len: usize,
+    pub(crate) handlers_cap: usize,
+    pub(crate) handler_stack_len: usize,
+    pub(crate) handler_catch_ip: usize,
+    pub(crate) handler_guard: usize,
     pub(crate) builders_len: usize,
     pub(crate) highest_open: usize,
     pub(crate) native_depth: usize,
@@ -591,6 +598,8 @@ pub(crate) struct VmLayout {
     pub(crate) max_frames: usize,
     pub(crate) globals_ptr: usize,
     pub(crate) global_accessors: usize,
+    pub(crate) array_push: usize,
+    pub(crate) proto_indices: usize,
 }
 
 fn vec_offsets<T>() -> (usize, usize, usize) {
@@ -604,7 +613,7 @@ pub(crate) fn vm_layout() -> VmLayout {
     use std::mem::offset_of;
     let (_, stack_len, stack_cap) = vec_offsets::<Value>();
     let (frames_ptr, frames_len, frames_cap) = vec_offsets::<Frame>();
-    let (handlers_ptr, handlers_len, _) = vec_offsets::<Handler>();
+    let (handlers_ptr, handlers_len, handlers_cap) = vec_offsets::<Handler>();
     let (_, builders_len, _) = vec_offsets::<(usize, String)>();
     let (globals_ptr, _, _) = vec_offsets::<Value>();
     let ups: Box<[Rc<UpCell>]> = vec![UpCell::new(Upvalue::Open(0)); 3].into_boxed_slice();
@@ -624,6 +633,10 @@ pub(crate) fn vm_layout() -> VmLayout {
         frames_cap: offset_of!(Vm, frames) + frames_cap,
         handlers_ptr: offset_of!(Vm, handlers) + handlers_ptr,
         handlers_len: offset_of!(Vm, handlers) + handlers_len,
+        handlers_cap: offset_of!(Vm, handlers) + handlers_cap,
+        handler_stack_len: offset_of!(Handler, stack_len),
+        handler_catch_ip: offset_of!(Handler, catch_ip),
+        handler_guard: offset_of!(Handler, guard),
         builders_len: offset_of!(Vm, builders) + builders_len,
         highest_open: offset_of!(Vm, highest_open),
         native_depth: offset_of!(Vm, native_depth),
@@ -643,6 +656,8 @@ pub(crate) fn vm_layout() -> VmLayout {
         max_frames: MAX_FRAMES,
         globals_ptr: offset_of!(Vm, globals) + offset_of!(Globals, values) + globals_ptr,
         global_accessors: offset_of!(Vm, global_accessors),
+        array_push: offset_of!(Vm, array_push),
+        proto_indices: offset_of!(Vm, proto_indices),
     }
 }
 
@@ -1297,6 +1312,9 @@ impl Vm {
             array_push: None,
             step_one: false,
             jit: None,
+            jit_pending: Vec::new(),
+            jit_keep: Vec::new(),
+            jit_sync: false,
             jit_on: std::env::var_os("JSQ_NOJIT").is_none(),
             jit_threshold: std::env::var("JSQ_JIT_THRESHOLD")
                 .ok()
@@ -5649,31 +5667,81 @@ impl Vm {
                     if let Some(Value::Object(f)) = math.get_own(name)
                         && matches!(f.kind, ObjKind::Native(_))
                     {
-                        intrinsics.push((f, kind));
+                        intrinsics.push((Rc::as_ptr(&f) as usize, kind));
+                        self.jit_keep.push(f);
                     }
                 }
             }
-            match crate::jit::Jit::new(intrinsics) {
-                Some(j) => self.jit = Some(Box::new(j)),
+            match crate::jit::Compiler::start(intrinsics) {
+                Some(c) => self.jit = Some(Box::new(c)),
                 None => {
                     self.jit_on = false;
                     return;
                 }
             }
+            self.jit_sync = self.jit_threshold <= 1 || std::env::var_os("JSQ_JIT_SYNC").is_some();
         }
-        let started = Instant::now();
-        let ok = self.jit.as_mut().is_some_and(|j| j.compile(proto));
+        let info = &proto.jit;
+        let job = crate::jit::Job {
+            proto: proto as *const FunctionProto as usize,
+            banned: info.banned.borrow().clone(),
+            no_int: info.no_int.get(),
+            no_spec: info.no_spec.get(),
+        };
+        let owned = unsafe {
+            Rc::increment_strong_count(proto as *const FunctionProto);
+            Rc::from_raw(proto as *const FunctionProto)
+        };
+        self.jit_pending.push(owned);
+        info.state.set(crate::jit::COMPILING);
+        if let Some(c) = self.jit.as_ref() {
+            c.submit(job);
+        }
+        if self.jit_sync
+            && let Some(b) = self.jit.as_mut().and_then(|c| c.wait())
+        {
+            self.jit_install(b);
+        }
+    }
+
+    fn jit_poll(&mut self) {
+        let built = match self.jit.as_mut() {
+            Some(c) if c.ready() => c.take(),
+            _ => return,
+        };
+        for b in built {
+            self.jit_install(b);
+        }
+    }
+
+    fn jit_install(&mut self, b: crate::jit::Built) {
+        let Some(at) = self
+            .jit_pending
+            .iter()
+            .position(|p| Rc::as_ptr(p) as usize == b.proto)
+        else {
+            return;
+        };
+        let proto = self.jit_pending.swap_remove(at);
+        let info = &proto.jit;
+        let ok = b.code != 0;
+        if ok {
+            let _ = info.depths.set(b.depths.into());
+            let _ = info.entries.set(b.entries.into());
+            info.max.set(b.max);
+            info.code.set(b.code);
+        }
         if std::env::var_os("JSQ_JIT_LOG").is_some() {
             eprintln!(
                 "jit {} {} ops={} slots={} us={}",
                 if ok { "compiled" } else { "rejected" },
                 proto.name,
                 proto.code.len(),
-                proto.jit.max.get(),
-                started.elapsed().as_micros()
+                info.max.get(),
+                b.micros
             );
         }
-        proto.jit.state.set(if ok {
+        info.state.set(if ok {
             crate::jit::READY
         } else {
             crate::jit::REJECTED
@@ -5682,8 +5750,8 @@ impl Vm {
         let direct = ok
             && proto.plain
             && (!proto.sloppy_this || proto.kind == ProtoKind::Arrow)
-            && proto.jit.entry_at(0) == Some(np + 1);
-        proto.jit.direct.set(if direct { np as u32 + 1 } else { 0 });
+            && info.entry_at(0) == Some(np + 1);
+        info.direct.set(if direct { np as u32 + 1 } else { 0 });
     }
 
     fn enter_jit(&mut self, proto: &FunctionProto, base: usize, ip: usize, stop: usize) -> u64 {
@@ -6033,6 +6101,9 @@ impl Vm {
                 self.jit_compile(proto);
             }
         }
+        if info.state.get() == crate::jit::COMPILING {
+            self.jit_poll();
+        }
         if !self.jit_on
             || info.state.get() != crate::jit::READY
             || info.entry_at(0) != Some(self.stack.len() - base)
@@ -6108,6 +6179,9 @@ impl Vm {
             if self.jit_due(p, h) {
                 self.jit_compile(p);
             }
+        }
+        if info.state.get() == crate::jit::COMPILING {
+            self.jit_poll();
         }
         if info.state.get() != crate::jit::READY || info.entry_at(0) != Some(argc + 1) {
             return 0;
@@ -6301,6 +6375,32 @@ impl Vm {
             return 1;
         }
         let o = self.new_object();
+        unsafe { std::ptr::write(ctx.bp.add(a[0] as usize), Value::Object(o)) };
+        0
+    }
+
+    pub(crate) fn jit_iter_next(&mut self, ctx: &mut crate::jit::JitCtx, a: &[u64; 6]) -> u64 {
+        let it = unsafe { value_bits(a[0], a[1]) };
+        let dst = unsafe { ctx.bp.add(a[2] as usize) };
+        match array_iter_step(&it, self.proto_indices, dst) {
+            0 => 0,
+            r => {
+                drop(std::mem::ManuallyDrop::into_inner(it));
+                r as u64
+            }
+        }
+    }
+
+    pub(crate) fn jit_new_literal(&mut self, ctx: &mut crate::jit::JitCtx, a: &[u64; 6]) -> u64 {
+        if crate::gc::due() {
+            return 1;
+        }
+        let site = unsafe { &*(a[1] as *const std::cell::Cell<usize>) };
+        let keys = unsafe { std::slice::from_raw_parts(a[2] as *const usize, a[3] as usize) };
+        let Some(o) = crate::object::literal_object(site, keys, self.realm.object_proto.clone())
+        else {
+            return 1;
+        };
         unsafe { std::ptr::write(ctx.bp.add(a[0] as usize), Value::Object(o)) };
         0
     }
@@ -6745,6 +6845,8 @@ impl Vm {
                                         self.jit_compile(proto);
                                         resync!();
                                     }
+                                } else if info.state.get() == crate::jit::COMPILING {
+                                    self.jit_poll();
                                 }
                                 if info.state.get() == crate::jit::READY {
                                     sync!();
@@ -7060,14 +7162,17 @@ impl Vm {
                                     self.stack.truncate(ci + 2 + np);
                                 }
                                 self.frames[fi].ip = ip!() + 1;
-                                if self.jit_on
-                                    && std::ptr::eq(&*c.proto, proto)
-                                    && proto.jit.state.get() == crate::jit::COLD
-                                {
-                                    let h = proto.jit.hot.get() + 1;
-                                    proto.jit.hot.set(h);
-                                    if self.jit_due(proto, h) {
-                                        self.jit_compile(proto);
+                                if self.jit_on && std::ptr::eq(&*c.proto, proto) {
+                                    match proto.jit.state.get() {
+                                        crate::jit::COLD => {
+                                            let h = proto.jit.hot.get() + 1;
+                                            proto.jit.hot.set(h);
+                                            if self.jit_due(proto, h) {
+                                                self.jit_compile(proto);
+                                            }
+                                        }
+                                        crate::jit::COMPILING => self.jit_poll(),
+                                        _ => {}
                                     }
                                 }
                                 let inline = settled!(c.proto);
