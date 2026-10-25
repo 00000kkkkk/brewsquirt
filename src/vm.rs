@@ -589,6 +589,8 @@ pub(crate) struct VmLayout {
     pub(crate) proto_code: usize,
     pub(crate) proto_max: usize,
     pub(crate) max_frames: usize,
+    pub(crate) globals_ptr: usize,
+    pub(crate) global_accessors: usize,
 }
 
 fn vec_offsets<T>() -> (usize, usize, usize) {
@@ -604,6 +606,7 @@ pub(crate) fn vm_layout() -> VmLayout {
     let (frames_ptr, frames_len, frames_cap) = vec_offsets::<Frame>();
     let (handlers_ptr, handlers_len, _) = vec_offsets::<Handler>();
     let (_, builders_len, _) = vec_offsets::<(usize, String)>();
+    let (globals_ptr, _, _) = vec_offsets::<Value>();
     let ups: Box<[Rc<UpCell>]> = vec![UpCell::new(Upvalue::Open(0)); 3].into_boxed_slice();
     let words =
         unsafe { std::slice::from_raw_parts(&ups as *const Box<[Rc<UpCell>]> as *const usize, 2) };
@@ -638,6 +641,8 @@ pub(crate) fn vm_layout() -> VmLayout {
         proto_code: jit + offset_of!(crate::jit::JitInfo, code),
         proto_max: jit + offset_of!(crate::jit::JitInfo, max),
         max_frames: MAX_FRAMES,
+        globals_ptr: offset_of!(Vm, globals) + offset_of!(Globals, values) + globals_ptr,
+        global_accessors: offset_of!(Vm, global_accessors),
     }
 }
 
@@ -5709,10 +5714,21 @@ impl Vm {
 
     fn jit_settle(&mut self, info: &crate::jit::JitInfo, base: usize, r: u64) {
         let kind = r >> 32;
-        if kind == 4 || kind == 5 {
+        if kind == 4 || kind == 5 || kind == 7 {
             let at = (r & 0xffff_ffff) as u32;
-            if kind == 4 {
+            if std::env::var_os("JSQ_JIT_LOG").is_some() {
+                let fi = self.frames.len() - 1;
+                let p = &self.frames[fi].closure.proto;
+                eprintln!(
+                    "jit deopt {} kind={kind} at={at} op={:?}",
+                    p.name,
+                    p.code.get(at as usize)
+                );
+            }
+            if kind != 5 {
                 info.banned.borrow_mut().push(at);
+            } else if info.no_int.get() {
+                info.no_spec.set(true);
             } else {
                 info.no_int.set(true);
             }
@@ -5726,8 +5742,8 @@ impl Vm {
             });
             info.hot.set(0);
         }
-        if kind == 0 || kind == 4 || kind == 5 {
-            let nip = (r & 0xffff_ffff) as usize;
+        if kind == 0 || kind == 4 || kind == 5 || kind == 7 {
+            let nip = (r & 0xffff_ffff) as usize + (kind == 7) as usize;
             let fi = self.frames.len() - 1;
             let d = info.depth_at(nip).unwrap_or(self.stack.len() - base);
             unsafe { self.stack.set_len(base + d) };
@@ -6029,8 +6045,8 @@ impl Vm {
 
     fn invoke_result(&mut self, base: usize, frame: usize, r: u64) -> Invoke {
         match r >> 32 {
-            0 | 4 | 5 => {
-                let nip = (r & 0xffff_ffff) as usize;
+            0 | 4 | 5 | 7 => {
+                let nip = self.frames[frame].ip;
                 if self.frames.len() == frame + 1
                     && !self.frames[frame].construct
                     && self.frames[frame].closure.proto.code.get(nip) == Some(&Op::Return)
@@ -6134,7 +6150,7 @@ impl Vm {
         self.native_depth -= 1;
         let frame = ctx.frame + 1;
         let mut base = 0;
-        if matches!(r >> 32, 0 | 4 | 5) {
+        if matches!(r >> 32, 0 | 4 | 5 | 7) {
             let cl = self.frames[frame].closure.clone();
             base = self.frames[frame].base;
             self.jit_settle(&cl.proto.jit, base, r);
@@ -6300,20 +6316,6 @@ impl Vm {
         0
     }
 
-    pub(crate) fn jit_global(&mut self, ctx: &mut crate::jit::JitCtx, a: &[u64; 6]) -> u64 {
-        let cache = unsafe { &*(a[0] as *const std::cell::Cell<u32>) };
-        let slot = cache.get();
-        if slot == u32::MAX || self.global_accessors {
-            return 1;
-        }
-        let v = self.globals.at(slot).clone();
-        if matches!(v, Value::Uninit) {
-            return 1;
-        }
-        unsafe { std::ptr::write(ctx.bp.add(a[1] as usize), v) };
-        0
-    }
-
     pub(crate) fn jit_pop_to(
         &mut self,
         ctx: &mut crate::jit::JitCtx,
@@ -6347,7 +6349,7 @@ impl Vm {
                     {
                         let r = self.enter_jit(proto, base, ip0, stop);
                         match r >> 32 {
-                            0 | 4 | 5 => {}
+                            0 | 4 | 5 | 7 => {}
                             1 => continue 'frame,
                             2 => return Err(self.jit_error.take().unwrap_or_default()),
                             6 => {

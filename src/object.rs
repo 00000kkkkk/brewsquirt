@@ -178,7 +178,17 @@ pub const FUNCTION_TAG: u8 = 2;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct JitLayout {
+    pub typed_tag: u8,
+    pub view_kind: usize,
+    pub view_buffer: usize,
+    pub view_offset: usize,
+    pub view_length: usize,
+    pub view_tracking: usize,
+    pub bd_ptr: usize,
+    pub bd_len: usize,
+    pub bd_shared: usize,
     pub rc_value: usize,
+    pub obj_proto: usize,
     pub kind_field: usize,
     pub obj_kind: usize,
     pub obj_flags: usize,
@@ -261,7 +271,49 @@ pub fn jit_layout() -> JitLayout {
         .position(|&w| w == usize::MAX)
         .unwrap_or(1)
         * 8;
+    let buffer = Rc::new(Obj {
+        kind: ObjKind::ArrayBuffer(Box::new(BufferData {
+            bytes: RefCell::new(Vec::new()),
+            max: None,
+            shared: false,
+            external: false,
+            shared_mem: None,
+        })),
+        props: RefCell::new(PropMap::default()),
+        proto: RefCell::new(None),
+        flags: Cell::new(0),
+        gc_slot: Cell::new(u32::MAX),
+        heap_slot: Cell::new(u32::MAX),
+    });
+    let bd_bytes = match &buffer.kind {
+        ObjKind::ArrayBuffer(b) => std::mem::offset_of!(BufferData, bytes) + cell_offset(&b.bytes),
+        _ => 0,
+    };
+    let typed = Obj {
+        kind: ObjKind::Typed(Box::new(View {
+            kind: TypedKind::Uint8,
+            buffer,
+            offset: 0,
+            length: 0,
+            tracking: false,
+        })),
+        props: RefCell::new(PropMap::default()),
+        proto: RefCell::new(None),
+        flags: Cell::new(0),
+        gc_slot: Cell::new(u32::MAX),
+        heap_slot: Cell::new(u32::MAX),
+    };
     JitLayout {
+        typed_tag: tag_of(&typed),
+        view_kind: std::mem::offset_of!(View, kind),
+        view_buffer: std::mem::offset_of!(View, buffer),
+        view_offset: std::mem::offset_of!(View, offset),
+        view_length: std::mem::offset_of!(View, length),
+        view_tracking: std::mem::offset_of!(View, tracking),
+        bd_ptr: bd_bytes + vec_ptr,
+        bd_len: bd_bytes + vec_len,
+        bd_shared: std::mem::offset_of!(BufferData, shared_mem),
+        obj_proto: std::mem::offset_of!(Obj, proto) + cell_offset(&plain.proto),
         kind_field,
         upvalue,
         open_index,
@@ -793,6 +845,7 @@ pub struct ProxyData {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
 pub enum TypedKind {
     Int8,
     Uint8,

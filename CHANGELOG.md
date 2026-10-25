@@ -34,6 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the size of the function. Compiled code spills only the values that changed and reloads only
   what an interpreted step could have changed, so compiling takes less time. Parsers such as
   acorn and babel no longer spend time compiling code that would not run faster.
+- Compiled code reads globals, looks up methods on the object or its direct prototype (class
+  methods, `Math.floor`), and reads and writes `Uint8Array`, `Int32Array` and `Float64Array`
+  elements without leaving machine code. It assumes that array elements and properties read in
+  a loop are numbers, checks it, and recompiles without the assumption when it fails, and it
+  skips reference counting for a local array or object that is only indexed. Summing or
+  updating an array runs 2 to 2.6 times faster, a loop over `Math` methods 3 times faster and
+  a sieve over a `Uint8Array` 5 times faster than before.
 - `Uint8Array.prototype.setFromBase64` and `setFromHex` decode into an existing array and report
   how much they read and wrote, and `Uint8Array.fromBase64` honours `lastChunkHandling`
   (`loose`, `strict` and `stop-before-partial`). Every base64 and hex method validates its

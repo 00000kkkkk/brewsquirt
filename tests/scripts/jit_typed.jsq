@@ -1,0 +1,26 @@
+const show = (...xs) => console.log(JSON.stringify(xs))
+const kinds = [Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array]
+const run = () => {
+  const out = []
+  for (const K of kinds) {
+    const a = new K(16)
+    for (let k = 0; k < 300; k++) {
+      for (let i = 0; i < 20; i++) a[i] = (i * 37 - 200) * (k % 3) + 0.75 * (i & 1) - (k === 299 ? 1e10 : 0)
+    }
+    let s = 0
+    for (let k = 0; k < 300; k++) for (let i = 0; i < 18; i++) s += a[i] === undefined ? 1000 : a[i]
+    out.push(K.name, s, Array.from(a).join(","))
+  }
+  const buf = new ArrayBuffer(16)
+  const v = new Uint8Array(buf, 4, 8)
+  for (let i = 0; i < 2000; i++) v[i % 10] = i
+  const f = new Float64Array(4)
+  for (let i = 0; i < 2000; i++) f[i % 4] = i % 4 === 3 ? NaN : -i / 3
+  const g = new Int32Array(4)
+  for (let i = 0; i < 2000; i++) g[i % 4] = i % 4 === 1 ? 2 ** 31 + i : i % 4 === 2 ? -(2 ** 40) : -i
+  const u = new Uint8Array(4)
+  for (let i = 0; i < 2000; i++) u[i % 4] = i % 4 === 0 ? -1 : i % 4 === 1 ? 256.9 : i % 4 === 2 ? "7" : null
+  out.push(Array.from(new Uint8Array(buf)).join(","), Array.from(f).join(","), Array.from(g).join(","), Array.from(u).join(","))
+  return out
+}
+show(...run())
