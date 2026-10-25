@@ -6439,6 +6439,33 @@ impl Vm {
                     }
                     Op::GetLocalProp(s, k) | Op::GetLocalMethod(s, k) => {
                         let ic = &proto.ics[proto.ic_index[ip!()] as usize];
+                        if matches!(op, Op::GetLocalProp(..))
+                            && let Value::Object(o) = local!(s)
+                            && matches!(o.kind, ObjKind::Ordinary)
+                        {
+                            let props = unsafe { &*o.props.as_ptr() };
+                            let e = &ic.entries[0];
+                            if e.shape.get() == props.shape_id() && e.holder.get() == 0 {
+                                match props.value_at(e.index.get() as usize) {
+                                    Some(Value::Number(x)) => {
+                                        let x = *x;
+                                        push_num!(x);
+                                        pc = unsafe { pc.add(1) };
+                                        continue;
+                                    }
+                                    Some(v)
+                                        if !props.may_have_accessors()
+                                            && !matches!(v, Value::Uninit) =>
+                                    {
+                                        let v = v.clone();
+                                        push!(v);
+                                        pc = unsafe { pc.add(1) };
+                                        continue;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                         sync!();
                         self.flush_builder(base + s as usize);
                         let ok = self.fast_get_local(
