@@ -301,9 +301,32 @@ pub(crate) struct Frame {
     pub(crate) ip: usize,
     pub(crate) base: usize,
     pub(crate) construct: bool,
+    pub(crate) extra: Option<Box<FrameExtra>>,
+}
+
+#[derive(Default)]
+pub(crate) struct FrameExtra {
     pub(crate) co: Option<Rc<Obj>>,
     pub(crate) new_target: Option<Rc<Obj>>,
     pub(crate) brands: Vec<(u32, u32)>,
+}
+
+impl Frame {
+    pub(crate) fn co(&self) -> Option<&Rc<Obj>> {
+        self.extra.as_ref()?.co.as_ref()
+    }
+
+    pub(crate) fn new_target(&self) -> Option<&Rc<Obj>> {
+        self.extra.as_ref()?.new_target.as_ref()
+    }
+
+    pub(crate) fn brands(&self) -> &[(u32, u32)] {
+        self.extra.as_ref().map_or(&[], |e| e.brands.as_slice())
+    }
+
+    pub(crate) fn brands_mut(&mut self) -> &mut Vec<(u32, u32)> {
+        &mut self.extra.get_or_insert_with(Default::default).brands
+    }
 }
 
 pub(crate) struct Handler {
@@ -633,6 +656,23 @@ fn array_iter_step(it: &Value, proto_indices: bool, dst: *mut Value) -> u8 {
         None => {
             *i = usize::MAX;
             2
+        }
+    }
+}
+
+#[inline(always)]
+unsafe fn drop_range(stack: &mut Vec<Value>, from: usize, to: usize) {
+    unsafe {
+        stack.set_len(from);
+        let p = stack.as_mut_ptr();
+        for i in from..to {
+            let v = p.add(i);
+            if matches!(
+                *v,
+                Value::Str(_) | Value::Object(_) | Value::Symbol(_) | Value::BigInt(_)
+            ) {
+                std::ptr::drop_in_place(v);
+            }
         }
     }
 }
@@ -1816,7 +1856,7 @@ impl Vm {
 
     fn frame_new_target(&self, fi: usize, base: usize, cl: &Closure) -> Value {
         if self.frames[fi].construct {
-            return match &self.frames[fi].new_target {
+            return match self.frames[fi].new_target() {
                 Some(t) => Value::Object(t.clone()),
                 None => self.stack[base - 1].clone(),
             };
@@ -2926,7 +2966,7 @@ impl Vm {
     }
 
     fn closure_brands(&self, fi: usize, cl: &Closure) -> Option<Rc<[(u32, u32)]>> {
-        let pending = &self.frames[fi].brands;
+        let pending = self.frames[fi].brands();
         if pending.is_empty() {
             return cl.brands.clone();
         }
@@ -2962,7 +3002,7 @@ impl Vm {
             return base.clone();
         }
         let brand = self.frames[fi]
-            .brands
+            .brands()
             .iter()
             .rev()
             .chain(cl.brands.as_deref().unwrap_or_default().iter().rev())
@@ -3134,9 +3174,12 @@ impl Vm {
             std::ptr::addr_of_mut!((*p).ip).write(0);
             std::ptr::addr_of_mut!((*p).base).write(base);
             std::ptr::addr_of_mut!((*p).construct).write(construct);
-            std::ptr::addr_of_mut!((*p).co).write(None);
-            std::ptr::addr_of_mut!((*p).new_target).write(new_target);
-            std::ptr::addr_of_mut!((*p).brands).write(Vec::new());
+            std::ptr::addr_of_mut!((*p).extra).write(new_target.map(|t| {
+                Box::new(FrameExtra {
+                    new_target: Some(t),
+                    ..Default::default()
+                })
+            }));
             self.frames.set_len(n + 1);
         }
     }
@@ -5855,12 +5898,12 @@ impl Vm {
 
     fn run_loop(&mut self, stop: usize) -> Result<Value, Value> {
         'frame: loop {
-            let fi = self.frames.len() - 1;
-            let cl: &Closure = unsafe { &*Rc::as_ptr(&self.frames[fi].closure) };
-            let proto: &FunctionProto = &cl.proto;
-            let code: *const Op = proto.code.as_ptr();
-            let consts: *const Value = proto.consts.as_ptr();
-            let base = self.frames[fi].base;
+            let mut fi = self.frames.len() - 1;
+            let mut cl: &Closure = unsafe { &*Rc::as_ptr(&self.frames[fi].closure) };
+            let mut proto: &FunctionProto = &cl.proto;
+            let mut code: *const Op = proto.code.as_ptr();
+            let mut consts: *const Value = proto.consts.as_ptr();
+            let mut base = self.frames[fi].base;
             if self.jit_on {
                 let info = &proto.jit;
                 if info.state.get() == crate::jit::COLD {
@@ -5907,6 +5950,23 @@ impl Vm {
             macro_rules! ip {
                 () => {
                     unsafe { pc.offset_from(code) as usize }
+                };
+            }
+            macro_rules! switch_frame {
+                () => {{
+                    fi = self.frames.len() - 1;
+                    cl = unsafe { &*Rc::as_ptr(&self.frames[fi].closure) };
+                    proto = &cl.proto;
+                    code = proto.code.as_ptr();
+                    consts = proto.consts.as_ptr();
+                    base = self.frames[fi].base;
+                    pc = unsafe { code.add(self.frames[fi].ip) };
+                    resync!();
+                }};
+            }
+            macro_rules! settled {
+                ($p:expr) => {
+                    !self.jit_on || $p.jit.state.get() == crate::jit::REJECTED
                 };
             }
             macro_rules! room {
@@ -6145,7 +6205,7 @@ impl Vm {
                     | Op::GetUpvalChecked(i, _)
                     | Op::GetUpvalCheckedUndef(i, _) => {
                         let checked = !matches!(op, Op::GetUpval(_));
-                        match &*cl.upvalues[i as usize].borrow() {
+                        match unsafe { &*cl.upvalues.get_unchecked(i as usize).value.as_ptr() } {
                             Upvalue::Open(idx) => match *slot!(*idx) {
                                 Value::Number(x) => push_num!(x),
                                 Value::Uninit if checked => break,
@@ -6537,7 +6597,12 @@ impl Vm {
                                     self.stack.truncate(ci + 2 + np);
                                 }
                                 self.frames[fi].ip = ip!() + 1;
+                                let inline = settled!(c.proto);
                                 self.push_plain_frame(c, ci + 1);
+                                if inline {
+                                    switch_frame!();
+                                    continue;
+                                }
                                 continue 'frame;
                             }
                             ObjKind::Native(_) => {
@@ -6578,13 +6643,16 @@ impl Vm {
                             self.stack[n - 1] = this;
                         }
                         if let Value::Number(x) = self.stack[n - 1] {
-                            unsafe { self.stack.set_len(n - 1) };
                             self.drop_top_frame();
-                            self.stack.truncate(base - 1);
+                            unsafe { drop_range(&mut self.stack, base - 1, n - 1) };
                             if self.frames.len() == stop {
                                 return Ok(Value::Number(x));
                             }
                             push_number(&mut self.stack, x);
+                            if settled!(self.frames[self.frames.len() - 1].closure.proto) {
+                                switch_frame!();
+                                continue;
+                            }
                             continue 'frame;
                         }
                         let result = self.stack.pop().unwrap_or_default();
@@ -6594,6 +6662,10 @@ impl Vm {
                             return Ok(result);
                         }
                         self.stack.push(result);
+                        if settled!(self.frames[self.frames.len() - 1].closure.proto) {
+                            switch_frame!();
+                            continue;
+                        }
                         continue 'frame;
                     }
                     _ => break,
@@ -7928,7 +8000,7 @@ impl Vm {
                     if !self.is_constructor(&Value::Object(sup.clone())) {
                         throw!(self.type_error("Super constructor is not a constructor"));
                     }
-                    self.next_new_target = match &self.frames[fi].new_target {
+                    self.next_new_target = match self.frames[fi].new_target() {
                         Some(t) => Some(t.clone()),
                         None => self.stack[base - 1].as_object().cloned(),
                     };
@@ -8283,9 +8355,7 @@ impl Vm {
                                 ip: 0,
                                 base: ci + 1,
                                 construct: false,
-                                co: None,
-                                new_target: None,
-                                brands: Vec::new(),
+                                extra: None,
                             });
                             reload!();
                             continue;
@@ -8769,10 +8839,10 @@ impl Vm {
                 Op::ClassBrand(id) => {
                     self.next_brand += 1;
                     let brand = self.next_brand;
-                    self.frames[fi].brands.push((id, brand));
+                    self.frames[fi].brands_mut().push((id, brand));
                 }
                 Op::EndClassBrand => {
-                    self.frames[fi].brands.pop();
+                    self.frames[fi].brands_mut().pop();
                 }
                 Op::PrivateKey(k) => {
                     let key = self.private_key(fi, cl, proto, k);

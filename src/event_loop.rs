@@ -113,7 +113,7 @@ impl Vm {
     }
 
     pub(crate) fn suspend_frame(&mut self, fi: usize) -> bool {
-        let Some(co) = self.frames[fi].co.clone() else {
+        let Some(co) = self.frames[fi].co().cloned() else {
             return false;
         };
         let seg = self.frames[fi].base - 1;
@@ -139,7 +139,7 @@ impl Vm {
                 stack,
                 handlers,
                 upvalues,
-                brands: frame.brands,
+                brands: frame.extra.map(|x| x.brands).unwrap_or_default(),
                 started: true,
             });
             c.state.set(CoState::Suspended);
@@ -204,9 +204,11 @@ impl Vm {
             ip: saved.ip,
             base: seg + 1,
             construct: false,
-            co: Some(co_obj.clone()),
-            new_target: None,
-            brands: saved.brands,
+            extra: Some(Box::new(crate::vm::FrameExtra {
+                co: Some(co_obj.clone()),
+                new_target: None,
+                brands: saved.brands,
+            })),
         });
         for (rel, catch_ip, guard) in saved.handlers {
             self.handlers.push(Handler {
