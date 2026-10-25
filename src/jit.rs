@@ -1290,6 +1290,28 @@ fn loans(
             }
         }
     }
+    for ip in 0..n.saturating_sub(1) {
+        if code[ip] != Op::GetIndex
+            || tys[ip].is_none()
+            || tys[ip + 1].is_none()
+            || targets[ip + 1]
+            || depths[ip] == UNKNOWN
+            || depths[ip] < 2
+            || out.consumed[ip + 1].is_some()
+        {
+            continue;
+        }
+        let Op::GetProp(_) = code[ip + 1] else {
+            continue;
+        };
+        let slot = depths[ip] as usize - 2;
+        if depths[ip + 1] as usize != slot + 1 {
+            continue;
+        }
+        out.lent[ip] = true;
+        out.consumed[ip + 1] = Some(slot);
+        out.held[ip + 1].push(slot);
+    }
     for ip in 0..n {
         let c = out.consumed[ip];
         out.exit[ip] = out.held[ip]
@@ -1939,10 +1961,6 @@ impl Gen<'_, '_> {
         self.guard(calm, miss);
         let ga = self.b.ins().load(types::I64, flags(), ctx, 56);
         let gt = self.b.ins().load(types::I64, flags(), ctx, 64);
-        let allocs = self.b.ins().load(types::I64, flags(), ga, 0);
-        let limit = self.b.ins().load(types::I64, flags(), gt, 0);
-        let fresh = self.b.ins().icmp(IntCC::UnsignedLessThan, allocs, limit);
-        self.guard(fresh, miss);
         let base = self.b.ins().load(types::I64, flags(), ctx, 16);
         let cbase = self.b.ins().iadd_imm_s(base, ci as i64 + 1);
         let max = self.b.ins().uload32(flags(), proto, vl.proto_max as i32);
@@ -2733,6 +2751,26 @@ impl Gen<'_, '_> {
         self.b.switch_to_block(cont);
     }
 
+    fn method_key(&self, ip: usize, ci: usize) -> Option<String> {
+        for m in (ip.saturating_sub(48)..ip).rev() {
+            let Some(t) = &self.types[m] else {
+                continue;
+            };
+            let (slot, c) = match self.proto.code[m] {
+                Op::GetMethod(c) => (t.len().checked_sub(1)?, c),
+                Op::GetLocalMethod(_, c) => (t.len(), c),
+                _ => continue,
+            };
+            if slot == ci {
+                return match &self.proto.consts[c as usize] {
+                    Value::Str(s) => Some(s.to_string()),
+                    _ => None,
+                };
+            }
+        }
+        None
+    }
+
     fn hoisted(&self, ip: usize) -> Option<(Hoist, [Variable; 4])> {
         let (v, idx) = self.use_of.get(ip).copied().flatten()?;
         let ver = &self.versions[v];
@@ -2839,7 +2877,7 @@ impl Gen<'_, '_> {
             let vp = self.b.ins().load(types::F64, flags(), addr, 8);
             if spec {
                 self.spec_guard(vh, ip, inn, Some((oh, op_)));
-            } else {
+            } else if !self.loans.lent[ip] {
                 let vpb = self.b.ins().bitcast(types::I64, MemFlagsData::new(), vp);
                 self.ref_change(vh, vpb, true);
             }
@@ -2935,6 +2973,9 @@ impl Gen<'_, '_> {
             self.load_slot(d - 2);
             if spec {
                 self.spec_after(ip, inn, d - 2);
+            } else if self.loans.lent[ip] {
+                let (h, p) = self.bits(d - 2, Ty::Any);
+                self.ref_change(h, p, false);
             }
         }
         self.b.ins().jump(done, &[]);
@@ -3429,6 +3470,10 @@ impl Gen<'_, '_> {
             self.bail_hot(ip, inn);
             return;
         }
+        if self.loans.lent[ip] && self.proto.code[ip] == Op::GetIndex {
+            self.bail(ip, inn);
+            return;
+        }
         self.spill(inn, 0, inn.len());
         let r = self.helper(
             self.sigs.step,
@@ -3810,7 +3855,7 @@ impl Gen<'_, '_> {
                 let vp = self.b.ins().load(types::F64, flags(), addr, 8);
                 if spec {
                     self.spec_guard(vh, ip, &inn, lent.then_some((oh, op_)));
-                } else {
+                } else if !self.loans.lent[ip] {
                     let vpb = self.b.ins().bitcast(types::I64, MemFlagsData::new(), vp);
                     self.ref_change(vh, vpb, true);
                 }
@@ -3868,6 +3913,9 @@ impl Gen<'_, '_> {
                 self.load_slot(d - 2);
                 if spec {
                     self.spec_after(ip, &inn, d - 2);
+                } else if self.loans.lent[ip] {
+                    let (h, p) = self.bits(d - 2, Ty::Any);
+                    self.ref_change(h, p, false);
                 }
                 self.b.ins().jump(done, &[]);
                 self.cold_from(mark);
@@ -4718,10 +4766,17 @@ impl Gen<'_, '_> {
             Op::Call(argc, _) => {
                 let ci = d - argc as usize - 2;
                 let pinned = matches!(self.hoisted(ip), Some((Hoist::Pin(..), _)));
+                let key = self.method_key(ip, ci);
+                let math = key.as_deref().is_some_and(|k| {
+                    matches!(
+                        k,
+                        "floor" | "ceil" | "trunc" | "abs" | "sqrt" | "min" | "max"
+                    )
+                });
                 let cands: Vec<(usize, Intrinsic)> = self
                     .intrinsics
                     .iter()
-                    .filter(|(_, k)| k.arity() == argc)
+                    .filter(|(_, k)| math && k.arity() == argc)
                     .map(|&(o, k)| (o, k))
                     .collect();
                 let generic = self.b.create_block();
@@ -4795,7 +4850,11 @@ impl Gen<'_, '_> {
                     self.bail_hot(ip, &inn);
                     return;
                 }
-                if argc == 1 && inn[ci] == Ty::Any && inn[ci + 1] == Ty::Any {
+                if argc == 1
+                    && inn[ci] == Ty::Any
+                    && inn[ci + 1] == Ty::Any
+                    && key.as_deref() == Some("push")
+                {
                     let (lay, vl) = (self.lay, self.vl);
                     let rest = self.b.create_block();
                     let ft = self.tag(ci);
