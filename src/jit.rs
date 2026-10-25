@@ -163,6 +163,15 @@ six!(jit_new_object, jit_new_object);
 six!(jit_init_prop, jit_init_prop);
 six!(jit_new_literal, jit_new_literal);
 six!(jit_iter_next, jit_iter_next);
+six!(jit_add, jit_add);
+
+unsafe extern "C" fn jit_template(ctx: *mut JitCtx, n: u32, depth: u32) -> u64 {
+    unsafe {
+        let ctx = &mut *ctx;
+        let vm = &mut *ctx.vm;
+        vm.jit_template(ctx, n as usize, depth as usize)
+    }
+}
 six!(jit_materialize, jit_materialize);
 six!(jit_frame, jit_frame);
 six!(jit_call_done, jit_call_done);
@@ -1062,6 +1071,7 @@ fn inline_op(op: Op) -> bool {
             | Op::IterNext(_)
             | Op::TryBegin(..)
             | Op::TryEnd
+            | Op::Template(_)
     )
 }
 
@@ -3348,6 +3358,22 @@ impl Gen<'_, '_> {
                 }
                 self.goto_from(&cur, next);
             }
+            Op::Template(n) => {
+                let n = n as usize;
+                let slow = self.slow_block(ip, &inn, succs);
+                self.spill(&inn, d - n, d);
+                let r = self.helper(
+                    self.sigs.pop_to,
+                    jit_template as *const () as usize,
+                    &[n as i64, d as i64],
+                );
+                let ok = self.b.ins().icmp_imm_s(IntCC::Equal, r, 0);
+                self.guard(ok, slow);
+                self.load_slot(d - n);
+                cur.truncate(d - n);
+                cur.push(Ty::Any);
+                self.goto_from(&cur, next);
+            }
             Op::IterNext(t) => {
                 let (ih, ipb) = self.bits(d - 1, inn[d - 1]);
                 let dst = self.konst((d - 1) as i64);
@@ -3602,8 +3628,16 @@ impl Gen<'_, '_> {
                     }
                 } else {
                     let slow = self.slow_block(ip, &inn, succs);
-                    self.number_guard(a_k, ta, slow);
-                    self.number_guard(b_k, tb, slow);
+                    let strs = op == Op::Add && !(is_num(ta) && is_num(tb));
+                    let miss = if strs {
+                        let blk = self.b.create_block();
+                        self.b.set_cold_block(blk);
+                        blk
+                    } else {
+                        slow
+                    };
+                    self.number_guard(a_k, ta, miss);
+                    self.number_guard(b_k, tb, miss);
                     let x = self.f64_of(a_k, ta);
                     let y = self.f64_of(b_k, tb);
                     let r = match arith {
@@ -3621,6 +3655,22 @@ impl Gen<'_, '_> {
                     self.set_f64(dst, nt, r);
                     cur.truncate(d - 1);
                     cur[dst] = nt;
+                    if strs {
+                        let joined = self.b.create_block();
+                        self.b.ins().jump(joined, &[]);
+                        self.b.switch_to_block(miss);
+                        let (ah, ap) = self.bits(a_k, ta);
+                        let (bh, bp) = self.bits(b_k, tb);
+                        let dv = self.konst(dst as i64);
+                        let zero = self.konst(0);
+                        let r = self
+                            .call_six(jit_add as *const () as usize, [ah, ap, bh, bp, dv, zero]);
+                        let ok = self.b.ins().icmp_imm_s(IntCC::Equal, r, 0);
+                        self.guard(ok, slow);
+                        self.load_slot(dst);
+                        self.b.ins().jump(joined, &[]);
+                        self.b.switch_to_block(joined);
+                    }
                 }
                 self.goto_from(&cur, next);
             }

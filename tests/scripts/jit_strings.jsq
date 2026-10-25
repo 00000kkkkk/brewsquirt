@@ -1,0 +1,63 @@
+const show = (...xs) => console.log(JSON.stringify(xs))
+
+const concat = () => {
+  const out = []
+  for (let i = 0; i < 3000; i++) {
+    const a = "k" + i
+    const b = i + "v"
+    const c = a + b
+    const d = 0.5 + "x" + -0 + NaN + Infinity + 1e21 + 1e-7
+    if (i % 1000 === 0) out.push(a, b, c, d)
+  }
+  return out
+}
+show(...concat())
+
+const objects = () => {
+  const o = { toString: () => "T", valueOf: () => 42 }
+  const p = { toString: () => "P" }
+  let s = ""
+  let n = 0
+  for (let i = 0; i < 2000; i++) {
+    s = "a" + o + p
+    n += o + 1
+  }
+  let err = ""
+  for (let i = 0; i < 1500; i++) {
+    try {
+      s += Symbol("x")
+    } catch (e) {
+      err = e.constructor.name
+    }
+  }
+  return [s, n, err]
+}
+show(...objects())
+
+const templates = () => {
+  const out = []
+  const obj = { toString() { return "obj" } }
+  for (let i = 0; i < 3000; i++) {
+    const t = `item-${i}-${i * 0.5}-${true}-${null}-${undefined}-${obj}`
+    if (i % 1500 === 0) out.push(t)
+  }
+  let err = ""
+  for (let i = 0; i < 1200; i++) {
+    try {
+      const t = `${Symbol("s")}`
+    } catch (e) {
+      err = e.constructor.name
+    }
+  }
+  return [out, err]
+}
+show(...templates())
+
+const keys = () => {
+  const m = new Map()
+  for (let i = 0; i < 3000; i++) m.set("k" + i, i)
+  let s = 0
+  for (let i = 0; i < 3000; i++) s += m.get("k" + i)
+  return s
+}
+show(keys())

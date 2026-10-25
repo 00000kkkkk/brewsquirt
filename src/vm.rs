@@ -6393,6 +6393,38 @@ impl Vm {
         0
     }
 
+    pub(crate) fn jit_add(&mut self, ctx: &mut crate::jit::JitCtx, a: &[u64; 6]) -> u64 {
+        let x = unsafe { value_bits(a[0], a[1]) };
+        let y = unsafe { value_bits(a[2], a[3]) };
+        let number = |n: f64| {
+            let mut t = String::new();
+            crate::number::push_number(&mut t, n);
+            t
+        };
+        let s = match (&*x, &*y) {
+            (Value::Str(p), Value::Str(q)) => crate::value::concat16(p, q),
+            (Value::Str(p), Value::Number(n)) => crate::value::concat16(p, &number(*n)),
+            (Value::Number(n), Value::Str(q)) => crate::value::concat16(&number(*n), q),
+            _ => return 1,
+        };
+        unsafe { std::ptr::write(ctx.bp.add(a[4] as usize), Value::Str(s.into())) };
+        drop(std::mem::ManuallyDrop::into_inner(x));
+        drop(std::mem::ManuallyDrop::into_inner(y));
+        0
+    }
+
+    pub(crate) fn jit_template(
+        &mut self,
+        ctx: &mut crate::jit::JitCtx,
+        n: usize,
+        depth: usize,
+    ) -> u64 {
+        unsafe { self.stack.set_len(ctx.base + depth) };
+        let ok = self.fast_template(n);
+        self.jit_refresh(ctx);
+        if ok { 0 } else { 1 }
+    }
+
     pub(crate) fn jit_iter_next(&mut self, ctx: &mut crate::jit::JitCtx, a: &[u64; 6]) -> u64 {
         let it = unsafe { value_bits(a[0], a[1]) };
         let dst = unsafe { ctx.bp.add(a[2] as usize) };
