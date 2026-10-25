@@ -346,6 +346,7 @@ pub struct Vm {
     pub globals: Globals,
     arg_buf: Vec<Value>,
     fast_resume: bool,
+    pub(crate) array_push: Option<Rc<Obj>>,
     step_one: bool,
     jit: Option<Box<crate::jit::Jit>>,
     jit_on: bool,
@@ -1164,6 +1165,7 @@ impl Vm {
             globals: Globals::default(),
             arg_buf: Vec::new(),
             fast_resume: false,
+            array_push: None,
             step_one: false,
             jit: None,
             jit_on: std::env::var_os("JSQ_NOJIT").is_none(),
@@ -6606,6 +6608,26 @@ impl Vm {
                                 continue 'frame;
                             }
                             ObjKind::Native(_) => {
+                                if argc == 1
+                                    && !self.proto_indices
+                                    && self.array_push.as_ref().is_some_and(|p| Rc::ptr_eq(p, o))
+                                    && let Value::Object(arr) = slot!(ci + 1)
+                                    && let ObjKind::Array(items) = &arr.kind
+                                    && arr.flags.get() & !crate::object::HAS_HOLES == 0
+                                {
+                                    let items = items as *const std::cell::RefCell<Vec<Value>>;
+                                    let v = pop!();
+                                    let len = {
+                                        let mut a = unsafe { (*items).borrow_mut() };
+                                        a.push(v);
+                                        a.len()
+                                    };
+                                    discard!();
+                                    discard!();
+                                    push_num!(len as f64);
+                                    pc = unsafe { pc.add(1) };
+                                    continue;
+                                }
                                 self.frames[fi].ip = ip!() + 1;
                                 sync!();
                                 let r = self.fast_native_call(ci);

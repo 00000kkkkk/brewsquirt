@@ -18,6 +18,7 @@ pub fn install(vm: &mut Vm) {
     for (i, (name, arity, _, _)) in METHODS.iter().enumerate() {
         method(vm, &ap, name, *arity, fns[i]);
     }
+    vm.array_push = ap.get_own("push").and_then(|v| v.as_object().cloned());
     let array = make_ctor(vm, "Array", 1, array_ctor, None, &ap);
     method(vm, &array, "isArray", 1, is_array);
     method(vm, &array, "from", 1, from);
