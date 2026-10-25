@@ -11,6 +11,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{Module, default_libcall_names};
 use std::cell::{Cell, OnceCell};
+use std::rc::Rc;
 
 const T_UNDEFINED: i64 = 0;
 const T_NULL: i64 = 1;
@@ -69,6 +70,7 @@ pub struct JitCtx {
     pub base: usize,
     pub need: usize,
     pub interrupt: *const u8,
+    pub upvals: *const u8,
 }
 
 pub type JitFn = unsafe extern "C" fn(*mut JitCtx, u32) -> u64;
@@ -89,14 +91,6 @@ unsafe extern "C" fn jit_call(ctx: *mut JitCtx, ip: u32, depth: u32, argc: u32) 
     }
 }
 
-unsafe extern "C" fn jit_upval(ctx: *mut JitCtx, index: u32, slot: u32) -> u64 {
-    unsafe {
-        let ctx = &mut *ctx;
-        let vm = &mut *ctx.vm;
-        vm.jit_upval(ctx, index as usize, slot as usize)
-    }
-}
-
 unsafe extern "C" fn jit_pop_to(ctx: *mut JitCtx, to: u32, depth: u32) -> u64 {
     unsafe {
         let ctx = &mut *ctx;
@@ -104,6 +98,46 @@ unsafe extern "C" fn jit_pop_to(ctx: *mut JitCtx, to: u32, depth: u32) -> u64 {
         vm.jit_pop_to(ctx, to as usize, depth as usize)
     }
 }
+
+unsafe extern "C" fn jit_clone(h: u64, p: u64) -> u64 {
+    let v = unsafe { crate::vm::value_bits(h, p) };
+    std::mem::forget((*v).clone());
+    0
+}
+
+unsafe extern "C" fn jit_drop(h: u64, p: u64) -> u64 {
+    drop(std::mem::ManuallyDrop::into_inner(unsafe {
+        crate::vm::value_bits(h, p)
+    }));
+    0
+}
+
+macro_rules! six {
+    ($name:ident, $method:ident) => {
+        unsafe extern "C" fn $name(
+            ctx: *mut JitCtx,
+            a0: u64,
+            a1: u64,
+            a2: u64,
+            a3: u64,
+            a4: u64,
+            a5: u64,
+        ) -> u64 {
+            unsafe {
+                let ctx = &mut *ctx;
+                let vm = &mut *ctx.vm;
+                vm.$method(ctx, &[a0, a1, a2, a3, a4, a5])
+            }
+        }
+    };
+}
+
+six!(jit_index, jit_index);
+six!(jit_set_index, jit_set_index);
+six!(jit_prop, jit_prop);
+six!(jit_global, jit_global);
+six!(jit_new_object, jit_new_object);
+six!(jit_init_prop, jit_init_prop);
 
 extern "C" fn jit_rem(x: f64, y: f64) -> f64 {
     crate::number::js_rem(x, y)
@@ -279,14 +313,37 @@ fn analyze(proto: &FunctionProto) -> Option<(Vec<u16>, u32)> {
     Some((depth, max as u32 + 4))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Intrinsic {
+    Floor,
+    Ceil,
+    Trunc,
+    Abs,
+    Sqrt,
+    Min,
+    Max,
+}
+
+impl Intrinsic {
+    fn arity(self) -> u32 {
+        match self {
+            Intrinsic::Min | Intrinsic::Max => 2,
+            _ => 1,
+        }
+    }
+}
+
 pub struct Jit {
+    lay: crate::object::JitLayout,
+    intrinsics: Vec<(Rc<crate::object::Obj>, Intrinsic)>,
     module: JITModule,
     ctx: Context,
     fctx: FunctionBuilderContext,
 }
 
 struct Sigs {
-    upval: SigRef,
+    six: SigRef,
+    two: SigRef,
     step: SigRef,
     call: SigRef,
     pop_to: SigRef,
@@ -374,6 +431,15 @@ fn inline_op(op: Op) -> bool {
             | Op::GetUpval(_)
             | Op::GetUpvalChecked(..)
             | Op::GetUpvalCheckedUndef(..)
+            | Op::GetIndex
+            | Op::SetIndex
+            | Op::GetProp(_)
+            | Op::GetLocalProp(..)
+            | Op::GetMethod(_)
+            | Op::GetLocalMethod(..)
+            | Op::GetGlobal(_)
+            | Op::NewObject
+            | Op::InitProp(_)
     )
 }
 
@@ -408,6 +474,7 @@ struct Infer<'a> {
     proto: &'a FunctionProto,
     banned: &'a [bool],
     ints: bool,
+    captured: &'a [bool],
 }
 
 impl Infer<'_> {
@@ -439,11 +506,30 @@ impl Infer<'_> {
         let d = inn.len();
         let next = ip + 1;
         let mut s = inn.to_vec();
+        let outs = match op {
+            Op::GetMethod(_) | Op::GetLocalMethod(..) | Op::Dup2 | Op::GetIndexMethod => 2,
+            Op::Rot3 => 3,
+            Op::Rot4 => 4,
+            _ => 1,
+        };
         let impure = || -> Option<Vec<(usize, Vec<Ty>)>> {
             Some(
                 flow(op, ip, d as i32)?
                     .into_iter()
-                    .map(|(t, depth_after)| (t, vec![Ty::Any; depth_after as usize]))
+                    .map(|(t, depth_after)| {
+                        let da = depth_after as usize;
+                        let keep = da.saturating_sub(outs).min(d);
+                        let st = (0..da)
+                            .map(|k| {
+                                if k < keep && !self.captured.get(k).copied().unwrap_or(true) {
+                                    inn[k]
+                                } else {
+                                    Ty::Any
+                                }
+                            })
+                            .collect();
+                        (t, st)
+                    })
                     .collect(),
             )
         };
@@ -463,7 +549,7 @@ impl Infer<'_> {
                 s.push(s[l as usize]);
                 s.push(Ty::Prim);
             }
-            Op::SetLocal(l) => s[l as usize] = s[d - 1],
+            Op::SetLocal(l) | Op::SetLocalChecked(l, _) => s[l as usize] = s[d - 1],
             Op::StoreLocal(l) => {
                 let t = s.pop()?;
                 s[l as usize] = t;
@@ -471,14 +557,28 @@ impl Infer<'_> {
             Op::IncLocal(l) | Op::DecLocal(l) => {
                 let t = s[l as usize];
                 if !is_num(t) {
-                    return impure();
+                    return impure().map(|v| {
+                        v.into_iter()
+                            .map(|(t, mut st)| {
+                                st[l as usize] = Ty::Any;
+                                (t, st)
+                            })
+                            .collect()
+                    });
                 }
                 s[l as usize] = self.arith(ip, t, Ty::Int);
             }
             Op::AppendLocal(l) => {
                 let (a, b) = (s[l as usize], s[d - 1]);
                 if !is_num(a) || !is_num(b) {
-                    return impure();
+                    return impure().map(|v| {
+                        v.into_iter()
+                            .map(|(t, mut st)| {
+                                st[l as usize] = Ty::Any;
+                                (t, st)
+                            })
+                            .collect()
+                    });
                 }
                 s[l as usize] = self.arith(ip, a, b);
                 s.pop();
@@ -581,6 +681,10 @@ impl Infer<'_> {
                 return Some(vec![(t as usize, s.clone()), (next, s)]);
             }
             Op::PopTo(n) => s.truncate(n as usize),
+            Op::NewObject => s.push(Ty::Any),
+            Op::InitProp(_) => {
+                s.pop();
+            }
             Op::GetUpval(_) | Op::GetUpvalChecked(..) => s.push(Ty::Any),
             Op::GetUpvalCheckedUndef(..) => {
                 s.push(Ty::Any);
@@ -604,11 +708,13 @@ fn infer(
     depths: &[u16],
     banned: &[bool],
     ints: bool,
+    captured: &[bool],
 ) -> Option<Vec<Option<Vec<Ty>>>> {
     let inf = Infer {
         proto,
         banned,
         ints,
+        captured,
     };
     let n = proto.code.len();
     let mut types: Vec<Option<Vec<Ty>>> = vec![None; n];
@@ -640,6 +746,9 @@ fn infer(
 
 struct Gen<'a, 'b> {
     b: &'a mut FunctionBuilder<'b>,
+    proto: &'a FunctionProto,
+    intrinsics: &'a [(Rc<crate::object::Obj>, Intrinsic)],
+    lay: crate::object::JitLayout,
     blocks: &'a [Block],
     types: &'a [Option<Vec<Ty>>],
     ints: bool,
@@ -653,6 +762,7 @@ struct Gen<'a, 'b> {
     sigs: &'a Sigs,
     slow: Vec<(Block, usize, Vec<Ty>, Vec<usize>)>,
     deopts: Vec<(Block, usize, Vec<Ty>)>,
+    narrows: Vec<(Block, usize, Vec<Ty>)>,
     exits: Vec<(Block, u64)>,
 }
 
@@ -675,30 +785,208 @@ impl Gen<'_, '_> {
         self.b.ins().icmp_imm_s(IntCC::Equal, t, tag)
     }
 
-    fn not_heap(&mut self, k: usize) -> V {
-        let t = self.tag(k);
-        let off = self.b.ins().iadd_imm_s(t, -4);
-        self.b.ins().icmp_imm_s(IntCC::UnsignedGreaterThan, off, 3)
-    }
-
-    fn plain_local(&mut self, k: usize, t: Ty, slow: Block) {
-        if t == Ty::Any {
-            let ok = self.not_heap(k);
-            self.guard(ok, slow);
-        }
-        if t == Ty::Any || t == Ty::Prim {
-            let tg = self.tag(k);
-            let ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, tg, T_UNDEFINED);
-            self.guard(ok, slow);
-        }
-    }
-
     fn f64_of(&mut self, k: usize, t: Ty) -> V {
         if t == Ty::Int {
             let i = self.b.use_var(self.ival[k]);
             self.b.ins().fcvt_from_sint(types::F64, i)
         } else {
             self.b.use_var(self.pay[k])
+        }
+    }
+
+    fn bits(&mut self, k: usize, t: Ty) -> (V, V) {
+        let (h, p) = match t {
+            Ty::Int | Ty::Num => (self.b.ins().iconst(types::I64, T_NUMBER), self.f64_of(k, t)),
+            _ => (self.b.use_var(self.head[k]), self.b.use_var(self.pay[k])),
+        };
+        let p = self.b.ins().bitcast(types::I64, MemFlagsData::new(), p);
+        (h, p)
+    }
+
+    fn call_six(&mut self, f: usize, args: [V; 6]) -> V {
+        let ctx = self.b.use_var(self.ctx_var);
+        let fv = self.b.ins().iconst(types::I64, f as i64);
+        let mut vals = vec![ctx];
+        vals.extend(args);
+        let call = self.b.ins().call_indirect(self.sigs.six, fv, &vals);
+        self.b.inst_results(call)[0]
+    }
+
+    fn konst(&mut self, v: i64) -> V {
+        self.b.ins().iconst(types::I64, v)
+    }
+
+    fn load_slot(&mut self, k: usize) {
+        let bp = self.bp();
+        let h = self.b.ins().load(types::I64, flags(), bp, k as i32 * SLOT);
+        let p = self
+            .b
+            .ins()
+            .load(types::F64, flags(), bp, k as i32 * SLOT + 8);
+        self.b.def_var(self.head[k], h);
+        self.b.def_var(self.pay[k], p);
+    }
+
+    fn refcount(&mut self, k: usize, t: Ty, f: usize) {
+        if t != Ty::Any {
+            return;
+        }
+        let (h, p) = self.bits(k, t);
+        let inc = f == jit_clone as *const () as usize;
+        self.ref_change(h, p, inc);
+    }
+
+    fn ref_change(&mut self, h: V, p: V, inc: bool) {
+        let tag = self.b.ins().band_imm_u(h, 0xff);
+        let off = self.b.ins().iadd_imm_s(tag, -4);
+        let heap = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::UnsignedLessThanOrEqual, off, 3);
+        let yes = self.b.create_block();
+        let done = self.b.create_block();
+        self.b.ins().brif(heap, yes, &[], done, &[]);
+        self.b.switch_to_block(yes);
+        let c = self.b.ins().load(types::I64, flags(), p, 0);
+        if inc {
+            let c1 = self.b.ins().iadd_imm_s(c, 1);
+            self.b.ins().store(flags(), c1, p, 0);
+            self.b.ins().jump(done, &[]);
+        } else {
+            let last = self.b.ins().icmp_imm_s(IntCC::Equal, c, 1);
+            let free = self.b.create_block();
+            let keep = self.b.create_block();
+            self.b.ins().brif(last, free, &[], keep, &[]);
+            self.b.switch_to_block(free);
+            let fv = self
+                .b
+                .ins()
+                .iconst(types::I64, jit_drop as *const () as usize as i64);
+            self.b.ins().call_indirect(self.sigs.two, fv, &[h, p]);
+            self.b.ins().jump(done, &[]);
+            self.b.switch_to_block(keep);
+            let c1 = self.b.ins().iadd_imm_s(c, -1);
+            self.b.ins().store(flags(), c1, p, 0);
+            self.b.ins().jump(done, &[]);
+        }
+        self.b.switch_to_block(done);
+    }
+
+    fn object_ptr(&mut self, h: V, p: V, fail: Block) -> V {
+        let tag = self.b.ins().band_imm_u(h, 0xff);
+        let ok = self.b.ins().icmp_imm_s(IntCC::Equal, tag, 5);
+        self.guard(ok, fail);
+        self.b.ins().iadd_imm_s(p, self.lay.rc_value as i64)
+    }
+
+    fn kind_is(&mut self, objp: V, tag: u8) -> V {
+        let k = self
+            .b
+            .ins()
+            .uload8(types::I32, flags(), objp, self.lay.obj_kind as i32);
+        self.b.ins().icmp_imm_s(IntCC::Equal, k, tag as i64)
+    }
+
+    fn array_vec(&mut self, objp: V, mask: i64, fail: Block) -> (V, V) {
+        let is_array = self.kind_is(objp, self.lay.array_tag);
+        self.guard(is_array, fail);
+        let fl = self
+            .b
+            .ins()
+            .uload8(types::I32, flags(), objp, self.lay.obj_flags as i32);
+        let bad = self.b.ins().band_imm_u(fl, mask);
+        let ok = self.b.ins().icmp_imm_s(IntCC::Equal, bad, 0);
+        self.guard(ok, fail);
+        let vec = (self.lay.obj_kind + self.lay.array_vec) as i32;
+        let ptr = self
+            .b
+            .ins()
+            .load(types::I64, flags(), objp, vec + self.lay.vec_ptr as i32);
+        let len = self
+            .b
+            .ins()
+            .load(types::I64, flags(), objp, vec + self.lay.vec_len as i32);
+        (ptr, len)
+    }
+
+    fn index_of(&mut self, k: usize, t: Ty, fail: Block) -> V {
+        if t == Ty::Int {
+            let i = self.i32_of(k);
+            return self.b.ins().sextend(types::I64, i);
+        }
+        if t != Ty::Num {
+            let ok = self.tag_is(k, T_NUMBER);
+            self.guard(ok, fail);
+        }
+        let x = self.b.use_var(self.pay[k]);
+        let i = self.b.ins().fcvt_to_sint_sat(types::I64, x);
+        let back = self.b.ins().fcvt_from_sint(types::F64, i);
+        let ok = self.b.ins().fcmp(FloatCC::Equal, back, x);
+        self.guard(ok, fail);
+        i
+    }
+
+    fn own_prop(&mut self, objp: V, ip: usize, fail: Block) -> (V, V) {
+        let ord = self.kind_is(objp, self.lay.ordinary_tag);
+        self.guard(ord, fail);
+        let pm = self.b.ins().iadd_imm_s(objp, self.lay.obj_props as i64);
+        let shp = self
+            .b
+            .ins()
+            .load(types::I64, flags(), pm, self.lay.pm_shape as i32);
+        let sid = self
+            .b
+            .ins()
+            .load(types::I64, flags(), shp, self.lay.shape_id as i32);
+        let ic = &self.proto.ics[self.proto.ic_index[ip] as usize] as *const _ as i64
+            + std::mem::offset_of!(crate::bytecode::PropIc, entries) as i64;
+        let e = self.b.ins().iconst(types::I64, ic);
+        let esh = self.b.ins().load(
+            types::I64,
+            flags(),
+            e,
+            std::mem::offset_of!(crate::bytecode::IcEntry, shape) as i32,
+        );
+        let same = self.b.ins().icmp(IntCC::Equal, sid, esh);
+        self.guard(same, fail);
+        let holder = self.b.ins().load(
+            types::I64,
+            flags(),
+            e,
+            std::mem::offset_of!(crate::bytecode::IcEntry, holder) as i32,
+        );
+        let own = self.b.ins().icmp_imm_s(IntCC::Equal, holder, 0);
+        self.guard(own, fail);
+        let acc = self
+            .b
+            .ins()
+            .uload8(types::I32, flags(), pm, self.lay.pm_accessors as i32);
+        let plain = self.b.ins().icmp_imm_s(IntCC::Equal, acc, 0);
+        self.guard(plain, fail);
+        let idx = self.b.ins().uload32(
+            flags(),
+            e,
+            std::mem::offset_of!(crate::bytecode::IcEntry, index) as i32,
+        );
+        let vals = self
+            .b
+            .ins()
+            .load(types::I64, flags(), pm, self.lay.pm_values as i32);
+        let off = self.b.ins().ishl_imm_u(idx, 4);
+        let addr = self.b.ins().iadd(vals, off);
+        let vh = self.b.ins().load(types::I64, flags(), addr, 0);
+        let vp = self.b.ins().load(types::F64, flags(), addr, 8);
+        let tag = self.b.ins().band_imm_u(vh, 0xff);
+        let ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, tag, T_UNINIT);
+        self.guard(ok, fail);
+        (vh, vp)
+    }
+
+    fn not_builder(&mut self, k: usize, t: Ty, slow: Block) {
+        if t == Ty::Any || t == Ty::Prim {
+            let tg = self.tag(k);
+            let ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, tg, T_UNDEFINED);
+            self.guard(ok, slow);
         }
     }
 
@@ -757,10 +1045,44 @@ impl Gen<'_, '_> {
 
     fn goto_from(&mut self, cur: &[Ty], target: usize) {
         let want = self.ty_at(target);
+        let mut fail = None;
         for k in 0..want.len() {
-            self.convert(k, cur[k], want[k]);
+            if join(cur[k], want[k]) != want[k] {
+                let f = *fail.get_or_insert_with(|| {
+                    let blk = self.b.create_block();
+                    self.narrows.push((blk, target, cur.to_vec()));
+                    blk
+                });
+                self.narrow(k, cur[k], want[k], f);
+            } else {
+                self.convert(k, cur[k], want[k]);
+            }
         }
         self.b.ins().jump(self.blocks[target], &[]);
+    }
+
+    fn narrow(&mut self, k: usize, from: Ty, to: Ty, fail: Block) {
+        if from == Ty::Any || from == Ty::Prim {
+            let tag = self.tag(k);
+            let ok = match to {
+                Ty::Prim => {
+                    let off = self.b.ins().iadd_imm_s(tag, -3);
+                    self.b.ins().icmp_imm_s(IntCC::UnsignedGreaterThan, off, 4)
+                }
+                _ => self.b.ins().icmp_imm_s(IntCC::Equal, tag, T_NUMBER),
+            };
+            self.guard(ok, fail);
+        }
+        if to == Ty::Int {
+            let p = self.b.use_var(self.pay[k]);
+            let i = self.b.ins().fcvt_to_sint_sat(types::I32, p);
+            let back = self.b.ins().fcvt_from_sint(types::F64, i);
+            let pb = self.b.ins().bitcast(types::I64, MemFlagsData::new(), p);
+            let bb = self.b.ins().bitcast(types::I64, MemFlagsData::new(), back);
+            let ok = self.b.ins().icmp(IntCC::Equal, pb, bb);
+            self.guard(ok, fail);
+            self.b.def_var(self.ival[k], i);
+        }
     }
 
     fn branch(&mut self, cond: V, cur_yes: &[Ty], yes: usize, cur_no: &[Ty], no: usize) {
@@ -911,6 +1233,15 @@ impl Gen<'_, '_> {
         while let Some((blk, status)) = self.exits.pop() {
             self.b.switch_to_block(blk);
             let v = self.b.ins().iconst(types::I64, status as i64);
+            self.ret_value(v);
+        }
+        while let Some((blk, ip, cur)) = self.narrows.pop() {
+            self.b.switch_to_block(blk);
+            self.spill(&cur, 0, cur.len());
+            let v = self
+                .b
+                .ins()
+                .iconst(types::I64, (DEOPT_TYPE | ip as u64) as i64);
             self.ret_value(v);
         }
         while let Some((blk, ip, inn)) = self.deopts.pop() {
@@ -1076,22 +1407,14 @@ impl Gen<'_, '_> {
                 self.goto_from(&cur, next);
             }
             Op::Pop => {
-                if inn[d - 1] == Ty::Any {
-                    let slow = self.slow_block(ip, &inn, succs);
-                    let ok = self.not_heap(d - 1);
-                    self.guard(ok, slow);
-                }
+                self.refcount(d - 1, inn[d - 1], jit_drop as *const () as usize);
                 cur.pop();
                 self.goto_from(&cur, next);
             }
             Op::Dup => {
                 let t = inn[d - 1];
-                if t == Ty::Any {
-                    let slow = self.slow_block(ip, &inn, succs);
-                    let ok = self.not_heap(d - 1);
-                    self.guard(ok, slow);
-                }
                 self.copy(d - 1, d, t);
+                self.refcount(d, t, jit_clone as *const () as usize);
                 cur.push(t);
                 self.goto_from(&cur, next);
             }
@@ -1116,7 +1439,7 @@ impl Gen<'_, '_> {
                 let checked = matches!(op, Op::GetLocalChecked(..));
                 if t == Ty::Any || t == Ty::Prim {
                     let slow = self.slow_block(ip, &inn, succs);
-                    self.plain_local(l, t, slow);
+                    self.not_builder(l, t, slow);
                     if checked {
                         let tg = self.tag(l);
                         let ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, tg, T_UNINIT);
@@ -1124,6 +1447,7 @@ impl Gen<'_, '_> {
                     }
                 }
                 self.copy(l, d, t);
+                self.refcount(d, t, jit_clone as *const () as usize);
                 cur.push(t);
                 if matches!(op, Op::GetLocalUndef(_)) {
                     self.set_head(d + 1, T_UNDEFINED);
@@ -1135,20 +1459,230 @@ impl Gen<'_, '_> {
                 let l = l as usize;
                 let (top, loc) = (inn[d - 1], inn[l]);
                 let store = matches!(op, Op::StoreLocal(_));
-                let need_top = !store && top == Ty::Any;
-                if loc == Ty::Any || loc == Ty::Prim || need_top {
+                if loc == Ty::Any || loc == Ty::Prim {
                     let slow = self.slow_block(ip, &inn, succs);
-                    self.plain_local(l, loc, slow);
-                    if need_top {
-                        let ok = self.not_heap(d - 1);
-                        self.guard(ok, slow);
-                    }
+                    self.not_builder(l, loc, slow);
                 }
+                self.refcount(l, loc, jit_drop as *const () as usize);
                 self.copy(d - 1, l, top);
+                if !store {
+                    self.refcount(l, top, jit_clone as *const () as usize);
+                }
                 cur[l] = top;
                 if store {
                     cur.pop();
                 }
+                self.goto_from(&cur, next);
+            }
+            Op::GetIndex => {
+                let (ta, tk) = (inn[d - 2], inn[d - 1]);
+                if !matches!(ta, Ty::Any) {
+                    self.step(ip, &inn, succs);
+                    return;
+                }
+                let slow = self.slow_block(ip, &inn, succs);
+                let help = self.b.create_block();
+                let done = self.b.create_block();
+                let (oh, op_) = self.bits(d - 2, ta);
+                let objp = self.object_ptr(oh, op_, help);
+                let (ptr, len) = self.array_vec(objp, 72, help);
+                let i = self.index_of(d - 1, tk, help);
+                let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
+                self.guard(inb, help);
+                let off = self.b.ins().ishl_imm_u(i, 4);
+                let addr = self.b.ins().iadd(ptr, off);
+                let vh = self.b.ins().load(types::I64, flags(), addr, 0);
+                let vp = self.b.ins().load(types::F64, flags(), addr, 8);
+                let vpb = self.b.ins().bitcast(types::I64, MemFlagsData::new(), vp);
+                self.ref_change(vh, vpb, true);
+                self.ref_change(oh, op_, false);
+                self.b.def_var(self.head[d - 2], vh);
+                self.b.def_var(self.pay[d - 2], vp);
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(help);
+                let (kh, kp) = self.bits(d - 1, tk);
+                let (oh2, op2) = self.bits(d - 2, ta);
+                let dst = self.konst((d - 2) as i64);
+                let zero = self.konst(0);
+                let r = self.call_six(
+                    jit_index as *const () as usize,
+                    [oh2, op2, kh, kp, dst, zero],
+                );
+                let ok = self.b.ins().icmp_imm_s(IntCC::Equal, r, 0);
+                self.guard(ok, slow);
+                self.load_slot(d - 2);
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(done);
+                cur.truncate(d - 1);
+                cur[d - 2] = Ty::Any;
+                self.goto_from(&cur, next);
+            }
+            Op::SetIndex => {
+                let (ta, tk, tv) = (inn[d - 3], inn[d - 2], inn[d - 1]);
+                if !matches!(ta, Ty::Any) {
+                    self.step(ip, &inn, succs);
+                    return;
+                }
+                let slow = self.slow_block(ip, &inn, succs);
+                let help = self.b.create_block();
+                let done = self.b.create_block();
+                let (oh, op_) = self.bits(d - 3, ta);
+                let objp = self.object_ptr(oh, op_, help);
+                let (ptr, len) = self.array_vec(objp, 74, help);
+                let i = self.index_of(d - 2, tk, help);
+                let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
+                self.guard(inb, help);
+                let off = self.b.ins().ishl_imm_u(i, 4);
+                let addr = self.b.ins().iadd(ptr, off);
+                let old_h = self.b.ins().load(types::I64, flags(), addr, 0);
+                let old_p = self.b.ins().load(types::I64, flags(), addr, 8);
+                let (vh, vp) = self.bits(d - 1, tv);
+                if tv == Ty::Any {
+                    self.ref_change(vh, vp, true);
+                }
+                self.b.ins().store(flags(), vh, addr, 0);
+                self.b.ins().store(flags(), vp, addr, 8);
+                self.ref_change(old_h, old_p, false);
+                self.ref_change(oh, op_, false);
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(help);
+                let (oh2, op2) = self.bits(d - 3, ta);
+                let (kh, kp) = self.bits(d - 2, tk);
+                let (vh2, vp2) = self.bits(d - 1, tv);
+                let r = self.call_six(
+                    jit_set_index as *const () as usize,
+                    [oh2, op2, kh, kp, vh2, vp2],
+                );
+                let ok = self.b.ins().icmp_imm_s(IntCC::Equal, r, 0);
+                self.guard(ok, slow);
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(done);
+                self.copy(d - 1, d - 3, tv);
+                cur.truncate(d - 2);
+                cur[d - 3] = tv;
+                self.goto_from(&cur, next);
+            }
+            Op::GetProp(k)
+            | Op::GetMethod(k)
+            | Op::GetLocalProp(_, k)
+            | Op::GetLocalMethod(_, k) => {
+                let (src, mode, dst) = match op {
+                    Op::GetLocalProp(s, _) => (s as usize, 0, d),
+                    Op::GetProp(_) => (d - 1, 1, d - 1),
+                    Op::GetLocalMethod(s, _) => (s as usize, 2, d),
+                    _ => (d - 1, 3, d - 1),
+                };
+                let ts = inn[src];
+                let slow = self.slow_block(ip, &inn, succs);
+                if matches!(op, Op::GetLocalProp(..) | Op::GetLocalMethod(..)) {
+                    self.not_builder(src, ts, slow);
+                }
+                let help = self.b.create_block();
+                let done = self.b.create_block();
+                let length =
+                    matches!(&self.proto.consts[k as usize], Value::Str(s) if &**s == "length");
+                if mode < 2 && ts == Ty::Any {
+                    let (oh, op_) = self.bits(src, ts);
+                    let objp = self.object_ptr(oh, op_, help);
+                    if length {
+                        let (_, len) = self.array_vec(objp, 64, help);
+                        let f = self.b.ins().fcvt_from_uint(types::F64, len);
+                        if mode == 1 {
+                            self.ref_change(oh, op_, false);
+                        }
+                        self.set_f64(dst, Ty::Any, f);
+                    } else {
+                        let (vh, vp) = self.own_prop(objp, ip, help);
+                        let vpb = self.b.ins().bitcast(types::I64, MemFlagsData::new(), vp);
+                        self.ref_change(vh, vpb, true);
+                        if mode == 1 {
+                            self.ref_change(oh, op_, false);
+                        }
+                        self.b.def_var(self.head[dst], vh);
+                        self.b.def_var(self.pay[dst], vp);
+                    }
+                    self.b.ins().jump(done, &[]);
+                } else {
+                    self.b.ins().jump(help, &[]);
+                }
+                self.b.switch_to_block(help);
+                let (oh, op_) = self.bits(src, ts);
+                let modev = self.konst(mode);
+                let dstv = self.konst(dst as i64);
+                let ic = &self.proto.ics[self.proto.ic_index[ip] as usize] as *const _ as i64;
+                let icv = self.konst(ic);
+                let key = &self.proto.consts[k as usize] as *const Value as i64;
+                let keyv = self.konst(key);
+                let r = self.call_six(
+                    jit_prop as *const () as usize,
+                    [oh, op_, modev, dstv, icv, keyv],
+                );
+                let ok = self.b.ins().icmp_imm_s(IntCC::Equal, r, 0);
+                self.guard(ok, slow);
+                self.load_slot(dst);
+                if mode >= 2 {
+                    self.load_slot(dst + 1);
+                }
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(done);
+                match op {
+                    Op::GetLocalProp(..) => cur.push(Ty::Any),
+                    Op::GetProp(_) => cur[d - 1] = Ty::Any,
+                    Op::GetLocalMethod(..) => {
+                        cur.push(Ty::Any);
+                        cur.push(Ty::Any);
+                    }
+                    _ => {
+                        cur[d - 1] = Ty::Any;
+                        cur.push(Ty::Any);
+                    }
+                }
+                self.goto_from(&cur, next);
+            }
+            Op::NewObject => {
+                let dst = self.konst(d as i64);
+                let zero = self.konst(0);
+                let r = self.call_six(
+                    jit_new_object as *const () as usize,
+                    [dst, zero, zero, zero, zero, zero],
+                );
+                let slow = self.slow_block(ip, &inn, succs);
+                let ok = self.b.ins().icmp_imm_s(IntCC::Equal, r, 0);
+                self.guard(ok, slow);
+                self.load_slot(d);
+                cur.push(Ty::Any);
+                self.goto_from(&cur, next);
+            }
+            Op::InitProp(k) => {
+                let (oh, op_) = self.bits(d - 2, inn[d - 2]);
+                let (vh, vp) = self.bits(d - 1, inn[d - 1]);
+                let key = &self.proto.consts[k as usize] as *const Value as i64;
+                let keyv = self.konst(key);
+                let zero = self.konst(0);
+                let r = self.call_six(
+                    jit_init_prop as *const () as usize,
+                    [oh, op_, vh, vp, keyv, zero],
+                );
+                let slow = self.slow_block(ip, &inn, succs);
+                let ok = self.b.ins().icmp_imm_s(IntCC::Equal, r, 0);
+                self.guard(ok, slow);
+                cur.pop();
+                self.goto_from(&cur, next);
+            }
+            Op::GetGlobal(k) => {
+                let cache = &self.proto.global_cache[k as usize] as *const _ as i64;
+                let cv = self.konst(cache);
+                let dst = self.konst(d as i64);
+                let zero = self.konst(0);
+                let r = self.call_six(
+                    jit_global as *const () as usize,
+                    [cv, dst, zero, zero, zero, zero],
+                );
+                let slow = self.slow_block(ip, &inn, succs);
+                let ok = self.b.ins().icmp_imm_s(IntCC::Equal, r, 0);
+                self.guard(ok, slow);
+                self.load_slot(d);
+                cur.push(Ty::Any);
                 self.goto_from(&cur, next);
             }
             Op::IncLocal(l) | Op::DecLocal(l) => {
@@ -1509,6 +2043,71 @@ impl Gen<'_, '_> {
                 self.goto_from(&cur, next);
             }
             Op::Call(argc, _) => {
+                let ci = d - argc as usize - 2;
+                let cands: Vec<(usize, Intrinsic)> = self
+                    .intrinsics
+                    .iter()
+                    .filter(|(_, k)| k.arity() == argc)
+                    .map(|(o, k)| (Rc::as_ptr(o) as usize, *k))
+                    .collect();
+                let generic = self.b.create_block();
+                if !cands.is_empty() && inn[ci] == Ty::Any {
+                    let tag = self.tag(ci);
+                    let is_obj = self.b.ins().icmp_imm_s(IntCC::Equal, tag, 5);
+                    self.guard(is_obj, generic);
+                    for (k, &t) in inn.iter().enumerate().take(d).skip(ci + 2) {
+                        if !is_num(t) {
+                            let ok = self.tag_is(k, T_NUMBER);
+                            self.guard(ok, generic);
+                        }
+                    }
+                    let p = self.b.use_var(self.pay[ci]);
+                    let bits = self.b.ins().bitcast(types::I64, MemFlagsData::new(), p);
+                    let objp = self.b.ins().iadd_imm_s(bits, self.lay.rc_value as i64);
+                    let done = self.b.create_block();
+                    self.b.append_block_param(done, types::F64);
+                    for (ptr, kind) in cands {
+                        let hit = self.b.ins().icmp_imm_s(IntCC::Equal, objp, ptr as i64);
+                        let yes = self.b.create_block();
+                        let no = self.b.create_block();
+                        self.b.ins().brif(hit, yes, &[], no, &[]);
+                        self.b.switch_to_block(yes);
+                        let x = self.f64_of(ci + 2, inn[ci + 2]);
+                        let r = match kind {
+                            Intrinsic::Floor => self.b.ins().floor(x),
+                            Intrinsic::Ceil => self.b.ins().ceil(x),
+                            Intrinsic::Trunc => self.b.ins().trunc(x),
+                            Intrinsic::Abs => self.b.ins().fabs(x),
+                            Intrinsic::Sqrt => self.b.ins().sqrt(x),
+                            Intrinsic::Min | Intrinsic::Max => {
+                                let y = self.f64_of(ci + 3, inn[ci + 3]);
+                                if kind == Intrinsic::Min {
+                                    self.b.ins().fmin(x, y)
+                                } else {
+                                    self.b.ins().fmax(x, y)
+                                }
+                            }
+                        };
+                        self.b.ins().jump(done, &[BlockArg::Value(r)]);
+                        self.b.switch_to_block(no);
+                    }
+                    self.b.ins().jump(generic, &[]);
+                    self.b.switch_to_block(done);
+                    let r = self.b.block_params(done)[0];
+                    let (fh, fp) = self.bits(ci, Ty::Any);
+                    self.ref_change(fh, fp, false);
+                    let (th, tp) = self.bits(ci + 1, inn[ci + 1]);
+                    if inn[ci + 1] == Ty::Any {
+                        self.ref_change(th, tp, false);
+                    }
+                    self.set_f64(ci, Ty::Any, r);
+                    let mut out = inn[..ci].to_vec();
+                    out.push(Ty::Any);
+                    self.goto_from(&out, next);
+                } else {
+                    self.b.ins().jump(generic, &[]);
+                }
+                self.b.switch_to_block(generic);
                 self.spill(&inn, 0, d);
                 let r = self.helper(
                     self.sigs.call,
@@ -1527,28 +2126,52 @@ impl Gen<'_, '_> {
                 self.ret_value(r);
             }
             Op::GetUpval(i) | Op::GetUpvalChecked(i, _) | Op::GetUpvalCheckedUndef(i, _) => {
-                let r = self.helper(
-                    self.sigs.upval,
-                    jit_upval as *const () as usize,
-                    &[i as i64, d as i64],
-                );
-                let bp = self.bp();
-                let h = self.b.ins().load(types::I64, flags(), bp, d as i32 * SLOT);
-                let p = self
+                let ctx = self.b.use_var(self.ctx_var);
+                let ups = self.b.ins().load(types::I64, flags(), ctx, 40);
+                let cell = self.b.ins().load(types::I64, flags(), ups, i as i32 * 8);
+                let uv = self.b.ins().iadd_imm_s(cell, self.lay.upvalue as i64);
+                let tag = self.b.ins().uload8(types::I32, flags(), uv, 0);
+                let open = self
                     .b
                     .ins()
-                    .load(types::F64, flags(), bp, d as i32 * SLOT + 8);
+                    .icmp_imm_s(IntCC::Equal, tag, self.lay.open_tag as i64);
+                let ob = self.b.create_block();
+                let cb = self.b.create_block();
+                let join_b = self.b.create_block();
+                self.b.append_block_param(join_b, types::I64);
+                self.b.ins().brif(open, ob, &[], cb, &[]);
+                self.b.switch_to_block(ob);
+                let idx = self
+                    .b
+                    .ins()
+                    .load(types::I64, flags(), uv, self.lay.open_index as i32);
+                let base = self.b.ins().load(types::I64, flags(), ctx, 16);
+                let bp = self.bp();
+                let rel = self.b.ins().isub(idx, base);
+                let off = self.b.ins().ishl_imm_u(rel, 4);
+                let addr = self.b.ins().iadd(bp, off);
+                self.b.ins().jump(join_b, &[BlockArg::Value(addr)]);
+                self.b.switch_to_block(cb);
+                let addr = self.b.ins().iadd_imm_s(uv, self.lay.closed_value as i64);
+                self.b.ins().jump(join_b, &[BlockArg::Value(addr)]);
+                self.b.switch_to_block(join_b);
+                let addr = self.b.block_params(join_b)[0];
+                let h = self.b.ins().load(types::I64, flags(), addr, 0);
+                let p = self.b.ins().load(types::F64, flags(), addr, 8);
+                if !matches!(op, Op::GetUpval(_)) {
+                    let slow = self.slow_block(ip, &inn, succs);
+                    let tg = self.b.ins().band_imm_u(h, 0xff);
+                    let ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, tg, T_UNINIT);
+                    self.guard(ok, slow);
+                }
+                let pb = self.b.ins().bitcast(types::I64, MemFlagsData::new(), p);
+                self.ref_change(h, pb, true);
                 self.b.def_var(self.head[d], h);
                 self.b.def_var(self.pay[d], p);
                 cur.push(Ty::Any);
                 if matches!(op, Op::GetUpvalCheckedUndef(..)) {
                     self.set_head(d + 1, T_UNDEFINED);
                     cur.push(Ty::Prim);
-                }
-                if !matches!(op, Op::GetUpval(_)) {
-                    let slow = self.slow_block(ip, &inn, succs);
-                    let ok = self.b.ins().icmp_imm_s(IntCC::Equal, r, 0);
-                    self.guard(ok, slow);
                 }
                 self.goto_from(&cur, next);
             }
@@ -1638,7 +2261,7 @@ fn entry_points(proto: &FunctionProto, depths: &[u16]) -> Vec<u16> {
 }
 
 impl Jit {
-    pub fn new() -> Option<Jit> {
+    pub fn new(intrinsics: Vec<(Rc<crate::object::Obj>, Intrinsic)>) -> Option<Jit> {
         let mut fb = settings::builder();
         fb.set("use_colocated_libcalls", "false").ok()?;
         fb.set("is_pic", "false").ok()?;
@@ -1650,6 +2273,8 @@ impl Jit {
         let module = JITModule::new(JITBuilder::with_isa(isa, default_libcall_names()));
         let ctx = module.make_context();
         Some(Jit {
+            lay: crate::object::jit_layout(),
+            intrinsics,
             module,
             ctx,
             fctx: FunctionBuilderContext::new(),
@@ -1674,6 +2299,9 @@ impl Jit {
             return false;
         }
         let Some((depths, max)) = analyze(proto) else {
+            if std::env::var_os("JSQ_JIT_LOG").is_some() {
+                eprintln!("jit analyze failed {}", proto.name);
+            }
             return false;
         };
         let mut hot = vec![false; proto.code.len()];
@@ -1697,6 +2325,12 @@ impl Jit {
             .any(|((op, &d), &h)| d != UNKNOWN && (h || !looped) && !inline_op(*op));
         let calls = !looped && proto.code.iter().any(|op| matches!(op, Op::Call(..)));
         if cold || calls || max > 400 {
+            if std::env::var_os("JSQ_JIT_LOG").is_some() {
+                eprintln!(
+                    "jit not eligible {} cold={cold} calls={calls} max={max}",
+                    proto.name
+                );
+            }
             return false;
         }
         let mut banned = vec![false; proto.code.len()];
@@ -1706,14 +2340,31 @@ impl Jit {
             }
         }
         let ints = !info.no_int.get();
-        let Some(tys) = infer(proto, &depths, &banned, ints) else {
+        let mut captured = vec![false; max as usize + 8];
+        for f in &proto.functions {
+            for u in &f.upvalues {
+                if u.is_local
+                    && let Some(c) = captured.get_mut(u.index as usize)
+                {
+                    *c = true;
+                }
+            }
+        }
+        if proto.uses_arguments {
+            captured.iter_mut().for_each(|c| *c = true);
+        }
+        let Some(tys) = infer(proto, &depths, &banned, ints, &captured) else {
+            if std::env::var_os("JSQ_JIT_LOG").is_some() {
+                eprintln!("jit infer failed {}", proto.name);
+            }
             return false;
         };
         let entries = entry_points(proto, &depths);
         let tc = self.module.target_config();
         let main = self.sig(&[types::I64, types::I32], types::I64);
         let step = self.sig(&[types::I64, types::I32, types::I32], types::I64);
-        let upval = self.sig(&[types::I64, types::I32, types::I32], types::I64);
+        let six = self.sig(&[types::I64; 7], types::I64);
+        let two = self.sig(&[types::I64, types::I64], types::I64);
         let call = self.sig(
             &[types::I64, types::I32, types::I32, types::I32],
             types::I64,
@@ -1728,7 +2379,8 @@ impl Jit {
         {
             let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut self.fctx);
             let sigs = Sigs {
-                upval: b.import_signature(upval),
+                six: b.import_signature(six),
+                two: b.import_signature(two),
                 step: b.import_signature(step),
                 call: b.import_signature(call),
                 pop_to: b.import_signature(pop_to),
@@ -1788,6 +2440,9 @@ impl Jit {
             {
                 let mut g = Gen {
                     b: &mut b,
+                    proto,
+                    intrinsics: &self.intrinsics,
+                    lay: self.lay,
                     blocks: &blocks,
 
                     types: &tys,
@@ -1802,6 +2457,7 @@ impl Jit {
                     sigs: &sigs,
                     slow: Vec::new(),
                     deopts: Vec::new(),
+                    narrows: Vec::new(),
                     exits: Vec::new(),
                 };
                 for (s, i) in starts {
@@ -1831,7 +2487,13 @@ impl Jit {
         }
         let dump = std::env::var_os("JSQ_JIT_DUMP").is_some();
         self.ctx.set_disasm(dump);
-        let ok = self.module.define_function(id, &mut self.ctx).is_ok();
+        let defined = self.module.define_function(id, &mut self.ctx);
+        if let Err(e) = &defined
+            && std::env::var_os("JSQ_JIT_LOG").is_some()
+        {
+            eprintln!("jit codegen failed {}: {e:?}", proto.name);
+        }
+        let ok = defined.is_ok();
         if dump && let Some(text) = self.ctx.compiled_code().and_then(|c| c.vcode.clone()) {
             eprintln!("== jit {}", proto.name);
             eprintln!("{text}");

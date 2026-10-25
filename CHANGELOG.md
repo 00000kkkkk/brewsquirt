@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with doubles for that operation. Remainders and products by constants become multiplications
   and shifts. Integer loops such as `for (let i = 0; i < n; i++) s = (s + i * 7) % m` run
   about five times faster than in the interpreter and as fast as in Node.
+- The JIT compiles loops that index arrays and typed arrays, read and write array elements,
+  read own data properties through the inline cache, read `length`, read closure variables,
+  build object literals and call `Math.floor`, `ceil`, `trunc`, `abs`, `sqrt`, `min` and `max`.
+  Holes, accessors, proxies, frozen arrays and replaced `Math` methods take the interpreter's
+  path. Loops over arrays and objects run 2.5 to 9 times faster than before.
 - `Uint8Array.prototype.setFromBase64` and `setFromHex` decode into an existing array and report
   how much they read and wrote, and `Uint8Array.fromBase64` honours `lastChunkHandling`
   (`loose`, `strict` and `stop-before-partial`). Every base64 and hex method validates its

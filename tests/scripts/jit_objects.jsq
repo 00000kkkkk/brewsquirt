@@ -1,0 +1,172 @@
+const show = (...xs) => console.log(JSON.stringify(xs, (k, v) => (Object.is(v, -0) ? "-0" : v === undefined ? "u" : Number.isNaN(v) ? "NaN" : v)))
+
+const data = Array.from({ length: 2000 }, (_, i) => i % 17)
+const sums = () => {
+  const a = data
+  let s = 0
+  let t = 0
+  for (let k = 0; k < 3; k++) {
+    for (let i = 0; i < a.length; i++) s += a[i]
+    for (let i = 0; i < data.length; i++) t += data[i] * 2
+  }
+  return [s, t]
+}
+show(...sums())
+
+const holes = () => {
+  const a = [1, , 3, 4]
+  const out = []
+  for (let k = 0; k < 2000; k++) {
+    let s = 0
+    for (let i = 0; i < 6; i++) s += a[i] === undefined ? 100 : a[i]
+    out.push(s)
+  }
+  Array.prototype[1] = 50
+  let p = 0
+  for (let i = 0; i < 4; i++) p += a[i]
+  delete Array.prototype[1]
+  return [out[0], out[1999], p]
+}
+show(...holes())
+
+const writes = () => {
+  const a = new Array(100).fill(0)
+  for (let k = 0; k < 300; k++) for (let i = 0; i < a.length; i++) a[i] = a[i] + i
+  const b = []
+  for (let i = 0; i < 1000; i++) b[i] = i * i
+  const objs = []
+  for (let i = 0; i < 1000; i++) objs[i] = { v: i }
+  for (let i = 0; i < 1000; i++) objs[i] = objs[(i + 1) % 1000]
+  return [a[99], b.length, b[999], objs[0].v, objs[999].v]
+}
+show(...writes())
+
+const strictWrites = () => {
+  "use strict"
+  const frozen = Object.freeze([1, 2, 3])
+  let fails = 0
+  for (let i = 0; i < 2000; i++) {
+    try {
+      frozen[i % 3] = 9
+    } catch (e) {
+      fails++
+    }
+  }
+  return fails
+}
+show(strictWrites())
+
+const props = () => {
+  const p = { x: 1, y: 2.5, z: "s" }
+  let s = 0
+  let str = ""
+  for (let i = 0; i < 3000; i++) {
+    s += p.x + p.y
+    if (i % 1000 === 0) str += p.z
+  }
+  const shapes = [{ x: 1 }, { y: 2, x: 3 }, { x: 4, z: 0 }, Object.create({ x: 7 })]
+  let t = 0
+  for (let i = 0; i < 4000; i++) t += shapes[i % 4].x
+  const g = { get x() { return 10 } }
+  let u = 0
+  for (let i = 0; i < 2000; i++) u += g.x
+  const changing = { x: 1 }
+  let w = 0
+  for (let i = 0; i < 3000; i++) {
+    w += changing.x
+    if (i === 1500) delete changing.x
+    if (i === 1600) changing.x = 2
+  }
+  return [s, str, t, u, w]
+}
+show(...props())
+
+const lengths = () => {
+  const arr = [1, 2, 3]
+  const str = "hello"
+  let n = 0
+  for (let i = 0; i < 3000; i++) {
+    n += arr.length + str.length
+    if (i === 1000) arr.push(4)
+    if (i === 2000) arr.length = 1
+  }
+  return n
+}
+show(lengths())
+
+const typed = () => {
+  const u8 = new Uint8Array(256)
+  const f64 = new Float64Array(64)
+  const i32 = new Int32Array(64)
+  for (let k = 0; k < 50; k++) {
+    for (let i = 0; i < 300; i++) u8[i] = i * 3 + k
+    for (let i = 0; i < 64; i++) f64[i] = f64[i] + i / 7
+    for (let i = 0; i < 64; i++) i32[i] = i32[i] + 2147483647
+  }
+  let s = 0
+  for (let i = 0; i < 256; i++) s += u8[i]
+  return [s, u8[255], f64[63], i32[1], i32[0], u8[300]]
+}
+show(...typed())
+
+const maths = () => {
+  let a = 0
+  let b = 0
+  let c = 0
+  for (let i = -3000; i < 3000; i++) {
+    a += Math.floor(i / 7) + Math.ceil(i / 7) - Math.trunc(i / 7)
+    b += Math.abs(i % 13) + Math.min(i, 5) + Math.max(i, -5)
+    c += Math.sqrt(i * i)
+  }
+  const special = []
+  for (let i = 0; i < 3; i++) {
+    special.push(Math.floor(-0), Math.ceil(-0.5), Math.trunc(-0.7), Math.abs(-0), Math.min(0, -0), Math.max(-0, 0), Math.sqrt(-1), Math.min(NaN, 1), Math.floor("7.9"), Math.max())
+  }
+  const fake = { floor: (x) => "fake" + x }
+  let f = ""
+  for (let i = 0; i < 1500; i++) if (i === 1499) f = fake.floor(1)
+  return [a, b, c, special, f]
+}
+show(...maths())
+
+const upvalues = () => {
+  let counter = 0
+  const bump = () => {
+    counter++
+  }
+  let seen = 0
+  for (let i = 0; i < 3000; i++) {
+    bump()
+    seen += counter
+  }
+  let late
+  const read = () => late
+  let firstErr = ""
+  try {
+    for (let i = 0; i < 3; i++) read()
+  } catch (e) {
+    firstErr = e.constructor.name
+  }
+  late = 5
+  return [counter, seen, read(), firstErr]
+}
+show(...upvalues())
+
+const literals = () => {
+  const out = []
+  for (let i = 0; i < 3000; i++) out.push({ a: i, b: { c: i * 2 }, d: [i] })
+  let s = 0
+  for (let i = 0; i < out.length; i++) s += out[i].a + out[i].b.c + out[i].d[0]
+  return [s, JSON.stringify(out[2999])]
+}
+show(...literals())
+
+const proxies = () => {
+  const target = { x: 1 }
+  const p = new Proxy(target, { get: (t, k) => (k === "x" ? 42 : t[k]) })
+  const items = [target, p, target]
+  let s = 0
+  for (let i = 0; i < 3000; i++) s += items[i % 3].x
+  return s
+}
+show(proxies())

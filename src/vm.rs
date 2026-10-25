@@ -741,6 +741,52 @@ fn ic_holder<'a>(o: &'a Obj, e: &crate::bytecode::IcEntry) -> Option<&'a Obj> {
 }
 
 #[inline(always)]
+fn ic_value(o: &Obj, ic: &crate::bytecode::PropIc) -> Option<Value> {
+    let props = o.props.borrow();
+    let sid = props.shape_id();
+    for e in &ic.entries {
+        if e.shape.get() != sid {
+            continue;
+        }
+        if e.holder.get() == 0 {
+            return props
+                .value_at(e.index.get() as usize)
+                .filter(|v| ic_plain(v, props.may_have_accessors()))
+                .cloned();
+        }
+        let Some(h) = ic_holder(o, e) else {
+            continue;
+        };
+        let pp = h.props.borrow();
+        return pp
+            .value_at(e.index.get() as usize)
+            .filter(|v| ic_plain(v, pp.may_have_accessors()))
+            .cloned();
+    }
+    None
+}
+
+pub(crate) unsafe fn value_bits(h: u64, p: u64) -> std::mem::ManuallyDrop<Value> {
+    std::mem::ManuallyDrop::new(unsafe { std::mem::transmute::<[u64; 2], Value>([h, p]) })
+}
+
+fn element_value(o: &Obj, k: f64) -> Option<Value> {
+    let i = k as usize;
+    if i as f64 != k {
+        return None;
+    }
+    match &o.kind {
+        ObjKind::Array(a) if o.flags.get() & crate::object::SLOW_ELEMENTS == 0 => {
+            if o.is_hole(i) {
+                return None;
+            }
+            a.borrow().get(i).cloned()
+        }
+        ObjKind::Typed(t) => t.get(i),
+        _ => None,
+    }
+}
+
 fn ic_push(stack: &mut Vec<Value>, o: &Obj, ic: &crate::bytecode::PropIc) -> bool {
     let props = o.props.borrow();
     let sid = props.shape_id();
@@ -5489,7 +5535,25 @@ impl Vm {
 
     fn jit_compile(&mut self, proto: &FunctionProto) {
         if self.jit.is_none() {
-            match crate::jit::Jit::new() {
+            let mut intrinsics = Vec::new();
+            if let Some(Value::Object(math)) = self.globals.get("Math").cloned() {
+                for (name, kind) in [
+                    ("floor", crate::jit::Intrinsic::Floor),
+                    ("ceil", crate::jit::Intrinsic::Ceil),
+                    ("trunc", crate::jit::Intrinsic::Trunc),
+                    ("abs", crate::jit::Intrinsic::Abs),
+                    ("sqrt", crate::jit::Intrinsic::Sqrt),
+                    ("min", crate::jit::Intrinsic::Min),
+                    ("max", crate::jit::Intrinsic::Max),
+                ] {
+                    if let Some(Value::Object(f)) = math.get_own(name)
+                        && matches!(f.kind, ObjKind::Native(_))
+                    {
+                        intrinsics.push((f, kind));
+                    }
+                }
+            }
+            match crate::jit::Jit::new(intrinsics) {
                 Some(j) => self.jit = Some(Box::new(j)),
                 None => {
                     self.jit_on = false;
@@ -5524,6 +5588,10 @@ impl Vm {
             base,
             need,
             interrupt: std::sync::Arc::as_ptr(&self.threads.interrupt) as *const u8,
+            upvals: {
+                let fi = self.frames.len() - 1;
+                self.frames[fi].closure.upvalues.as_ptr() as *const u8
+            },
         };
         let prev = std::mem::replace(&mut self.jit_stop, stop);
         let f: crate::jit::JitFn = unsafe { std::mem::transmute(info.code.get()) };
@@ -5867,20 +5935,138 @@ impl Vm {
         }
     }
 
-    pub(crate) fn jit_upval(
-        &mut self,
-        ctx: &mut crate::jit::JitCtx,
-        index: usize,
-        slot: usize,
-    ) -> u64 {
-        let fi = self.frames.len() - 1;
-        let v = match &*self.frames[fi].closure.upvalues[index].borrow() {
-            Upvalue::Open(idx) => self.stack[*idx].clone(),
-            Upvalue::Closed(v) => v.clone(),
+    pub(crate) fn jit_index(&mut self, ctx: &mut crate::jit::JitCtx, a: &[u64; 6]) -> u64 {
+        let o = unsafe { value_bits(a[0], a[1]) };
+        let k = unsafe { value_bits(a[2], a[3]) };
+        let (Value::Object(obj), Value::Number(key)) = (&*o, &*k) else {
+            return 1;
         };
-        let uninit = matches!(v, Value::Uninit);
-        unsafe { std::ptr::write(ctx.bp.add(slot), v) };
-        uninit as u64
+        let Some(v) = element_value(obj, *key) else {
+            return 1;
+        };
+        unsafe { std::ptr::write(ctx.bp.add(a[4] as usize), v) };
+        drop(std::mem::ManuallyDrop::into_inner(o));
+        0
+    }
+
+    pub(crate) fn jit_set_index(&mut self, _ctx: &mut crate::jit::JitCtx, a: &[u64; 6]) -> u64 {
+        if self.proto_indices {
+            return 1;
+        }
+        let o = unsafe { value_bits(a[0], a[1]) };
+        let k = unsafe { value_bits(a[2], a[3]) };
+        let v = unsafe { value_bits(a[4], a[5]) };
+        let (Value::Object(obj), Value::Number(key)) = (&*o, &*k) else {
+            return 1;
+        };
+        let i = *key as usize;
+        if let ObjKind::Typed(t) = &obj.kind {
+            let Value::Number(x) = &*v else {
+                return 1;
+            };
+            if i as f64 != *key || t.kind.is_big() || i >= t.len() {
+                return 1;
+            }
+            t.set_f64(i, *x);
+            drop(std::mem::ManuallyDrop::into_inner(o));
+            return 0;
+        }
+        let ObjKind::Array(items) = &obj.kind else {
+            return 1;
+        };
+        if i as f64 != *key || obj.flags.get() & !crate::object::HAS_HOLES != 0 {
+            return 1;
+        }
+        let len = items.borrow().len();
+        if i < len {
+            if obj.is_hole(i) {
+                return 1;
+            }
+            let old = std::mem::replace(&mut items.borrow_mut()[i], (*v).clone());
+            drop(old);
+        } else if i == len {
+            items.borrow_mut().push((*v).clone());
+        } else {
+            return 1;
+        }
+        drop(std::mem::ManuallyDrop::into_inner(o));
+        0
+    }
+
+    pub(crate) fn jit_prop(&mut self, ctx: &mut crate::jit::JitCtx, a: &[u64; 6]) -> u64 {
+        let v = unsafe { value_bits(a[0], a[1]) };
+        let mode = a[2];
+        let dst = a[3] as usize;
+        let ic = unsafe { &*(a[4] as *const crate::bytecode::PropIc) };
+        let key = unsafe { &*(a[5] as *const Value) };
+        let found = match &*v {
+            Value::Object(o) if matches!(o.kind, ObjKind::Ordinary) => ic_value(o, ic),
+            other => {
+                let len = if mode < 2 {
+                    fast_length(other, key)
+                } else {
+                    None
+                };
+                match len {
+                    Some(n) => Some(Value::Number(n)),
+                    None => {
+                        let h = self.method_holder(other, key);
+                        if h.is_null() {
+                            None
+                        } else {
+                            ic_value(unsafe { &*h }, ic)
+                        }
+                    }
+                }
+            }
+        };
+        let Some(r) = found else {
+            return 1;
+        };
+        unsafe {
+            std::ptr::write(ctx.bp.add(dst), r);
+            match mode {
+                1 => drop(std::mem::ManuallyDrop::into_inner(v)),
+                2 => std::ptr::write(ctx.bp.add(dst + 1), (*v).clone()),
+                3 => std::ptr::write(ctx.bp.add(dst + 1), std::mem::ManuallyDrop::into_inner(v)),
+                _ => {}
+            }
+        }
+        0
+    }
+
+    pub(crate) fn jit_new_object(&mut self, ctx: &mut crate::jit::JitCtx, a: &[u64; 6]) -> u64 {
+        if crate::gc::due() {
+            return 1;
+        }
+        let o = self.new_object();
+        unsafe { std::ptr::write(ctx.bp.add(a[0] as usize), Value::Object(o)) };
+        0
+    }
+
+    pub(crate) fn jit_init_prop(&mut self, _ctx: &mut crate::jit::JitCtx, a: &[u64; 6]) -> u64 {
+        let o = unsafe { value_bits(a[0], a[1]) };
+        let key = unsafe { &*(a[4] as *const Value) };
+        let (Value::Object(obj), Value::Str(k)) = (&*o, key) else {
+            return 1;
+        };
+        let v = std::mem::ManuallyDrop::into_inner(unsafe { value_bits(a[2], a[3]) });
+        obj.props.borrow_mut().insert(k.clone(), v);
+        0
+    }
+
+    pub(crate) fn jit_global(&mut self, ctx: &mut crate::jit::JitCtx, a: &[u64; 6]) -> u64 {
+        let cache = unsafe { &*(a[0] as *const std::cell::Cell<u32>) };
+        let slot = cache.get();
+        if slot == u32::MAX || self.global_accessors {
+            return 1;
+        }
+        let v = self.globals.at(slot).clone();
+        if matches!(v, Value::Uninit) {
+            return 1;
+        }
+        unsafe { std::ptr::write(ctx.bp.add(a[1] as usize), v) };
+        0
     }
 
     pub(crate) fn jit_pop_to(

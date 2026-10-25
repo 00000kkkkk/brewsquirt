@@ -174,6 +174,103 @@ impl Shape {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct JitLayout {
+    pub rc_value: usize,
+    pub obj_kind: usize,
+    pub obj_flags: usize,
+    pub obj_props: usize,
+    pub pm_shape: usize,
+    pub pm_values: usize,
+    pub pm_accessors: usize,
+    pub shape_id: usize,
+    pub array_vec: usize,
+    pub vec_ptr: usize,
+    pub vec_len: usize,
+    pub ordinary_tag: u8,
+    pub array_tag: u8,
+    pub upvalue: usize,
+    pub open_index: usize,
+    pub closed_value: usize,
+    pub open_tag: u8,
+}
+
+fn rc_offset<T>(rc: &Rc<T>) -> usize {
+    let raw = unsafe { *(rc as *const Rc<T> as *const usize) };
+    Rc::as_ptr(rc) as usize - raw
+}
+
+fn cell_offset<T>(c: &RefCell<T>) -> usize {
+    c.as_ptr() as usize - c as *const RefCell<T> as usize
+}
+
+pub fn jit_layout() -> JitLayout {
+    let probe: Vec<Value> = Vec::with_capacity(3);
+    let mut probe = probe;
+    probe.push(Value::Undefined);
+    let words =
+        unsafe { std::slice::from_raw_parts(&probe as *const Vec<Value> as *const usize, 3) };
+    let vec_ptr = words
+        .iter()
+        .position(|&w| w == probe.as_ptr() as usize)
+        .unwrap_or(0)
+        * 8;
+    let vec_len = words.iter().position(|&w| w == 1).unwrap_or(0) * 8;
+    let plain = Rc::new(Obj {
+        kind: ObjKind::Ordinary,
+        props: RefCell::new(PropMap::default()),
+        proto: RefCell::new(None),
+        flags: Cell::new(0),
+        gc_slot: Cell::new(u32::MAX),
+        heap_slot: Cell::new(u32::MAX),
+    });
+    let array = Rc::new(Obj {
+        kind: ObjKind::Array(RefCell::new(Vec::new())),
+        props: RefCell::new(PropMap::default()),
+        proto: RefCell::new(None),
+        flags: Cell::new(0),
+        gc_slot: Cell::new(u32::MAX),
+        heap_slot: Cell::new(u32::MAX),
+    });
+    let tag_of = |o: &Obj| unsafe { *(&o.kind as *const ObjKind as *const u8) };
+    let array_vec = match &array.kind {
+        ObjKind::Array(c) => c.as_ptr() as usize - &array.kind as *const ObjKind as usize,
+        _ => 0,
+    };
+    let shape = Shape::root();
+    let cell = UpCell::new(Upvalue::Open(0x5a5a));
+    let upvalue = rc_offset(&cell) + std::mem::offset_of!(UpCell, value) + cell_offset(&cell.value);
+    let open = Upvalue::Open(0x5a5a);
+    let open_words =
+        unsafe { std::slice::from_raw_parts(&open as *const Upvalue as *const usize, 2) };
+    let open_index = open_words.iter().position(|&w| w == 0x5a5a).unwrap_or(1) * 8;
+    let closed = Upvalue::Closed(Value::Undefined);
+    let closed_value = match &closed {
+        Upvalue::Closed(v) => v as *const Value as usize - &closed as *const Upvalue as usize,
+        _ => 8,
+    };
+    let open_tag = unsafe { *(&open as *const Upvalue as *const u8) };
+    JitLayout {
+        upvalue,
+        open_index,
+        closed_value,
+        open_tag,
+        rc_value: rc_offset(&plain),
+        obj_kind: std::mem::offset_of!(Obj, kind),
+        obj_flags: std::mem::offset_of!(Obj, flags),
+        obj_props: std::mem::offset_of!(Obj, props) + cell_offset(&plain.props),
+        pm_shape: std::mem::offset_of!(PropMap, shape),
+        pm_values: std::mem::offset_of!(PropMap, values) + vec_ptr,
+        pm_accessors: std::mem::offset_of!(PropMap, accessors),
+        shape_id: rc_offset(&shape) + std::mem::offset_of!(Shape, id),
+        array_vec,
+        vec_ptr,
+        vec_len,
+        ordinary_tag: tag_of(&plain),
+        array_tag: tag_of(&array),
+    }
+}
+
 pub struct PropMap {
     shape: Rc<Shape>,
     values: Vec<Value>,
@@ -613,6 +710,7 @@ impl Drop for Obj {
     }
 }
 
+#[repr(u8)]
 pub enum ObjKind {
     Ordinary,
     Array(RefCell<Vec<Value>>),
@@ -1250,6 +1348,7 @@ impl UpCell {
     }
 }
 
+#[repr(u8)]
 pub enum Upvalue {
     Open(usize),
     Closed(Value),
