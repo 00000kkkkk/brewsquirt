@@ -497,6 +497,15 @@ fn speculates(op: Op, inn: &[Ty], banned: bool) -> bool {
         }
 }
 
+fn is_length(proto: &FunctionProto, op: Op) -> bool {
+    match op {
+        Op::GetLocalProp(_, k) | Op::GetProp(k) => {
+            matches!(&proto.consts[k as usize], Value::Str(s) if &**s == "length")
+        }
+        _ => false,
+    }
+}
+
 fn spec_slot(op: Op, d: usize) -> usize {
     match op {
         Op::GetIndex => d - 2,
@@ -704,9 +713,10 @@ fn virtuals(
                     break k;
                 }
                 Op::GetLocalProp(s, c) if s as usize == slot => {
-                    if !keys
-                        .iter()
-                        .any(|&kc| key_of(kc).is_some() && key_of(kc) == key_of(c))
+                    if key_of(c) == Some("length")
+                        || !keys
+                            .iter()
+                            .any(|&kc| key_of(kc).is_some() && key_of(kc) == key_of(c))
                     {
                         continue 'site;
                     }
@@ -879,15 +889,22 @@ fn loans(
         consumed: vec![None; n],
     };
     for ip in 0..n {
-        let Op::GetLocal(l) = code[ip] else {
-            continue;
-        };
-        let l = l as usize;
         let Some(t) = &tys[ip] else {
             continue;
         };
-        if t.get(l) != Some(&Ty::Any) || volatile.get(l).copied().unwrap_or(true) {
-            continue;
+        match code[ip] {
+            Op::GetLocal(l) => {
+                let l = l as usize;
+                if t.get(l) != Some(&Ty::Any) || volatile.get(l).copied().unwrap_or(true) {
+                    continue;
+                }
+            }
+            Op::GetUpval(i) | Op::GetUpvalChecked(i, _) => {
+                if !proto.upvalues.get(i as usize).is_some_and(|u| u.constant) {
+                    continue;
+                }
+            }
+            _ => continue,
         }
         let slot = depths[ip] as usize;
         let mut found = None;
@@ -1322,11 +1339,16 @@ impl Infer<'_> {
                 if speculates(op, inn, self.banned[ip]) =>
             {
                 let at = spec_slot(op, d);
+                let ty = if self.ints && is_length(self.proto, op) {
+                    Ty::Int
+                } else {
+                    Ty::Num
+                };
                 return impure().map(|v| {
                     v.into_iter()
                         .map(|(t, mut st)| {
                             if let Some(x) = st.get_mut(at) {
-                                *x = Ty::Num;
+                                *x = ty;
                             }
                             (t, st)
                         })
@@ -1398,7 +1420,9 @@ struct Gen<'a, 'b> {
     ival: Vec<Variable>,
     sigs: &'a Sigs,
     volatile: &'a [bool],
+    builders: &'a [bool],
     literals: &'a Literals,
+    ic_snap: &'a [[u64; 5]],
     virts: &'a [Virt],
     virt_of: &'a [Option<usize>],
     fields: Vec<Vec<(Variable, Variable, bool)>>,
@@ -1955,11 +1979,100 @@ impl Gen<'_, '_> {
         i
     }
 
+    fn plain_kind(&mut self, objp: V, fail: Block) {
+        let lay = self.lay;
+        if lay.ordinary_tag == 0 && lay.array_tag == 1 {
+            let k = self
+                .b
+                .ins()
+                .uload8(types::I64, flags(), objp, lay.obj_kind as i32);
+            let ok = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::UnsignedLessThanOrEqual, k, 1);
+            self.guard(ok, fail);
+        } else {
+            let ord = self.kind_is(objp, lay.ordinary_tag);
+            let arr = self.kind_is(objp, lay.array_tag);
+            let either = self.b.ins().bor(ord, arr);
+            self.guard(either, fail);
+        }
+    }
+
+    fn known_prop(&mut self, objp: V, snap: [u64; 5], fail: Block) -> (V, V) {
+        let lay = self.lay;
+        let [shape, holder, holder_shape, index, depth] = snap;
+        self.plain_kind(objp, fail);
+        let pm = self.b.ins().iadd_imm_s(objp, lay.obj_props as i64);
+        let shp = self
+            .b
+            .ins()
+            .load(types::I64, flags(), pm, lay.pm_shape as i32);
+        let sid = self
+            .b
+            .ins()
+            .load(types::I64, flags(), shp, lay.shape_id as i32);
+        let same = self.b.ins().icmp_imm_s(IntCC::Equal, sid, shape as i64);
+        self.guard(same, fail);
+        let pm = if holder == 0 {
+            pm
+        } else {
+            if depth != 1 {
+                self.b.ins().jump(fail, &[]);
+                let dead = self.b.create_block();
+                self.b.switch_to_block(dead);
+            }
+            let prc = self
+                .b
+                .ins()
+                .load(types::I64, flags(), objp, lay.obj_proto as i32);
+            let pobj = self.b.ins().iadd_imm_s(prc, lay.rc_value as i64);
+            let same = self.b.ins().icmp_imm_s(IntCC::Equal, pobj, holder as i64);
+            self.guard(same, fail);
+            let hpm = self.b.ins().iadd_imm_s(pobj, lay.obj_props as i64);
+            let hshp = self
+                .b
+                .ins()
+                .load(types::I64, flags(), hpm, lay.pm_shape as i32);
+            let hsid = self
+                .b
+                .ins()
+                .load(types::I64, flags(), hshp, lay.shape_id as i32);
+            let same = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, hsid, holder_shape as i64);
+            self.guard(same, fail);
+            hpm
+        };
+        let acc = self
+            .b
+            .ins()
+            .uload8(types::I32, flags(), pm, lay.pm_accessors as i32);
+        let plain = self.b.ins().icmp_imm_s(IntCC::Equal, acc, 0);
+        self.guard(plain, fail);
+        let vals = self
+            .b
+            .ins()
+            .load(types::I64, flags(), pm, lay.pm_values as i32);
+        let at = (index as i32) * SLOT;
+        let vh = self.b.ins().load(types::I64, flags(), vals, at);
+        let vp = self.b.ins().load(types::F64, flags(), vals, at + 8);
+        let tag = self.b.ins().band_imm_u(vh, 0xff);
+        let ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, tag, T_UNINIT);
+        self.guard(ok, fail);
+        (vh, vp)
+    }
+
     fn own_prop(&mut self, objp: V, ip: usize, fail: Block) -> (V, V) {
-        let ord = self.kind_is(objp, self.lay.ordinary_tag);
-        let arr = self.kind_is(objp, self.lay.array_tag);
-        let either = self.b.ins().bor(ord, arr);
-        self.guard(either, fail);
+        let slot = self.proto.ic_index[ip] as usize;
+        if let Some(&snap) = self.ic_snap.get(slot)
+            && snap[0] != 0
+            && snap[3] < (1 << 24)
+        {
+            return self.known_prop(objp, snap, fail);
+        }
+        self.plain_kind(objp, fail);
         let pm = self.b.ins().iadd_imm_s(objp, self.lay.obj_props as i64);
         let shp = self
             .b
@@ -2056,6 +2169,9 @@ impl Gen<'_, '_> {
     }
 
     fn not_builder(&mut self, k: usize, t: Ty, slow: Block) {
+        if !self.builders.get(k).copied().unwrap_or(true) {
+            return;
+        }
         if t == Ty::Any || t == Ty::Prim {
             let tg = self.tag(k);
             let ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, tg, T_UNDEFINED);
@@ -2506,6 +2622,10 @@ impl Gen<'_, '_> {
     fn spec_guard(&mut self, h: V, ip: usize, inn: &[Ty], own: Option<(V, V)>) {
         let tg = self.b.ins().band_imm_u(h, 0xff);
         let ok = self.b.ins().icmp_imm_s(IntCC::Equal, tg, T_NUMBER);
+        self.spec_check(ok, ip, inn, own);
+    }
+
+    fn spec_check(&mut self, ok: V, ip: usize, inn: &[Ty], own: Option<(V, V)>) {
         let cont = self.b.create_block();
         let fail = self.b.create_block();
         self.b.set_cold_block(fail);
@@ -2517,6 +2637,26 @@ impl Gen<'_, '_> {
         let ovf = self.overflow_block(ip, inn);
         self.b.ins().jump(ovf, &[]);
         self.b.switch_to_block(cont);
+    }
+
+    fn spec_after_int(&mut self, ip: usize, inn: &[Ty], dst: usize) {
+        self.spec_after(ip, inn, dst);
+        let x = self.b.use_var(self.pay[dst]);
+        let i = self.b.ins().fcvt_to_sint_sat(types::I32, x);
+        let back = self.b.ins().fcvt_from_sint(types::F64, i);
+        let xb = self.b.ins().bitcast(types::I64, MemFlagsData::new(), x);
+        let bb = self.b.ins().bitcast(types::I64, MemFlagsData::new(), back);
+        let ok = self.b.ins().icmp(IntCC::Equal, xb, bb);
+        let cont = self.b.create_block();
+        let fail = self.b.create_block();
+        self.b.set_cold_block(fail);
+        self.b.ins().brif(ok, cont, &[], fail, &[]);
+        self.b.switch_to_block(fail);
+        self.spill(inn, 0, dst.min(inn.len()));
+        let v = self.konst((DEOPT_SPEC | ip as u64) as i64);
+        self.ret_value(v);
+        self.b.switch_to_block(cont);
+        self.set_int(dst, i);
     }
 
     fn spec_after(&mut self, ip: usize, inn: &[Ty], dst: usize) {
@@ -3105,10 +3245,24 @@ impl Gen<'_, '_> {
                 let done = self.b.create_block();
                 let length =
                     matches!(&self.proto.consts[k as usize], Value::Str(s) if &**s == "length");
+                let int_len = spec && length && self.ints;
                 if ts == Ty::Any && (mode < 2 || !length) {
                     let (oh, op_) = self.bits(src, ts);
                     let objp = self.object_ptr(oh, op_, help);
-                    if length {
+                    if length && int_len {
+                        let (_, len) = self.array_vec(objp, 64, help);
+                        let small = self.b.ins().icmp_imm_s(
+                            IntCC::UnsignedLessThanOrEqual,
+                            len,
+                            0x7fff_ffff,
+                        );
+                        self.spec_check(small, ip, &inn, lent.then_some((oh, op_)));
+                        let i = self.b.ins().ireduce(types::I32, len);
+                        if mode == 1 && !lent {
+                            self.ref_change(oh, op_, false);
+                        }
+                        self.set_int(dst, i);
+                    } else if length {
                         let (_, len) = self.array_vec(objp, 64, help);
                         let f = self.b.ins().fcvt_from_uint(types::F64, len);
                         if mode == 1 && !lent {
@@ -3165,13 +3319,21 @@ impl Gen<'_, '_> {
                 if mode >= 2 {
                     self.load_slot(dst + 1);
                 }
-                if spec {
+                if int_len {
+                    self.spec_after_int(ip, &inn, dst);
+                } else if spec {
                     self.spec_after(ip, &inn, dst);
                 }
                 self.b.ins().jump(done, &[]);
                 self.cold_from(mark);
                 self.b.switch_to_block(done);
-                let out = if spec { Ty::Num } else { Ty::Any };
+                let out = if int_len {
+                    Ty::Int
+                } else if spec {
+                    Ty::Num
+                } else {
+                    Ty::Any
+                };
                 match op {
                     Op::GetLocalProp(..) => cur.push(out),
                     Op::GetProp(_) => cur[d - 1] = out,
@@ -4005,8 +4167,10 @@ impl Gen<'_, '_> {
                     let ok = self.b.ins().icmp_imm_s(IntCC::NotEqual, tg, T_UNINIT);
                     self.guard(ok, slow);
                 }
-                let pb = self.b.ins().bitcast(types::I64, MemFlagsData::new(), p);
-                self.ref_change(h, pb, true);
+                if !self.loans.lent[ip] {
+                    let pb = self.b.ins().bitcast(types::I64, MemFlagsData::new(), p);
+                    self.ref_change(h, pb, true);
+                }
                 self.b.def_var(self.head[d], h);
                 self.b.def_var(self.pay[d], p);
                 cur.push(Ty::Any);
@@ -4365,11 +4529,15 @@ impl Jit {
         }
         let dirty = dirty_sets(proto, &depths, max as usize);
         let mut volatile = captured.clone();
+        let mut builder_slots = vec![false; captured.len()];
         for op in &proto.code {
-            if let Op::AppendLocal(l) = *op
-                && let Some(v) = volatile.get_mut(l as usize)
-            {
-                *v = true;
+            if let Op::AppendLocal(l) = *op {
+                if let Some(v) = volatile.get_mut(l as usize) {
+                    *v = true;
+                }
+                if let Some(v) = builder_slots.get_mut(l as usize) {
+                    *v = true;
+                }
             }
         }
         let Some(tys) = infer(proto, &depths, &banned, ints, &captured) else {
@@ -4519,7 +4687,9 @@ impl Jit {
                     ival,
                     sigs: &sigs,
                     volatile: &volatile,
+                    builders: &builder_slots,
                     literals: &literal_sites,
+                    ic_snap: &job.ics,
                     virts: &virts,
                     virt_of: &virt_of,
                     fields: Vec::new(),
@@ -4598,6 +4768,7 @@ impl Jit {
 
 pub struct Job {
     pub proto: usize,
+    pub ics: Vec<[u64; 5]>,
     pub banned: Vec<u32>,
     pub no_int: bool,
     pub no_spec: bool,

@@ -51,6 +51,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the object is built only if the code has to fall back to the interpreter in between. A loop
   like `const p = { x: i, y: i * 2 }; s += p.x + p.y` runs 20 times faster. Leaving a block
   with block-scoped variables no longer calls into the runtime.
+- Compiled property reads use the hidden class and slot the inline cache had seen when the
+  function was compiled as constants, `.length` of arrays is an integer in compiled code, and
+  `const` variables captured from an outer function are read without reference counting.
+  Property-heavy loops run 1.4 times faster and loops over captured arrays 1.4 times faster.
 - `Uint8Array.prototype.setFromBase64` and `setFromHex` decode into an existing array and report
   how much they read and wrote, and `Uint8Array.fromBase64` honours `lastChunkHandling`
   (`loose`, `strict` and `stop-before-partial`). Every base64 and hex method validates its

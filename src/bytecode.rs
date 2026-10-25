@@ -227,6 +227,7 @@ pub enum ProtoKind {
 pub struct UpvalDesc {
     pub is_local: bool,
     pub index: u32,
+    pub constant: bool,
 }
 
 pub const DG_KEEP: u8 = 1;

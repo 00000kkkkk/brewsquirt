@@ -5684,6 +5684,20 @@ impl Vm {
         let info = &proto.jit;
         let job = crate::jit::Job {
             proto: proto as *const FunctionProto as usize,
+            ics: proto
+                .ics
+                .iter()
+                .map(|ic| {
+                    let e = &ic.entries[0];
+                    [
+                        e.shape.get(),
+                        e.holder.get() as u64,
+                        e.holder_shape.get(),
+                        e.index.get() as u64,
+                        e.depth.get() as u64,
+                    ]
+                })
+                .collect(),
             banned: info.banned.borrow().clone(),
             no_int: info.no_int.get(),
             no_spec: info.no_spec.get(),

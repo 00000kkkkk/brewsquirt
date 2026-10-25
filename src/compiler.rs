@@ -1186,7 +1186,7 @@ impl Compiler {
             .map(|&i| (i, st.locals[i as usize].is_const))
     }
 
-    fn add_upvalue(&mut self, si: usize, is_local: bool, index: u32) -> u32 {
+    fn add_upvalue(&mut self, si: usize, is_local: bool, index: u32, constant: bool) -> u32 {
         let ups = &mut self.states[si].upvalues;
         if let Some(i) = ups
             .iter()
@@ -1194,7 +1194,11 @@ impl Compiler {
         {
             return i as u32;
         }
-        ups.push(UpvalDesc { is_local, index });
+        ups.push(UpvalDesc {
+            is_local,
+            index,
+            constant,
+        });
         (ups.len() - 1) as u32
     }
 
@@ -1207,14 +1211,14 @@ impl Compiler {
             if name == "this" {
                 self.states[si - 1].reads_this = true;
             }
-            return Some((self.add_upvalue(si, true, slot), c));
+            return Some((self.add_upvalue(si, true, slot, c), c));
         }
         if let Some(ups) = self.states[si - 1].eval_upvals.clone() {
             let (_, idx, c) = ups.iter().find(|(n, _, _)| &**n == name)?;
-            return Some((self.add_upvalue(si, false, *idx), *c));
+            return Some((self.add_upvalue(si, false, *idx, *c), *c));
         }
         if let Some((idx, c)) = self.resolve_upvalue(si - 1, name) {
-            return Some((self.add_upvalue(si, false, idx), c));
+            return Some((self.add_upvalue(si, false, idx, c), c));
         }
         None
     }
