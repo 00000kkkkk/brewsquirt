@@ -1,0 +1,124 @@
+const show = (...xs) => console.log(JSON.stringify(xs))
+
+const fib = (n) => (n < 2 ? n : fib(n - 1) + fib(n - 2))
+function fib2(n) {
+  return n < 2 ? n : fib2(n - 1) + fib2(n - 2)
+}
+show(fib(22), fib2(22))
+
+const sum = (n) => (n === 0 ? 0 : n + sum(n - 1))
+show(sum(500))
+
+const deep = (n) => (n === 0 ? 0 : 1 + deep(n - 1))
+let overflow = ""
+try {
+  deep(1e6)
+} catch (e) {
+  overflow = e.constructor.name
+}
+show(overflow, deep(3000))
+
+const thrower = (n) => {
+  if (n === 7) throw new Error("seven")
+  return n < 1 ? 0 : thrower(n - 1) + 1
+}
+const catcher = () => {
+  let caught = 0
+  for (let i = 0; i < 3000; i++) {
+    try {
+      thrower(i % 10)
+    } catch (e) {
+      caught++
+    }
+  }
+  return caught
+}
+show(catcher())
+
+const mixed = (n) => (n < 2 ? n : mixed(n - 1) + mixed(n - 2) + (n === 15 ? 0.5 : 0))
+show(mixed(20))
+
+const big = (n) => (n < 2 ? 2147483647 : big(n - 1) + big(n - 2))
+show(big(12))
+
+const args = (a, b) => (b === undefined ? a : a + b)
+const caller = () => {
+  let s = 0
+  for (let i = 0; i < 3000; i++) s += args(i) + args(i, 1) + args(i, 1, 2)
+  return s
+}
+show(caller())
+
+function Point(x) {
+  this.x = x
+}
+const builder = () => {
+  let s = 0
+  for (let i = 0; i < 3000; i++) s += new Point(i).x
+  return s
+}
+show(builder())
+
+function sloppy() {
+  return typeof this
+}
+const strictCall = function () {
+  "use strict"
+  return typeof this
+}
+const thisCalls = () => {
+  const out = []
+  for (let i = 0; i < 2000; i++) {
+    const r = [sloppy(), strictCall()]
+    if (i === 1999) out.push(...r)
+  }
+  return out
+}
+show(...thisCalls())
+
+let count = 0
+const bump = () => {
+  count++
+}
+let label = "x"
+const relabel = (v) => {
+  label = v
+}
+const closures = () => {
+  for (let i = 0; i < 4000; i++) {
+    bump()
+    if (i % 1000 === 0) relabel("l" + i)
+  }
+  return [count, label]
+}
+show(...closures())
+
+const counter = () => {
+  let n = 0
+  const inc = () => n++
+  for (let i = 0; i < 3000; i++) inc()
+  return n
+}
+show(counter())
+
+const objs = (n) => (n === 0 ? { depth: 0 } : { depth: objs(n - 1).depth + 1 })
+show(objs(200).depth)
+
+const where = (n) => {
+  if (n === 0) {
+    const e = new Error("here")
+    return e.stack.split("\n").length > 2
+  }
+  return where(n - 1)
+}
+let traced = false
+for (let i = 0; i < 2000; i++) traced = where(5)
+show(traced)
+
+const poly = [(x) => x + 1, (x) => x * 2, (x) => -x, Math.abs]
+const polyCalls = () => {
+  let s = 0
+  for (let i = 0; i < 4000; i++) s += poly[i % 4](i)
+  return s
+}
+show(polyCalls())

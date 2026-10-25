@@ -174,9 +174,12 @@ impl Shape {
     }
 }
 
+pub const FUNCTION_TAG: u8 = 2;
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct JitLayout {
     pub rc_value: usize,
+    pub kind_field: usize,
     pub obj_kind: usize,
     pub obj_flags: usize,
     pub obj_props: usize,
@@ -250,7 +253,16 @@ pub fn jit_layout() -> JitLayout {
         _ => 8,
     };
     let open_tag = unsafe { *(&open as *const Upvalue as *const u8) };
+    let weak = ObjKind::WeakRef(std::rc::Weak::new());
+    let weak_words =
+        unsafe { std::slice::from_raw_parts(&weak as *const ObjKind as *const usize, 2) };
+    let kind_field = weak_words
+        .iter()
+        .position(|&w| w == usize::MAX)
+        .unwrap_or(1)
+        * 8;
     JitLayout {
+        kind_field,
         upvalue,
         open_index,
         closed_value,
@@ -714,7 +726,7 @@ impl Drop for Obj {
 pub enum ObjKind {
     Ordinary,
     Array(RefCell<Vec<Value>>),
-    Function(Rc<Closure>),
+    Function(Rc<Closure>) = FUNCTION_TAG,
     Native(Box<Native>),
     Bound(Box<Bound>),
     Error,

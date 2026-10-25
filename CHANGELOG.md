@@ -25,6 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build object literals and call `Math.floor`, `ceil`, `trunc`, `abs`, `sqrt`, `min` and `max`.
   Holes, accessors, proxies, frozen arrays and replaced `Math` methods take the interpreter's
   path. Loops over arrays and objects run 2.5 to 9 times faster than before.
+- Compiled code calls other compiled functions directly, pushing and popping the call frame in
+  machine code, and recursive functions are compiled as soon as they are hot. `fib(30)` runs
+  twice as fast. Compiled code also writes closure variables, so a loop that calls
+  `() => { count++ }` runs three times faster.
+- The JIT only compiles loops whose bodies it can speed up, and functions without loops only
+  when compiled code or the function itself calls them, scaling the hotness it waits for with
+  the size of the function. Compiled code spills only the values that changed and reloads only
+  what an interpreted step could have changed, so compiling takes less time. Parsers such as
+  acorn and babel no longer spend time compiling code that would not run faster.
 - `Uint8Array.prototype.setFromBase64` and `setFromHex` decode into an existing array and report
   how much they read and wrote, and `Uint8Array.fromBase64` honours `lastChunkHandling`
   (`loose`, `strict` and `stop-before-partial`). Every base64 and hex method validates its

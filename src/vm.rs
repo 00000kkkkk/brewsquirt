@@ -563,6 +563,84 @@ fn push_fast(stack: &mut Vec<Value>, v: Value) {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct VmLayout {
+    pub(crate) stack_len: usize,
+    pub(crate) stack_cap: usize,
+    pub(crate) frames_ptr: usize,
+    pub(crate) frames_len: usize,
+    pub(crate) frames_cap: usize,
+    pub(crate) handlers_ptr: usize,
+    pub(crate) handlers_len: usize,
+    pub(crate) builders_len: usize,
+    pub(crate) highest_open: usize,
+    pub(crate) native_depth: usize,
+    pub(crate) frame_size: usize,
+    pub(crate) frame_closure: usize,
+    pub(crate) frame_ip: usize,
+    pub(crate) frame_base: usize,
+    pub(crate) frame_construct: usize,
+    pub(crate) frame_extra: usize,
+    pub(crate) handler_size: usize,
+    pub(crate) handler_frame: usize,
+    pub(crate) closure_proto: usize,
+    pub(crate) closure_upvalues: usize,
+    pub(crate) proto_direct: usize,
+    pub(crate) proto_code: usize,
+    pub(crate) proto_max: usize,
+    pub(crate) max_frames: usize,
+}
+
+fn vec_offsets<T>() -> (usize, usize, usize) {
+    let v: Vec<T> = Vec::with_capacity(5);
+    let words = unsafe { std::slice::from_raw_parts(&v as *const Vec<T> as *const usize, 3) };
+    let at = |x: usize| words.iter().position(|&w| w == x).unwrap_or(0) * 8;
+    (at(v.as_ptr() as usize), at(0), at(v.capacity()))
+}
+
+pub(crate) fn vm_layout() -> VmLayout {
+    use std::mem::offset_of;
+    let (_, stack_len, stack_cap) = vec_offsets::<Value>();
+    let (frames_ptr, frames_len, frames_cap) = vec_offsets::<Frame>();
+    let (handlers_ptr, handlers_len, _) = vec_offsets::<Handler>();
+    let (_, builders_len, _) = vec_offsets::<(usize, String)>();
+    let ups: Box<[Rc<UpCell>]> = vec![UpCell::new(Upvalue::Open(0)); 3].into_boxed_slice();
+    let words =
+        unsafe { std::slice::from_raw_parts(&ups as *const Box<[Rc<UpCell>]> as *const usize, 2) };
+    let box_ptr = words
+        .iter()
+        .position(|&w| w == ups.as_ptr() as usize)
+        .unwrap_or(0)
+        * 8;
+    let jit = offset_of!(FunctionProto, jit);
+    VmLayout {
+        stack_len: offset_of!(Vm, stack) + stack_len,
+        stack_cap: offset_of!(Vm, stack) + stack_cap,
+        frames_ptr: offset_of!(Vm, frames) + frames_ptr,
+        frames_len: offset_of!(Vm, frames) + frames_len,
+        frames_cap: offset_of!(Vm, frames) + frames_cap,
+        handlers_ptr: offset_of!(Vm, handlers) + handlers_ptr,
+        handlers_len: offset_of!(Vm, handlers) + handlers_len,
+        builders_len: offset_of!(Vm, builders) + builders_len,
+        highest_open: offset_of!(Vm, highest_open),
+        native_depth: offset_of!(Vm, native_depth),
+        frame_size: std::mem::size_of::<Frame>(),
+        frame_closure: offset_of!(Frame, closure),
+        frame_ip: offset_of!(Frame, ip),
+        frame_base: offset_of!(Frame, base),
+        frame_construct: offset_of!(Frame, construct),
+        frame_extra: offset_of!(Frame, extra),
+        handler_size: std::mem::size_of::<Handler>(),
+        handler_frame: offset_of!(Handler, frame),
+        closure_proto: offset_of!(Closure, proto),
+        closure_upvalues: offset_of!(Closure, upvalues) + box_ptr,
+        proto_direct: jit + offset_of!(crate::jit::JitInfo, direct),
+        proto_code: jit + offset_of!(crate::jit::JitInfo, code),
+        proto_max: jit + offset_of!(crate::jit::JitInfo, max),
+        max_frames: MAX_FRAMES,
+    }
+}
+
 enum Invoke {
     Done(Value),
     Reload,
@@ -5533,6 +5611,23 @@ impl Vm {
         r
     }
 
+    fn jit_due(&self, proto: &FunctionProto, h: u32) -> bool {
+        if h < self.jit_threshold {
+            return false;
+        }
+        let info = &proto.jit;
+        let mut need = info.need.get();
+        if need == 0 {
+            let Some(cost) = crate::jit::cost(proto) else {
+                info.state.set(crate::jit::REJECTED);
+                return false;
+            };
+            need = self.jit_threshold.saturating_mul((cost / 250).max(1));
+            info.need.set(need);
+        }
+        h >= need
+    }
+
     fn jit_compile(&mut self, proto: &FunctionProto) {
         if self.jit.is_none() {
             let mut intrinsics = Vec::new();
@@ -5561,12 +5656,16 @@ impl Vm {
                 }
             }
         }
+        let started = Instant::now();
         let ok = self.jit.as_mut().is_some_and(|j| j.compile(proto));
         if std::env::var_os("JSQ_JIT_LOG").is_some() {
             eprintln!(
-                "jit {} {}",
+                "jit {} {} ops={} slots={} us={}",
                 if ok { "compiled" } else { "rejected" },
-                proto.name
+                proto.name,
+                proto.code.len(),
+                proto.jit.max.get(),
+                started.elapsed().as_micros()
             );
         }
         proto.jit.state.set(if ok {
@@ -5574,6 +5673,12 @@ impl Vm {
         } else {
             crate::jit::REJECTED
         });
+        let np = proto.num_params as usize;
+        let direct = ok
+            && proto.plain
+            && (!proto.sloppy_this || proto.kind == ProtoKind::Arrow)
+            && proto.jit.entry_at(0) == Some(np + 1);
+        proto.jit.direct.set(if direct { np as u32 + 1 } else { 0 });
     }
 
     fn enter_jit(&mut self, proto: &FunctionProto, base: usize, ip: usize, stop: usize) -> u64 {
@@ -5582,21 +5687,27 @@ impl Vm {
         if self.stack.capacity() < need {
             self.stack.reserve(need - self.stack.len());
         }
+        let fi = self.frames.len() - 1;
         let mut ctx = crate::jit::JitCtx {
             vm: self as *mut Vm,
             bp: unsafe { self.stack.as_mut_ptr().add(base) },
             base,
             need,
             interrupt: std::sync::Arc::as_ptr(&self.threads.interrupt) as *const u8,
-            upvals: {
-                let fi = self.frames.len() - 1;
-                self.frames[fi].closure.upvalues.as_ptr() as *const u8
-            },
+            upvals: self.frames[fi].closure.upvalues.as_ptr() as *const u8,
+            frame: fi,
+            gc_allocs: crate::gc::counters().0,
+            gc_threshold: crate::gc::counters().1,
         };
         let prev = std::mem::replace(&mut self.jit_stop, stop);
         let f: crate::jit::JitFn = unsafe { std::mem::transmute(info.code.get()) };
         let r = unsafe { f(&mut ctx, ip as u32) };
         self.jit_stop = prev;
+        self.jit_settle(info, base, r);
+        r
+    }
+
+    fn jit_settle(&mut self, info: &crate::jit::JitInfo, base: usize, r: u64) {
         let kind = r >> 32;
         if kind == 4 || kind == 5 {
             let at = (r & 0xffff_ffff) as u32;
@@ -5607,6 +5718,7 @@ impl Vm {
             }
             let n = info.compiles.get() + 1;
             info.compiles.set(n);
+            info.direct.set(0);
             info.state.set(if n > 8 {
                 crate::jit::REJECTED
             } else {
@@ -5621,7 +5733,6 @@ impl Vm {
             unsafe { self.stack.set_len(base + d) };
             self.frames[fi].ip = nip;
         }
-        r
     }
 
     pub(crate) fn jit_refresh(&mut self, ctx: &mut crate::jit::JitCtx) {
@@ -5857,22 +5968,31 @@ impl Vm {
                 self.native_depth += 1;
                 let r = self.jit_invoke(&callee.proto, ci + 1, fi + 1);
                 self.native_depth -= 1;
-                match r {
-                    Invoke::Done(v) => {
-                        let _: () = match v {
-                            Value::Number(x) => push_number(&mut self.stack, x),
-                            v => self.stack.push(v),
-                        };
-                        Ok(())
-                    }
-                    Invoke::Reload => return crate::jit::RELOAD,
-                    Invoke::Unwound => return crate::jit::ERR,
-                    Invoke::Returned => return crate::jit::RETURNED,
-                    Invoke::Failed(e) => Err(e),
-                }
+                return self.call_finish(ctx, ip, r);
             }
             None => self.fast_native_call(ci),
         };
+        self.call_end(ctx, ip, r)
+    }
+
+    fn call_finish(&mut self, ctx: &mut crate::jit::JitCtx, ip: usize, r: Invoke) -> u64 {
+        let r = match r {
+            Invoke::Done(v) => {
+                let _: () = match v {
+                    Value::Number(x) => push_number(&mut self.stack, x),
+                    v => self.stack.push(v),
+                };
+                Ok(())
+            }
+            Invoke::Reload => return crate::jit::RELOAD,
+            Invoke::Unwound => return crate::jit::ERR,
+            Invoke::Returned => return crate::jit::RETURNED,
+            Invoke::Failed(e) => Err(e),
+        };
+        self.call_end(ctx, ip, r)
+    }
+
+    fn call_end(&mut self, ctx: &mut crate::jit::JitCtx, ip: usize, r: Result<(), Value>) -> u64 {
         match r {
             Ok(()) => {
                 self.jit_refresh(ctx);
@@ -5893,7 +6013,7 @@ impl Vm {
         if self.jit_on && info.state.get() == crate::jit::COLD {
             let h = info.hot.get() + 1;
             info.hot.set(h);
-            if h >= self.jit_threshold {
+            if self.jit_due(proto, h) {
                 self.jit_compile(proto);
             }
         }
@@ -5904,12 +6024,16 @@ impl Vm {
             return Invoke::from(self.run(frame));
         }
         let r = self.enter_jit(proto, base, 0, self.jit_stop);
+        self.invoke_result(base, frame, r)
+    }
+
+    fn invoke_result(&mut self, base: usize, frame: usize, r: u64) -> Invoke {
         match r >> 32 {
             0 | 4 | 5 => {
                 let nip = (r & 0xffff_ffff) as usize;
-                if proto.code.get(nip) == Some(&Op::Return)
+                if self.frames.len() == frame + 1
                     && !self.frames[frame].construct
-                    && self.frames.len() == frame + 1
+                    && self.frames[frame].closure.proto.code.get(nip) == Some(&Op::Return)
                 {
                     let result = self.stack.pop().unwrap_or_default();
                     self.close_upvalues(base);
@@ -5931,8 +6055,129 @@ impl Vm {
                 }
             }
             2 => Invoke::Unwound,
+            6 => Invoke::Done(self.stack.pop().unwrap_or_default()),
             _ => Invoke::Returned,
         }
+    }
+
+    pub(crate) fn jit_frame(&mut self, ctx: &mut crate::jit::JitCtx, a: &[u64; 6]) -> u64 {
+        let (ci, ip, depth, argc) = (a[0] as usize, a[1] as usize, a[3] as usize, a[4] as usize);
+        if self.native_depth >= 1000
+            || crate::gc::due()
+            || self.frames.len() >= MAX_FRAMES
+            || self.threads.interrupted()
+        {
+            return 0;
+        }
+        let c = match unsafe { &*ctx.bp.add(ci) } {
+            Value::Object(o) => match &o.kind {
+                ObjKind::Function(c) => c,
+                _ => return 0,
+            },
+            _ => return 0,
+        };
+        let p = &c.proto;
+        if !p.plain
+            || p.num_params as usize != argc
+            || (p.sloppy_this
+                && p.kind != ProtoKind::Arrow
+                && !unsafe { &*ctx.bp.add(ci + 1) }.is_object())
+        {
+            return 0;
+        }
+        let info = &p.jit;
+        if info.state.get() == crate::jit::COLD {
+            let h = info.hot.get() + 1;
+            info.hot.set(h);
+            if self.jit_due(p, h) {
+                self.jit_compile(p);
+            }
+        }
+        if info.state.get() != crate::jit::READY || info.entry_at(0) != Some(argc + 1) {
+            return 0;
+        }
+        let c = c.clone();
+        unsafe { self.stack.set_len(ctx.base + depth) };
+        let fi = self.frames.len() - 1;
+        self.frames[fi].ip = ip + 1;
+        let base = ctx.base + ci + 1;
+        let need = base + c.proto.jit.max.get() as usize + 8;
+        if self.stack.capacity() < need {
+            self.stack.reserve(need - self.stack.len());
+        }
+        self.jit_refresh(ctx);
+        let code = c.proto.jit.code.get() as u64;
+        let upvals = c.upvalues.as_ptr() as *const u8;
+        self.push_plain_frame(c, base);
+        self.native_depth += 1;
+        unsafe {
+            std::ptr::write(
+                a[2] as *mut crate::jit::JitCtx,
+                crate::jit::JitCtx {
+                    vm: ctx.vm,
+                    bp: self.stack.as_mut_ptr().add(base),
+                    base,
+                    need,
+                    interrupt: ctx.interrupt,
+                    upvals,
+                    frame: fi + 1,
+                    gc_allocs: ctx.gc_allocs,
+                    gc_threshold: ctx.gc_threshold,
+                },
+            )
+        };
+        code
+    }
+
+    pub(crate) fn jit_call_done(&mut self, ctx: &mut crate::jit::JitCtx, a: &[u64; 6]) -> u64 {
+        let (r, ip) = (a[0], a[1] as usize);
+        self.native_depth -= 1;
+        let frame = ctx.frame + 1;
+        let mut base = 0;
+        if matches!(r >> 32, 0 | 4 | 5) {
+            let cl = self.frames[frame].closure.clone();
+            base = self.frames[frame].base;
+            self.jit_settle(&cl.proto.jit, base, r);
+        }
+        let r = self.invoke_result(base, frame, r);
+        self.call_finish(ctx, ip, r)
+    }
+
+    pub(crate) fn jit_return(
+        &mut self,
+        ctx: &mut crate::jit::JitCtx,
+        ip: usize,
+        depth: usize,
+    ) -> u64 {
+        let fi = self.frames.len() - 1;
+        let base = ctx.base;
+        if self.frames[fi].construct || self.frames[fi].base != base {
+            return ip as u64;
+        }
+        unsafe { self.stack.set_len(base + depth) };
+        self.close_upvalues(base);
+        while self.handlers.last().is_some_and(|h| h.frame >= fi) {
+            self.handlers.pop();
+        }
+        self.prune_builders(base - 1);
+        let at = base + depth - 1;
+        let (h, p) = unsafe {
+            let q = self.stack.as_ptr().add(at) as *const u64;
+            (
+                std::ptr::read_volatile(q),
+                std::ptr::read_volatile(q.add(1)),
+            )
+        };
+        unsafe { self.stack.set_len(at) };
+        self.drop_top_frame();
+        self.stack.truncate(base - 1);
+        unsafe {
+            let q = self.stack.as_mut_ptr().add(base - 1) as *mut u64;
+            std::ptr::write_volatile(q, h);
+            std::ptr::write_volatile(q.add(1), p);
+            self.stack.set_len(base);
+        }
+        crate::jit::POPPED
     }
 
     pub(crate) fn jit_index(&mut self, ctx: &mut crate::jit::JitCtx, a: &[u64; 6]) -> u64 {
@@ -6094,13 +6339,6 @@ impl Vm {
             let mut base = self.frames[fi].base;
             if self.jit_on {
                 let info = &proto.jit;
-                if info.state.get() == crate::jit::COLD {
-                    let h = info.hot.get() + 1;
-                    info.hot.set(h);
-                    if h >= self.jit_threshold {
-                        self.jit_compile(proto);
-                    }
-                }
                 if info.state.get() == crate::jit::READY {
                     let ip0 = self.frames[fi].ip;
                     if info
@@ -6112,6 +6350,14 @@ impl Vm {
                             0 | 4 | 5 => {}
                             1 => continue 'frame,
                             2 => return Err(self.jit_error.take().unwrap_or_default()),
+                            6 => {
+                                let v = self.stack.pop().unwrap_or_default();
+                                if self.frames.len() == stop {
+                                    return Ok(v);
+                                }
+                                self.stack.push(v);
+                                continue 'frame;
+                            }
                             _ => return Ok(self.jit_value.take().unwrap_or_default()),
                         }
                     }
@@ -6154,7 +6400,7 @@ impl Vm {
             }
             macro_rules! settled {
                 ($p:expr) => {
-                    !self.jit_on || $p.jit.state.get() == crate::jit::REJECTED
+                    !self.jit_on || $p.jit.state.get() != crate::jit::READY
                 };
             }
             macro_rules! room {
@@ -6492,7 +6738,7 @@ impl Vm {
                                 if info.state.get() == crate::jit::COLD {
                                     let h = info.hot.get() + 1;
                                     info.hot.set(h);
-                                    if h >= self.jit_threshold {
+                                    if self.jit_due(proto, h) {
                                         sync!();
                                         self.jit_compile(proto);
                                         resync!();
@@ -6812,6 +7058,16 @@ impl Vm {
                                     self.stack.truncate(ci + 2 + np);
                                 }
                                 self.frames[fi].ip = ip!() + 1;
+                                if self.jit_on
+                                    && std::ptr::eq(&*c.proto, proto)
+                                    && proto.jit.state.get() == crate::jit::COLD
+                                {
+                                    let h = proto.jit.hot.get() + 1;
+                                    proto.jit.hot.set(h);
+                                    if self.jit_due(proto, h) {
+                                        self.jit_compile(proto);
+                                    }
+                                }
                                 let inline = settled!(c.proto);
                                 self.push_plain_frame(c, ci + 1);
                                 if inline {

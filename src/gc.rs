@@ -42,6 +42,13 @@ pub(crate) fn unregister(o: &Obj) {
     });
 }
 
+pub(crate) fn counters() -> (*const usize, *const usize) {
+    (
+        ALLOCS.with(|a| a.as_ptr() as *const usize),
+        THRESHOLD.with(|t| t.as_ptr() as *const usize),
+    )
+}
+
 #[inline]
 pub fn due() -> bool {
     ALLOCS.with(|a| a.get()) >= THRESHOLD.with(|t| t.get())
