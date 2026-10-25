@@ -176,6 +176,25 @@ impl Shape {
 
 pub const FUNCTION_TAG: u8 = 2;
 
+pub fn literal_from(
+    site: &Cell<usize>,
+    keys: &[usize],
+    proto: Rc<Obj>,
+    vals: Vec<Value>,
+) -> Rc<Obj> {
+    if let Some(o) = literal_object(site, keys, proto.clone()) {
+        o.props.borrow_mut().values = vals;
+        return o;
+    }
+    let o = Obj::new(ObjKind::Ordinary, Some(proto));
+    for (&k, v) in keys.iter().zip(vals) {
+        if let Value::Str(key) = unsafe { &*(k as *const Value) } {
+            o.props.borrow_mut().insert(key.clone(), v);
+        }
+    }
+    o
+}
+
 pub fn literal_object(site: &Cell<usize>, keys: &[usize], proto: Rc<Obj>) -> Option<Rc<Obj>> {
     let mut sp = site.get();
     if sp == 0 {

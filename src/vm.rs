@@ -6391,6 +6391,19 @@ impl Vm {
         }
     }
 
+    pub(crate) fn jit_materialize(&mut self, ctx: &mut crate::jit::JitCtx, a: &[u64; 6]) -> u64 {
+        let site = unsafe { &*(a[1] as *const std::cell::Cell<usize>) };
+        let keys = unsafe { std::slice::from_raw_parts(a[2] as *const usize, a[3] as usize) };
+        let buf = unsafe { std::slice::from_raw_parts(a[4] as *const [u64; 2], a[3] as usize) };
+        let vals: Vec<Value> = buf
+            .iter()
+            .map(|w| std::mem::ManuallyDrop::into_inner(unsafe { value_bits(w[0], w[1]) }))
+            .collect();
+        let o = crate::object::literal_from(site, keys, self.realm.object_proto.clone(), vals);
+        unsafe { std::ptr::write(ctx.bp.add(a[0] as usize), Value::Object(o)) };
+        0
+    }
+
     pub(crate) fn jit_new_literal(&mut self, ctx: &mut crate::jit::JitCtx, a: &[u64; 6]) -> u64 {
         if crate::gc::due() {
             return 1;

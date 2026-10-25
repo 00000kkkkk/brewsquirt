@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code are created with their final hidden class and filled in place, `for...of` loops over
   arrays and `try` blocks compile, and `array.push(x)` appends without leaving machine code.
   `JSQ_JIT_THRESHOLD=1` and `JSQ_JIT_SYNC=1` compile synchronously.
+- An object literal assigned to a block-scoped variable that compiled code only reads
+  properties from before the block ends is never allocated: its fields live in registers and
+  the object is built only if the code has to fall back to the interpreter in between. A loop
+  like `const p = { x: i, y: i * 2 }; s += p.x + p.y` runs 20 times faster. Leaving a block
+  with block-scoped variables no longer calls into the runtime.
 - `Uint8Array.prototype.setFromBase64` and `setFromHex` decode into an existing array and report
   how much they read and wrote, and `Uint8Array.fromBase64` honours `lastChunkHandling`
   (`loose`, `strict` and `stop-before-partial`). Every base64 and hex method validates its

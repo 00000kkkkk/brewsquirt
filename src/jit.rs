@@ -163,6 +163,7 @@ six!(jit_new_object, jit_new_object);
 six!(jit_init_prop, jit_init_prop);
 six!(jit_new_literal, jit_new_literal);
 six!(jit_iter_next, jit_iter_next);
+six!(jit_materialize, jit_materialize);
 six!(jit_frame, jit_frame);
 six!(jit_call_done, jit_call_done);
 
@@ -551,6 +552,189 @@ fn passes(op: Op) -> bool {
 struct Literals {
     news: Vec<Option<(usize, usize, usize)>>,
     inits: Vec<Option<(usize, usize)>>,
+    sites: Vec<Option<Vec<usize>>>,
+}
+
+struct Virt {
+    start: usize,
+    store: usize,
+    pop: Option<usize>,
+    end: usize,
+    slot: usize,
+    temp: usize,
+    inits: Vec<usize>,
+    keys: Vec<u32>,
+    site: (usize, usize, usize),
+}
+
+fn calm(op: Op) -> bool {
+    matches!(
+        op,
+        Op::GetLocal(_)
+            | Op::GetLocalChecked(..)
+            | Op::Const(_)
+            | Op::Undefined
+            | Op::Null
+            | Op::True
+            | Op::False
+            | Op::Add
+            | Op::Sub
+            | Op::Mul
+            | Op::Div
+            | Op::Mod
+            | Op::AddConst(_)
+            | Op::SubConst(_)
+            | Op::MulConst(_)
+            | Op::ModConst(_)
+            | Op::BitAnd
+            | Op::BitOr
+            | Op::BitXor
+            | Op::Shl
+            | Op::Shr
+            | Op::UShr
+            | Op::Neg
+            | Op::Inc
+            | Op::Dec
+            | Op::Lt
+            | Op::Gt
+            | Op::Le
+            | Op::Ge
+            | Op::StrictEq
+            | Op::StrictNe
+            | Op::ToNumeric
+            | Op::ToNumber
+            | Op::AppendLocal(_)
+            | Op::IncLocal(_)
+            | Op::DecLocal(_)
+            | Op::SetLocal(_)
+            | Op::StoreLocal(_)
+            | Op::Pop
+            | Op::GetLocalProp(..)
+            | Op::GetProp(_)
+            | Op::GetIndex
+            | Op::GetUpval(_)
+            | Op::GetUpvalChecked(..)
+    )
+}
+
+fn branch_targets(proto: &FunctionProto, depths: &[u16]) -> Vec<bool> {
+    let n = proto.code.len();
+    let mut targets = vec![false; n];
+    for (ip, &op) in proto.code.iter().enumerate() {
+        if depths[ip] == UNKNOWN {
+            continue;
+        }
+        for (t, _) in flow(op, ip, depths[ip] as i32).unwrap_or_default() {
+            if t != ip + 1 && t < n {
+                targets[t] = true;
+            }
+        }
+    }
+    targets
+}
+
+fn virtuals(
+    proto: &FunctionProto,
+    depths: &[u16],
+    sites_of: &Literals,
+    volatile: &[bool],
+) -> (Vec<Virt>, Vec<Option<usize>>) {
+    let code = &proto.code;
+    let n = code.len();
+    let targets = branch_targets(proto, depths);
+    let mut out = Vec::new();
+    let mut at = vec![None; n];
+    let key_of = |c: u32| match &proto.consts[c as usize] {
+        Value::Str(s) => Some(&**s),
+        _ => None,
+    };
+    'site: for ip0 in 0..n {
+        let (Some(inits), Some(site)) = (&sites_of.sites[ip0], sites_of.news[ip0]) else {
+            continue;
+        };
+        if depths[ip0] == UNKNOWN || at[ip0].is_some() {
+            continue;
+        }
+        let temp = depths[ip0] as usize;
+        let last = *inits.last().unwrap_or(&ip0);
+        let keys: Vec<u32> = inits
+            .iter()
+            .filter_map(|&k| match code[k] {
+                Op::InitProp(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        if keys.len() != inits.len() || last + 2 >= n {
+            continue;
+        }
+        let (store, pop, slot) = match (code[last + 1], code[last + 2]) {
+            (Op::SetLocal(p), Op::Pop) => (last + 1, Some(last + 2), p as usize),
+            (Op::StoreLocal(p), _) => (last + 1, None, p as usize),
+            _ => continue,
+        };
+        if slot >= temp || volatile.get(slot).copied().unwrap_or(true) {
+            continue;
+        }
+        for k in ip0 + 1..=last {
+            if targets[k] || depths[k] == UNKNOWN {
+                continue 'site;
+            }
+            if inits.contains(&k) {
+                continue;
+            }
+            if !calm(code[k]) || local_of(code[k]) == Some(slot) {
+                continue 'site;
+            }
+        }
+        if targets[store] || pop.is_some_and(|q| targets[q]) {
+            continue;
+        }
+        let mut k = pop.unwrap_or(store) + 1;
+        let end = loop {
+            if k >= n || k > ip0 + 64 || targets[k] || depths[k] == UNKNOWN {
+                continue 'site;
+            }
+            let op = code[k];
+            match op {
+                Op::PopTo(m) if (m as usize) <= slot => {
+                    let d = depths[k] as usize;
+                    if (m as usize..d).any(|s| volatile.get(s).copied().unwrap_or(true)) {
+                        continue 'site;
+                    }
+                    break k;
+                }
+                Op::GetLocalProp(s, c) if s as usize == slot => {
+                    if !keys
+                        .iter()
+                        .any(|&kc| key_of(kc).is_some() && key_of(kc) == key_of(c))
+                    {
+                        continue 'site;
+                    }
+                }
+                _ if local_of(op) == Some(slot) => continue 'site,
+                Op::PopTo(_) => {}
+                _ if calm(op) => {}
+                _ => continue 'site,
+            }
+            k += 1;
+        };
+        let idx = out.len();
+        for slot_at in &mut at[ip0..=end] {
+            *slot_at = Some(idx);
+        }
+        out.push(Virt {
+            start: ip0,
+            store,
+            pop,
+            end,
+            slot,
+            temp,
+            inits: inits.clone(),
+            keys,
+            site,
+        });
+    }
+    (out, at)
 }
 
 fn starts_value(op: Op) -> bool {
@@ -589,6 +773,7 @@ fn literals(proto: &FunctionProto, depths: &[u16]) -> Literals {
     let mut out = Literals {
         news: vec![None; n],
         inits: vec![None; n],
+        sites: vec![None; n],
     };
     for ip in 0..n {
         if code[ip] != Op::NewObject || depths[ip] == UNKNOWN {
@@ -653,6 +838,7 @@ fn literals(proto: &FunctionProto, depths: &[u16]) -> Literals {
             .collect();
         let at = Box::leak(ptrs).as_ptr() as usize;
         out.news[ip] = Some((site, at, keys.len()));
+        out.sites[ip] = Some(keys.iter().map(|&(kip, _)| kip).collect());
         for (idx, &(kip, _)) in keys.iter().enumerate() {
             out.inits[kip] = Some((site, idx));
         }
@@ -1213,6 +1399,9 @@ struct Gen<'a, 'b> {
     sigs: &'a Sigs,
     volatile: &'a [bool],
     literals: &'a Literals,
+    virts: &'a [Virt],
+    virt_of: &'a [Option<usize>],
+    fields: Vec<Vec<(Variable, Variable, bool)>>,
     loans: &'a Loans,
     spill_full: bool,
     dirty: &'a [Vec<u64>],
@@ -1987,7 +2176,208 @@ impl Gen<'_, '_> {
         }
     }
 
+    fn virt_slots(&self, ip: usize) -> Vec<usize> {
+        let Some(v) = self
+            .virt_of
+            .get(ip)
+            .copied()
+            .flatten()
+            .map(|i| &self.virts[i])
+        else {
+            return Vec::new();
+        };
+        if ip <= v.start {
+            Vec::new()
+        } else if ip <= v.store {
+            vec![v.temp]
+        } else if v.pop.is_some_and(|q| ip <= q) {
+            vec![v.slot, v.temp]
+        } else {
+            vec![v.slot]
+        }
+    }
+
+    fn materialize(&mut self, ip: usize, slots: &[usize]) {
+        let Some(vi) = self.virt_of[ip] else {
+            return;
+        };
+        let (site, keys, n) = self.virts[vi].site;
+        let fields = self.fields.get(vi).cloned().unwrap_or_default();
+        let ss = self.b.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            (n as u32).max(1) * 16,
+            3,
+        ));
+        let buf = self.b.ins().stack_addr(types::I64, ss, 0);
+        for (j, &(hv, pv, num)) in fields.iter().enumerate() {
+            let h = if num {
+                self.konst(T_NUMBER)
+            } else {
+                self.b.use_var(hv)
+            };
+            let p = self.b.use_var(pv);
+            self.b.ins().store(flags(), h, buf, j as i32 * SLOT);
+            self.b.ins().store(flags(), p, buf, j as i32 * SLOT + 8);
+        }
+        let dst = self.konst(slots[0] as i64);
+        let sv = self.konst(site as i64);
+        let kv = self.konst(keys as i64);
+        let nv = self.konst(n as i64);
+        let zero = self.konst(0);
+        self.call_six(
+            jit_materialize as *const () as usize,
+            [dst, sv, kv, nv, buf, zero],
+        );
+        self.reload_bp();
+        let bp = self.bp();
+        let h = self
+            .b
+            .ins()
+            .load(types::I64, flags(), bp, slots[0] as i32 * SLOT);
+        let p = self
+            .b
+            .ins()
+            .load(types::I64, flags(), bp, slots[0] as i32 * SLOT + 8);
+        for &s in &slots[1..] {
+            self.ref_change(h, p, true);
+            let bp = self.bp();
+            self.b.ins().store(flags(), h, bp, s as i32 * SLOT);
+            self.b.ins().store(flags(), p, bp, s as i32 * SLOT + 8);
+        }
+    }
+
+    fn virt_op(&mut self, ip: usize, op: Op, inn: &[Ty]) -> bool {
+        let Some(vi) = self.virt_of[ip] else {
+            return false;
+        };
+        let d = inn.len();
+        let next = ip + 1;
+        let mut cur = inn.to_vec();
+        let (start, end, slot) = {
+            let v = &self.virts[vi];
+            (v.start, v.end, v.slot)
+        };
+        match op {
+            Op::NewObject if ip == start => {
+                while self.fields.len() <= vi {
+                    self.fields.push(Vec::new());
+                }
+                let inits = self.virts[vi].inits.clone();
+                let mut fs = Vec::new();
+                for at in inits {
+                    let t = self.types[at].as_ref().and_then(|t| t.last().copied());
+                    let num = t.is_some_and(is_num);
+                    let hv = self.b.declare_var(types::I64);
+                    let pv = self.b.declare_var(types::F64);
+                    let z = self.konst(T_UNDEFINED);
+                    let zf = self.b.ins().f64const(0.0);
+                    self.b.def_var(hv, z);
+                    self.b.def_var(pv, zf);
+                    fs.push((hv, pv, num));
+                }
+                self.fields[vi] = fs;
+                self.set_head(d, T_UNDEFINED);
+                let zf = self.b.ins().f64const(0.0);
+                self.b.def_var(self.pay[d], zf);
+                cur.push(Ty::Any);
+                self.goto_from(&cur, next);
+                true
+            }
+            Op::InitProp(_) => {
+                let Some(j) = self.virts[vi].inits.iter().position(|&k| k == ip) else {
+                    return false;
+                };
+                let (hv, pv, num) = self.fields[vi][j];
+                let t = inn[d - 1];
+                if num {
+                    let f = self.f64_of(d - 1, t);
+                    self.b.def_var(pv, f);
+                } else {
+                    let h = self.b.use_var(self.head[d - 1]);
+                    let p = if is_num(t) {
+                        self.f64_of(d - 1, t)
+                    } else {
+                        self.b.use_var(self.pay[d - 1])
+                    };
+                    let h = if is_num(t) { self.konst(T_NUMBER) } else { h };
+                    self.b.def_var(hv, h);
+                    self.b.def_var(pv, p);
+                }
+                cur.pop();
+                self.goto_from(&cur, next);
+                true
+            }
+            Op::GetLocalProp(s, c) if s as usize == slot => {
+                let name = match &self.proto.consts[c as usize] {
+                    Value::Str(x) => Some(x.to_string()),
+                    _ => None,
+                };
+                let keys = self.virts[vi].keys.clone();
+                let Some(j) = keys
+                    .iter()
+                    .position(|&k| match &self.proto.consts[k as usize] {
+                        Value::Str(x) => Some(x.to_string()) == name,
+                        _ => false,
+                    })
+                else {
+                    return false;
+                };
+                let (hv, pv, num) = self.fields[vi][j];
+                let spec = speculates(op, inn, self.banned[ip]);
+                let out = if spec { Ty::Num } else { Ty::Any };
+                if num {
+                    let f = self.b.use_var(pv);
+                    self.set_f64(d, out, f);
+                } else {
+                    let h = self.b.use_var(hv);
+                    let p = self.b.use_var(pv);
+                    if spec {
+                        self.spec_guard(h, ip, inn, None);
+                    } else {
+                        let pb = self.b.ins().bitcast(types::I64, MemFlagsData::new(), p);
+                        self.ref_change(h, pb, true);
+                        self.b.def_var(self.head[d], h);
+                    }
+                    self.b.def_var(self.pay[d], p);
+                }
+                cur.push(out);
+                self.goto_from(&cur, next);
+                true
+            }
+            Op::PopTo(m) if ip == end => {
+                let m = m as usize;
+                let fields = self.fields[vi].clone();
+                for (hv, pv, num) in fields {
+                    if !num {
+                        let h = self.b.use_var(hv);
+                        let p = self.b.use_var(pv);
+                        let pb = self.b.ins().bitcast(types::I64, MemFlagsData::new(), p);
+                        self.ref_change(h, pb, false);
+                    }
+                }
+                for (k, &t) in inn.iter().enumerate().take(d).skip(m) {
+                    if t == Ty::Any && k != slot {
+                        let (h, p) = self.bits(k, t);
+                        self.ref_change(h, p, false);
+                    }
+                }
+                cur.truncate(m);
+                self.goto_from(&cur, next);
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn spill(&mut self, cur: &[Ty], from: usize, to: usize) {
+        let virt = self.virt_slots(self.spill_at);
+        if let Some(&first) = virt.first()
+            && first >= from
+            && first < to
+        {
+            let at = self.spill_at;
+            self.materialize(at, &virt);
+        }
         let lent = self.lent_at(self.spill_at, self.spill_full);
         for &k in &lent {
             if k >= from && k < to && cur.get(k) == Some(&Ty::Any) {
@@ -2001,7 +2391,7 @@ impl Gen<'_, '_> {
             .map(|k| dirty.get(k / 64).is_none_or(|w| w >> (k % 64) & 1 == 1))
             .collect();
         for (k, &t) in cur.iter().enumerate().take(to).skip(from) {
-            if !marked[k] {
+            if !marked[k] || virt.contains(&k) {
                 continue;
             }
             let off = k as i32 * SLOT;
@@ -2188,6 +2578,10 @@ impl Gen<'_, '_> {
     }
 
     fn step(&mut self, ip: usize, inn: &[Ty], succs: &[usize]) {
+        if !self.virt_slots(ip).is_empty() {
+            self.bail(ip, inn);
+            return;
+        }
         self.spill(inn, 0, inn.len());
         let r = self.helper(
             self.sigs.step,
@@ -2380,6 +2774,9 @@ impl Gen<'_, '_> {
         let d = inn.len();
         let next = ip + 1;
         let mut cur = inn.clone();
+        if self.virt_op(ip, op, &inn) {
+            return;
+        }
         match op {
             Op::Const(k) => match &proto.consts[k as usize] {
                 Value::Number(x) => {
@@ -3341,6 +3738,17 @@ impl Gen<'_, '_> {
             }
             Op::PopTo(n) => {
                 let n = n as usize;
+                if (n..d).all(|k| !self.volatile.get(k).copied().unwrap_or(true)) {
+                    for (k, &t) in inn.iter().enumerate().take(d).skip(n) {
+                        if t == Ty::Any {
+                            let (h, p) = self.bits(k, t);
+                            self.ref_change(h, p, false);
+                        }
+                    }
+                    cur.truncate(n);
+                    self.goto_from(&cur, next);
+                    return;
+                }
                 self.spill(&inn, n, d);
                 self.helper(
                     self.sigs.pop_to,
@@ -3352,6 +3760,70 @@ impl Gen<'_, '_> {
             }
             Op::Call(argc, _) => {
                 let ci = d - argc as usize - 2;
+                let cands: Vec<(usize, Intrinsic)> = self
+                    .intrinsics
+                    .iter()
+                    .filter(|(_, k)| k.arity() == argc)
+                    .map(|&(o, k)| (o, k))
+                    .collect();
+                let generic = self.b.create_block();
+                if !cands.is_empty() && inn[ci] == Ty::Any {
+                    let tag = self.tag(ci);
+                    let is_obj = self.b.ins().icmp_imm_s(IntCC::Equal, tag, 5);
+                    self.guard(is_obj, generic);
+                    for (k, &t) in inn.iter().enumerate().take(d).skip(ci + 2) {
+                        if !is_num(t) {
+                            let ok = self.tag_is(k, T_NUMBER);
+                            self.guard(ok, generic);
+                        }
+                    }
+                    let p = self.b.use_var(self.pay[ci]);
+                    let bits = self.b.ins().bitcast(types::I64, MemFlagsData::new(), p);
+                    let objp = self.b.ins().iadd_imm_s(bits, self.lay.rc_value as i64);
+                    let done = self.b.create_block();
+                    self.b.append_block_param(done, types::F64);
+                    for (ptr, kind) in cands {
+                        let hit = self.b.ins().icmp_imm_s(IntCC::Equal, objp, ptr as i64);
+                        let yes = self.b.create_block();
+                        let no = self.b.create_block();
+                        self.b.ins().brif(hit, yes, &[], no, &[]);
+                        self.b.switch_to_block(yes);
+                        let x = self.f64_of(ci + 2, inn[ci + 2]);
+                        let r = match kind {
+                            Intrinsic::Floor => self.b.ins().floor(x),
+                            Intrinsic::Ceil => self.b.ins().ceil(x),
+                            Intrinsic::Trunc => self.b.ins().trunc(x),
+                            Intrinsic::Abs => self.b.ins().fabs(x),
+                            Intrinsic::Sqrt => self.b.ins().sqrt(x),
+                            Intrinsic::Min | Intrinsic::Max => {
+                                let y = self.f64_of(ci + 3, inn[ci + 3]);
+                                if kind == Intrinsic::Min {
+                                    self.b.ins().fmin(x, y)
+                                } else {
+                                    self.b.ins().fmax(x, y)
+                                }
+                            }
+                        };
+                        self.b.ins().jump(done, &[BlockArg::Value(r)]);
+                        self.b.switch_to_block(no);
+                    }
+                    self.b.ins().jump(generic, &[]);
+                    self.b.switch_to_block(done);
+                    let r = self.b.block_params(done)[0];
+                    let (fh, fp) = self.bits(ci, Ty::Any);
+                    self.ref_change(fh, fp, false);
+                    let (th, tp) = self.bits(ci + 1, inn[ci + 1]);
+                    if inn[ci + 1] == Ty::Any {
+                        self.ref_change(th, tp, false);
+                    }
+                    self.set_f64(ci, Ty::Any, r);
+                    let mut out = inn[..ci].to_vec();
+                    out.push(Ty::Any);
+                    self.goto_from(&out, next);
+                } else {
+                    self.b.ins().jump(generic, &[]);
+                }
+                self.b.switch_to_block(generic);
                 if argc == 1 && inn[ci] == Ty::Any && inn[ci + 1] == Ty::Any {
                     let (lay, vl) = (self.lay, self.vl);
                     let rest = self.b.create_block();
@@ -3423,70 +3895,6 @@ impl Gen<'_, '_> {
                     self.goto_from(&out, next);
                     self.b.switch_to_block(rest);
                 }
-                let cands: Vec<(usize, Intrinsic)> = self
-                    .intrinsics
-                    .iter()
-                    .filter(|(_, k)| k.arity() == argc)
-                    .map(|&(o, k)| (o, k))
-                    .collect();
-                let generic = self.b.create_block();
-                if !cands.is_empty() && inn[ci] == Ty::Any {
-                    let tag = self.tag(ci);
-                    let is_obj = self.b.ins().icmp_imm_s(IntCC::Equal, tag, 5);
-                    self.guard(is_obj, generic);
-                    for (k, &t) in inn.iter().enumerate().take(d).skip(ci + 2) {
-                        if !is_num(t) {
-                            let ok = self.tag_is(k, T_NUMBER);
-                            self.guard(ok, generic);
-                        }
-                    }
-                    let p = self.b.use_var(self.pay[ci]);
-                    let bits = self.b.ins().bitcast(types::I64, MemFlagsData::new(), p);
-                    let objp = self.b.ins().iadd_imm_s(bits, self.lay.rc_value as i64);
-                    let done = self.b.create_block();
-                    self.b.append_block_param(done, types::F64);
-                    for (ptr, kind) in cands {
-                        let hit = self.b.ins().icmp_imm_s(IntCC::Equal, objp, ptr as i64);
-                        let yes = self.b.create_block();
-                        let no = self.b.create_block();
-                        self.b.ins().brif(hit, yes, &[], no, &[]);
-                        self.b.switch_to_block(yes);
-                        let x = self.f64_of(ci + 2, inn[ci + 2]);
-                        let r = match kind {
-                            Intrinsic::Floor => self.b.ins().floor(x),
-                            Intrinsic::Ceil => self.b.ins().ceil(x),
-                            Intrinsic::Trunc => self.b.ins().trunc(x),
-                            Intrinsic::Abs => self.b.ins().fabs(x),
-                            Intrinsic::Sqrt => self.b.ins().sqrt(x),
-                            Intrinsic::Min | Intrinsic::Max => {
-                                let y = self.f64_of(ci + 3, inn[ci + 3]);
-                                if kind == Intrinsic::Min {
-                                    self.b.ins().fmin(x, y)
-                                } else {
-                                    self.b.ins().fmax(x, y)
-                                }
-                            }
-                        };
-                        self.b.ins().jump(done, &[BlockArg::Value(r)]);
-                        self.b.switch_to_block(no);
-                    }
-                    self.b.ins().jump(generic, &[]);
-                    self.b.switch_to_block(done);
-                    let r = self.b.block_params(done)[0];
-                    let (fh, fp) = self.bits(ci, Ty::Any);
-                    self.ref_change(fh, fp, false);
-                    let (th, tp) = self.bits(ci + 1, inn[ci + 1]);
-                    if inn[ci + 1] == Ty::Any {
-                        self.ref_change(th, tp, false);
-                    }
-                    self.set_f64(ci, Ty::Any, r);
-                    let mut out = inn[..ci].to_vec();
-                    out.push(Ty::Any);
-                    self.goto_from(&out, next);
-                } else {
-                    self.b.ins().jump(generic, &[]);
-                }
-                self.b.switch_to_block(generic);
                 self.spill(&inn, 0, d);
                 let ss = self.b.create_sized_stack_slot(StackSlotData::new(
                     StackSlotKind::ExplicitSlot,
@@ -3761,12 +4169,7 @@ fn helpful(op: Op) -> bool {
 fn costly(op: Op) -> bool {
     matches!(
         op,
-        Op::Call(..)
-            | Op::NewObject
-            | Op::InitProp(_)
-            | Op::Return
-            | Op::AppendLocal(_)
-            | Op::PopTo(_)
+        Op::Call(..) | Op::NewObject | Op::InitProp(_) | Op::Return | Op::AppendLocal(_)
     )
 }
 
@@ -3977,6 +4380,7 @@ impl Jit {
         };
         let loans = loans(proto, &depths, &tys, &volatile);
         let literal_sites = literals(proto, &depths);
+        let (virts, virt_of) = virtuals(proto, &depths, &literal_sites, &volatile);
         if std::env::var_os("JSQ_JIT_LOG").is_some() {
             let lent: Vec<usize> = (0..loans.lent.len()).filter(|&i| loans.lent[i]).collect();
             eprintln!("jit loans {} {lent:?}", proto.name);
@@ -4116,6 +4520,9 @@ impl Jit {
                     sigs: &sigs,
                     volatile: &volatile,
                     literals: &literal_sites,
+                    virts: &virts,
+                    virt_of: &virt_of,
+                    fields: Vec::new(),
                     loans: &loans,
                     spill_full: false,
                     dirty: &dirty,

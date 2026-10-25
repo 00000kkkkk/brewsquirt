@@ -1,0 +1,98 @@
+const show = (...xs) => console.log(JSON.stringify(xs))
+
+const sum = () => {
+  let s = 0
+  for (let i = 0; i < 20000; i++) {
+    const p = { x: i, y: i * 2 }
+    s += p.x + p.y
+  }
+  return s
+}
+show(sum())
+
+const overflow = () => {
+  let s = 0
+  for (let i = 0; i < 20000; i++) {
+    const p = { x: i * 200000, y: i * 300000 }
+    s += p.x - p.y
+  }
+  return s
+}
+show(overflow())
+
+const mixed = () => {
+  let s = 0
+  let str = ""
+  for (let i = 0; i < 6000; i++) {
+    const p = { n: i, label: i % 1000 === 0 ? "k" + i : i, f: i / 4 }
+    s += p.n + p.f
+    if (typeof p.label === "string") str += p.label
+  }
+  return [s, str]
+}
+show(...mixed())
+
+const strings = () => {
+  let out = ""
+  for (let i = 0; i < 3000; i++) {
+    const p = { a: "x", b: i }
+    out = p.a + p.b
+  }
+  return out
+}
+show(strings())
+
+const switching = () => {
+  let s = 0
+  for (let i = 0; i < 6000; i++) {
+    const p = { v: i < 3000 ? i : "s" + i }
+    s += p.v
+  }
+  return String(s).length
+}
+show(switching())
+
+const objectsInside = () => {
+  let total = 0
+  for (let i = 0; i < 4000; i++) {
+    const p = { inner: [i, i + 1], tag: { name: "t" + (i % 5) } }
+    total += p.inner[1] + p.tag.name.length
+  }
+  return total
+}
+show(objectsInside())
+
+const nanAndNeg = () => {
+  let s = 0
+  for (let i = 0; i < 5000; i++) {
+    const p = { x: i % 7 === 0 ? -0 : i, y: i % 11 === 0 ? NaN : 1 }
+    s += Object.is(p.x, -0) ? 1 : 0
+    if (p.y !== p.y) s += 2
+  }
+  return s
+}
+show(nanAndNeg())
+
+const escapes = () => {
+  const kept = []
+  for (let i = 0; i < 3000; i++) {
+    const p = { x: i, y: -i }
+    if (i % 1000 === 0) kept.push(p)
+  }
+  return kept.map((p) => p.x + "," + p.y).join(";")
+}
+show(escapes())
+
+const thrown = () => {
+  let caught = 0
+  for (let i = 0; i < 3000; i++) {
+    try {
+      const p = { x: i, y: i % 500 === 0 ? null : i }
+      caught += p.x + p.y.toFixed(0).length
+    } catch (e) {
+      caught += 1000000
+    }
+  }
+  return caught
+}
+show(thrown())
