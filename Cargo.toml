@@ -52,7 +52,7 @@ memchr = "2"
 encoding_rs = "0.8"
 brotli = "8"
 zstd = { version = "0.13", default-features = false }
-libsqlite3-sys = { version = "0.35", features = ["bundled"] }
+libsqlite3-sys = { version = "0.38", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 webpki-roots = "1"
 aes = "0.8"
