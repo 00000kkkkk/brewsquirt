@@ -65,7 +65,7 @@ p384 = { version = "0.13", features = ["ecdsa", "ecdh", "pkcs8", "pem", "jwk"] }
 p521 = { version = "0.13", features = ["ecdsa", "ecdh", "pkcs8", "pem", "jwk"] }
 k256 = { version = "0.13", features = ["ecdsa", "ecdh", "pkcs8", "pem", "jwk"] }
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+x25519-dalek = { version = "3", features = ["static_secrets"] }
 rsa = { version = "0.9", features = ["sha2", "pem", "hazmat"] }
 pkcs8 = { version = "0.10", features = ["pem", "std", "encryption"] }
 pem-rfc7468 = { version = "0.7", features = ["alloc"] }
