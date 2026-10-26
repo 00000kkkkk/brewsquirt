@@ -36,7 +36,7 @@ sha1 = { version = "0.10", features = ["oid"] }
 sha2 = { version = "0.10", features = ["oid"] }
 indexmap = { version = "2.14", features = ["serde"] }
 mimalloc = { version = "0.1", default-features = false }
-num-bigint = "0.4"
+num-bigint = "0.5"
 num-integer = "0.1"
 num-traits = "0.2"
 rustc-hash = "2.1"
