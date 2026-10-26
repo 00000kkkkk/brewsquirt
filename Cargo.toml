@@ -33,7 +33,7 @@ getrandom = "0.2"
 hmac = "0.12"
 md-5 = { version = "0.10", features = ["oid"] }
 sha1 = { version = "0.10", features = ["oid"] }
-sha2 = { version = "0.10", features = ["oid"] }
+sha2 = { version = "0.11", features = ["oid"] }
 indexmap = { version = "2.14", features = ["serde"] }
 mimalloc = { version = "0.1", default-features = false }
 num-bigint = "0.4"
