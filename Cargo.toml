@@ -72,7 +72,7 @@ pem-rfc7468 = { version = "0.7", features = ["alloc"] }
 spki = { version = "0.7", features = ["pem", "std"] }
 x509-cert = { version = "0.2", default-features = false, features = ["pem", "std"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
-scrypt = { version = "0.11", default-features = false }
+scrypt = { version = "0.12", default-features = false }
 wasmi = { version = "0.47.1", default-features = false, features = ["std", "simd"] }
 cranelift-codegen = "0.137"
 cranelift-frontend = "0.137"
