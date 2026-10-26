@@ -30,7 +30,7 @@ fancy-regex = "0.19"
 regex-syntax = "0.8"
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 getrandom = "0.2"
-hmac = "0.12"
+hmac = "0.13"
 md-5 = { version = "0.10", features = ["oid"] }
 sha1 = { version = "0.10", features = ["oid"] }
 sha2 = { version = "0.10", features = ["oid"] }
